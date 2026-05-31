@@ -1,0 +1,1021 @@
+/**
+ * Feed Handler
+ *
+ * Handles feed aggregation and filtering.
+ *
+ * PREPARATORY: Uses DataRouter for region-aware data operations.
+ */
+
+
+// PostRadius is a Prisma-generated enum. `@prisma/client` is CJS, and
+// cjs-module-lexer can't statically detect runtime-generated enum exports
+// under ESM, so `import { getLogger, PostRadius }` fails when the package is
+// consumed (the in-repo test suite runs against source and tolerates it
+// — the consumer-install smoke catches it on the published tarball).
+// Default-import + destructure: the runtime exports object always
+// contains it.
+import prismaPkg from "@prisma/client";
+const { PostRadius } = prismaPkg;
+import { getLogger } from "./logger.js";
+
+import { DataRouter } from "./data-router.js";
+import { FriendsHandler } from "./friends-handler.js";
+import { Logger, type LoggerEnv } from "./logger.js";
+import type { TrellisRequestContext } from "./request-context.js";
+import { getSentimentDisplayMode, SentimentDisplayMode } from "./sentiment-display.js";
+import type { Session } from "./session-cookie.js";
+import type { Env } from "../env.js";
+
+export interface FeedPost {
+  id: string;
+  uri?: string;
+  text: string;
+  author: {
+    id: string;
+    email: string;
+    did?: string; // Optional: for future AT Protocol integration
+    handle?: string; // Optional: for future AT Protocol integration
+    avatar?: string;
+  };
+  createdAt: string;
+  radius: string;
+  taggedEntities?: Array<{
+    id: string;
+    name: string;
+    entityType?: string;
+  }>;
+  taxonomyTags?: Array<{
+    taxonId: string;
+    displayName: string;
+    description: string | null;
+    category?: {
+      code: string;
+      displayName: string;
+      dimension?: {
+        code: string;
+        displayName: string;
+      };
+    };
+  }>;
+  geoData?: {
+    lat: number;
+    lng: number;
+    place?: string;
+  };
+  contentWarnings?: string[];
+  sentimentCounts?: Record<string, number>;
+  sentimentTypes?: string[];                    // only when display mode = DISTRIBUTION
+  sentimentDisplayMode?: string;                // "full" | "distribution" | "hidden"
+  commentCount?: number;
+  userSentiment?: string;
+  isOwner?: boolean;
+  media?: Array<{
+    id: string;
+    mediaId: string;
+    alt: string | null;
+    order: number;
+    file: {
+      id: string;
+      contentHash: string;
+      mimeType: string;
+      originalKey: string;
+      thumbnailKey: string | null;
+      optimizedKey: string | null;
+      width: number | null;
+      height: number | null;
+    };
+  }>;
+}
+
+export interface FeedResponse {
+  posts: FeedPost[];
+  cursor?: string;
+  hasMore: boolean;
+  pageNumber?: number;
+  sessionPostCount?: number;
+  quietHoursActive?: boolean;
+  nudge?: {
+    type: "time_reminder" | "session_limit";
+    message: string;
+    sessionMinutes: number;
+  };
+}
+
+export class FeedHandler {
+  private friendsHandler: FriendsHandler;
+  private logger: Logger;
+
+  constructor(env?: LoggerEnv) {
+    this.friendsHandler = new FriendsHandler();
+    this.logger = getLogger();
+  }
+
+  /**
+   * Get API domain consistently across all feed operations
+   * Respects APP_DOMAIN environment variable, converts www. to api., or uses default
+   */
+  private static getApiDomain(env: Env): string {
+    if (env.APP_DOMAIN) {
+      try {
+        const url = new URL(env.APP_DOMAIN);
+        let hostname = url.hostname;
+
+        // Convert www. to api.
+        if (hostname.startsWith("www.")) {
+          hostname = hostname.replace("www.", "api.");
+        } else if (!hostname.includes("api.")) {
+          // If no api. subdomain, add it
+          const parts = hostname.split(".");
+          if (parts.length >= 2) {
+            hostname = `api.${parts.slice(-2).join(".")}`;
+          }
+        }
+
+        return `${url.protocol}//${hostname}`;
+      } catch {
+        // Invalid URL, fall through to default
+      }
+    }
+
+    // Default fallback
+    return "https://api.rkm1.de";
+  }
+
+  /**
+   * Get user's home feed
+   *
+   * PREPARATORY: Uses DataRouter for region-aware queries.
+   */
+  async getHomeFeed(
+    session: Session,
+    request: Request,
+    env: Env,
+    options: {
+      limit?: number;
+      cursor?: string;
+      entityRef?: string; // For backward compatibility
+      entityRefs?: string[]; // Filter by multiple entities
+      taxonomyTags?: string[]; // Filter by taxonomy tags (taxonIds)
+      personalized?: boolean; // Enable personalization based on user's entity tags
+      personalizationEntityIds?: string[]; // Specific entity IDs for personalization
+    },
+    requestContext: TrellisRequestContext,
+    activeTenantId: string,
+  ): Promise<Response> {
+    try {
+      const limit = Math.min(options.limit || 20, 100);
+      const cursor = options.cursor ? new Date(options.cursor) : undefined;
+
+      // Safer Social Design: Parse pagination and session awareness params
+      const url = new URL(request.url);
+      const pageNumber = parseInt(url.searchParams.get("pageNumber") || "1", 10);
+      const sessionDurationMinutes = parseInt(url.searchParams.get("sessionDurationMinutes") || "0", 10);
+
+      // PREPARATORY: Use region in cache key to ensure region-specific caching
+      const region = requestContext.region;
+      const cacheVersion = await FeedHandler.getCacheVersion(env);
+      // Include entityRefs in cache key for proper cache invalidation
+      const entityRefsKey =
+        options.entityRefs?.sort().join(",") || options.entityRef || "";
+      const cacheKey = `feed:home:${region}:v${cacheVersion}:${session.userId}:${entityRefsKey}:${options.cursor || "initial"}:${limit}`;
+
+      // PREPARATORY: Check aggressive caching feature flag
+      // If enabled, use longer cache TTL and more aggressive cache strategies
+      const aggressiveCaching =
+        requestContext.config.features.performance.aggressiveCaching;
+      const cached = await this.getCachedFeed(cacheKey, env);
+      if (cached) {
+        return new Response(JSON.stringify(cached), {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+            // Add cache headers if aggressive caching enabled
+            ...(aggressiveCaching && {
+              "Cache-Control": "public, max-age=300", // 5 minutes
+            }),
+          },
+        });
+      }
+
+      // PREPARATORY: Use DataRouter to get region-specific database
+      // Pass request for monitoring/rate limiting (if available)
+      const db = DataRouter.getDatabaseForRegion(
+        region,
+        env,
+        request,
+        session?.userId,
+      );
+
+      // Get friends list for visibility filtering
+      const friends = await this.friendsHandler.getFriends(
+        session,
+        "ACCEPTED",
+        env,
+      );
+      const friendIds = friends.map((f) => f.id);
+
+      // Build visibility filter
+      // Note: This OR condition is at the top level, not nested
+      const visibilityFilter = {
+        OR: [
+          { radius: PostRadius.SHOUT },
+          { authorId: session.userId }, // Own posts
+          {
+            radius: PostRadius.NORMAL,
+            authorId: { in: friendIds },
+          },
+        ],
+      };
+
+      // Build entity filter for multi-entity tagging
+      let entityFilter: any = undefined;
+      if (options.entityRefs && options.entityRefs.length > 0) {
+        // Filter posts that have at least one of the specified entities tagged
+        entityFilter = {
+          subjectEntities: {
+            some: {
+              entityId: { in: options.entityRefs },
+            },
+          },
+        };
+      } else if (options.entityRef) {
+        // Backward compatibility: filter by single entity
+        entityFilter = {
+          subjectEntities: {
+            some: {
+              entityId: options.entityRef,
+            },
+          },
+        };
+      }
+
+      // Tenant ID comes from the authenticated caller's JWT (passed in by the route).
+      const tenantId = activeTenantId;
+
+      // Build taxonomy filter
+      let taxonomyFilter: any = undefined;
+      let userEntityTaxonIds: string[] = [];
+
+      if (options.taxonomyTags && options.taxonomyTags.length > 0) {
+        // Explicit taxonomy tags filter
+        const { getWrappedDatabase } = await import(
+          "./database-wrapper-helper.js"
+        );
+        const wrappedDb = getWrappedDatabase(region, env, request);
+
+        // Find taxon IDs by taxonId strings
+        const taxons = await wrappedDb.taxonomyTaxon.findMany({
+          where: {
+            tenantId,
+            taxonId: { in: options.taxonomyTags },
+            isActive: true,
+          },
+          select: { id: true },
+        });
+
+        if (taxons.length > 0) {
+          taxonomyFilter = {
+            taxonomyTags: {
+              some: {
+                taxonId: { in: taxons.map((t: any) => t.id) },
+              },
+            },
+          };
+        } else {
+          // If no matching taxons found, return empty results
+          taxonomyFilter = { id: { in: [] } };
+        }
+      } else if (options.personalized) {
+        // Personalize feed based on user's entity taxonomy tags
+        const { FeedPersonalization } = await import("./feed-personalization.js");
+        userEntityTaxonIds = await FeedPersonalization.getEntityTaxonomyTags(
+          session.userId,
+          options.personalizationEntityIds,
+          region,
+          env,
+          request,
+          tenantId,
+        );
+
+        if (userEntityTaxonIds.length > 0) {
+          const { getWrappedDatabase } = await import(
+            "./database-wrapper-helper.js"
+          );
+          const wrappedDb = getWrappedDatabase(region, env, request);
+
+          // Find taxon IDs by taxonId strings
+          const taxons = await wrappedDb.taxonomyTaxon.findMany({
+            where: {
+              tenantId,
+              taxonId: { in: userEntityTaxonIds },
+              isActive: true,
+            },
+            select: { id: true },
+          });
+
+          if (taxons.length > 0) {
+            taxonomyFilter = {
+              taxonomyTags: {
+                some: {
+                  taxonId: { in: taxons.map((t: any) => t.id) },
+                },
+              },
+            };
+          }
+        }
+        // If user has no entity tags, don't filter (show all posts)
+      }
+
+      // PREPARATORY: Fetch posts with dataRegion filter to ensure data residency
+      // Note: Type assertion needed since Prisma client hasn't been regenerated with dataRegion field
+      // Use DatabaseConnectionManager for clear state management
+      const { sharedDatabaseConnectionManager } = await import(
+        "./database-connection-manager.js"
+      );
+      const { withQueryTimeoutAndRetry, QueryTimeoutPresets } = await import(
+        "./db-query-helper.js"
+      );
+
+      // Create connection manager instance (manages its own pool state)
+      const dbManager = sharedDatabaseConnectionManager;
+
+      const posts = await withQueryTimeoutAndRetry(
+        dbManager,
+        region,
+        env,
+        async (client) => {
+          return client.post.findMany({
+            where: {
+              // Combine all filters at the same level
+              // Prisma will handle the OR conditions correctly when spread
+              AND: [
+                visibilityFilter, // OR condition for visibility
+                ...(entityFilter ? [entityFilter] : []), // Optional entity filter
+                ...(taxonomyFilter ? [taxonomyFilter] : []), // Optional taxonomy filter
+                {
+                  deletedAt: null,
+                  hiddenByAuthor: false,
+                  // CRITICAL: Only get posts from the correct region
+                  // For empty database, this filter returns 0 results instantly
+                  // For production, all posts should have dataRegion set
+                  // Note: We don't allow NULL dataRegion here - posts must have region set
+                  dataRegion: region,
+                },
+                ...(cursor ? [{ createdAt: { lt: cursor } }] : []), // Optional cursor pagination
+              ],
+            } as any,
+            orderBy: { createdAt: "desc" },
+            take: limit + 1,
+            // Optimize includes: only fetch what's needed
+            // On empty database, these should return quickly
+            include: {
+              author: {
+                select: {
+                  id: true,
+                  email: true,
+                  actorUri: true,
+                  handle: true,
+                  // Only include essential author fields to reduce query complexity
+                },
+              },
+              subjectEntities: {
+                take: 10, // Limit subject entities to prevent excessive joins
+                include: {
+                  entity: {
+                    select: {
+                      id: true,
+                      name: true,
+                      entityType: true,
+                      // Only include essential entity fields
+                    },
+                  },
+                },
+              },
+              taxonomyTags: {
+                take: 20, // Limit taxonomy tags
+                include: {
+                  taxon: {
+                    select: {
+                      taxonId: true,
+                      displayName: true,
+                      description: true,
+                      category: {
+                        select: {
+                          code: true,
+                          displayName: true,
+                          dimension: {
+                            select: {
+                              code: true,
+                              displayName: true,
+                            },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+              media: {
+                where: {
+                  media: {
+                    hidden: false,
+                    deletedAt: null,
+                  },
+                },
+                orderBy: { order: "asc" },
+                include: {
+                  media: {
+                    select: {
+                      id: true,
+                      contentHash: true,
+                      mimeType: true,
+                      originalKey: true,
+                      thumbnailKey: true,
+                      optimizedKey: true,
+                      width: true,
+                      height: true,
+                    },
+                  },
+                },
+              },
+            },
+          }) as unknown as Promise<any[]>;
+        },
+        {
+          ...QueryTimeoutPresets.USER_FACING, // 3s initial, 2s retry = 5s max total
+          defaultValue: [], // Return empty array if query fails (graceful degradation)
+          context: {
+            operation: "getHomeFeed",
+            userId: session.userId,
+            region,
+          },
+        },
+      );
+
+      const hasMore = posts.length > limit;
+      let result = hasMore ? posts.slice(0, limit) : posts;
+
+      // Feed personalization via extension feedStrategy was removed in the
+      // redesign; recommendationStrategy (pull-model) replaces the push-model
+      // personalize hook. Leaving options.personalized as a no-op for now.
+
+      const nextCursor =
+        hasMore && result.length > 0
+          ? result[result.length - 1].createdAt.toISOString()
+          : undefined;
+
+      // Enrich posts with sentiment counts and comment counts
+      const enrichedPosts = await this.enrichPosts(
+        result,
+        session,
+        env,
+        requestContext,
+      );
+
+      // Safer Social Design: Check quiet hours
+      let quietHoursActive = false;
+      if (requestContext.featureAccess || session.ageTier) {
+        const { isInQuietHours } = await import("./quiet-hours.js");
+        const now = new Date();
+        const nowMinutes = now.getHours() * 60 + now.getMinutes();
+        // We'd need the user's quiet hours settings from DB, but for now check requestContext
+        // Quiet hours integration is optional - the flag is set if the user has quiet hours configured
+      }
+
+      // Safer Social Design: Check session awareness nudge
+      let nudge: FeedResponse["nudge"] = undefined;
+      if (sessionDurationMinutes > 0 && session.ageTier) {
+        const { getSessionNudge } = await import("./session-awareness.js");
+        const sessionNudge = getSessionNudge(sessionDurationMinutes, session.ageTier);
+        if (sessionNudge) {
+          nudge = sessionNudge;
+        }
+      }
+
+      // Safer Social Design: Check pagination limits
+      let hasReachedLimit = false;
+      if (session.ageTier) {
+        const { getPaginationConfig, computePaginationMetadata } = await import("./feed-pagination.js");
+        const paginationConfig = getPaginationConfig(session.ageTier);
+        const metadata = computePaginationMetadata(pageNumber, limit, paginationConfig.maxPages);
+        hasReachedLimit = metadata.hasReachedLimit;
+      }
+
+      const feedResponse: FeedResponse = {
+        posts: enrichedPosts,
+        cursor: hasReachedLimit ? undefined : nextCursor,
+        hasMore: hasReachedLimit ? false : hasMore,
+        pageNumber,
+        sessionPostCount: pageNumber * limit,
+        quietHoursActive: quietHoursActive || undefined,
+        nudge,
+      };
+
+      // Cache response
+      await this.cacheFeed(cacheKey, feedResponse, env);
+
+      return new Response(JSON.stringify(feedResponse), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    } catch (error: any) {
+      this.logger.error("Error getting home feed:", error);
+      this.logger.error(
+        `Error details: ${error.message}${error.stack ? `\n${error.stack}` : ""}`,
+      );
+      return new Response(
+        JSON.stringify({ error: "Failed to get feed", details: error.message }),
+        { status: 500, headers: { "content-type": "application/json" } },
+      );
+    }
+  }
+
+  /**
+   * Get feed for a specific entity
+   *
+   * PREPARATORY: Uses DataRouter for region-aware queries.
+   *
+   * @deprecated Use getHomeFeed with entityRefs filter instead
+   */
+  async getEntityFeed(
+    session: Session,
+    entityRef: string,
+    env: Env,
+    options: {
+      limit?: number;
+      cursor?: string;
+    },
+    requestContext: TrellisRequestContext,
+    activeTenantId: string,
+  ): Promise<Response> {
+    // Delegate to getHomeFeed with entityRef filter for consistency
+    return this.getHomeFeed(
+      session,
+      new Request("http://localhost/feeds/home"), // Dummy request for compatibility
+      env,
+      {
+        limit: options.limit,
+        cursor: options.cursor,
+        entityRef, // Use single entity filter
+      },
+      requestContext,
+      activeTenantId,
+    );
+  }
+
+  /**
+   * Get a single post by ID, enriched with sentiment counts and comment count.
+   * Returns null if the post is not found or not accessible.
+   */
+  async getPost(
+    postId: string,
+    session: Session,
+    env: Env,
+    requestContext: TrellisRequestContext,
+  ): Promise<FeedPost | null> {
+    const region = requestContext.region;
+    const { sharedDatabaseConnectionManager } = await import(
+      "./database-connection-manager.js"
+    );
+    const { withQueryTimeoutAndRetry, QueryTimeoutPresets } = await import(
+      "./db-query-helper.js"
+    );
+    const apiDomain = FeedHandler.getApiDomain(env);
+
+    const post = await withQueryTimeoutAndRetry(
+      sharedDatabaseConnectionManager,
+      region,
+      env,
+      async (db) => {
+        return db.post.findUnique({
+          where: { id: postId, deletedAt: null, hiddenByAuthor: false },
+          include: {
+            author: {
+              select: {
+                id: true,
+                email: true,
+                actorUri: true,
+                handle: true,
+              },
+            },
+            media: {
+              where: {
+                media: { hidden: false, deletedAt: null },
+              },
+              orderBy: { order: "asc" },
+              include: {
+                media: {
+                  select: {
+                    id: true,
+                    contentHash: true,
+                    mimeType: true,
+                    originalKey: true,
+                    thumbnailKey: true,
+                    optimizedKey: true,
+                    width: true,
+                    height: true,
+                  },
+                },
+              },
+            },
+          },
+        });
+      },
+      { ...QueryTimeoutPresets.USER_FACING, context: { operation: "getPost", postId } },
+    ) as any;
+
+    if (!post) return null;
+
+    // Remap media keys to full URLs (same as enrichPosts does for feed)
+    if (post.media) {
+      post.media = post.media.map((pm: any) => ({
+        ...pm,
+        file: {
+          id: pm.media.id,
+          contentHash: pm.media.contentHash,
+          mimeType: pm.media.mimeType,
+          originalKey: `${apiDomain}/api/media/${pm.media.contentHash}?variant=original`,
+          thumbnailKey: pm.media.thumbnailKey
+            ? `${apiDomain}/api/media/${pm.media.contentHash}?variant=thumbnail`
+            : null,
+          optimizedKey: pm.media.optimizedKey
+            ? `${apiDomain}/api/media/${pm.media.contentHash}?variant=optimized`
+            : null,
+          width: pm.media.width,
+          height: pm.media.height,
+        },
+      }));
+    }
+
+    const enriched = await this.enrichPosts([post], session, env, requestContext);
+    return enriched[0] ?? null;
+  }
+
+  /**
+   * Enrich posts with sentiment counts, comment counts, and user sentiment
+   *
+   * PREPARATORY: Uses DataRouter for region-aware queries.
+   */
+  protected async enrichPosts(
+    posts: any[],
+    session: Session,
+    env: Env,
+    requestContext: TrellisRequestContext,
+  ): Promise<FeedPost[]> {
+    // PREPARATORY: Use DataRouter to get region-specific database
+    const region = requestContext.region;
+    const postIds = posts.map((p) => p.id);
+
+    // Use standardized timeout/retry helper for enrichment queries
+    const { sharedDatabaseConnectionManager } = await import(
+      "./database-connection-manager.js"
+    );
+    const { withQueryTimeoutAndRetry, QueryTimeoutPresets } = await import(
+      "./db-query-helper.js"
+    );
+
+    // OPTIMIZATION: Cache is handled per-post in reaction-handler.ts
+    // For batch queries, we'll query database directly (cache individual post results)
+    // This avoids cache key length issues and provides better cache hit rates
+    const kv = env.FEED_CACHE_KV;
+
+    // OPTIMIZATION: Execute all enrichment queries in parallel with reduced timeouts and retries
+    // Reduced maxRetries from 3 to 1 (fail fast) and timeout from 1s to 500ms for scalability
+    // Only query database if cache miss
+    const [sentiments, userSentiments, commentCounts, linkChecks] =
+      await Promise.all([
+        // Get sentiment counts with timeout/retry
+        // OPTIMIZATION: Individual post sentiment counts are cached in reaction-handler.ts
+        // Batch queries are fast enough (<100ms) that per-batch caching isn't needed
+        withQueryTimeoutAndRetry(
+          sharedDatabaseConnectionManager,
+          region,
+          env as any,
+          async (db) => {
+            return await db.postSentiment.groupBy({
+              by: ["postId", "sentiment"],
+              where: { postId: { in: postIds } },
+              _count: true,
+            });
+          },
+          {
+            ...QueryTimeoutPresets.USER_FACING,
+            maxRetries: 1, // Reduced from 3 to 1 (fail fast for scalability)
+            baseDelayMs: 100,
+            defaultValue: [], // Graceful degradation: return empty array if query fails
+            context: {
+              operation: "enrichPosts_sentiments",
+              userId: session.userId,
+              postCount: postIds.length,
+            },
+          },
+        ),
+        // Get user's sentiments with timeout/retry
+        withQueryTimeoutAndRetry(
+          sharedDatabaseConnectionManager,
+          region,
+          env as any,
+          async (db) => {
+            return await db.postSentiment.findMany({
+              where: {
+                postId: { in: postIds },
+                authorId: session.userId,
+              },
+            });
+          },
+          {
+            ...QueryTimeoutPresets.USER_FACING,
+            maxRetries: 1, // Reduced from 3 to 1 (fail fast for scalability)
+            baseDelayMs: 100,
+            defaultValue: [], // Graceful degradation: return empty array if query fails
+            context: {
+              operation: "enrichPosts_userSentiments",
+              userId: session.userId,
+              postCount: postIds.length,
+            },
+          },
+        ),
+        // Get comment counts with timeout/retry
+        // OPTIMIZATION: Batch queries are fast enough (<100ms) that caching isn't needed
+        // Individual comment counts are updated in real-time, so batch caching has low hit rate
+        withQueryTimeoutAndRetry(
+          sharedDatabaseConnectionManager,
+          region,
+          env as any,
+          async (db) => {
+            return await db.postComment.groupBy({
+              by: ["postId"],
+              where: {
+                postId: { in: postIds },
+                hiddenByPostOwner: false,
+              },
+              _count: true,
+            });
+          },
+          {
+            ...QueryTimeoutPresets.USER_FACING,
+            maxRetries: 1, // Reduced from 3 to 1 (fail fast for scalability)
+            baseDelayMs: 100,
+            defaultValue: [], // Graceful degradation: return empty array if query fails
+            context: {
+              operation: "enrichPosts_commentCounts",
+              userId: session.userId,
+              postCount: postIds.length,
+            },
+          },
+        ),
+        // Get link checks with timeout/retry
+        withQueryTimeoutAndRetry(
+          sharedDatabaseConnectionManager,
+          region,
+          env as any,
+          async (db) => {
+            return await db.linkCheck.findMany({
+              where: {
+                postId: { in: postIds },
+              },
+              select: {
+                id: true,
+                postId: true,
+                originalUrl: true,
+                normalizedUrl: true,
+                domain: true,
+                status: true,
+              },
+            });
+          },
+          {
+            ...QueryTimeoutPresets.USER_FACING,
+            maxRetries: 1, // Reduced from 3 to 1 (fail fast for scalability)
+            baseDelayMs: 100,
+            defaultValue: [], // Graceful degradation: return empty array if query fails
+            context: {
+              operation: "enrichPosts_linkChecks",
+              userId: session.userId,
+              postCount: postIds.length,
+            },
+          },
+        ),
+      ]);
+
+    // Build maps
+    const sentimentCountsMap: Record<string, Record<string, number>> = {};
+    for (const s of sentiments) {
+      if (!sentimentCountsMap[s.postId]) {
+        sentimentCountsMap[s.postId] = {};
+      }
+      sentimentCountsMap[s.postId][s.sentiment] = s._count;
+    }
+
+    const userSentimentMap: Record<string, string> = {};
+    for (const us of userSentiments) {
+      userSentimentMap[us.postId] = us.sentiment;
+    }
+
+    const commentCountMap: Record<string, number> = {};
+    for (const cc of commentCounts) {
+      commentCountMap[cc.postId] = cc._count;
+    }
+
+    const linkChecksMap: Record<
+      string,
+      Array<{
+        id: string;
+        originalUrl: string;
+        normalizedUrl: string;
+        domain: string;
+        status: string;
+      }>
+    > = {};
+    for (const lc of linkChecks) {
+      if (!linkChecksMap[lc.postId!]) {
+        linkChecksMap[lc.postId!] = [];
+      }
+      linkChecksMap[lc.postId!].push({
+        id: lc.id,
+        originalUrl: lc.originalUrl,
+        normalizedUrl: lc.normalizedUrl,
+        domain: lc.domain,
+        status: lc.status,
+      });
+    }
+
+    // Get API domain for constructing media URLs
+    const apiDomain = FeedHandler.getApiDomain(env);
+
+    // Enrich posts
+    return posts.map((post) => ({
+      id: post.id,
+      uri: post.uri || "", // Ensure uri is always a string (empty if not available)
+      text: post.text,
+      author: {
+        id: post.author.id,
+        email: post.author.email,
+        actorUri: post.author.actorUri || post.author.id, // Use id as fallback for actorUri
+        handle: post.author.handle || post.author.email?.split("@")[0] || "", // Use email prefix as fallback for handle
+      },
+      createdAt: post.createdAt.toISOString(),
+      radius: post.radius,
+      taggedEntities:
+        post.subjectEntities?.map((pe: any) => ({
+          id: pe.entity.id,
+          name: pe.entity.name,
+          entityType: pe.entity.entityType || undefined,
+        })) || undefined,
+      taxonomyTags:
+        post.taxonomyTags?.map((pt: any) => ({
+          taxonId: pt.taxon.taxonId,
+          displayName: pt.taxon.displayName,
+          description: pt.taxon.description,
+          category: pt.taxon.category
+            ? {
+                code: pt.taxon.category.code,
+                displayName: pt.taxon.category.displayName,
+                dimension: pt.taxon.category.dimension
+                  ? {
+                      code: pt.taxon.category.dimension.code,
+                      displayName: pt.taxon.category.dimension.displayName,
+                    }
+                  : undefined,
+              }
+            : undefined,
+        })) || undefined,
+      geoData: post.geoData as
+        | { lat: number; lng: number; place?: string }
+        | undefined,
+      contentWarnings: post.contentWarnings || [],
+      // Safer Social Design: Apply sentiment display mode based on age tier
+      ...(() => {
+        if (session.ageTier && session.ageTier !== "ADULT") {
+          const isPostAuthor = post.authorId === session.userId;
+          const mode = getSentimentDisplayMode(session.ageTier, isPostAuthor);
+          if (mode === SentimentDisplayMode.HIDDEN) {
+            return { sentimentDisplayMode: "hidden" };
+          }
+          if (mode === SentimentDisplayMode.DISTRIBUTION) {
+            return {
+              sentimentTypes: Object.keys(sentimentCountsMap[post.id] || {}),
+              sentimentDisplayMode: "distribution",
+            };
+          }
+        }
+        return {
+          sentimentCounts: sentimentCountsMap[post.id] || {},
+          sentimentDisplayMode: "full",
+        };
+      })(),
+      commentCount: commentCountMap[post.id] || 0,
+      userSentiment: userSentimentMap[post.id],
+      isOwner: post.authorId === session.userId,
+      links: linkChecksMap[post.id] || undefined,
+      media:
+        post.media?.map((pm: any) => ({
+          id: pm.id,
+          mediaId: pm.mediaId,
+          alt: pm.alt,
+          order: pm.order,
+          file: {
+            id: pm.media.id,
+            contentHash: pm.media.contentHash,
+            mimeType: pm.media.mimeType,
+            // Convert R2 storage keys to full media endpoint URLs
+            originalKey: `${apiDomain}/api/media/${pm.media.contentHash}?variant=original`,
+            thumbnailKey: pm.media.thumbnailKey
+              ? `${apiDomain}/api/media/${pm.media.contentHash}?variant=thumbnail`
+              : null,
+            optimizedKey: pm.media.optimizedKey
+              ? `${apiDomain}/api/media/${pm.media.contentHash}?variant=optimized`
+              : null,
+            width: pm.media.width,
+            height: pm.media.height,
+          },
+        })) || undefined,
+    }));
+  }
+
+  /**
+   * Get cached feed
+   */
+  private async getCachedFeed(
+    cacheKey: string,
+    env: Env,
+  ): Promise<FeedResponse | null> {
+    const kv = env.FEED_CACHE_KV;
+    if (!kv) return null;
+
+    try {
+      const cached = await kv.get(cacheKey, "json");
+      return cached as FeedResponse | null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  /**
+   * Cache feed response
+   *
+   * TTL: 30 seconds (as recommended in database/database-scalability-best-practices.md)
+   * This balances cache hit rate with data freshness, reducing database load by 50-80%
+   */
+  private async cacheFeed(
+    cacheKey: string,
+    response: FeedResponse,
+    env: Env,
+  ): Promise<void> {
+    const kv = env.FEED_CACHE_KV;
+    if (!kv) {
+      // KV not configured - this is acceptable, caching is optional
+      return;
+    }
+
+    try {
+      await kv.put(cacheKey, JSON.stringify(response), {
+        expirationTtl: 60, // Minimum 60 seconds TTL (KV requirement, recommended for feed queries)
+      });
+    } catch (error) {
+      // Cache failures are non-critical - log but don't fail the request
+      this.logger.error("[FeedHandler] Error caching feed:", error);
+    }
+  }
+
+  /**
+   * Get current cache version (static method to avoid circular dependencies)
+   * Returns the current feed cache version number (starts at 1)
+   */
+  static async getCacheVersion(env: Env): Promise<number> {
+    const kv = env.FEED_CACHE_KV;
+    if (!kv) return 1; // If no KV, return default version
+
+    const logger = getLogger();
+    try {
+      const versionStr = await kv.get("feed:cache:version", "text");
+      if (versionStr) {
+        return parseInt(versionStr, 10);
+      }
+      // Initialize version to 1 if not exists
+      await kv.put("feed:cache:version", "1");
+      return 1;
+    } catch (error) {
+      logger.error("Error getting cache version:", error);
+      return 1; // Default to version 1 on error
+    }
+  }
+
+  /**
+   * Invalidate feed cache by incrementing version (static method to avoid circular dependencies)
+   * This makes all existing cache keys invalid (they use old version)
+   */
+  static async invalidateFeedCache(env: Env): Promise<void> {
+    const kv = env.FEED_CACHE_KV;
+    if (!kv) return;
+
+    const logger = getLogger();
+    try {
+      const currentVersion = await FeedHandler.getCacheVersion(env);
+      const newVersion = currentVersion + 1;
+      await kv.put("feed:cache:version", newVersion.toString());
+    } catch (error) {
+      logger.error("Error invalidating feed cache:", error);
+    }
+  }
+}

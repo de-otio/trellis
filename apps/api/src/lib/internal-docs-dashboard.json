@@ -1,0 +1,112 @@
+{
+  "sections": [
+    {
+      "title": "Getting Started",
+      "order": 1,
+      "items": [
+        {
+          "id": "overview",
+          "title": "Overview",
+          "description": "Internal documentation system overview",
+          "path": "OVERVIEW.md"
+        }
+      ]
+    },
+    {
+      "title": "Sales",
+      "order": 2,
+      "items": [
+        {
+          "id": "sales-guide",
+          "title": "Sales Guide",
+          "description": "Comprehensive guide for sales teams",
+          "path": "SALES_GUIDE.md"
+        }
+      ]
+    },
+    {
+      "title": "Business Analysts",
+      "order": 3,
+      "items": [
+        {
+          "id": "business-analyst-guide",
+          "title": "Business Analyst Guide",
+          "description": "Comprehensive guide for business analysts and data scientists",
+          "path": "BUSINESS_ANALYST_GUIDE.md"
+        }
+      ]
+    },
+    {
+      "title": "Support",
+      "order": 4,
+      "items": [
+        {
+          "id": "support-guide",
+          "title": "Support Guide",
+          "description": "Comprehensive guide for support workers and customer service",
+          "path": "SUPPORT_GUIDE.md"
+        }
+      ]
+    },
+    {
+      "title": "Operations",
+      "order": 5,
+      "items": [
+        {
+          "id": "operations-guide",
+          "title": "Operations Guide",
+          "description": "Comprehensive guide for SRE, DevOps, and infrastructure teams",
+          "path": "OPERATIONS_GUIDE.md"
+        }
+      ]
+    },
+    {
+      "title": "Market Analysis",
+      "order": 6,
+      "items": [
+        {
+          "id": "market-analysis-docs",
+          "title": "Market Analysis Documentation",
+          "description": "Competitive intelligence and market research",
+          "path": "MARKET_ANALYSIS_DOCS.md"
+        }
+      ]
+    },
+    {
+      "title": "Compliance",
+      "order": 7,
+      "items": [
+        {
+          "id": "compliance-guide",
+          "title": "Compliance Guide",
+          "description": "Comprehensive GDPR, BDSG, and security audit documentation",
+          "path": "COMPLIANCE_GUIDE.md"
+        }
+      ]
+    },
+    {
+      "title": "Developers",
+      "order": 8,
+      "items": [
+        {
+          "id": "developer-guide",
+          "title": "Developer Guide",
+          "description": "Comprehensive technical guide for developers",
+          "path": "DEVELOPER_GUIDE.md"
+        },
+        {
+          "id": "implementation",
+          "title": "Implementation Guide",
+          "description": "Step-by-step implementation guide",
+          "path": "IMPLEMENTATION.md"
+        },
+        {
+          "id": "sync-strategy",
+          "title": "Sync Strategy",
+          "description": "Strategies for keeping documentation in sync",
+          "path": "SYNC_STRATEGY.md"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  lint-and-test:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: trellis_test
+          POSTGRES_USER: trellis
+          POSTGRES_PASSWORD: test-ci-password
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+      dynamodb:
+        image: amazon/dynamodb-local:latest
+        ports: ["8000:8000"]
+        options: --health-cmd "curl -s http://localhost:8000" --health-interval 5s
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npm run prisma:generate
+        env:
+          DATABASE_URL: postgresql://trellis:test-ci-password@localhost:5432/trellis_test
+
+      - name: Run migrations
+        run: npm run prisma:migrate:deploy
+        env:
+          DATABASE_URL: postgresql://trellis:test-ci-password@localhost:5432/trellis_test
+          DIRECT_DATABASE_URL: postgresql://trellis:test-ci-password@localhost:5432/trellis_test
+
+      - name: Build workspace packages
+        run: npm run build -w @de-otio/trellis
+
+      - name: Lint (TypeScript)
+        run: npm run lint -w @de-otio/trellis
+
+      - name: Run tests
+        run: npm test -w @de-otio/trellis
+        env:
+          DATABASE_URL: postgresql://trellis:test-ci-password@localhost:5432/trellis_test
+          DYNAMODB_ENDPOINT: http://localhost:8000
+          DYNAMODB_TABLE: test-trellis
+          STAGE: test
+          NODE_ENV: test
+          SESSION_SECRET: test-session-secret-must-be-32chars!!
+          AWS_REGION: us-east-1
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test
+
+      # Consumer-install smoke: pack, install with --omit=dev into a fresh
+      # project, require every published entry point. Catches runtime
+      # imports of devDeps and unshipped relative imports — gaps the
+      # in-repo tests can't see because they run with the full source
+      # tree + devDeps installed.
+      - name: Consumer-install smoke test
+        run: bash apps/api/scripts/smoke-pack.sh

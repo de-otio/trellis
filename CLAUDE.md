@@ -1,0 +1,385 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code when working with this repository.
+
+## Project Overview
+
+**Trellis** is a generic multi-tenant social-network platform core. It provides the foundation (auth + **multi-tenant identity federation (SAML/OIDC)**, feeds, posts, comments, media, moderation, ActivityPub federation) that vertical-specific applications build on via extensions. Multi-tenancy is a first-class capability — every product on trellis can serve B2C consumers and B2B organizations with their own identity providers, side-by-side. See [`doc/02-technical/identity-federation/`](doc/02-technical/identity-federation/) for the design.
+
+- **Repository Type**: TypeScript/Node.js monorepo (npm workspaces)
+- **Distribution**: Published to npm as `@de-otio/trellis` and `@de-otio/trellis-extension-api`
+- **Database (target)**: PostgreSQL via Prisma + DynamoDB for KV/cache
+- **Auth (target)**: AWS Cognito
+- **Federation (target)**: ActivityPub via Fedify
+
+## Deployment Status — IMPORTANT
+
+**Trellis is not (yet) deployed standalone.** It is consumed by Trellis as an npm dependency, and Trellis owns the live AWS environment (`Trellis-dev-*` / `Trellis-prod-*`). Code lands here, gets published to npm via the tag-triggered `publish.yml` workflow, and reaches AWS only when Trellis bumps its `@de-otio/trellis` dependency and deploys from its own repo.
+
+End-to-end verification of code that touches infrastructure (e.g., the graph layer, RDS migrations) happens in **Trellis's** environment, not here.
+
+## Workspace Structure
+
+```
+apps/
+  └── api/              # Node.js HTTP API (consumed by Trellis as @de-otio/trellis)
+
+packages/
+  └── extension-api/    # TrellisExtension interface and types (@de-otio/trellis-extension-api)
+
+prisma/                 # Prisma schema + migrations
+scripts/                # Local dev helpers only (see scripts/README.md)
+```
+
+## Common Commands
+
+### Development
+
+```bash
+npm install                    # Install all workspace dependencies
+bash scripts/dev-setup.sh      # First-run setup: start services, migrate DB, seed data
+npm run dev                    # Start API in watch mode
+```
+
+### Database
+
+```bash
+npm run prisma:generate        # Regenerate Prisma client
+npm run prisma:migrate:dev     # Create + apply migration (dev) — requires DATABASE_URL + DIRECT_DATABASE_URL
+npm run prisma:migrate:deploy  # Apply migrations (prod)
+npm run seed:feature-toggles   # Seed feature toggles
+```
+
+## Architecture
+
+This describes the architecture Trellis is **designed for** when deployed (currently realised by Trellis, which embeds Trellis):
+
+- **API**: Node.js HTTP server (Express), designed to run in ECS Fargate on port 3000
+- **Entry point**: `apps/api/src/server.ts`
+- **Routes**: `apps/api/src/lib/routes.ts`
+- **Env**: `apps/api/src/env.ts` (all config from process.env + AWS clients)
+- **Database**: Prisma ORM → PostgreSQL via plain pg driver
+- **KV/Cache**: DynamoDB single-table (`{stage}-{appName}`)
+- **Queues**: SQS (5 core queues + DLQs; federation queue only when `features.activityPub` is enabled)
+- **Auth**: Cognito JWT validated with `aws-jwt-verify`
+- **Federation**: ActivityPub via Fedify — **disabled by default**, enabled per environment via `config.features.activityPub`
+- **Extensions**: Verticals register extensions via `registerExtension()` to add domain-specific routes, metadata schemas, and terminology
+
+## Testing
+
+```bash
+npm test                                  # All tests
+npm test -- path/to/test.test.ts         # Specific test
+npm run test:coverage                    # Coverage report
+```
+
+**CRITICAL: Never run tests in the background.** Each process can consume 4GB+ RAM.
+
+Test setup: Docker Compose must be running for integration tests.
+
+## Environment Variables
+
+All configuration comes from `process.env`. Secrets are in AWS SSM Parameter Store:
+- `/{appName}/{stage}/db-secret-arn` — RDS credentials (Secrets Manager ARN)
+- `/{appName}/{stage}/cognito-user-pool-id`
+- `/{appName}/{stage}/cognito-app-client-id`
+- `/{appName}/{stage}/openai-api-key`
+- `/{appName}/{stage}/google-safe-browsing-key`
+- `/{appName}/{stage}/session-secret`
+
+See `apps/api/src/env.ts` for the full environment schema.
+
+## Development Best Practices
+
+1. **Always read files before editing**
+2. **Minimal changes** — don't refactor or "improve" surrounding code
+3. **Use Prisma types** — leverage type safety for database operations
+4. **Security first** — review for injection, OWASP issues
+5. **Run tests in foreground** — never background test processes
+6. **Database efficiency** — use indexes, limit query complexity, paginate
+
+## When Working on Features
+
+1. Look for existing patterns in `apps/api/src/lib/`
+2. Add tests in `apps/api/test/`
+3. Remember: changes here ship via npm, not via direct deploy (see "Deployment Status" / "Release Checklist")
+
+## Infinite Loop Prevention
+
+When implementing pagination, polling, retries, or recurring operations:
+1. Always include a maximum iteration count
+2. Always include a circuit breaker
+3. Never call async methods from `build()` without a guard
+4. Test the degenerate case (API returns success but no data)
+
+## Extension Development
+
+Trellis is extended by verticals that register extensions at startup. An extension provides:
+
+- **id**: Unique identifier (e.g., `"dog"`)
+- **terminology**: Entity naming (`{ entity: "dog", entityPlural: "dogs" }`)
+- **routes**: Additional route handlers
+- **metadataSchema**: Zod schema for entity metadata validation
+- **configSchema** (optional): Zod schema for extension-specific env vars
+- **shutdown** (optional): Cleanup function called on graceful shutdown
+
+See `packages/extension-api/` for the `TrellisExtension` interface.
+
+---
+
+## Code Patterns
+
+### Route Handler Pattern
+
+Handlers are class-based, located in `apps/api/src/lib/`. Each handler method follows this structure:
+
+```typescript
+import type { Env } from "../env";
+import type { RequestContext } from "./request-context";
+import type { Session } from "./session-manager";
+
+export class ExampleHandler {
+  async handleCreate(
+    resourceId: string,
+    request: Request,
+    session: Session,
+    env: Env,
+    requestContext: RequestContext,
+  ): Promise<Response> {
+    try {
+      // 1. Validate input with Zod schema
+      const { validateRequest } = await import("./validate-request");
+      const validation = await validateRequest(request, createSchema);
+      if (!validation.success) return validation.error;
+      const body = validation.data;
+
+      // 2. Check business rules (rate limits, permissions, feature flags)
+
+      // 3. Perform database operation via Prisma
+      const result = await db.model.create({ data: { ... } });
+
+      // 4. Return JSON response
+      return new Response(JSON.stringify(result), {
+        status: 201,
+        headers: { "content-type": "application/json" },
+      });
+    } catch (error) {
+      logger.error("Operation failed:", error);
+      return new Response(
+        JSON.stringify({ error: "Internal server error" }),
+        { status: 500, headers: { "content-type": "application/json" } },
+      );
+    }
+  }
+}
+```
+
+Key conventions:
+- Use dynamic imports (`await import(...)`) for tree-shaking
+- Error responses use `{ error: "CODE", message: "user-friendly text" }` format
+- Always validate at the handler boundary, not deeper
+- Get Prisma client from env, not direct imports
+
+### Route Registration Pattern
+
+Routes are arrays of `Route[]` objects in `apps/api/src/lib/routes/`:
+
+```typescript
+import type { Route } from "./types";
+
+export const exampleRoutes: Route[] = [
+  {
+    path: /^\/api\/examples\/([^/]+)$/,  // Regex with capture groups
+    method: "POST",
+    handler: async (request, env, { pathname, requestContext }) => {
+      // 1. Instantiate dependencies
+      const sessionManager = new SessionManager();
+      const securityHeaders = new SecurityHeaders(env);
+      const handler = new ExampleHandler();
+
+      // 2. Check auth
+      const session = await sessionManager.getSession(request, Secrets.getSessionSecret(env));
+      if (!session) {
+        return securityHeaders.createSecureResponse(
+          JSON.stringify({ error: "Unauthorized" }),
+          { status: 401, headers: { "content-type": "application/json" } },
+        );
+      }
+
+      // 3. Extract path params
+      const id = pathname.match(/^\/api\/examples\/([^/]+)$/)?.[1];
+
+      // 4. Delegate to handler
+      const response = await handler.handleCreate(id!, request, session, env, requestContext);
+
+      // 5. Add security headers
+      return securityHeaders.addSecurityHeaders(response);
+    },
+    middleware: [corsMiddleware(), csrfMiddleware()],
+    description: "Create example",
+  },
+];
+```
+
+Key conventions:
+- Instantiate dependencies inside the handler function, not at module level
+- Always check auth before delegating to the handler
+- Always wrap response with `securityHeaders.addSecurityHeaders()`
+- Apply middleware as an array (CORS and CSRF are standard)
+
+### Unit Test Pattern
+
+Tests use vitest, located in `apps/api/test/unit/`:
+
+```typescript
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { Env } from "../../src/env";
+
+// Hoist mocks for factory functions
+const { mockSend } = vi.hoisted(() => ({
+  mockSend: vi.fn(),
+}));
+
+// Mock external dependencies
+vi.mock("../../src/db", () => ({
+  createPrisma: vi.fn(() => mockPrisma),
+}));
+
+const mockPrisma = {
+  model: { findUnique: vi.fn(), create: vi.fn(), update: vi.fn() },
+};
+
+describe("ExampleHandler", () => {
+  let handler: ExampleHandler;
+  let mockEnv: Env;
+  let mockSession: any;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    handler = new ExampleHandler();
+    mockEnv = {
+      DATABASE_URL: "postgresql://test:test@localhost:5432/test",
+      SESSION_SECRET: "test-secret-32-characters-long!!",
+    } as Env;
+    mockSession = {
+      userId: "user123",
+      email: "user@example.com",
+      role: "END_USER",
+      expiresAt: Date.now() + 3600000,
+    };
+  });
+
+  describe("handleCreate", () => {
+    it("should create and return 201", async () => {
+      mockPrisma.model.create.mockResolvedValue({ id: "new-id" });
+      const request = new Request("https://api.example.com/api/examples", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "test" }),
+      });
+
+      const response = await handler.handleCreate("id", request, mockSession, mockEnv, {} as any);
+
+      expect(response.status).toBe(201);
+      const body = await response.json();
+      expect(body.id).toBe("new-id");
+    });
+
+    it("should return 404 when not found", async () => {
+      mockPrisma.model.findUnique.mockResolvedValue(null);
+      // ... test 404 path
+    });
+
+    it("should return 500 on database error", async () => {
+      mockPrisma.model.create.mockRejectedValue(new Error("DB error"));
+      // ... test error handling
+    });
+  });
+});
+```
+
+Key conventions:
+- Use `vi.hoisted()` for mock factories that need to be available before module loading
+- Use `vi.clearAllMocks()` in `beforeEach`, not `afterEach`
+- Test the success case, not-found case, and database error case at minimum
+- Assert both `response.status` and the parsed JSON body
+- Create `Request` objects with full URLs for realistic testing
+
+### Lambda Function Pattern (Cognito Triggers)
+
+Lambda triggers live in `apps/api/src/lambda/`:
+
+```typescript
+import { DynamoDBClient, PutItemCommand } from "@aws-sdk/client-dynamodb";
+
+// AWS clients at module level (reused across invocations)
+const dynamo = new DynamoDBClient({ region: process.env.AWS_REGION });
+const TABLE = process.env.DYNAMODB_TABLE!;
+
+export const handler = async (event: any) => {
+  const email = event.request.userAttributes.email;
+
+  try {
+    // Perform operation
+    await dynamo.send(new PutItemCommand({ TableName: TABLE, Item: { ... } }));
+  } catch (err) {
+    console.error("Operation failed", err);
+    throw err;  // Let Lambda retry
+  }
+
+  // Modify and return the Cognito event
+  event.response.privateChallengeParameters = { ... };
+  return event;
+};
+```
+
+Key conventions:
+- AWS SDK clients instantiated at module level for connection reuse
+- Use `process.env` for configuration (set via CDK Lambda environment)
+- Throw errors to let Lambda retry (don't swallow them)
+- Return the modified event object for Cognito triggers
+- Use DynamoDB for temporary state (with TTL for auto-cleanup)
+
+### Prisma Schema Conventions
+
+```prisma
+model Example {
+  id        String   @id @default(cuid())
+  name      String
+  ownerId   String   @map("owner_id")      // snake_case in DB
+  metadata  Json?                            // Flexible JSON when needed
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  owner User @relation(fields: [ownerId], references: [id])
+
+  @@index([ownerId])                         // Index foreign keys
+  @@map("examples")                          // snake_case table name
+}
+```
+
+Key conventions:
+- `@map()` for snake_case column and table names
+- `@default(cuid())` for primary keys
+- `@updatedAt` for audit trails
+- Enums for fixed value sets (`UserRole`, `Privacy`, etc.)
+- `@@index` on foreign keys and frequently queried fields
+- `Json?` for extensible metadata fields
+- Denormalized counts for performance (e.g., `followersCount`)
+
+---
+
+## Release Checklist
+
+Trellis ships via npm. Two tag-triggered publish flows exist (`.github/workflows/publish.yml`):
+
+- `extension-api-v<x.y.z>` → publishes `@de-otio/trellis-extension-api`
+- `v<x.y.z>` → publishes `@de-otio/trellis` (the api package)
+
+Before tagging:
+- [ ] Tests + lint pass on `main`
+- [ ] `packages/extension-api/package.json` and `apps/api/package.json` versions match the tags you're about to push
+- [ ] If extension-api is bumped, `apps/api`'s `@de-otio/trellis-extension-api` constraint accepts the new version (npm caret on `0.x` only allows patch)
+- [ ] `package-lock.json` is updated to match
+
+After tagging, watch the workflow run and confirm the version is on npm with `npm view <pkg> versions --json --registry=https://registry.npmjs.org`.
