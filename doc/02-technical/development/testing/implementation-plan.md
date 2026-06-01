@@ -322,13 +322,21 @@ keep them in the deployed shard rather than faking them.
 >
 > **Confirmed blocker for the bulk write port — tenancy, not auth.** With a
 > *valid* cookie session (proven: `/api/csrf-token` returns 200), `POST
-> /api/posts` and `GET /api/feeds/home` still return **401** — these paths
-> require an `activeTenantId` the local cookie session can't supply, the same
-> root cause as the skipped entity-create test. So `post-crud` / `link-reports`
-> (and the broader CRUD/social create paths) are **deferred to the
-> identity-federation tenancy work**, not blocked on test plumbing. The
-> remaining non-create read/social suites can port now; deep write coverage
-> waits on tenancy.
+> /api/posts` and `GET /api/feeds/home` still return **401**. Root cause traced
+> to **two distinct auth paths**: the suites that pass use
+> `SessionManager.getSession` (cookie) with no tenant requirement; the
+> tenant-scoped routes (posts/feeds/circles/connection-codes/taxonomy) require
+> an `AuthContext` from `buildAuthContext` (`auth/auth-middleware.ts`), which
+> **demands a verified Cognito JWT carrying `custom:activeTenantId`** and
+> returns null without it → 401. A local harness cannot forge a JWT the Cognito
+> JWKS verifier accepts, so this is **not liftable from the test harness**.
+> Unblocking requires either a test-mode seam inside `buildAuthContext` (derive
+> the tenant from the session/a header when `STAGE=test`) — a production-auth
+> change owned by identity-federation, not the test layer — or the planned
+> tenancy work that lets cookie sessions carry tenant context. So `post-crud` /
+> `link-reports` and the 7 tenant-scoped read/social suites all wait on the
+> same change; the non-tenant read/social suites (now ported) are the ceiling
+> until then.
 >
 > Also deferred: `admin-access` (route `/api/admin/users` unmounted in the
 > dummy server → 404 vs deployed 403).
