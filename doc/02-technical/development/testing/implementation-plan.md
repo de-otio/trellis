@@ -297,6 +297,28 @@ thin confirmation layer.
 **Risk:** Cognito-specific assertions (token shape, magic-link) can't move —
 keep them in the deployed shard rather than faking them.
 
+> **Pilot landed (`vitest.e2e.standalone.config.ts`).** The target-agnostic
+> plumbing already existed: suites resolve the API via `getApiUrl()`/`API_URL`
+> and the ~30 pool suites funnel through `shard-user-pool.ts`. A new
+> `standalone-e2e-global-setup.ts` boots the in-process server (reusing the
+> standalone lane's boot) and mints the user pool via `/api/admin/test/users`,
+> seeding each entry's server-minted `trellis_session` cookie;
+> `getShardUser()` was made cookie-aware (seed the cookie, omit the empty
+> Bearer). **4 read suites green (21 tests)** against the in-process server with
+> zero Cognito/AWS. Two findings sized the rest of the port:
+> 1. **CSRF must be threaded for cookie-mode writes.** Deployed Bearer-JWT
+>    auth bypassed CSRF; cookie sessions enforce it (state-changing `POST`s
+>    return 403 without a token). Before porting the CRUD/social shards, add a
+>    CSRF-aware `authFetch` (GET `/api/csrf-token`, attach header + rotated
+>    cookie) — this is the gating work item for write suites.
+> 2. **Route-mounting differences.** Some deployed routes (e.g.
+>    `/api/admin/users`) aren't mounted in the dummy standalone server (404 vs
+>    403); a handful of suites need per-suite expectation adjustments or a
+>    fixture route. Triage per suite.
+>
+> CI wiring for this lane is **intentionally deferred** to avoid colliding with
+> the in-flight Neptune graph-CI work in `ci.yml`.
+
 ---
 
 ## Stage 4 — Extension-API contract tests (~2 days)

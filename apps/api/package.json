@@ -30,6 +30,7 @@
     "test:e2e:media": "E2E_SHARD=media E2E_USER_COUNT=1 vitest run --config vitest.e2e.media.config.ts",
     "test:e2e:security": "E2E_SHARD=security E2E_USER_COUNT=1 vitest run --config vitest.e2e.security.config.ts",
     "test:e2e:readonly": "E2E_SHARD=readonly E2E_USER_COUNT=1 vitest run --config vitest.e2e.readonly.config.ts",
+    "test:e2e:standalone": "E2E_SHARD=standalone E2E_USER_COUNT=2 vitest run --config vitest.e2e.standalone.config.ts",
     "test:postdeployment": "vitest run --config vitest.postdeployment.config.ts",
     "test:postdeployment:api": "vitest run --config vitest.postdeployment.api.config.ts",
     "test:postdeployment:followers": "vitest run --config vitest.postdeployment.followers.config.ts",

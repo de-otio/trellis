@@ -9,6 +9,14 @@ interface PoolEntry {
   email: string;
   jwt: string;
   userId: string;
+  /**
+   * Standalone-lane (local) mode only: an encrypted `trellis_session` cookie
+   * value minted by the in-process server. When set, the suite authenticates
+   * by cookie instead of a Cognito `Authorization: Bearer` JWT (which the
+   * standalone server can't verify). Deployed mode leaves this undefined and
+   * keeps using `jwt`.
+   */
+  sessionCookie?: string;
 }
 
 let pool: PoolEntry[] | null = null;
@@ -43,8 +51,12 @@ export function getShardUser(index: number) {
 
   const entry = entries[index];
 
-  // Track cookies for CSRF support
+  // Track cookies for CSRF support. In standalone (cookie) mode, seed the
+  // session cookie minted by the in-process server.
   const cookies: Record<string, string> = {};
+  if (entry.sessionCookie) {
+    cookies["trellis_session"] = entry.sessionCookie;
+  }
 
   const authFetch = async (url: string, init: RequestInit = {}): Promise<Response> => {
     const cookieHeader = Object.entries(cookies)
@@ -52,7 +64,11 @@ export function getShardUser(index: number) {
       .join("; ");
 
     const headers: Record<string, string> = {
-      Authorization: `Bearer ${entry.jwt}`,
+      // Deployed mode: send the Cognito JWT. Standalone mode (cookie auth):
+      // jwt is empty and the session cookie carries identity — sending an
+      // empty Bearer would make the auth middleware reject before the cookie
+      // is read, so omit it.
+      ...(entry.jwt ? { Authorization: `Bearer ${entry.jwt}` } : {}),
       ...(cookieHeader ? { Cookie: cookieHeader } : {}),
       ...(init.headers as Record<string, string> || {}),
     };
