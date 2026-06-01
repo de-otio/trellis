@@ -122,21 +122,19 @@ worth a team decision before the surface grows:
    happens — neutralise at the export boundary (prefix a `'`/tab) rather than
    changing the documented RFC-4180 contract of `escapeCsvField`. A unit test
    pins the current (unsanitised) behaviour so any future change is deliberate.
-2. **Domain mutations emit no audit events** (`tenant/domain-handler.ts`).
-   `RoleMappingHandler` and `MemberHandler` both call `emitTenantAudit` on every
-   mutation; `DomainHandler` (claim / verify / remove) calls it **zero** times,
+2. **Domain mutations emit no audit events — RESOLVED.** `DomainHandler`
+   (claim / verify / remove) previously called `emitTenantAudit` **zero** times,
    even though a verified domain gates federated SSO sign-in (JIT provisioning),
-   making these among the more security-sensitive tenant operations. This is a
-   **deliberate-looking deferral, not a one-line wiring fix**: the audit taxonomy
-   ([`audit-actions.ts`](../../../../apps/api/src/lib/audit-actions.ts)) defines
-   `TENANT_DOMAIN_ADDED` and `TENANT_DOMAIN_VERIFIED` but **no
-   `TENANT_DOMAIN_REMOVED`**, and `emitTenantAudit`'s `action`/`targetType`
-   unions ([`tenant/audit-emit.ts`](../../../../apps/api/src/lib/tenant/audit-emit.ts))
-   carry no domain cases. Wiring it properly means: extend both unions + the
-   `actionFor` map, **define a new `tenant.domain.removed` audit action** (a
-   taxonomy decision touching compliance art-30 records / dashboards — left to
-   the team), then emit on claim→added, verify→verified, delete→removed. Tracked
-   here rather than guessed at in code.
+   making these among the more security-sensitive tenant operations. Now wired:
+   a new `tenant.domain.removed` action was added to the taxonomy
+   ([`audit-actions.ts`](../../../../apps/api/src/lib/audit-actions.ts)) alongside
+   the existing `…added`/`…verified`; `emitTenantAudit`'s `action`/`targetType`
+   unions + `actionFor` map ([`tenant/audit-emit.ts`](../../../../apps/api/src/lib/tenant/audit-emit.ts))
+   gained `domain.add`/`domain.verify`/`domain.remove`; and `DomainHandler` emits
+   on claim→added (new claims only, not idempotent re-claims), successful
+   verify→verified, and delete→removed. The `domain-handler` unit tests assert
+   emission on the success paths and non-emission on the not-found / failed-DNS
+   paths.
 3. **Capability naming inconsistency** (`auth/capabilities.ts`). All capability
    values follow `<resource>.<verb>` (dotted) except
    `ManageAgentSessions: "manage:agent_sessions"`, which uses a colon. Cosmetic

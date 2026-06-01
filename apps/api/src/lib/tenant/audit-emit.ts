@@ -19,6 +19,9 @@ import {
   TENANT_OWNERSHIP_TRANSFERRED,
   TENANT_ROLE_MAPPING_ADDED,
   TENANT_ROLE_MAPPING_REMOVED,
+  TENANT_DOMAIN_ADDED,
+  TENANT_DOMAIN_VERIFIED,
+  TENANT_DOMAIN_REMOVED,
 } from "../audit-actions.js";
 
 export interface TenantAuditEvent {
@@ -30,8 +33,11 @@ export interface TenantAuditEvent {
     | "tenant.transfer_ownership"
     | "role_mapping.create"
     | "role_mapping.update"
-    | "role_mapping.delete";
-  targetType: "member" | "role_mapping" | "tenant";
+    | "role_mapping.delete"
+    | "domain.add"
+    | "domain.verify"
+    | "domain.remove";
+  targetType: "member" | "role_mapping" | "tenant" | "domain";
   targetId: string;
   metadata?: Record<string, string | number | boolean | null>;
 }
@@ -50,6 +56,12 @@ function actionFor(action: TenantAuditEvent["action"]): AuditAction {
       return TENANT_ROLE_MAPPING_ADDED;
     case "role_mapping.delete":
       return TENANT_ROLE_MAPPING_REMOVED;
+    case "domain.add":
+      return TENANT_DOMAIN_ADDED;
+    case "domain.verify":
+      return TENANT_DOMAIN_VERIFIED;
+    case "domain.remove":
+      return TENANT_DOMAIN_REMOVED;
   }
 }
 

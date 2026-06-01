@@ -18,6 +18,7 @@ import { requireActiveTenant } from "../auth/auth-middleware.js";
 import { requireRole } from "../auth/require.js";
 import { validateDomain } from "./domain-validator.js";
 import { verifyDomainToken } from "./domain-verifier.js";
+import { emitTenantAudit } from "./audit-emit.js";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -135,6 +136,18 @@ export class DomainHandler {
       },
     });
 
+    emitTenantAudit(
+      {
+        tenantId,
+        actorUserId: auth.userId,
+        action: "domain.add",
+        targetType: "domain",
+        targetId: record.id,
+        metadata: { domain: record.domain },
+      },
+      db,
+    );
+
     return json(formatDomainRecord(record), 201);
   }
 
@@ -214,6 +227,19 @@ export class DomainHandler {
     }
 
     await db.tenantDomain.delete({ where: { id: domainId } });
+
+    emitTenantAudit(
+      {
+        tenantId,
+        actorUserId: auth.userId,
+        action: "domain.remove",
+        targetType: "domain",
+        targetId: domainId,
+        metadata: { domain: record.domain },
+      },
+      db,
+    );
+
     return json({ ok: true }, 200);
   }
 
@@ -293,6 +319,19 @@ export class DomainHandler {
           verifyAttempts: { increment: 1 },
         },
       });
+
+      emitTenantAudit(
+        {
+          tenantId,
+          actorUserId: auth.userId,
+          action: "domain.verify",
+          targetType: "domain",
+          targetId: domainId,
+          metadata: { domain: updated.domain, verificationMethod: "dns-txt" },
+        },
+        db,
+      );
+
       return json({ ok: true, domain: updated.domain, verifiedAt: updated.verifiedAt }, 200);
     }
 

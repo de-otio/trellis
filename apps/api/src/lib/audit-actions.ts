@@ -44,6 +44,7 @@ export const TENANT_MEMBER_ROLE_CHANGED: AuditAction = "tenant.member.role_chang
 export const TENANT_MEMBER_REMOVED: AuditAction = "tenant.member.removed";
 export const TENANT_DOMAIN_ADDED: AuditAction = "tenant.domain.added";
 export const TENANT_DOMAIN_VERIFIED: AuditAction = "tenant.domain.verified";
+export const TENANT_DOMAIN_REMOVED: AuditAction = "tenant.domain.removed";
 export const TENANT_IDP_CONNECTED: AuditAction = "tenant.idp.connected";
 export const TENANT_IDP_MODIFIED: AuditAction = "tenant.idp.modified";
 export const TENANT_IDP_DISABLED: AuditAction = "tenant.idp.disabled";
@@ -76,6 +77,7 @@ export const AuditEventType = {
   TENANT_MEMBER_REMOVED,
   TENANT_DOMAIN_ADDED,
   TENANT_DOMAIN_VERIFIED,
+  TENANT_DOMAIN_REMOVED,
   TENANT_IDP_CONNECTED,
   TENANT_IDP_MODIFIED,
   TENANT_IDP_DISABLED,

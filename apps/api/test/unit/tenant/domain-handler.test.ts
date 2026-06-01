@@ -3,9 +3,9 @@
  *
  * Covers: handleClaim, handleList, handleDelete, handleVerify
  *
- * NOTE: emitTenantAudit is NOT imported by domain-handler.ts (unlike
- * role-mapping-handler). There is no audit instrumentation in this handler.
- * This is called out in the findings section at the bottom of this file.
+ * Audit: domain claim/verify/remove now emit tenant audit events
+ * (domain.add / domain.verify / domain.remove). emitTenantAudit is mocked
+ * here and asserted on the success paths.
  *
  * domain-validator.ts is used real (no mock) so the handler's integration
  * with domain validation is exercised end-to-end.
@@ -45,6 +45,12 @@ vi.mock("../../../src/db", () => ({
 // Mock domain-verifier to avoid live DNS lookups.
 vi.mock("../../../src/lib/tenant/domain-verifier", () => ({
   verifyDomainToken: mockVerifyDomainToken,
+}));
+
+// Mock the audit emitter so we can assert emission without a real audit store.
+const { mockEmitTenantAudit } = vi.hoisted(() => ({ mockEmitTenantAudit: vi.fn() }));
+vi.mock("../../../src/lib/tenant/audit-emit", () => ({
+  emitTenantAudit: mockEmitTenantAudit,
 }));
 
 // ─── Spread-actual mocks for auth guards ──────────────────────────────────────
@@ -250,6 +256,17 @@ describe("DomainHandler", () => {
           data: expect.objectContaining({ tenantId: TENANT_ID, domain: VALID_DOMAIN }),
         }),
       );
+
+      // Emits a domain.add audit event for the new claim.
+      expect(mockEmitTenantAudit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tenantId: TENANT_ID,
+          action: "domain.add",
+          targetType: "domain",
+          targetId: DOMAIN_ID,
+        }),
+        expect.anything(),
+      );
     });
 
     it("returns 400 for a public suffix domain (e.g. 'com')", async () => {
@@ -425,6 +442,23 @@ describe("DomainHandler", () => {
       const body = await res.json() as { ok: boolean };
       expect(body.ok).toBe(true);
       expect(mockDb.tenantDomain.delete).toHaveBeenCalledWith({ where: { id: DOMAIN_ID } });
+
+      // Emits a domain.remove audit event.
+      expect(mockEmitTenantAudit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tenantId: TENANT_ID,
+          action: "domain.remove",
+          targetType: "domain",
+          targetId: DOMAIN_ID,
+        }),
+        expect.anything(),
+      );
+    });
+
+    it("does not emit an audit event when the domain is not found (404)", async () => {
+      mockDb.tenantDomain.findUnique.mockResolvedValue(null);
+      await handler.handleDelete(TENANT_ID, DOMAIN_ID, auth, env);
+      expect(mockEmitTenantAudit).not.toHaveBeenCalled();
     });
 
     it("returns 404 when domain not found for this tenant", async () => {
@@ -544,6 +578,30 @@ describe("DomainHandler", () => {
           where: { id: DOMAIN_ID },
           data: expect.objectContaining({ verifiedAt: expect.any(Date) }),
         }),
+      );
+
+      // Emits a domain.verify audit event on successful verification.
+      expect(mockEmitTenantAudit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tenantId: TENANT_ID,
+          action: "domain.verify",
+          targetType: "domain",
+          targetId: DOMAIN_ID,
+        }),
+        expect.anything(),
+      );
+    });
+
+    it("does not emit an audit event when DNS verification fails", async () => {
+      const row = makeUnverifiedDomainRow();
+      mockDb.tenantDomain.findUnique.mockResolvedValue(row);
+      mockVerifyDomainToken.mockResolvedValue({ verified: false, reason: "TOKEN_MISMATCH" });
+
+      await handler.handleVerify(TENANT_ID, DOMAIN_ID, auth, env);
+
+      expect(mockEmitTenantAudit).not.toHaveBeenCalledWith(
+        expect.objectContaining({ action: "domain.verify" }),
+        expect.anything(),
       );
     });
 
@@ -726,12 +784,14 @@ describe("DomainHandler", () => {
 /*
  * ─── FINDINGS ────────────────────────────────────────────────────────────────
  *
- * FINDING 1 (GAP — no audit trail): DomainHandler does NOT call emitTenantAudit
- * for any of its mutating operations (claim, delete, verify). The
- * role-mapping-handler, member-handler, and transfer-handler all emit audit
- * events on mutations. Domain claim/verify/remove are security-sensitive
- * (domain ownership gates SSO logins) and should be audited. This is a missing
- * feature, not a bug that breaks existing behavior.
+ * FINDING 1 (RESOLVED — audit trail wired): DomainHandler now emits
+ * emitTenantAudit on every mutation — domain.add on claim, domain.verify on a
+ * successful DNS verification, and domain.remove on delete (mapping to the
+ * tenant.domain.added/verified/removed audit actions; tenant.domain.removed was
+ * added to the taxonomy + the emitter union as part of this change). The
+ * success-path tests above assert emission; the not-found / failed-DNS paths
+ * assert no event is emitted. Domain ownership gates SSO logins, so these are
+ * security-sensitive operations and are now covered for compliance art-30.
  *
  * FINDING 2 (OBSERVATION — delete returns 200, not 204): handleDelete returns
  * json({ ok: true }, 200), unlike role-mapping-handler's handleDelete which
