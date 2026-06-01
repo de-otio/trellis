@@ -96,8 +96,25 @@ Work breakdown and sequencing to realize the testing strategy. Companion to
 > deliberate-looking deferral that needs an audit-taxonomy decision, documented
 > in [standalone.md](standalone.md#latent-hardening-notes-not-live-bugs) rather
 > than guessed at. Driving the broader tier branch thresholds is the ongoing
-> remainder; the one large untested handler left is `tenant/idp-handler.ts`
-> (~908 lines, Cognito IdP SDK + secrets) — it needs its own scoped pass.
+> remainder. (g) A fourth parallel batch covered the federation route layer +
+> the large IdP handler (~121 tests): the four `routes/tenant-{domains,idp,
+> members,role-mappings}` files (registration shape + CSRF-on-mutating +
+> every-route-401-unauthenticated, mirroring `routes/tenants.test.ts`),
+> `routes/auth-discover` (the pre-login discovery endpoint — locks no-auth,
+> 429+Retry-After rate-limit, input-validation 400s, and the **no-leak**
+> property: the query gates on `verifiedAt` AND `identityProvider.status:
+> ACTIVE`, so a claimed-but-disabled-IdP domain is indistinguishable from an
+> unknown one), and `tenant/idp-handler` (~908 lines, 72 tests — auth-gating on
+> every method, zod validation, the connect/patch/disable/delete lifecycle with
+> Cognito-SDK + Secrets-Manager mocked, rollback paths, error→status mapping,
+> single-IdP invariant, issuer-probe SSRF gate, and `clientSecretArn` never
+> appearing in any response). idp-handler emits `tenant.idp.*` audit events on
+> every mutation — confirming the domain-handler audit omission (finding above)
+> is a deliberate deferral, not a systemic gap. Deferred within idp-handler:
+> the best-effort global-signout (dynamic SDK import) and the advisory-lock SQL
+> hash (documented in the suite). The remaining untested surface is now the
+> graph/ActivityPub layers (Neo4j/Fedify-backed) and a few queue
+> consumers/leaf modules.
 
 ## Estimate
 
