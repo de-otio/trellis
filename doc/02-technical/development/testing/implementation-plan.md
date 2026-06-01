@@ -169,6 +169,14 @@ Work breakdown and sequencing to realize the testing strategy. Companion to
 > [standalone.md](standalone.md#bugs-this-lane-surfaced-all-in-trellis-not-the-foundation-packages)
 > (bug #5). This is the highest-value find of the coverage effort: these bugs
 > would break circles/discovery/pagination on the consuming vertical's AuraDB.
+>
+> **Graph lane now CI-gated.** A dedicated `graph` job in
+> [`ci.yml`](../../../../.github/workflows/ci.yml) runs `test:graph` against a
+> `neo4j:5-community` service container on every push/PR to `main`, fronted by a
+> `wait-for-neo4j.mjs` Bolt-readiness gate. The lane needs no Postgres/DynamoDB
+> and no `prisma:generate` (graph source only type-imports `@prisma/client`).
+> This closes the gap that let the four Neo4j-5 bugs above sit unexercised — a
+> future Cypher regression now fails the build instead of reaching AuraDB.
 
 ## Estimate
 

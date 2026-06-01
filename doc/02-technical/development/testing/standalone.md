@@ -73,8 +73,10 @@ HTTP port still answers. `docker-compose.yml` uses in-memory.
    significant find. The `test:graph` lane (`neo4j-graph-service.ts`) had **44
    failing tests** the first time it was run against a real Neo4j 5 (the version
    AuraDB runs in production); the suite had never been exercised because it
-   needs a live Neo4j and isn't in CI. Four distinct production-affecting bugs,
-   all now fixed (graph lane: 44 failures → **0**, 172 passing):
+   needs a live Neo4j and was not in CI at the time. It is **now CI-gated** via
+   the dedicated `graph` job (`neo4j:5-community` service), so these regressions
+   can no longer ship silently. Four distinct production-affecting bugs, all now
+   fixed (graph lane: 44 failures → **0**, 172 passing):
    - **`LIMIT`/`SKIP` passed as JS floats.** Cypher requires integer `LIMIT`;
      the driver serialises a JS `number` as a float (`51.0`), which Neo4j 5
      rejects (`'51.0' is not a valid value`). Fixed: wrap every paginating
