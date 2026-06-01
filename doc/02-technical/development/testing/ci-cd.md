@@ -35,7 +35,9 @@ at, or (preferably) against the local dummy target described in
 ## CI Workflow (`.github/workflows/ci.yml`)
 
 Triggers on push to `main`, PRs targeting `main`, and `workflow_dispatch`.
-One job, `lint-and-test`:
+Three parallel jobs: `lint-and-test`, `standalone`, and `graph`.
+
+### `lint-and-test`
 
 | Step | What runs |
 |------|-----------|
@@ -50,6 +52,27 @@ The consumer-install smoke is the one piece of CI that verifies Trellis the
 way a vertical consumes it: it catches runtime imports of devDependencies and
 unshipped relative imports that the in-repo suite (full source tree + devDeps)
 cannot see.
+
+### `standalone`
+
+Boots the real server in-process with the dummy-target extension and drives
+the full HTTP path — no AWS account, no consuming vertical. Services:
+PostgreSQL 16 + DynamoDB Local + Neo4j 5. Runs `prisma:migrate:deploy` then
+`npm run test:standalone -w @de-otio/trellis`. See [standalone.md](standalone.md).
+
+### `graph`
+
+Runs the Neo4j graph integration lane (`npm run test:graph`) against a
+`neo4j:5-community` service container. No Postgres/DynamoDB and no
+`prisma:generate` — the graph source only type-imports `@prisma/client`
+(erased at runtime), so the lane needs nothing but Neo4j. A
+`wait-for-neo4j.mjs` gate polls Bolt with `RETURN 1` before the tests start,
+because the container's HTTP health-check (7474) goes green before Bolt (7687)
+can authenticate. Tests target the default `neo4j` db (community edition has no
+multi-db) via `NEO4J_TEST_ALLOW_DEFAULT_DB=1`, with `STAGE=test` keeping the
+prod-refusal and wipe guards satisfied. This lane catches Neo4j-5 / Cypher
+regressions (integer coercion, `UNION` pagination, property writes) that the
+unit suite cannot see because it never touches a real database.
 
 ### What CI does **not** do here
 
@@ -75,7 +98,7 @@ pre-tag gate (versions match, lint+tests pass on `main`, lockfile updated).
 |------------|---------------|------------------|--------------------------|
 | `test` | `vitest.config.ts` | Unit + pre-deploy integration (excludes e2e, postdeployment, graph, schema, live-infra integration) | ✅ yes |
 | `test:integration` | `vitest.integration.config.ts` | Pre-deployment integration (needs Docker Compose) | run locally / standalone |
-| `test:graph` | `vitest.graph.config.ts` | Neo4j graph integration (needs local Neo4j) | run locally |
+| `test:graph` | `vitest.graph.config.ts` | Neo4j graph integration (needs Neo4j) | ✅ yes (`graph` job) |
 | `test:schema` | `vitest.schema.config.ts` | Prisma schema-shape checks (needs local Postgres) | run locally |
 | `test:e2e` (+ shards) | `vitest.e2e*.config.ts` | E2E against a deployed API (or the dummy target) | consumer pipeline / standalone |
 | `test:postdeployment` (+ shards) | `vitest.postdeployment*.config.ts` | Post-deploy validation against deployed infra | consumer pipeline |
