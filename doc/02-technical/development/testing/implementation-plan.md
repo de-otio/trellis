@@ -112,9 +112,24 @@ Work breakdown and sequencing to realize the testing strategy. Companion to
 > every mutation — confirming the domain-handler audit omission (finding above)
 > is a deliberate deferral, not a systemic gap. Deferred within idp-handler:
 > the best-effort global-signout (dynamic SDK import) and the advisory-lock SQL
-> hash (documented in the suite). The remaining untested surface is now the
-> graph/ActivityPub layers (Neo4j/Fedify-backed) and a few queue
-> consumers/leaf modules.
+> hash (documented in the suite). (h) A fifth parallel batch reached into the
+> graph/ActivityPub + leaf layers (~124 tests): `activitypub/crypto` (AES-256-GCM
+> round-trip, GCM tamper-detection, the ACTIVITYPUB_KEY_ENCRYPTION_KEY→
+> SESSION_SECRET key-derivation fallback, missing-key throw),
+> `graph/dual-write-service` (the retry/exponential-backoff logic under fake
+> timers — non-critical syncs return queued/failed and never throw, critical
+> ops throw `GraphSyncError`, the inline-retry **circuit cap** is honoured so
+> there is no unbounded retry, async-enqueue on/off, `processRetry` redispatch),
+> `activitypub/audience-service` (every createAudience validation guard +
+> member-CRUD incl. suspended/deleted rejection and P2002-idempotent re-add),
+> `taxonomy-handler-factory` (the null-not-default-tenant security contract),
+> and `audit-actions` (taxonomy invariants — dotted-lowercase format, value
+> uniqueness, AuditEventType map integrity). No bugs found; no source weakened.
+> The remaining untested surface is the heaviest graph/ActivityPub pieces
+> (`neo4j-graph-service`, `reconciliation-service`, the Fedify
+> dispatchers/config) plus `notification-preferences-handler`, the
+> media-reconciliation queue consumer, and the constant-only/type-only modules
+> (deliberately skipped).
 
 ## Estimate
 
