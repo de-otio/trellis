@@ -312,8 +312,13 @@ keep them in the deployed shard rather than faking them.
 > now, in cookie mode only, fetches `/api/csrf-token` before a mutating
 > request, attaches `X-CSRF-Token`, captures the rotated session cookie, and
 > retries once on a stale-token 403. Deployed mode is byte-for-byte unchanged.
-> Lane now **6 suites green (26 tests)**: the 4 read suites + `comments-crud` +
-> `reactions`.
+> Lane now **9 suites green (39 tests)**: the read suites + `comments-crud` +
+> `reactions` + `privacy` + `sentiments-read` + `access-control`. A triage
+> sweep of 10 read/social candidates cleanly split the set: the 7 that fail
+> (`circles`, `comment-management`, `connection-codes`, `content-discovery`,
+> `discovery`, `friends-followers`, `relationships`) all hit the same `401`
+> tenancy gate (a couple also have response-shape diffs), confirming the
+> ceiling is uniform — everything tenant-scoped waits on the same work.
 >
 > **Confirmed blocker for the bulk write port — tenancy, not auth.** With a
 > *valid* cookie session (proven: `/api/csrf-token` returns 200), `POST
