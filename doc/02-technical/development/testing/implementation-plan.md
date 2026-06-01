@@ -305,16 +305,28 @@ keep them in the deployed shard rather than faking them.
 > seeding each entry's server-minted `trellis_session` cookie;
 > `getShardUser()` was made cookie-aware (seed the cookie, omit the empty
 > Bearer). **4 read suites green (21 tests)** against the in-process server with
-> zero Cognito/AWS. Two findings sized the rest of the port:
-> 1. **CSRF must be threaded for cookie-mode writes.** Deployed Bearer-JWT
->    auth bypassed CSRF; cookie sessions enforce it (state-changing `POST`s
->    return 403 without a token). Before porting the CRUD/social shards, add a
->    CSRF-aware `authFetch` (GET `/api/csrf-token`, attach header + rotated
->    cookie) — this is the gating work item for write suites.
-> 2. **Route-mounting differences.** Some deployed routes (e.g.
->    `/api/admin/users`) aren't mounted in the dummy standalone server (404 vs
->    403); a handful of suites need per-suite expectation adjustments or a
->    fixture route. Triage per suite.
+> zero Cognito/AWS.
+>
+> **CSRF-aware `authFetch` landed (writes now work).** Cookie sessions enforce
+> CSRF (deployed Bearer-JWT auth was exempt), so `getShardUser().authFetch`
+> now, in cookie mode only, fetches `/api/csrf-token` before a mutating
+> request, attaches `X-CSRF-Token`, captures the rotated session cookie, and
+> retries once on a stale-token 403. Deployed mode is byte-for-byte unchanged.
+> Lane now **6 suites green (26 tests)**: the 4 read suites + `comments-crud` +
+> `reactions`.
+>
+> **Confirmed blocker for the bulk write port — tenancy, not auth.** With a
+> *valid* cookie session (proven: `/api/csrf-token` returns 200), `POST
+> /api/posts` and `GET /api/feeds/home` still return **401** — these paths
+> require an `activeTenantId` the local cookie session can't supply, the same
+> root cause as the skipped entity-create test. So `post-crud` / `link-reports`
+> (and the broader CRUD/social create paths) are **deferred to the
+> identity-federation tenancy work**, not blocked on test plumbing. The
+> remaining non-create read/social suites can port now; deep write coverage
+> waits on tenancy.
+>
+> Also deferred: `admin-access` (route `/api/admin/users` unmounted in the
+> dummy server → 404 vs deployed 403).
 >
 > CI wiring for this lane is **intentionally deferred** to avoid colliding with
 > the in-flight Neptune graph-CI work in `ci.yml`.

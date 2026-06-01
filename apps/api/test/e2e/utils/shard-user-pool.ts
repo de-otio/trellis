@@ -58,28 +58,84 @@ export function getShardUser(index: number) {
     cookies["trellis_session"] = entry.sessionCookie;
   }
 
-  const authFetch = async (url: string, init: RequestInit = {}): Promise<Response> => {
-    const cookieHeader = Object.entries(cookies)
+  // Cookie mode authenticates by session cookie; deployed mode by Cognito JWT.
+  const cookieMode = !!entry.sessionCookie;
+  const MUTATING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+  let csrfToken: string | null = null;
+
+  const cookieHeader = (): string =>
+    Object.entries(cookies)
       .map(([k, v]) => `${k}=${v}`)
       .join("; ");
 
-    const headers: Record<string, string> = {
-      // Deployed mode: send the Cognito JWT. Standalone mode (cookie auth):
-      // jwt is empty and the session cookie carries identity — sending an
-      // empty Bearer would make the auth middleware reject before the cookie
-      // is read, so omit it.
-      ...(entry.jwt ? { Authorization: `Bearer ${entry.jwt}` } : {}),
-      ...(cookieHeader ? { Cookie: cookieHeader } : {}),
-      ...(init.headers as Record<string, string> || {}),
-    };
-
-    const res = await fetch(url, { ...init, headers });
-
-    // Track cookies from response
-    const setCookie = res.headers.getSetCookie?.() || [];
-    for (const cookie of setCookie) {
+  const captureCookies = (res: Response): void => {
+    for (const cookie of res.headers.getSetCookie?.() ?? []) {
       const match = cookie.match(/^([^=]+)=([^;]*)/);
       if (match) cookies[match[1]] = match[2];
+    }
+  };
+
+  // Cookie sessions are CSRF-protected (deployed Bearer-JWT auth was exempt).
+  // Fetch a token from /api/csrf-token, which also rotates the session cookie
+  // (captured below). Cached and refreshed on demand.
+  const ensureCsrf = async (origin: string): Promise<void> => {
+    if (csrfToken) return;
+    const res = await fetch(`${origin}/api/csrf-token`, {
+      headers: cookieHeader() ? { Cookie: cookieHeader() } : {},
+    });
+    captureCookies(res);
+    if (res.ok) {
+      const body = (await res.json().catch(() => ({}))) as { token?: string };
+      csrfToken = body.token ?? null;
+    }
+  };
+
+  const sendOnce = async (
+    url: string,
+    init: RequestInit,
+    method: string,
+    callerHasCsrf: boolean,
+  ): Promise<Response> => {
+    const headers: Record<string, string> = {
+      // Deployed mode: send the Cognito JWT. Cookie mode: jwt is empty and the
+      // session cookie carries identity — an empty Bearer would make the auth
+      // middleware reject before the cookie is read, so omit it.
+      ...(entry.jwt ? { Authorization: `Bearer ${entry.jwt}` } : {}),
+      ...(cookieHeader() ? { Cookie: cookieHeader() } : {}),
+      ...(cookieMode && csrfToken && MUTATING.has(method) && !callerHasCsrf
+        ? { "X-CSRF-Token": csrfToken }
+        : {}),
+      ...((init.headers as Record<string, string>) || {}),
+    };
+    const res = await fetch(url, { ...init, headers });
+    captureCookies(res);
+    return res;
+  };
+
+  const authFetch = async (url: string, init: RequestInit = {}): Promise<Response> => {
+    const method = (init.method ?? "GET").toUpperCase();
+    const callerHasCsrf = Object.keys(
+      (init.headers as Record<string, string>) || {},
+    ).some((h) => h.toLowerCase() === "x-csrf-token");
+
+    // Cookie-mode mutations need a CSRF token; deployed mode is unchanged.
+    if (cookieMode && MUTATING.has(method) && !callerHasCsrf) {
+      await ensureCsrf(new URL(url).origin);
+    }
+
+    let res = await sendOnce(url, init, method, callerHasCsrf);
+
+    // The session cookie rotates on use; if a cached token went stale, refresh
+    // once and retry (a genuine authz 403 stays 403).
+    if (
+      res.status === 403 &&
+      cookieMode &&
+      MUTATING.has(method) &&
+      !callerHasCsrf
+    ) {
+      csrfToken = null;
+      await ensureCsrf(new URL(url).origin);
+      res = await sendOnce(url, init, method, callerHasCsrf);
     }
 
     return res;
