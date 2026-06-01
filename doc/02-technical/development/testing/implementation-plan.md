@@ -139,10 +139,25 @@ Work breakdown and sequencing to realize the testing strategy. Companion to
 > deprecated path can't silently return real data), and `auth/capabilities`
 > (catalog invariants: ALL_CAPABILITIES completeness, value uniqueness, naming
 > — which surfaced the `manage:agent_sessions` colon-vs-dot outlier, recorded as
-> a minor note in standalone.md). No bugs found. What's left is genuinely
-> infra-bound: `neo4j-graph-service`, `graph-schema-init`, `reconciliation-service`,
-> and the Fedify dispatchers/config — better exercised by the `test:graph` /
-> standalone lanes than by unit mocks.
+> a minor note in standalone.md). No bugs found. (j) A final unit batch took the
+> two remaining modules that had real mockable logic (~64 tests):
+> `graph/reconciliation-service` (the bulk Postgres→graph rebuild — locks
+> termination, the consecutive-failure **circuit breaker at exactly 10**, the
+> `maxRecordsPerModel` cap, cursor pagination, the 100-entry error-tracking cap,
+> and `checkConsistency`; surfaced a minor finding — the cap is page-granular,
+> noted in standalone.md) and `entity-tagging-errors` (the error code/HTTP-status
+> contract handlers map onto responses).
+>
+> **Unit-test pass substantially complete.** Everything still untested is now
+> either (a) **type/constant-only** (`*/types.ts`, `compliance/baseline.ts`) or
+> (b) **genuinely infra-bound** — `neo4j-graph-service` and `graph-schema-init`
+> (real Neo4j driver/Cypher → the `test:graph` lane against the Dockerised
+> Neo4j), the Fedify `dispatchers/`, `fedify/config`, `entity-profile-service`,
+> and `routes/activitypub/entity-profile` (ActivityPub is disabled-by-default and
+> Fedify-bound → the standalone lane with `features.activityPub` enabled), or
+> `session-cookie` (already covered transitively by `session-manager.test.ts`).
+> Adding unit mocks for these would be over-mock theatre; the next real coverage
+> step for them is the graph/standalone integration lanes, not more unit suites.
 
 ## Estimate
 

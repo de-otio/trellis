@@ -111,6 +111,14 @@ worth a team decision before the surface grows:
    and any dashboard/grouping that splits on `.`. A future catalog revision
    could align it (e.g. `agent_session.manage`); the capabilities test allows
    the outlier explicitly rather than failing on it.
+4. **Reconciliation `maxRecordsPerModel` cap is page-granular**
+   (`graph/reconciliation-service.ts`). The circuit breaker (10 consecutive
+   failures) and the cap both work and the loop always terminates, but the cap
+   gates only the *next-page* fetch — an in-flight batch is processed in full,
+   so a run can process up to `maxRecordsPerModel + batchSize − 1` records
+   instead of exactly the cap. Not a runaway risk; just looser than "Maximum
+   records per model" implies. A record-granular clamp (slice the final batch)
+   would make it exact. Locked at current behaviour by a test with a comment.
 
 > **Co-developing the foundation packages.** When `@de-otio/saas-foundation` is
 > npm-linked (`scripts/link-foundation.sh`), it carries its own nested
