@@ -161,7 +161,49 @@ async function fetchGraphCredentialsFromSsm(
  * @throws GraphConnectionError if the database is unreachable
  * @throws Error if neither GRAPH_DB_URI nor GRAPH_DB_CREDENTIALS_SSM_PARAM is set
  */
-export async function createGraphServiceFromEnv(_env?: unknown): Promise<
+/**
+ * Process-wide shared graph service.
+ *
+ * A neo4j Driver is designed to be a long-lived singleton (one per app),
+ * owning its own connection pool. `createGraphServiceFromEnv` is called from
+ * ~10 per-request handlers; creating (and never closing) a fresh driver per
+ * request leaks a Bolt connection + liveness timer each time. Memoize the
+ * connected service so all callers share one driver. Config comes from env /
+ * SSM, which is stable for the process, so a single instance is correct.
+ */
+let sharedGraphService: Promise<GraphService & GraphConnection> | null = null;
+
+export async function createGraphServiceFromEnv(
+  env?: unknown,
+): Promise<GraphService & GraphConnection> {
+  if (!sharedGraphService) {
+    sharedGraphService = buildGraphServiceFromEnv(env).catch((err) => {
+      // Don't cache a failed connection — allow the next call to retry.
+      sharedGraphService = null;
+      throw err;
+    });
+  }
+  return sharedGraphService;
+}
+
+/**
+ * Close the shared graph service and clear the cache. Call on graceful
+ * shutdown / test teardown so the Bolt connection + timers are released and
+ * the process can exit cleanly.
+ */
+export async function closeSharedGraphService(): Promise<void> {
+  if (!sharedGraphService) return;
+  const pending = sharedGraphService;
+  sharedGraphService = null;
+  try {
+    const svc = await pending;
+    await svc.close();
+  } catch {
+    // best-effort
+  }
+}
+
+async function buildGraphServiceFromEnv(_env?: unknown): Promise<
   GraphService & GraphConnection
 > {
   const region = process.env.AWS_REGION ?? "eu-central-1";

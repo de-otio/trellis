@@ -7,6 +7,11 @@ export default defineConfig({
     include: ["test/**/*.test.ts"],
     exclude: [
       "test/e2e/**/*.test.ts", // Exclude E2E tests - they should only run post-deployment
+      // Exclude the standalone lane — it boots a real server via its own
+      // globalSetup (vitest.standalone.config.ts). Under this default config
+      // there is no server, so the suites would fetch and fail.
+      // Run separately: npm run test:standalone -w @de-otio/trellis
+      "test/standalone/**/*.test.ts",
       "test/integration/postdeployment/**/*.test.ts", // Exclude postdeployment tests - they require deployed infrastructure
       // Exclude integration tests that require live infrastructure (DB + running API)
       "test/integration/encryption-key-service.integration.test.ts",

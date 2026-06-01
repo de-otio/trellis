@@ -34,11 +34,20 @@ Integration tests hit real PostgreSQL (Docker Compose) and DynamoDB Local. They 
 
 Postdeployment tests (`test/integration/postdeployment/`) require deployed infrastructure and are excluded from `npm test`. Run them separately after deploying.
 
-## Test Factories (`apps/api/test/factories/`)
+## Shared Test Utilities
 
-- `createUser(overrides?)` — inserts a User with a `cognitoSub`
-- `createPost(userId, overrides?)` — inserts a Post
-- `createMediaFile(userId, overrides?)` — inserts a MediaFile record
+There is no `test/factories/` directory. Shared helpers and fixtures live in:
+
+- `apps/api/test/utils/` — request/response and env helpers, e.g.
+  `mock-env.ts` (`createMockEnv()`, `MockKV`), `test-helpers.ts`
+  (`createMockRequest()`, `createAuthenticatedRequest()`,
+  `assertSecurityHeaders()`, `sleep()`), `test-auth.ts`, plus
+  `mock-oauth.ts`, `mock-atproto.ts`, `fedify-test-fixtures.ts`.
+- `apps/api/test/_helpers/multi-tenant-fixture.ts` — multi-tenant setup.
+- `apps/api/test/fixtures/` — seed data (e.g. `graph-seed.ts`).
+
+Prefer these over hand-rolling mocks. Use `createMockEnv()` for the `Env`
+object and the assertion helpers for security/CORS header checks.
 
 ## Writing Tests
 

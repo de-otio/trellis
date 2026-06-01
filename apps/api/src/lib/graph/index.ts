@@ -35,6 +35,7 @@ export { Neo4jGraphService } from "./neo4j-graph-service.js";
 export {
   createGraphService,
   createGraphServiceFromEnv,
+  closeSharedGraphService,
   type GraphServiceEnvConfig,
 } from "./graph-factory.js";
 export { initGraphSchema, verifyGraphSchema } from "./graph-schema-init.js";

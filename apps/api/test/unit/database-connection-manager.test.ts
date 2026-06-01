@@ -193,6 +193,29 @@ describe("DatabaseConnectionManager", () => {
     });
   });
 
+  describe("SSL configuration", () => {
+    it("requires SSL (rejectUnauthorized:false) for a remote host", () => {
+      manager.acquireClient("US", baseEnv); // hyperdrive remote URL
+      expect(mockPoolInstances[0].config.ssl).toEqual({
+        rejectUnauthorized: false,
+      });
+    });
+
+    it("disables SSL for a local Postgres host (no TLS locally)", () => {
+      manager.acquireClient("US", {
+        DATABASE_URL: "postgresql://trellis:pw@localhost:5432/trellis_dev",
+      } as any);
+      expect(mockPoolInstances[0].config.ssl).toBe(false);
+    });
+
+    it("disables SSL for 127.0.0.1", () => {
+      manager.acquireClient("US", {
+        DATABASE_URL: "postgresql://trellis:pw@127.0.0.1:5432/trellis_dev",
+      } as any);
+      expect(mockPoolInstances[0].config.ssl).toBe(false);
+    });
+  });
+
   describe("withClient", () => {
     it("should run callback with client and cleanup after", async () => {
       const callback = vi.fn(async (client: PrismaClient) => {

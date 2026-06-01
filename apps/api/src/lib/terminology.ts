@@ -40,7 +40,9 @@ export function getTerminology(entityType?: string): Terminology {
       };
     }
   }
-  return DEFAULT_TERMINOLOGY;
+  // Spread so callers never receive (and cannot mutate) the shared module
+  // constant — the override path above already returns a fresh object.
+  return { ...DEFAULT_TERMINOLOGY };
 }
 
 /**
