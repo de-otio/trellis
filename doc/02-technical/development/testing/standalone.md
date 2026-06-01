@@ -69,6 +69,39 @@ HTTP port still answers. `docker-compose.yml` uses in-memory.
    by the Stage 5 unit-coverage pass. Fixed: the fallback now spreads; a
    regression test asserts successive fallback calls return distinct objects
    and that mutation does not bleed across calls.
+5. **The Neo4j graph layer was systemically broken on Neo4j 5** — the most
+   significant find. The `test:graph` lane (`neo4j-graph-service.ts`) had **44
+   failing tests** the first time it was run against a real Neo4j 5 (the version
+   AuraDB runs in production); the suite had never been exercised because it
+   needs a live Neo4j and isn't in CI. Four distinct production-affecting bugs,
+   all now fixed (graph lane: 44 failures → **0**, 172 passing):
+   - **`LIMIT`/`SKIP` passed as JS floats.** Cypher requires integer `LIMIT`;
+     the driver serialises a JS `number` as a float (`51.0`), which Neo4j 5
+     rejects (`'51.0' is not a valid value`). Fixed: wrap every paginating
+     query's limit with `LIMIT toInteger($limit)` (9 sites). (26 failures.)
+   - **`syncPost` never wrote `radiusInt`.** Every circle/visibility query
+     filters `post.radiusInt >= $tier`, but the write only stored the string
+     `radius`, so `radiusInt` was always null → all circle queries returned
+     empty. Fixed: derive + persist `radiusInt` (WHISPER 0 … SHOUT 3). (11.)
+   - **`syncPost` stored `createdAt` as an ISO string and never wrote
+     `authorId`.** Reads compare `post.createdAt > datetime($since)` (string vs
+     datetime → null) and filter user posts on `post.authorId` (never set).
+     Fixed: store `createdAt = datetime(...)` and set `authorId`. (4.)
+   - **Cross-branch pagination was broken.** A trailing `ORDER BY … LIMIT`
+     after a bare `UNION` binds to the last branch only, so page 2 came back
+     empty. Fixed: wrap the entity/user branches in a `CALL { … }` subquery so
+     ordering + limit apply to the combined result. (1.)
+   Two test-side issues were also corrected: the graph harness `createEntity`
+   silently dropped extra props like `breed` (now `SET e += $extra`), and the
+   `confirmEntityRelationship` not-found test wrongly assumed the reverse
+   direction had no edge — entity relationships are reciprocal, so confirming
+   one direction CONFIRMs both (test now queries a genuinely-unrelated entity).
+   A new `schema-init.integration.test.ts` covers `initGraphSchema` /
+   `verifyGraphSchema` (constraint+index creation, idempotency, drop-detection,
+   uniqueness enforcement). Run: `npm run test:graph` with a local Neo4j 5 and
+   `NEO4J_TEST_DATABASE=neo4j NEO4J_TEST_ALLOW_DEFAULT_DB=1` (community has no
+   multi-db). **These bugs would break circles/discovery/pagination on the
+   consuming vertical's AuraDB — verify there after the next dependency bump.**
 
 ### Latent hardening notes (not live bugs)
 

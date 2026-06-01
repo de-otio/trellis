@@ -331,10 +331,21 @@ describe("confirmEntityRelationship", () => {
   });
 
   it("throws GraphNotFoundError when the relationship does not exist", async () => {
+    // Entity relationships are reciprocal: confirming e-conf-src ↔ e-conf-tgt
+    // above created a CONFIRMED edge in BOTH directions, so querying the
+    // "reverse" tgt→src would hit that edge (Conflict), not a missing one.
+    // To exercise the genuine not-found path, use a fresh entity the
+    // confirming user owns that has no relationship in any direction.
+    await svc.syncEntity({ id: uid("e-conf-orphan"), entityType: "dog", name: "Orphan" });
+    await svc.syncOwnership({
+      userId: uid("u-conf-src"),
+      entityId: uid("e-conf-orphan"),
+      role: "PRIMARY_OWNER",
+    });
     await expect(
       svc.confirmEntityRelationship(
-        uid("e-conf-tgt"), // reversed direction — no edge in this direction
-        uid("e-conf-src"),
+        uid("e-conf-tgt"),
+        uid("e-conf-orphan"),
         uid("u-conf-src"),
       ),
     ).rejects.toThrow(GraphNotFoundError);

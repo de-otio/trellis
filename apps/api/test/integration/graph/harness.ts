@@ -145,9 +145,12 @@ export async function createEntity(
 ): Promise<void> {
   const { entityType, name, ...extra } = props;
   await withSession(async (session) => {
+    // `SET e += $extra` persists any additional props (breed, lat/lng,
+    // discoverable, …). The previous version passed them as params but never
+    // wrote them, so e.g. breed-matching queries saw a null `breed`.
     await session.run(
-      "CREATE (e:Entity { id: $id, entityType: $entityType, name: $name, createdAt: datetime() })",
-      { id, entityType, name, ...extra },
+      "CREATE (e:Entity { id: $id, entityType: $entityType, name: $name, createdAt: datetime() }) SET e += $extra",
+      { id, entityType, name, extra },
     );
   });
 }

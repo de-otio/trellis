@@ -44,6 +44,7 @@ import type {
   NearbyFilters,
   PaginatedResult,
   PaginationInput,
+  PostRadius,
   Recommendation,
   RecordInteractionInput,
   Relationship,
@@ -60,6 +61,18 @@ import type {
 // ---------------------------------------------------------------------------
 // Implementation
 // ---------------------------------------------------------------------------
+
+/**
+ * Post-radius → integer rank persisted as `Post.radiusInt`. A post is visible
+ * at circle tier T when `radiusInt >= T` (see circle-queries.md). Kept in sync
+ * with the `PostRadius` union; read queries depend on this exact mapping.
+ */
+const RADIUS_TO_INT: Record<PostRadius, number> = {
+  WHISPER: 0,
+  NORMAL: 1,
+  LOUD: 2,
+  SHOUT: 3,
+};
 
 export class Neo4jGraphService implements GraphService, GraphConnection {
   private driver: Driver | null = null;
@@ -353,7 +366,7 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
       RETURN r, tgt.id AS targetId,
              CASE WHEN tgt:User THEN 'user' ELSE 'entity' END AS targetType
       ORDER BY r.score DESC
-      LIMIT $fetchLimit
+      LIMIT toInteger($fetchLimit)
       `,
       {
         userId,
@@ -501,24 +514,32 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
       ? `AND (post.createdAt < datetime($cursorCreatedAt) OR (post.createdAt = datetime($cursorCreatedAt) AND post.id < $cursorPostId))`
       : "";
 
+    // The entity-branch and user-branch are combined with UNION inside a CALL
+    // subquery so the trailing ORDER BY/LIMIT applies to the COMBINED result.
+    // A bare `RETURN … UNION … RETURN … ORDER BY … LIMIT` binds the ORDER
+    // BY/LIMIT to the last branch only, which breaks cross-branch pagination
+    // (page 2 came back empty when the limit was smaller than the total).
     const query = `
-      MATCH (viewer:User {id: $viewerId})-[r:RELATES_TO]->(entity:Entity)
-      WHERE r.score >= $lowerThreshold AND r.score < $upperThreshold
-      WITH entity, r.score AS relScore
-      MATCH (post:Post)-[:ABOUT]->(entity)
-      WHERE post.createdAt > datetime($since) AND post.radiusInt >= $tierInt ${cursorClause}
-      WITH post, MIN(CASE WHEN relScore >= $innerThreshold THEN 0 WHEN relScore >= $closeFriendThreshold THEN 1 WHEN relScore >= $communityThreshold THEN 2 ELSE 3 END) AS resolvedTier
-      RETURN post.id AS postId, post.createdAt AS createdAt, resolvedTier
-      UNION
-      MATCH (viewer:User {id: $viewerId})-[r:RELATES_TO]->(author:User)
-      WHERE r.score >= $lowerThreshold AND r.score < $upperThreshold
-      WITH author, r.score AS relScore
-      MATCH (post:Post)
-      WHERE post.authorId = author.id AND post.createdAt > datetime($since) AND post.radiusInt >= $tierInt ${cursorClause}
-      WITH post, MIN(CASE WHEN relScore >= $innerThreshold THEN 0 WHEN relScore >= $closeFriendThreshold THEN 1 WHEN relScore >= $communityThreshold THEN 2 ELSE 3 END) AS resolvedTier
-      RETURN post.id AS postId, post.createdAt AS createdAt, resolvedTier
+      CALL {
+        MATCH (viewer:User {id: $viewerId})-[r:RELATES_TO]->(entity:Entity)
+        WHERE r.score >= $lowerThreshold AND r.score < $upperThreshold
+        WITH entity, r.score AS relScore
+        MATCH (post:Post)-[:ABOUT]->(entity)
+        WHERE post.createdAt > datetime($since) AND post.radiusInt >= $tierInt ${cursorClause}
+        WITH post, MIN(CASE WHEN relScore >= $innerThreshold THEN 0 WHEN relScore >= $closeFriendThreshold THEN 1 WHEN relScore >= $communityThreshold THEN 2 ELSE 3 END) AS resolvedTier
+        RETURN post.id AS postId, post.createdAt AS createdAt, resolvedTier
+        UNION
+        MATCH (viewer:User {id: $viewerId})-[r:RELATES_TO]->(author:User)
+        WHERE r.score >= $lowerThreshold AND r.score < $upperThreshold
+        WITH author, r.score AS relScore
+        MATCH (post:Post)
+        WHERE post.authorId = author.id AND post.createdAt > datetime($since) AND post.radiusInt >= $tierInt ${cursorClause}
+        WITH post, MIN(CASE WHEN relScore >= $innerThreshold THEN 0 WHEN relScore >= $closeFriendThreshold THEN 1 WHEN relScore >= $communityThreshold THEN 2 ELSE 3 END) AS resolvedTier
+        RETURN post.id AS postId, post.createdAt AS createdAt, resolvedTier
+      }
+      RETURN postId, toString(createdAt) AS createdAt, resolvedTier
       ORDER BY createdAt DESC
-      LIMIT $limit`;
+      LIMIT toInteger($limit)`;
 
     const params: Record<string, unknown> = {
       viewerId: userId, lowerThreshold: bounds.lower,
@@ -623,7 +644,7 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
          MATCH (post:Post)-[:ABOUT]->(entity)
          WHERE post.createdAt > datetime($since)
            AND post.radiusInt >= CASE WHEN r.score >= $innerThreshold THEN 0 WHEN r.score >= $closeFriendThreshold THEN 1 WHEN r.score >= $communityThreshold THEN 2 ELSE 3 END
-         RETURN post.id AS postId ORDER BY post.createdAt DESC LIMIT $limit`,
+         RETURN post.id AS postId ORDER BY post.createdAt DESC LIMIT toInteger($limit)`,
         commonParams,
       );
       return result.records.map((r) => r.get("postId") as string);
@@ -634,7 +655,7 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
        MATCH (post:Post)
        WHERE post.authorId = author.id AND post.createdAt > datetime($since)
          AND post.radiusInt >= CASE WHEN r.score >= $innerThreshold THEN 0 WHEN r.score >= $closeFriendThreshold THEN 1 WHEN r.score >= $communityThreshold THEN 2 ELSE 3 END
-       RETURN post.id AS postId ORDER BY post.createdAt DESC LIMIT $limit`,
+       RETURN post.id AS postId ORDER BY post.createdAt DESC LIMIT toInteger($limit)`,
       commonParams,
     );
     return result.records.map((r) => r.get("postId") as string);
@@ -1160,7 +1181,7 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
              discovered.breed     AS breed,
              ${safeHops}          AS hops
       ORDER BY discovered.name ASC
-      LIMIT $limit
+      LIMIT toInteger($limit)
     `;
 
     const params: Record<string, unknown> = { userId, limit };
@@ -1233,7 +1254,7 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
              entity.breed     AS breed,
              distanceMeters
       ORDER BY distanceMeters ASC
-      LIMIT $limit
+      LIMIT toInteger($limit)
     `;
 
     const params: Record<string, unknown> = { userId, lat, lng, radiusMeters, limit };
@@ -1295,7 +1316,7 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
              toFloat(sharedCount) / 10.0 AS score,
              'shared_connections'         AS reason
       ORDER BY score DESC
-      LIMIT $limit
+      LIMIT toInteger($limit)
     `;
 
     // Signal 2: Same breed as user's owned entities
@@ -1313,7 +1334,7 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
              candidate.entityType AS entityType,
              0.6                  AS score,
              'same_breed'         AS reason
-      LIMIT $limit
+      LIMIT toInteger($limit)
     `;
 
     // Signal 3: Geographic proximity to user's owned entities
@@ -1348,7 +1369,7 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
              (1.0 - (minDist / 10000.0)) * 0.5 AS score,
              'nearby'             AS reason
       ORDER BY minDist ASC
-      LIMIT $limit
+      LIMIT toInteger($limit)
     `;
 
     const [sharedResult, breedResult, nearbyResult] = await Promise.all([
@@ -1916,22 +1937,33 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
   }
 
   async syncPost(input: SyncPostInput): Promise<void> {
+    // Read queries filter on the integer `radiusInt` (WHISPER 0 … SHOUT 3) and
+    // treat `createdAt` as a Neo4j datetime (`post.createdAt > datetime($since)`,
+    // ORDER BY post.createdAt). Persist both in those shapes — storing radius as
+    // a bare string (no radiusInt) or createdAt as an ISO string silently makes
+    // every circle/discovery query return nothing on Neo4j 5.
+    const radiusInt = RADIUS_TO_INT[input.radius];
     await this.executeQuery(
       `
       MERGE (u:User {id: $authorId})
       MERGE (p:Post {id: $id})
       ON CREATE SET
+        p.authorId  = $authorId,
         p.radius    = $radius,
-        p.createdAt = $createdAt
+        p.radiusInt = toInteger($radiusInt),
+        p.createdAt = datetime($createdAt)
       ON MATCH SET
+        p.authorId  = $authorId,
         p.radius    = $radius,
-        p.createdAt = $createdAt
+        p.radiusInt = toInteger($radiusInt),
+        p.createdAt = datetime($createdAt)
       MERGE (u)-[:AUTHORED]->(p)
       `,
       {
         id: input.id,
         authorId: input.authorId,
         radius: input.radius,
+        radiusInt,
         createdAt: input.createdAt.toISOString(),
       },
     );

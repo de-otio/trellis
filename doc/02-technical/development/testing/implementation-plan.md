@@ -158,6 +158,17 @@ Work breakdown and sequencing to realize the testing strategy. Companion to
 > `session-cookie` (already covered transitively by `session-manager.test.ts`).
 > Adding unit mocks for these would be over-mock theatre; the next real coverage
 > step for them is the graph/standalone integration lanes, not more unit suites.
+>
+> **Graph lane activated (Stage 3-adjacent).** Running `test:graph` against a
+> real Neo4j 5 for the first time surfaced that the graph layer was
+> systemically broken on Neo4j 5 — **44 failures → 0** after fixing four
+> production-affecting `neo4j-graph-service` bugs (float `LIMIT`; `syncPost`
+> never writing `radiusInt`/`authorId` and storing `createdAt` as a string;
+> bare-`UNION` pagination), plus a new `schema-init.integration.test.ts` and two
+> test-side corrections. Full detail + the run command are in
+> [standalone.md](standalone.md#bugs-this-lane-surfaced-all-in-trellis-not-the-foundation-packages)
+> (bug #5). This is the highest-value find of the coverage effort: these bugs
+> would break circles/discovery/pagination on the consuming vertical's AuraDB.
 
 ## Estimate
 
