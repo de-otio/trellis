@@ -1,5 +1,15 @@
 # Post-Deployment Test Architecture
 
+> **Scope note.** Post-deployment verification runs against a *deployed*
+> environment, which the **consuming vertical** owns — so the
+> `.github/workflows/deploy.yml` sharding jobs described below live in that
+> repo's pipeline, not in Trellis core (which has no `deploy.yml` and does not
+> deploy). The test-architecture techniques here (global user pool, CSRF
+> caching, connection budgeting, shard-per-domain) are pipeline-agnostic and
+> apply equally to the local dummy-target lane in
+> [standalone.md](standalone.md). Read references to `deploy.yml` as "the
+> consumer's deploy pipeline."
+
 **Hard constraint:** The full post-deployment verification must complete in under 5 minutes, regardless of how many tests exist.
 
 ## Current State

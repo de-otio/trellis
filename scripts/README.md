@@ -6,6 +6,7 @@ Helper scripts for local development.
 | --- | --- |
 | `dev-setup.sh` | One-time local dev setup: brings up `docker compose` services, runs migrations, seeds data |
 | `e2e-parallel.sh` | Runs all e2e shards in parallel against a given `API_URL` (works against any URL — local docker, ngrok, Trellis dev, etc.) |
+| `link-foundation.sh` | Links the locally-developed `@de-otio/saas-foundation` + `@de-otio/vestibulum` into this repo for co-development. Re-run after any `npm install` (it clobbers the symlinks). `--status` / `--unlink` supported. CI and publish intentionally use the registry versions. |
 
 ## Note
 

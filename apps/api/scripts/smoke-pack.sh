@@ -45,6 +45,17 @@ fi
 
 echo "==> packed: ${TARBALL_PATH}"
 
+# Test fixtures (the dummy-target example-extension and the whole test/ tree)
+# must never ship. The published `files` list is dist/prisma/src/lambda, so
+# this asserts the boundary holds even if `files` is edited later.
+echo "==> asserting test fixtures are absent from the tarball"
+LEAKED="$(tar -tzf "${TARBALL_PATH}" | grep -E '(^|/)(test/|example-extension)' || true)"
+if [ -n "${LEAKED}" ]; then
+  echo "::error::test fixtures leaked into the published tarball:"
+  echo "${LEAKED}"
+  exit 1
+fi
+
 # Fresh consumer project outside the monorepo so npm doesn't resolve via
 # workspaces. Use a tempdir we own.
 CONSUMER_DIR="$(mktemp -d -t trellis-smoke-XXXXXX)"

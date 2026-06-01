@@ -325,15 +325,22 @@ export class DatabaseConnectionManager {
         : "undefined",
     });
 
+    // RDS requires SSL (rejectUnauthorized: false because the Amazon RDS root CA
+    // may not be in Node's default trust store; the connection is still encrypted).
+    // A local Postgres (dev / CI / the standalone test lane) is not configured for
+    // TLS, so requesting SSL fails with "server does not support SSL connections".
+    // Skip SSL only for local hosts; everything else keeps the RDS behaviour.
+    const isLocalDb = /@(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(
+      resolved.connectionString ?? "",
+    );
+
     const pool = new Pool({
       connectionString: resolved.connectionString,
       max: poolMax,
       connectionTimeoutMillis: resolved.connectionTimeout,
       idleTimeoutMillis: this.DEFAULT_IDLE_TIMEOUT_MS,
       allowExitOnIdle: false,
-      // RDS requires SSL. Use rejectUnauthorized: false because the Amazon RDS root CA
-      // may not be in the Node.js default trust store. The connection is still encrypted.
-      ssl: { rejectUnauthorized: false },
+      ssl: isLocalDb ? false : { rejectUnauthorized: false },
     });
 
     pool.on("error", (err) => {

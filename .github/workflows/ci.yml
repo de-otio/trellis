@@ -87,3 +87,64 @@ jobs:
       # tree + devDeps installed.
       - name: Consumer-install smoke test
         run: bash apps/api/scripts/smoke-pack.sh
+
+  standalone:
+    name: Standalone lane
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: trellis_dev
+          POSTGRES_USER: trellis
+          POSTGRES_PASSWORD: trellis_dev_password
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+      dynamodb:
+        image: amazon/dynamodb-local:latest
+        ports: ["8000:8000"]
+        options: --health-cmd "curl -s http://localhost:8000" --health-interval 5s
+      neo4j:
+        image: neo4j:5-community
+        env:
+          NEO4J_AUTH: neo4j/trellis_dev_password
+        ports: ["7687:7687", "7474:7474"]
+        options: >-
+          --health-cmd "wget -qO- http://localhost:7474 || exit 1"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 15
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npm run prisma:generate
+        env:
+          DATABASE_URL: postgresql://trellis:trellis_dev_password@localhost:5432/trellis_dev
+
+      - name: Run migrations
+        run: npm run prisma:migrate:deploy
+        env:
+          DATABASE_URL: postgresql://trellis:trellis_dev_password@localhost:5432/trellis_dev
+          DIRECT_DATABASE_URL: postgresql://trellis:trellis_dev_password@localhost:5432/trellis_dev
+
+      # Boots the real server in-process with the dummy-target extensions and
+      # drives the full HTTP path — no AWS account, no consuming vertical.
+      # The standalone-env defaults point at the service containers above.
+      - name: Run standalone lane
+        run: npm run test:standalone -w @de-otio/trellis

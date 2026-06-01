@@ -212,6 +212,8 @@ export async function startServer(): Promise<http.Server> {
         }
         const { sharedDatabaseConnectionManager } = await import("./lib/database-connection-manager.js");
         await sharedDatabaseConnectionManager.shutdown();
+        const { closeSharedGraphService } = await import("./lib/graph/index.js");
+        await closeSharedGraphService();
         logger.info("Server and database pools closed");
       } catch (err: any) {
         logger.error("Error shutting down database pools", { error: err?.message });

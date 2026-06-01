@@ -1,5 +1,12 @@
 # Post-Deployment Test Connection Design
 
+> **Scope note.** This describes the post-deployment suite, which runs against
+> a *deployed* environment owned by the **consuming vertical**. The connection
+> behaviour analysed here is that of the deployed API (single Fargate task,
+> small DB pool); the helper designs (global user pool, `CachedSession`) are
+> pipeline-agnostic. See [post-deploy-speed.md](post-deploy-speed.md) and the
+> local lane in [standalone.md](standalone.md).
+
 ## Problem
 
 Post-deployment API tests fail with `Database query timeout after 2000ms` because every test file independently creates users, fetches CSRF tokens, and cleans up — each operation opening a new database connection pool through the API. With 17 test files running sequentially, the pattern is:

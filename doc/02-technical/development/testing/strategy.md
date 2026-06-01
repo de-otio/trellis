@@ -7,6 +7,16 @@
 3. **CI must block deploys** — no code reaches production without passing tests
 4. **Post-deployment verification is automated** — never "run this manually after deploy"
 5. **Tests are the second pair of eyes** — for a solo developer, if it's not tested, it's not safe to ship
+6. **Trellis must be testable independently** — Trellis is a generic core consumed by a vertical that owns the live AWS environment. As much as possible must be verifiable *in this repo*, against local infrastructure, with no consuming vertical and no AWS account. The most realistic tests should not depend on someone else's deploy cadence.
+
+## Testing Trellis Independently
+
+Trellis is published to npm and consumed by a vertical via `registerExtension()` + `startServer()`; that vertical owns the deployed AWS environment. To keep verification cheap and self-contained, the layers split as follows:
+
+- **Run independently in this repo (CI + local):** type-check / lint, unit, integration (Postgres + DynamoDB-local + LocalStack via `docker-compose`), schema, graph (Neo4j), and the consumer-install smoke (`scripts/smoke-pack.sh`). This is the bulk of the suite and the default expectation for every change.
+- **Replace the real consumer with a generic dummy target:** a minimal reference extension fixture (neutral terminology — *not* any real product) that registers through the published API and boots the server against local infrastructure. This exercises the extension contract and the full HTTP request path here, before publish — closing the gap where E2E / post-deployment currently require the consumer's deployed Cognito / SSM / RDS.
+
+The complete design, local-infrastructure map, dummy-target specification, and a phased P0/P1/P2 implementation plan live in **[standalone.md](standalone.md)**. The independence gaps tracked there are distinct from the coverage gaps below.
 
 ## Coverage Requirements by Module Type
 
@@ -21,7 +31,7 @@ A bug here can compromise user data or break the auth flow entirely.
 | Session management | `src/lib/session-manager.ts` | Creation, validation, expiry, tampering |
 | CSRF protection | `src/lib/csrf.ts` | Token generation, validation, rejection |
 | MFA (TOTP) | `src/lib/mfa/` | Secret generation, verification window, replay rejection, recovery codes |
-| Encryption services | `src/lib/encryption-key-service.ts`, `packages/crypto/` | Roundtrip, key rotation, wrong-key rejection |
+| Encryption services | `src/lib/encryption-key-service.ts`, voting crypto (`test/unit/crypto/`) | Roundtrip, key rotation, wrong-key rejection |
 | User deletion | `src/lib/user-deletion-handler*.ts` | Full deletion flow, partial failure, GDPR compliance |
 | Security headers | `src/lib/security-headers.ts` | All headers present, no header stripping |
 
@@ -41,10 +51,15 @@ These modules implement the primary user-facing features.
 
 | Module | Location |
 |--------|----------|
-| CDK stacks | `infra/lib/stacks/*.ts` |
 | Database utilities | `src/lib/database-*.ts` |
 | KV/Storage/Queue adapters | `src/lib/kv/`, `src/lib/storage/`, `src/lib/queue/` |
 | Feature flags | `src/lib/feature-flags.ts`, `src/lib/feature-toggle-service.ts` |
+
+> **CDK stacks are not in this repo.** Trellis ships as an npm package; the
+> CDK infrastructure (and its template/policy tests) lives in the consuming
+> vertical. The closest infra-shaped surface Trellis owns is the Lambda
+> handlers in `src/lambda/` (Tier 1, above) and the published-package contract
+> verified by the consumer-install smoke (`scripts/smoke-pack.sh`).
 
 ### Tier 4: ActivityPub (test when feature is enabled)
 
@@ -55,32 +70,45 @@ ActivityPub is behind a feature flag. Tests exist but only matter when `features
 These are areas identified as needing test coverage. When addressing them, follow
 the priority order below.
 
-### P0 — Blocks safe deployment
+> **Status note (reconciled with the repo).** Several gaps from earlier
+> revisions are now closed: Lambda triggers have tests (`test/unit/lambda/`,
+> `test/lambda/`), the MFA module has tests (`test/unit/mfa/`), and the
+> `integration` / `postdeployment` vitest configs exist. The "CI disconnected
+> from deploy pipeline" gap does not apply to this repo — Trellis core has no
+> deploy pipeline (it publishes to npm); deploy gating is the consuming
+> vertical's concern. The remaining gaps are about **independence** — see
+> [standalone.md](standalone.md).
+
+### P0 — Blocks confident release
 
 | Gap | Impact |
 |-----|--------|
-| Lambda Cognito triggers (7 functions, 0 tests) | Auth flow can break silently |
-| MFA module (2 files, 0 tests) | Security feature with no safety net |
-| Missing vitest configs (`integration`, `postdeployment`) | Test scripts are broken |
-| CI disconnected from deploy pipeline | Code can deploy without tests passing |
+| No in-repo full-path test (nothing boots a registered extension via HTTP) | Extension-API breakage only surfaces downstream, after publish |
+| E2E / post-deployment cannot run without the consumer's deployed AWS | The most realistic tests depend on someone else's environment |
+
+(Both are addressed by the dummy-target plan in [standalone.md](standalone.md).)
 
 ### P1 — Significant risk
 
 | Gap | Impact |
 |-----|--------|
-| Lambda workers (3 functions, 0 tests) | Data cleanup and media processing untested |
-| 4 route files with no tests | Endpoints could silently break |
-| 18 of 29 E2E test files excluded | Only 38% of E2E coverage is active |
-| Deploy smoke test is a single `curl` | Post-deploy validation is minimal |
+| Route files without tests | Endpoints could silently break |
+| Excluded / inactive E2E files | Some E2E coverage is not exercised |
+| Post-deploy validation depth | Smoke coverage should grow with surface area |
 
 ### P2 — Moderate risk
 
-| Gap | Impact |
-|-----|--------|
-| Metadata services (5 of 6 untested) | Metadata extraction could silently fail |
-| Crypto voting (3 of 6 untested) | Encryption schemes untested |
-| Scheduled tasks (`media-stale-cleanup`) | Cleanup could silently stop working |
-| `MediaMetadataExtractor`, `MediaMetrics` | No dedicated unit tests |
+Verify current coverage before treating any of these as open (the suite has
+grown — `test/unit/metadata/`, `test/unit/crypto/voting/`, and
+`test/unit/scheduled/` all exist). Use `npm run test:coverage` to find the
+real per-file gaps rather than trusting a fixed list.
+
+| Area | Watch for |
+|------|-----------|
+| Metadata services (`test/unit/metadata/`) | Extraction paths that fail silently |
+| Voting crypto (`test/unit/crypto/voting/`) | Untested encryption schemes |
+| Scheduled tasks (`test/unit/scheduled/`, e.g. `media-stale-cleanup`) | Cleanup that could silently stop |
+| Media extractor / metrics | Missing dedicated unit tests |
 
 ## Mock Strategy
 

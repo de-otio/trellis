@@ -2,6 +2,16 @@
 
 This guide establishes debugging practices for Trellis. The goal: **find root causes in seconds or minutes, not hours**.
 
+> **Scope note.** Tiers 1–3 (unit test, local Node script, static analysis)
+> are pure Trellis-core debugging and run entirely in this repo. Tiers 4–5
+> (remote probe, deploy) and any reference to CDK stacks (`infra/lib/stacks/…`),
+> ECS, CloudFront, ALB, SSM, or CloudWatch describe the **consuming vertical's
+> deployed environment** — Trellis core has no `infra/` and does not deploy.
+> Use those tiers when debugging the deployed system from within the
+> consumer's account; for everything else, stay in Tiers 1–3. Paths like
+> `infra/lib/stacks/*.ts` below are pointers into the consumer's repo, not
+> this one.
+
 > **Background**: The AWS Well-Architected Framework's [Operational Excellence pillar](https://docs.aws.amazon.com/wellarchitected/latest/operational-excellence-pillar/) emphasizes "make frequent, small, reversible changes" and "improve through game days." Martin Fowler's [Testing Pyramid](https://martinfowler.com/articles/practical-test-pyramid.html) and the DORA metrics (from *Accelerate* by Forsgren, Humble, Kim) both show that shifting testing left — catching bugs earlier, closer to the developer — is the single highest-leverage improvement for software delivery.
 
 ## The #1 Rule
@@ -43,7 +53,7 @@ npm run build -w @de-otio/trellis
 
 # Test session encrypt/decrypt round-trip
 node -e "
-const {SessionManager} = require('./apps/api/dist/lib/session-manager.js');
+const {SessionManager} = require('./apps/api/dist/lib/session-cookie.js');
 const sm = new SessionManager();
 const data = JSON.stringify({userId:'test', expiresAt:Date.now()+3600000});
 sm.encryptSession(data, 'secret-32-chars-minimum-length!!', 'salt-value')
@@ -177,7 +187,7 @@ export SESSION_SALT=$(AWS_PROFILE=dot-dev aws ssm get-parameter \
 npm run build -w @de-otio/trellis  # Always test compiled output!
 
 node -e "
-const {SessionManager} = require('./apps/api/dist/lib/session-manager.js');
+const {SessionManager} = require('./apps/api/dist/lib/session-cookie.js');
 const sm = new SessionManager();
 const data = JSON.stringify({userId:'test',expiresAt:Date.now()+3600000,dataRegion:'EU',sessionType:'user',lastActivityAt:Date.now(),profileContext:'primary'});
 sm.encryptSession(data, process.env.SESSION_SECRET, process.env.SESSION_SALT)

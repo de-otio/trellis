@@ -1,6 +1,14 @@
 # E2E Tests
 
-E2E tests run against a deployed environment. They verify the full request path: CloudFront → ALB → ECS → RDS.
+E2E tests run against a **running API** and verify the full request path. In
+the consuming vertical's deployed environment that path is
+CloudFront → ALB → ECS → RDS; the suites authenticate via Cognito and read
+secrets from SSM, so they need that deployed environment and AWS credentials.
+
+To run the same request path **without any deployed environment or AWS
+account** — against a locally-booted server with a generic dummy extension —
+use the standalone lane in [standalone.md](standalone.md). This page describes
+the **deployed-target** mode.
 
 ## Running
 
@@ -15,9 +23,10 @@ API_URL=https://api.dev.example.com npx vitest run --config vitest.e2e.config.ts
 
 ## Configuration (`apps/api/vitest.e2e.config.ts`)
 
-- Single thread (`fileParallelism: false`) — prevents Cognito rate limiting
-- `API_URL` env var required (or defaults to `http://localhost:8787`)
-- Setup: health check on startup, aborts if API unreachable
+- Single thread (`fileParallelism: false`) — prevents Cognito rate limiting and DB connection-pool exhaustion against a single Fargate task
+- Target resolved by `TestConfig` (`test/utils/test-config.ts`) from a `config.yaml` keyed on `TEST_ENV` (override with `API_URL`)
+- Setup (`test/e2e/setup.ts`): health check on `GET /health` at startup, aborts if the API is unreachable
+- The API listens on port `3000`
 
 ## Test User
 
