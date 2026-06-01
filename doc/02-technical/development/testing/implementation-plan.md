@@ -129,7 +129,20 @@ Work breakdown and sequencing to realize the testing strategy. Companion to
 > (`neo4j-graph-service`, `reconciliation-service`, the Fedify
 > dispatchers/config) plus `notification-preferences-handler`, the
 > media-reconciliation queue consumer, and the constant-only/type-only modules
-> (deliberately skipped).
+> (deliberately skipped). (i) A sixth batch covered the remaining
+> lightly-mockable handlers/leaf modules (~52 tests): `notification-preferences-handler`
+> (the CHILD→403 child-safety guard, boolean validation, upsert happy path, and
+> `db.release()` in finally on every path — no connection leak),
+> `queue-consumers/media-reconciliation-consumer` (the ack-on-success /
+> retry-all-on-failure DLQ contract — no silent message loss), the
+> `activitypub/friendship-service` stub (no-ops + empty returns, so the
+> deprecated path can't silently return real data), and `auth/capabilities`
+> (catalog invariants: ALL_CAPABILITIES completeness, value uniqueness, naming
+> — which surfaced the `manage:agent_sessions` colon-vs-dot outlier, recorded as
+> a minor note in standalone.md). No bugs found. What's left is genuinely
+> infra-bound: `neo4j-graph-service`, `graph-schema-init`, `reconciliation-service`,
+> and the Fedify dispatchers/config — better exercised by the `test:graph` /
+> standalone lanes than by unit mocks.
 
 ## Estimate
 

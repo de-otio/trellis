@@ -104,6 +104,13 @@ worth a team decision before the surface grows:
    taxonomy decision touching compliance art-30 records / dashboards — left to
    the team), then emit on claim→added, verify→verified, delete→removed. Tracked
    here rather than guessed at in code.
+3. **Capability naming inconsistency** (`auth/capabilities.ts`). All capability
+   values follow `<resource>.<verb>` (dotted) except
+   `ManageAgentSessions: "manage:agent_sessions"`, which uses a colon. Cosmetic
+   — it works and is unique — but it breaks the catalog's own naming convention
+   and any dashboard/grouping that splits on `.`. A future catalog revision
+   could align it (e.g. `agent_session.manage`); the capabilities test allows
+   the outlier explicitly rather than failing on it.
 
 > **Co-developing the foundation packages.** When `@de-otio/saas-foundation` is
 > npm-linked (`scripts/link-foundation.sh`), it carries its own nested
