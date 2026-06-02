@@ -533,31 +533,35 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
       ? `AND (post.createdAt < datetime($cursorCreatedAt) OR (post.createdAt = datetime($cursorCreatedAt) AND post.id < $cursorPostId))`
       : "";
 
-    // The entity-branch and user-branch are combined with UNION inside a CALL
-    // subquery so the trailing ORDER BY/LIMIT applies to the COMBINED result.
-    // A bare `RETURN … UNION … RETURN … ORDER BY … LIMIT` binds the ORDER
-    // BY/LIMIT to the last branch only, which breaks cross-branch pagination
-    // (page 2 came back empty when the limit was smaller than the total).
-    const query = `
-      CALL {
-        MATCH (viewer:User {id: $viewerId})-[r:RELATES_TO]->(entity:Entity)
-        WHERE r.score >= $lowerThreshold AND r.score < $upperThreshold
-        WITH entity, r.score AS relScore
-        MATCH (post:Post)-[:ABOUT]->(entity)
-        WHERE post.createdAt > datetime($since) AND post.radiusInt >= $tierInt ${cursorClause}
-        WITH post, MIN(CASE WHEN relScore >= $innerThreshold THEN 0 WHEN relScore >= $closeFriendThreshold THEN 1 WHEN relScore >= $communityThreshold THEN 2 ELSE 3 END) AS resolvedTier
-        RETURN post.id AS postId, post.createdAt AS createdAt, resolvedTier
-        UNION
-        MATCH (viewer:User {id: $viewerId})-[r:RELATES_TO]->(author:User)
-        WHERE r.score >= $lowerThreshold AND r.score < $upperThreshold
-        WITH author, r.score AS relScore
-        MATCH (post:Post)
-        WHERE post.authorId = author.id AND post.createdAt > datetime($since) AND post.radiusInt >= $tierInt ${cursorClause}
-        WITH post, MIN(CASE WHEN relScore >= $innerThreshold THEN 0 WHEN relScore >= $closeFriendThreshold THEN 1 WHEN relScore >= $communityThreshold THEN 2 ELSE 3 END) AS resolvedTier
-        RETURN post.id AS postId, post.createdAt AS createdAt, resolvedTier
-      }
-      RETURN postId, toString(createdAt) AS createdAt, resolvedTier
-      ORDER BY createdAt DESC
+    // Neptune does not support CALL{} subqueries (audit F4), which the prior
+    // implementation used to apply a single ORDER BY/LIMIT across the
+    // entity-branch ∪ author-branch UNION. Instead, run the two branches as
+    // separate queries — each ordered + limited to (limit+1) by (createdAt,id)
+    // — and merge app-side. The global top-(limit+1) is always a subset of the
+    // union of the per-branch top-(limit+1), so merge → re-sort → truncate is
+    // exact. Posts visible via both branches are deduped, keeping the closest
+    // (min) resolved tier.
+    const tierExpr =
+      `MIN(CASE WHEN relScore >= $innerThreshold THEN 0 WHEN relScore >= $closeFriendThreshold THEN 1 WHEN relScore >= $communityThreshold THEN 2 ELSE 3 END)`;
+    const entityQuery = `
+      MATCH (viewer:User {id: $viewerId})-[r:RELATES_TO]->(entity:Entity)
+      WHERE r.score >= $lowerThreshold AND r.score < $upperThreshold
+      WITH entity, r.score AS relScore
+      MATCH (post:Post)-[:ABOUT]->(entity)
+      WHERE post.createdAt > datetime($since) AND post.radiusInt >= $tierInt ${cursorClause}
+      WITH post, ${tierExpr} AS resolvedTier
+      RETURN post.id AS postId, toString(post.createdAt) AS createdAt, resolvedTier
+      ORDER BY post.createdAt DESC, post.id DESC
+      LIMIT $limit`;
+    const authorQuery = `
+      MATCH (viewer:User {id: $viewerId})-[r:RELATES_TO]->(author:User)
+      WHERE r.score >= $lowerThreshold AND r.score < $upperThreshold
+      WITH author, r.score AS relScore
+      MATCH (post:Post)
+      WHERE post.authorId = author.id AND post.createdAt > datetime($since) AND post.radiusInt >= $tierInt ${cursorClause}
+      WITH post, ${tierExpr} AS resolvedTier
+      RETURN post.id AS postId, toString(post.createdAt) AS createdAt, resolvedTier
+      ORDER BY post.createdAt DESC, post.id DESC
       LIMIT $limit`;
 
     const params: Record<string, unknown> = {
@@ -569,12 +573,32 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
     };
     if (cursor) { params.cursorCreatedAt = cursor.createdAt; params.cursorPostId = cursor.postId; }
 
-    const result = await this.executeQuery(query, params);
-    const items: VisiblePostResult[] = result.records.slice(0, pagination.limit).map((rec) => {
+    const [entityRes, authorRes] = await Promise.all([
+      this.executeQuery(entityQuery, params),
+      this.executeQuery(authorQuery, params),
+    ]);
+
+    // Merge + dedupe by postId (keep the closest/min resolved tier).
+    const byId = new Map<string, VisiblePostResult>();
+    for (const rec of [...entityRes.records, ...authorRes.records]) {
+      const postId = rec.get("postId") as string;
       const ca = rec.get("createdAt");
-      return { postId: rec.get("postId") as string, createdAt: ca instanceof Date ? ca : new Date(String(ca)), resolvedTier: rec.get("resolvedTier") as CircleTier };
+      const createdAt = ca instanceof Date ? ca : new Date(String(ca));
+      const resolvedTier = rec.get("resolvedTier") as CircleTier;
+      const existing = byId.get(postId);
+      if (!existing || resolvedTier < existing.resolvedTier) {
+        byId.set(postId, { postId, createdAt, resolvedTier });
+      }
+    }
+    // Sort createdAt DESC, then postId DESC — matches the cursor's tiebreak.
+    const merged = Array.from(byId.values()).sort((a, b) => {
+      const d = b.createdAt.getTime() - a.createdAt.getTime();
+      if (d !== 0) return d;
+      return a.postId < b.postId ? 1 : a.postId > b.postId ? -1 : 0;
     });
-    const hasMore = result.records.length > pagination.limit;
+
+    const items = merged.slice(0, pagination.limit);
+    const hasMore = merged.length > pagination.limit;
     const last = items[items.length - 1];
     const nextCursor = hasMore && last ? this.encodeCircleCursor(last.createdAt.toISOString(), last.postId) : null;
     return { items, cursor: nextCursor, hasMore };
@@ -702,7 +726,7 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
         `MATCH (viewer:User {id: $viewerId})-[r:RELATES_TO]->(target)
          WHERE r.score >= $lowerThreshold AND r.score < $upperThreshold
          MATCH (post:Post)
-         WHERE ((target:Entity AND EXISTS { MATCH (post)-[:ABOUT]->(target) }) OR (target:User AND post.authorId = target.id))
+         WHERE ((target:Entity AND (post)-[:ABOUT]->(target)) OR (target:User AND post.authorId = target.id))
            AND post.radiusInt >= $tierInt AND post.createdAt > datetime($lastReadAt)
          RETURN COUNT(DISTINCT post.id) AS unseenCount`,
         { viewerId: userId, lowerThreshold: bounds.lower, upperThreshold: bounds.upper === Infinity ? 1e9 : bounds.upper, tierInt: tier, lastReadAt: lr[tier].toISOString() },
@@ -1178,7 +1202,7 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
     const limit = filters?.limit ?? 20;
 
     const filterClauses: string[] = [
-      "NOT EXISTS { MATCH (me)-[:RELATES_TO]->(discovered) }",
+      "NOT (me)-[:RELATES_TO]->(discovered)",
       "(discovered.discoverable IS NULL OR discovered.discoverable = true)",
     ];
     if (filters?.entityType) filterClauses.push("discovered.entityType = $entityType");
@@ -1324,8 +1348,8 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
     const sharedConnectionsQuery = `
       MATCH (me:User {id: $userId})-[:OWNS|RELATES_TO]->(myEntity:Entity)
             -[:PLAYMATE|PACK_MATE|SIBLING|PARENT|OFFSPRING|WALK_BUDDY*1..2]-(candidate:Entity)
-      WHERE NOT EXISTS { MATCH (me)-[:RELATES_TO]->(candidate) }
-        AND NOT EXISTS { MATCH (me)-[:OWNS]->(candidate) }
+      WHERE NOT (me)-[:RELATES_TO]->(candidate)
+        AND NOT (me)-[:OWNS]->(candidate)
         AND (candidate.discoverable IS NULL OR candidate.discoverable = true)
         AND candidate.id <> myEntity.id
       WITH candidate, count(DISTINCT myEntity) AS sharedCount
@@ -1345,8 +1369,8 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
       WITH me, collect(DISTINCT myDog.breed) AS myBreeds
       MATCH (candidate:Entity)
       WHERE candidate.breed IN myBreeds
-        AND NOT EXISTS { MATCH (me)-[:RELATES_TO]->(candidate) }
-        AND NOT EXISTS { MATCH (me)-[:OWNS]->(candidate) }
+        AND NOT (me)-[:RELATES_TO]->(candidate)
+        AND NOT (me)-[:OWNS]->(candidate)
         AND (candidate.discoverable IS NULL OR candidate.discoverable = true)
       RETURN candidate.id        AS entityId,
              candidate.name      AS name,
@@ -1364,8 +1388,8 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
       MATCH (candidate:Entity)
       WHERE candidate.lat IS NOT NULL
         AND candidate.lng IS NOT NULL
-        AND NOT EXISTS { MATCH (me)-[:RELATES_TO]->(candidate) }
-        AND NOT EXISTS { MATCH (me)-[:OWNS]->(candidate) }
+        AND NOT (me)-[:RELATES_TO]->(candidate)
+        AND NOT (me)-[:OWNS]->(candidate)
         AND (candidate.discoverable IS NULL OR candidate.discoverable = true)
       WITH candidate, myEntities,
            reduce(minD = 999999999.0, e IN myEntities |

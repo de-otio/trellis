@@ -86,13 +86,27 @@ run fully concurrently. That is the core parallelization win.
   Neptune). Verified: **graph integration 100/100** (relationship-crud +
   circle-resolution + discovery-scoring), tsc clean, linter
   no-expression-skiplimit → 0.
-- **Linter error-level findings remaining:** no-call-subquery 1 (C2b),
-  no-exists-subquery 8 (C2a), no-spatial 12 + no-reduce 1 (C7 geo→Postgres),
-  plus constraints 3 / index 5 / show 2 in `graph-schema-init.ts` (C3).
-- **Not yet:** C2a (EXISTS→anti-join, mostly inside the geo queries C7 will
-  rewrite), C2b (CALL/UNION feed), C3 (schema-init), C7 (geo→Postgres), C8
-  (datetime verify on cluster). Then Track D against the live cluster
-  (end-to-end IAM/Bolt + Neptune-specific behaviour) and the API cutover.
+- **C2b (CALL/UNION feed) — DONE and verified (trellis).** `getVisiblePostIds`
+  (cursor-paginated circle feed) rewritten from a `CALL{}`/UNION subquery to two
+  separate branch queries (each ORDER BY createdAt,id + LIMIT limit+1) merged
+  app-side — dedupe by postId (min tier), sort createdAt-then-postId DESC,
+  paginate. Global top-k ⊆ union of per-branch top-k, so the merge is exact.
+  Verified: **circle-resolution 40/40**, tsc clean, linter no-call-subquery → 0.
+- **C2a (EXISTS) — DONE and verified (trellis).** All 8 `EXISTS { MATCH … }`
+  → bare **pattern predicates** (`NOT (me)-[:RELATES_TO]->(candidate)`),
+  supported on both Neo4j 5 and Neptune openCypher; preserves AND/OR structure.
+  Verified: **full graph suite 7 files / 172 tests green** (C2a+b+c+d together),
+  tsc clean, linter no-exists-subquery → 0.
+- **All self-contained Cypher rewrites are DONE** (C2a/b/c/d). `neo4j-graph-service.ts`
+  linter findings remaining: only **no-spatial 12 + no-reduce 1** — entirely
+  inside `discoverNearby` + the recommendations nearby-signal, which **C7
+  removes by moving geo to Postgres** (not Cypher rewrites). Plus
+  `graph-schema-init.ts`: constraints 3 / index 5 / show 2 (C3).
+- **Not yet (each bigger than a single increment):** C7 (geo→Postgres PostGIS
+  subsystem — spans the Postgres schema + a new migration; **needs PostGIS,
+  which the dev Docker `postgres:16-alpine` lacks** → not verifiable locally as
+  is), C3 (schema-init, coupled to business-id→`~id`), C8 (datetime — settle via
+  the against-cluster spike). Then Track D and the API cutover.
 
 ## Phase 0 — Decisions & kickoff (small, unblocks the tracks)
 
