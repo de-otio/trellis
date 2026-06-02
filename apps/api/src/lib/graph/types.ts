@@ -520,7 +520,8 @@ export interface GraphCircuitBreakerConfig {
 /** Authentication configuration */
 export type GraphAuthConfig =
   | { type: "none" }
-  | { type: "basic"; username: string; password: string };
+  | { type: "basic"; username: string; password: string }
+  | { type: "iam"; region: string };
 
 /** Connection pool configuration */
 export interface GraphPoolConfig {

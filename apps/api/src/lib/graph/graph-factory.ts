@@ -33,7 +33,13 @@ export interface GraphServiceEnvConfig {
   user?: string;
   /** Password for basic auth. */
   password?: string;
-  /** AWS region used by SSM credential lookup in createGraphServiceFromEnv. */
+  /**
+   * Auth scheme. "iam" → Amazon Neptune SigV4 via the task role (no stored
+   * credential). Omitted → inferred: "basic" when user+password are present,
+   * else "none". Neo4j/AuraDB use basic; local/docker use none.
+   */
+  authMode?: "iam" | "basic" | "none";
+  /** AWS region — used by SSM credential lookup and required for IAM (Neptune) auth. */
   region?: string;
   maxConnectionPoolSize?: number;
   connectionAcquisitionTimeout?: number;
@@ -49,10 +55,18 @@ export interface GraphServiceEnvConfig {
 function buildConnectionConfig(
   env: GraphServiceEnvConfig,
 ): GraphConnectionConfig {
-  const auth: GraphConnectionConfig["auth"] =
-    env.user && env.password
-      ? { type: "basic", username: env.user, password: env.password }
-      : { type: "none" };
+  let auth: GraphConnectionConfig["auth"];
+  if (env.authMode === "iam") {
+    if (!env.region) {
+      // Fail at startup (ECS health check → rollback) rather than connect un-authed.
+      throw new Error("GRAPH_DB_AUTH_MODE=iam requires a region (set AWS_REGION)");
+    }
+    auth = { type: "iam", region: env.region };
+  } else if (env.user && env.password) {
+    auth = { type: "basic", username: env.user, password: env.password };
+  } else {
+    auth = { type: "none" };
+  }
 
   return {
     endpoint: env.uri,
@@ -209,6 +223,26 @@ async function buildGraphServiceFromEnv(_env?: unknown): Promise<
   const region = process.env.AWS_REGION ?? "eu-central-1";
   const isLambda = !!process.env.AWS_LAMBDA_FUNCTION_NAME;
   const poolMax = isLambda ? 1 : intEnv("GRAPH_DB_POOL_MAX_SIZE");
+
+  // IAM path — Amazon Neptune. The Bolt endpoint comes from GRAPH_DB_URI (the
+  // construct-published SSM value, injected by the deploy) and auth is SigV4
+  // via the task role — no stored credential, no SSM credential fetch.
+  if (process.env.GRAPH_DB_AUTH_MODE === "iam") {
+    const uri = process.env.GRAPH_DB_URI;
+    if (!uri) {
+      throw new Error("GRAPH_DB_AUTH_MODE=iam requires GRAPH_DB_URI (the Neptune Bolt endpoint)");
+    }
+    return createGraphService({
+      uri,
+      authMode: "iam",
+      region,
+      maxConnectionPoolSize: poolMax,
+      connectionAcquisitionTimeout: intEnv("GRAPH_DB_POOL_ACQUIRE_TIMEOUT_MS"),
+      maxConnectionLifetime: intEnv("GRAPH_DB_POOL_MAX_LIFETIME_MS"),
+      connectionLivenessCheckTimeout: intEnv("GRAPH_DB_POOL_LIVENESS_CHECK_MS"),
+      queryTimeoutMs: intEnv("GRAPH_DB_QUERY_TIMEOUT_MS"),
+    });
+  }
 
   // Direct env-var path — local dev, docker-compose, integration tests.
   if (process.env.GRAPH_DB_URI) {

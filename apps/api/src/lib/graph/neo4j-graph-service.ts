@@ -14,7 +14,14 @@
  * @see /analysis/redesign/07-graph-database/04-graph-schema.md
  */
 
-import neo4j, { type Driver, type QueryResult, type Session } from "neo4j-driver";
+import neo4j, {
+  type AuthToken,
+  type AuthTokenManager,
+  type Driver,
+  type QueryResult,
+  type Session,
+} from "neo4j-driver";
+import { createNeptuneAuthTokenManager, parseBoltEndpoint } from "./neptune-auth.js";
 
 import type { GraphConnection, GraphService } from "./graph-service.js";
 import {
@@ -90,9 +97,20 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
 
     try {
       // Resolve authentication
-      let auth: ReturnType<typeof neo4j.auth.basic> | undefined;
+      let auth: AuthToken | AuthTokenManager | undefined;
+      // Neptune speaks bolt:// (no +s scheme), so TLS is enabled via config and
+      // trusts the system CA (Amazon-issued cert). Left empty for Neo4j/AuraDB,
+      // which carry TLS in the URI scheme (neo4j+s:// / bolt+s://).
+      const tlsConfig: { encrypted?: "ENCRYPTION_ON"; trust?: "TRUST_SYSTEM_CA_SIGNED_CERTIFICATES" } = {};
       if (config.auth.type === "basic") {
         auth = neo4j.auth.basic(config.auth.username, config.auth.password);
+      } else if (config.auth.type === "iam") {
+        // Neptune IAM: a SigV4 auth-token manager that re-signs before the
+        // ~5-minute signature expiry (see neptune-auth.ts).
+        const { host, port } = parseBoltEndpoint(config.endpoint);
+        auth = createNeptuneAuthTokenManager({ host, port, region: config.auth.region });
+        tlsConfig.encrypted = "ENCRYPTION_ON";
+        tlsConfig.trust = "TRUST_SYSTEM_CA_SIGNED_CERTIFICATES";
       }
       // "none" auth type: no auth object passed to driver
 
@@ -104,6 +122,7 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
         ...(config.pool?.connectionLivenessCheckTimeout !== undefined && {
           connectionLivenessCheckTimeout: config.pool.connectionLivenessCheckTimeout,
         }),
+        ...tlsConfig,
         disableLosslessIntegers: true, // Return native JS numbers instead of Neo4j Integer
       });
 
@@ -219,10 +238,10 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
       WITH r, rev, (tgt:User) AS isUserTarget
       SET r.reciprocated = (isUserTarget AND rev IS NOT NULL)
       WITH r, rev, isUserTarget
-      // Mark the reverse edge as reciprocated if it exists
-      FOREACH (_ IN CASE WHEN isUserTarget AND rev IS NOT NULL THEN [1] ELSE [] END |
-        SET rev.reciprocated = true
-      )
+      // Mark the reverse edge reciprocated for user→user. SET on a null rev (no
+      // reverse edge) is a no-op, so no FOREACH/subquery guard is needed — Neptune
+      // supports neither (graph-db-neptune-serverless audit F5).
+      SET rev.reciprocated = CASE WHEN isUserTarget AND rev IS NOT NULL THEN true ELSE rev.reciprocated END
       RETURN r
       `,
       { userId, targetId, initialScore, tier, connectionMethod, now },
@@ -252,11 +271,11 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
       // If reciprocated user-user edge, clear the reverse reciprocated flag
       OPTIONAL MATCH (tgt)-[rev:RELATES_TO]->(src)
       WITH r, rev, isUserTarget, found
-      FOREACH (_ IN CASE WHEN isUserTarget AND rev IS NOT NULL THEN [1] ELSE [] END |
-        SET rev.reciprocated = false
-      )
+      // Clear the reverse reciprocated flag (SET on a null rev is a no-op).
+      SET rev.reciprocated = CASE WHEN isUserTarget AND rev IS NOT NULL THEN false ELSE rev.reciprocated END
       WITH r, found
-      FOREACH (_ IN CASE WHEN r IS NOT NULL THEN [1] ELSE [] END | DELETE r)
+      // DELETE on a null r (edge not found) is a no-op — no FOREACH guard needed.
+      DELETE r
       RETURN found
       `,
       { userId, targetId },
@@ -366,13 +385,13 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
       RETURN r, tgt.id AS targetId,
              CASE WHEN tgt:User THEN 'user' ELSE 'entity' END AS targetType
       ORDER BY r.score DESC
-      LIMIT toInteger($fetchLimit)
+      LIMIT $fetchLimit
       `,
       {
         userId,
         tier: options?.tier ?? null,
         cursorScore: cursorScore ?? null,
-        fetchLimit: limit + 1, // fetch one extra to detect hasMore
+        fetchLimit: neo4j.int(limit + 1), // fetch one extra to detect hasMore (int for Neptune LIMIT)
       },
     );
 
@@ -539,14 +558,14 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
       }
       RETURN postId, toString(createdAt) AS createdAt, resolvedTier
       ORDER BY createdAt DESC
-      LIMIT toInteger($limit)`;
+      LIMIT $limit`;
 
     const params: Record<string, unknown> = {
       viewerId: userId, lowerThreshold: bounds.lower,
       upperThreshold: bounds.upper === Infinity ? 1e9 : bounds.upper,
       since: since.toISOString(), tierInt: tier,
       innerThreshold: t.innerThreshold, closeFriendThreshold: t.closeFriendThreshold,
-      communityThreshold: t.communityThreshold, limit: pagination.limit + 1,
+      communityThreshold: t.communityThreshold, limit: neo4j.int(pagination.limit + 1),
     };
     if (cursor) { params.cursorCreatedAt = cursor.createdAt; params.cursorPostId = cursor.postId; }
 
@@ -635,7 +654,7 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
     const commonParams = {
       viewerId: userId, targetId, since: since.toISOString(),
       innerThreshold: t.innerThreshold, closeFriendThreshold: t.closeFriendThreshold,
-      communityThreshold: t.communityThreshold, limit,
+      communityThreshold: t.communityThreshold, limit: neo4j.int(limit),
     };
 
     if (targetType === "entity") {
@@ -644,7 +663,7 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
          MATCH (post:Post)-[:ABOUT]->(entity)
          WHERE post.createdAt > datetime($since)
            AND post.radiusInt >= CASE WHEN r.score >= $innerThreshold THEN 0 WHEN r.score >= $closeFriendThreshold THEN 1 WHEN r.score >= $communityThreshold THEN 2 ELSE 3 END
-         RETURN post.id AS postId ORDER BY post.createdAt DESC LIMIT toInteger($limit)`,
+         RETURN post.id AS postId ORDER BY post.createdAt DESC LIMIT $limit`,
         commonParams,
       );
       return result.records.map((r) => r.get("postId") as string);
@@ -655,7 +674,7 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
        MATCH (post:Post)
        WHERE post.authorId = author.id AND post.createdAt > datetime($since)
          AND post.radiusInt >= CASE WHEN r.score >= $innerThreshold THEN 0 WHEN r.score >= $closeFriendThreshold THEN 1 WHEN r.score >= $communityThreshold THEN 2 ELSE 3 END
-       RETURN post.id AS postId ORDER BY post.createdAt DESC LIMIT toInteger($limit)`,
+       RETURN post.id AS postId ORDER BY post.createdAt DESC LIMIT $limit`,
       commonParams,
     );
     return result.records.map((r) => r.get("postId") as string);
@@ -1181,10 +1200,10 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
              discovered.breed     AS breed,
              ${safeHops}          AS hops
       ORDER BY discovered.name ASC
-      LIMIT toInteger($limit)
+      LIMIT $limit
     `;
 
-    const params: Record<string, unknown> = { userId, limit };
+    const params: Record<string, unknown> = { userId, limit: neo4j.int(limit) };
     if (filters?.entityType) params.entityType = filters.entityType;
     if (filters?.breed) params.breed = filters.breed;
     if (filters?.lifeStage) params.lifeStage = filters.lifeStage;
@@ -1254,10 +1273,10 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
              entity.breed     AS breed,
              distanceMeters
       ORDER BY distanceMeters ASC
-      LIMIT toInteger($limit)
+      LIMIT $limit
     `;
 
-    const params: Record<string, unknown> = { userId, lat, lng, radiusMeters, limit };
+    const params: Record<string, unknown> = { userId, lat, lng, radiusMeters, limit: neo4j.int(limit) };
     if (filters?.entityType) params.entityType = filters.entityType;
     if (filters?.breed) params.breed = filters.breed;
 
@@ -1299,7 +1318,7 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
     userId: string,
     limit: number,
   ): Promise<Recommendation[]> {
-    const params: Record<string, unknown> = { userId, limit };
+    const params: Record<string, unknown> = { userId, limit: neo4j.int(limit) };
 
     // Signal 1: Shared connections (also folds in owner proximity internally)
     const sharedConnectionsQuery = `
@@ -1316,7 +1335,7 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
              toFloat(sharedCount) / 10.0 AS score,
              'shared_connections'         AS reason
       ORDER BY score DESC
-      LIMIT toInteger($limit)
+      LIMIT $limit
     `;
 
     // Signal 2: Same breed as user's owned entities
@@ -1334,7 +1353,7 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
              candidate.entityType AS entityType,
              0.6                  AS score,
              'same_breed'         AS reason
-      LIMIT toInteger($limit)
+      LIMIT $limit
     `;
 
     // Signal 3: Geographic proximity to user's owned entities
@@ -1369,7 +1388,7 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
              (1.0 - (minDist / 10000.0)) * 0.5 AS score,
              'nearby'             AS reason
       ORDER BY minDist ASC
-      LIMIT toInteger($limit)
+      LIMIT $limit
     `;
 
     const [sharedResult, breedResult, nearbyResult] = await Promise.all([
