@@ -40,6 +40,9 @@ vi.mock("neo4j-driver", () => {
       auth: {
         basic: vi.fn(() => ({ scheme: "basic" })),
       },
+      // Static SKIP/LIMIT params are passed via neo4j.int(n) (Neptune requires
+      // static integers); identity is enough for unit assertions.
+      int: (n: number) => n,
       integer: {
         toNumber: (v: unknown) => Number(v),
       },

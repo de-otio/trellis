@@ -43,6 +43,8 @@ vi.mock("neo4j-driver", () => {
     default: {
       driver: vi.fn(() => mockDriver),
       auth: { basic: vi.fn(() => ({ scheme: "basic" })) },
+      // Static SKIP/LIMIT params are passed via neo4j.int(n); identity suffices.
+      int: (n: number) => n,
       integer: { toNumber: (v: unknown) => Number(v) },
     },
   };
@@ -303,15 +305,21 @@ describe("getVisiblePostIds", () => {
     expect(params.cursorPostId).toBeUndefined();
   });
 
-  it("query contains UNION for dual-gated visibility", async () => {
-    mockSessionRun.mockResolvedValueOnce(emptyResult);
+  it("runs two UNION-less branch queries (entity-about + author) — Neptune has no CALL{}/UNION", async () => {
+    mockSessionRun.mockResolvedValue(emptyResult);
 
     await service.getVisiblePostIds("viewer-1", 0, twoDaysAgo, { limit: 10 });
 
-    const [query] = mockSessionRun.mock.calls[0];
-    expect(query).toContain("UNION");
-    expect(query).toContain("entity:Entity");
-    expect(query).toContain("author:User");
+    // C2b: the entity-branch ∪ author-branch UNION (with a single CALL{}-scoped
+    // ORDER BY/LIMIT) is replaced by two separate queries merged app-side.
+    expect(mockSessionRun).toHaveBeenCalledTimes(2);
+    const queries = mockSessionRun.mock.calls.map((c) => c[0] as string);
+    for (const q of queries) {
+      expect(q).not.toContain("UNION");
+      expect(q).not.toContain("CALL {");
+    }
+    expect(queries.some((q) => q.includes("entity:Entity"))).toBe(true);
+    expect(queries.some((q) => q.includes("author:User"))).toBe(true);
   });
 });
 
@@ -627,14 +635,16 @@ describe("getCircleStatus", () => {
     expect(mockSessionRun).toHaveBeenCalledTimes(4);
   });
 
-  it("queries contain EXISTS and UNION-less per-tier approach", async () => {
+  it("uses a per-tier query with no EXISTS{}/UNION (Neptune F3/F4)", async () => {
     mockSessionRun.mockResolvedValue(makeResult([{ unseenCount: 0 }]));
 
     await service.getCircleStatus("viewer-1");
 
-    // Each call should have the EXISTS subquery pattern
+    // C2a: the EXISTS { } subquery is gone — visibility is an inline OR-branch
+    // (target:Entity AND (post)-[:ABOUT]->(target)) OR (target:User AND …).
     const [query] = mockSessionRun.mock.calls[0];
-    expect(query).toContain("EXISTS");
+    expect(query).not.toContain("EXISTS {");
+    expect(query).not.toContain("UNION");
     expect(query).toContain("COUNT(DISTINCT post.id)");
   });
 });
@@ -755,31 +765,33 @@ describe("markCircleRead", () => {
 // ---------------------------------------------------------------------------
 
 describe("cursor encoding", () => {
-  it("round-trips through encode and decode via getVisiblePostIds", async () => {
-    // First query returns 2 results (limit=1 means hasMore)
+  it("round-trips the cursor: page 2 decodes page 1's encoded cursor into query params", async () => {
     const ts = now.toISOString();
-    mockSessionRun.mockResolvedValueOnce(
-      makeResult([
-        { postId: "post-1", createdAt: ts, resolvedTier: 0 },
-        { postId: "post-2", createdAt: ts, resolvedTier: 0 },
-      ]),
-    );
+    // Page 1 (limit=1): two posts at the same ts arrive on the entity branch →
+    // hasMore, a cursor is emitted. getVisiblePostIds runs two branch queries,
+    // so page 1 consumes calls 0 (entity) + 1 (author).
+    mockSessionRun
+      .mockResolvedValueOnce(
+        makeResult([
+          { postId: "post-1", createdAt: ts, resolvedTier: 0 },
+          { postId: "post-2", createdAt: ts, resolvedTier: 0 },
+        ]),
+      )
+      .mockResolvedValueOnce(emptyResult);
 
-    const result = await service.getVisiblePostIds("v", 0, twoDaysAgo, {
-      limit: 1,
-    });
-    expect(result.cursor).toBeTruthy();
+    const page1 = await service.getVisiblePostIds("v", 0, twoDaysAgo, { limit: 1 });
+    expect(page1.cursor).toBeTruthy();
+    // DESC tiebreak on (createdAt, postId) → page 1 keeps the larger id; the
+    // cursor points at it so page 2 fetches post.id < it.
+    const lastId = page1.items[0].postId;
 
-    // Use the cursor in a second query
-    mockSessionRun.mockResolvedValueOnce(emptyResult);
-    await service.getVisiblePostIds("v", 0, twoDaysAgo, {
-      limit: 1,
-      cursor: result.cursor!,
-    });
+    // Page 2 with the cursor — both branch queries (calls 2 + 3) get the decoded cursor.
+    mockSessionRun.mockResolvedValue(emptyResult);
+    await service.getVisiblePostIds("v", 0, twoDaysAgo, { limit: 1, cursor: page1.cursor! });
 
-    const [_q, params] = mockSessionRun.mock.calls[1];
+    const [, params] = mockSessionRun.mock.calls[2];
     expect(params.cursorCreatedAt).toBe(ts);
-    expect(params.cursorPostId).toBe("post-1");
+    expect(params.cursorPostId).toBe(lastId);
   });
 });
 

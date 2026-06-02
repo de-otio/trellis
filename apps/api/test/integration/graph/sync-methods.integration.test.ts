@@ -179,7 +179,7 @@ describe("syncEntity", () => {
     });
   });
 
-  it("stores all optional fields when provided", async () => {
+  it("stores non-spatial optional fields, but never lat/lng (geo lives in PostGIS, C7)", async () => {
     await withCleanDb(async () => {
       await svc.syncEntity({
         id: "e1",
@@ -194,8 +194,10 @@ describe("syncEntity", () => {
       const props = await getNodeProps("Entity", "e1");
       expect(props!.breed).toBe("Labrador");
       expect(props!.lifeStage).toBe("adult");
-      expect(props!.lat).toBe(48.856);
-      expect(props!.lng).toBe(2.352);
+      // C7: coordinates are no longer graph properties — they go to
+      // Postgres/PostGIS via the injected EntityGeoLookup (absent here).
+      expect(props!.lat ?? null).toBeNull();
+      expect(props!.lng ?? null).toBeNull();
     });
   });
 
