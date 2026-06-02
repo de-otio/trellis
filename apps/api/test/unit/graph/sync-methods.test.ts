@@ -143,8 +143,12 @@ describe("syncEntity", () => {
     expect(params.name).toBe("Buddy");
     expect(params.breed).toBe("Labrador");
     expect(params.lifeStage).toBe("adult");
-    expect(params.lat).toBe(48.8566);
-    expect(params.lng).toBe(2.3522);
+    // Geo is no longer stored in the graph (Neptune has no spatial type, C7) —
+    // lat/lng go to Postgres/PostGIS via the geo lookup, not the Cypher MERGE.
+    expect(query).not.toContain("e.lat");
+    expect(query).not.toContain("e.lng");
+    expect(params.lat).toBeUndefined();
+    expect(params.lng).toBeUndefined();
   });
 
   it("is idempotent on second call with same input", async () => {
@@ -163,8 +167,9 @@ describe("syncEntity", () => {
     const [, params] = mockSessionRun.mock.calls[0] as [string, Record<string, unknown>];
     expect(params.breed).toBeNull();
     expect(params.lifeStage).toBeNull();
-    expect(params.lat).toBeNull();
-    expect(params.lng).toBeNull();
+    // lat/lng are no longer graph params (geo lives in Postgres, C7).
+    expect(params.lat).toBeUndefined();
+    expect(params.lng).toBeUndefined();
   });
 
   it("SECURITY: Cypher injection in name field is passed as parameter value, not interpolated", async () => {
@@ -176,6 +181,70 @@ describe("syncEntity", () => {
     expect(params.name).toBe(injectionAttempt);
     expect(query).not.toContain(injectionAttempt);
     expect(query).not.toContain("DETACH DELETE n");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// syncEntity — geo dual-write to Postgres/PostGIS (C7)
+// ---------------------------------------------------------------------------
+
+describe("syncEntity geo dual-write", () => {
+  let geoService: Neo4jGraphService;
+  const upsertLocation = vi.fn().mockResolvedValue(undefined);
+  const removeLocation = vi.fn().mockResolvedValue(undefined);
+
+  beforeEach(async () => {
+    upsertLocation.mockClear();
+    removeLocation.mockClear();
+    geoService = new Neo4jGraphService({
+      findNearby: vi.fn().mockResolvedValue([]),
+      findNearAnchors: vi.fn().mockResolvedValue([]),
+      upsertLocation,
+      removeLocation,
+    });
+    mockVerifyConnectivity.mockResolvedValueOnce(undefined);
+    mockSessionRun.mockResolvedValue(emptyResult);
+    await geoService.connect({ endpoint: "bolt://localhost:7687", auth: { type: "none" } });
+  });
+
+  it("upserts full-precision location to PostGIS when lat/lng + tenantId are present", async () => {
+    await geoService.syncEntity({
+      id: "entity-1",
+      tenantId: "tenant-a",
+      entityType: "dog",
+      name: "Buddy",
+      lat: 48.8566123,
+      lng: 2.3522456,
+    });
+
+    expect(upsertLocation).toHaveBeenCalledWith("entity-1", "tenant-a", 48.8566123, 2.3522456);
+    expect(removeLocation).not.toHaveBeenCalled();
+  });
+
+  it("skips the geo upsert when no tenant can be resolved", async () => {
+    await geoService.syncEntity({
+      id: "entity-2",
+      entityType: "dog",
+      name: "NoTenant",
+      lat: 1.23,
+      lng: 4.56,
+    });
+
+    expect(upsertLocation).not.toHaveBeenCalled();
+    // No location to store, but absence is not a removal either when undecidable.
+    expect(removeLocation).not.toHaveBeenCalled();
+  });
+
+  it("removes any stored location when lat/lng are absent", async () => {
+    await geoService.syncEntity({
+      id: "entity-3",
+      tenantId: "tenant-a",
+      entityType: "cat",
+      name: "Whiskers",
+    });
+
+    expect(removeLocation).toHaveBeenCalledWith("entity-3");
+    expect(upsertLocation).not.toHaveBeenCalled();
   });
 });
 

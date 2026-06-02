@@ -195,6 +195,7 @@ export class ReconciliationService {
     const meta = entity.metadata as any;
     await this.graphService.syncEntity({
       id: entity.id,
+      tenantId: entity.tenantId,
       entityType: entity.entityType ?? "unknown",
       name: entity.name,
       breed: meta?.breed ?? undefined,
@@ -393,6 +394,7 @@ export class ReconciliationService {
         orderBy: { id: "asc" },
         select: {
           id: true,
+          tenantId: true,
           entityType: true,
           name: true,
           metadata: true,
@@ -407,6 +409,7 @@ export class ReconciliationService {
           const meta = entity.metadata as any;
           await this.graphService.syncEntity({
             id: entity.id,
+            tenantId: entity.tenantId,
             entityType: entity.entityType ?? "unknown",
             name: entity.name,
             breed: meta?.breed ?? undefined,

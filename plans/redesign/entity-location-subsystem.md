@@ -1,7 +1,21 @@
 # Entity-location subsystem (trellis core)
 
-**Date:** 2026-06-01 (foundation built 2026-06-02)
-**Status:** Foundation BUILT + verified; cross-store rewiring remains.
+**Date:** 2026-06-01 (foundation built + cross-store rewiring landed 2026-06-02)
+**Status:** DONE — foundation + cross-store rewiring complete and verified.
+- **Cross-store rewiring (landed):** `syncEntity` writes location to PostGIS
+  (`upsertLocation`, full precision) and no longer stores `lat`/`lng` in the
+  graph; `tenantId` threaded through `SyncEntityInput` + all callers (entity
+  handler, reconciliation) with an ambient-context fallback. `discoverNearby`
+  and the recommendations `nearby` signal now use the PostGIS repo
+  (`findNearby` / `findNearAnchors`, the `MIN`-over-anchors query replacing the
+  `reduce()`/`point.distance()` Cypher) merged with graph facts (discoverable,
+  exclude-already-related). Geo is injected into `Neo4jGraphService` via an
+  `EntityGeoLookup` (graph tests use a fake; prod wires `EntityGeoRepository`).
+- **Verification:** opencypher linter `no-spatial` + `no-reduce` → 0;
+  discovery unit (42) + sync-methods unit + discovery-scoring integration (27)
+  + a new `entity-geo-repository.integration` (8, real PostGIS) all green; tsc
+  clean. Exposure coarsening is now a read-time policy (distance bands), not a
+  write-time mutilation — the handler stores full precision.
 - **PostGIS in dev:** docker-compose `postgres:16-alpine` → `postgis/postgis:16-3.4`,
   verified `postgis_version()` 3.4.
 - **Migration applied:** the pre-existing un-migrated drift (`tenant_id` on

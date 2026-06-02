@@ -448,6 +448,14 @@ export interface SyncEntityInput {
   lifeStage?: string;
   lat?: number;
   lng?: number;
+  /**
+   * Tenant that owns the entity. Required to tenant-scope the entity's location
+   * row in Postgres/PostGIS (the graph no longer stores lat/lng, C7). Optional
+   * because request-path callers may instead rely on the ambient tenant context
+   * (`getCurrentTenantId()`); background callers (reconciliation) must pass it
+   * explicitly. When neither is available, the geo write is skipped.
+   */
+  tenantId?: string;
 }
 
 /** Data to sync a Post node to the graph */

@@ -19,6 +19,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createGraphService } from "../../../src/lib/graph/graph-factory.js";
 import type { GraphConnection, GraphService } from "../../../src/lib/graph/graph-service.js";
+import type { EntityGeoLookup, NearbyEntity } from "../../../src/lib/geo/entity-geo-repository.js";
+import { runWithTenantContext, tenantId } from "@de-otio/saas-foundation/tenant";
 import { closeTestDriver, createEntity, createOwnership, createUser, deleteTestNodes } from "./harness.js";
 import { getTestDatabase, getTestDriver } from "./setup.js";
 
@@ -130,12 +132,40 @@ async function getRelatesToProps(
 
 let svc: GraphService & GraphConnection;
 
+// Fake geo lookup — proximity is PostGIS's job (EntityGeoRepository, verified in
+// its own suite). Tests set `fakeNearby` / `fakeNearAnchors` to drive the
+// graph-side merge/filter; the write methods record nothing (no PostGIS here).
+let fakeNearby: NearbyEntity[] = [];
+let fakeNearAnchors: NearbyEntity[] = [];
+const fakeGeo: EntityGeoLookup = {
+  findNearby: async () => fakeNearby,
+  findNearAnchors: async () => fakeNearAnchors,
+  upsertLocation: async () => {},
+  removeLocation: async () => {},
+};
+const TEST_TENANT = tenantId("t-discovery-test");
+
+/** Run discoverNearby with a given geo candidate set, inside a tenant context. */
+async function discoverWith(nearby: NearbyEntity[], userId: string) {
+  fakeNearby = nearby;
+  return runWithTenantContext(TEST_TENANT, () => svc.discoverNearby(userId, 52.52, 13.4, 5000));
+}
+
+/** Run getRecommendations with a given near-anchors set, inside a tenant context. */
+async function recommendWith(nearAnchors: NearbyEntity[], userId: string, limit = 10) {
+  fakeNearAnchors = nearAnchors;
+  return runWithTenantContext(TEST_TENANT, () => svc.getRecommendations(userId, limit));
+}
+
 beforeAll(async () => {
-  svc = await createGraphService({
-    uri: process.env.NEO4J_TEST_URI ?? "bolt://localhost:7687",
-    user: process.env.NEO4J_TEST_USER,
-    password: process.env.NEO4J_TEST_PASSWORD,
-  });
+  svc = await createGraphService(
+    {
+      uri: process.env.NEO4J_TEST_URI ?? "bolt://localhost:7687",
+      user: process.env.NEO4J_TEST_USER,
+      password: process.env.NEO4J_TEST_PASSWORD,
+    },
+    fakeGeo,
+  );
 });
 
 afterAll(async () => {
@@ -265,84 +295,61 @@ describe("discoverByGraph", () => {
 // ---------------------------------------------------------------------------
 
 describe("discoverNearby", () => {
-  // Center: Berlin, ~52.52N, ~13.40E
-  const CENTER_LAT = 52.52;
-  const CENTER_LNG = 13.40;
+  // Proximity is computed in Postgres/PostGIS (EntityGeoRepository, verified in
+  // its own suite). Here a fake geo lookup supplies the candidate set, and we
+  // assert the graph-side behaviour: entity fields, coarse band, IN-restriction,
+  // and exclude-already-related.
 
-  it("returns entities within the given radius", async () => {
+  it("returns nearby entities with a coarse distanceBand (never exact distance)", async () => {
     const u1 = id("dn-u1");
     const e1 = id("dn-e1");
-
     await createUser(u1, "END_USER");
-    // ~200m from center — well within any reasonable test radius
     await runCypher(
-      `CREATE (e:Entity {id: $id, entityType: 'dog', name: 'NearDog', lat: 52.5215, lng: 13.4010, createdAt: datetime()})`,
+      `CREATE (e:Entity {id: $id, entityType: 'dog', name: 'NearDog', createdAt: datetime()})`,
       { id: e1 },
     );
 
-    const results = await svc.discoverNearby(u1, CENTER_LAT, CENTER_LNG, 5000);
-
-    expect(results.some((r) => r.entityId === e1)).toBe(true);
-  });
-
-  it("excludes entities outside the radius", async () => {
-    const u1 = id("dn-u2");
-    const e1 = id("dn-e2");
-
-    await createUser(u1, "END_USER");
-    // Munich (~500km from Berlin)
-    await runCypher(
-      `CREATE (e:Entity {id: $id, entityType: 'dog', name: 'FarDog', lat: 48.137, lng: 11.576, createdAt: datetime()})`,
-      { id: e1 },
-    );
-
-    // Radius is 5km — Munich is far outside
-    const results = await svc.discoverNearby(u1, CENTER_LAT, CENTER_LNG, 5000);
-
-    expect(results.some((r) => r.entityId === e1)).toBe(false);
-  });
-
-  it("returns a coarse distanceBand (never exact distance)", async () => {
-    const u1 = id("dn-u3");
-    const e1 = id("dn-e3");
-    const validBands = ["< 500m", "500m-1km", "1-2km", "2-5km", "> 5km"];
-
-    await createUser(u1, "END_USER");
-    await runCypher(
-      `CREATE (e:Entity {id: $id, entityType: 'dog', name: 'BandDog', lat: 52.5210, lng: 13.4005, createdAt: datetime()})`,
-      { id: e1 },
-    );
-
-    const results = await svc.discoverNearby(u1, CENTER_LAT, CENTER_LNG, 5000);
+    const results = await discoverWith([{ entityId: e1, distanceMeters: 200 }], u1);
     const target = results.find((r) => r.entityId === e1);
 
     expect(target).toBeDefined();
-    expect(validBands).toContain(target?.distanceBand);
+    expect(["< 500m", "500m-1km", "1-2km", "2-5km", "> 5km"]).toContain(target?.distanceBand);
+  });
+
+  it("returns only entities in the geo candidate set (radius is the repo's job)", async () => {
+    const u1 = id("dn-u2");
+    const e1 = id("dn-e2");
+    await createUser(u1, "END_USER");
+    await runCypher(
+      `CREATE (e:Entity {id: $id, entityType: 'dog', name: 'FarDog', createdAt: datetime()})`,
+      { id: e1 },
+    );
+
+    // Geo lookup returns nothing for this entity → discovery excludes it.
+    const results = await discoverWith([], u1);
+    expect(results.some((r) => r.entityId === e1)).toBe(false);
   });
 
   it("excludes entities with an existing RELATES_TO relationship", async () => {
     const u1 = id("dn-u4");
     const e1 = id("dn-e4");
-
     await createUser(u1, "END_USER");
     await runCypher(
-      `CREATE (e:Entity {id: $id, entityType: 'dog', name: 'RelatedNearDog', lat: 52.5215, lng: 13.4010, createdAt: datetime()})`,
+      `CREATE (e:Entity {id: $id, entityType: 'dog', name: 'RelatedNearDog', createdAt: datetime()})`,
       { id: e1 },
     );
     await createRelatesToEdge(u1, "Entity", e1);
 
-    const results = await svc.discoverNearby(u1, CENTER_LAT, CENTER_LNG, 5000);
-
+    // Even though geo returns it, the graph excludes already-related entities.
+    const results = await discoverWith([{ entityId: e1, distanceMeters: 100 }], u1);
     expect(results.some((r) => r.entityId === e1)).toBe(false);
   });
 
-  it("returns empty array when no entities are within radius", async () => {
+  it("returns empty when the geo lookup finds nothing", async () => {
     const u1 = id("dn-u5");
     await createUser(u1, "END_USER");
 
-    // Use a point in the middle of the Pacific Ocean, tiny radius
-    const results = await svc.discoverNearby(u1, 0.0, -180.0, 10);
-
+    const results = await discoverWith([], u1);
     expect(results).toEqual([]);
   });
 });
@@ -403,6 +410,57 @@ describe("getRecommendations", () => {
     const results = await svc.getRecommendations(u1, 2);
 
     expect(results.length).toBeLessThanOrEqual(2);
+  });
+
+  it("surfaces a PostGIS near-anchor candidate as a 'nearby' recommendation", async () => {
+    const u1 = id("rec-nb-u1");
+    const owned = id("rec-nb-owned"); // anchor the user owns
+    const near = id("rec-nb-near"); // PostGIS says this is close to the anchor
+
+    await createUser(u1, "END_USER");
+    await createEntity(owned, { entityType: "dog", name: "MyAnchor" });
+    await createEntity(near, { entityType: "dog", name: "NearbyDog" });
+    await createOwnership(u1, owned, "PRIMARY_OWNER");
+
+    // PostGIS returns `near` within 1200m of an anchor; the graph confirms it is
+    // discoverable and unrelated, so it should surface with reason "nearby".
+    const results = await recommendWith([{ entityId: near, distanceMeters: 1200 }], u1);
+
+    const rec = results.find((r) => r.entityId === near);
+    expect(rec).toBeDefined();
+    expect(rec!.reason).toBe("nearby");
+    // score = (1 - 1200/10000) * 0.5 = 0.44; confidence clamps to [0,1].
+    expect(rec!.confidence).toBeCloseTo(0.44, 2);
+  });
+
+  it("excludes a near-anchor candidate the user already relates to", async () => {
+    const u1 = id("rec-nb-u2");
+    const owned = id("rec-nb-owned2");
+    const related = id("rec-nb-related"); // close in PostGIS, but already followed
+
+    await createUser(u1, "END_USER");
+    await createEntity(owned, { entityType: "dog", name: "MyAnchor2" });
+    await createEntity(related, { entityType: "dog", name: "AlreadyFollowed" });
+    await createOwnership(u1, owned, "PRIMARY_OWNER");
+    await createRelatesToEdge(u1, "Entity", related);
+
+    const results = await recommendWith([{ entityId: related, distanceMeters: 300 }], u1);
+
+    expect(results.some((r) => r.entityId === related)).toBe(false);
+  });
+
+  it("returns no 'nearby' signal when the user owns no anchor entities", async () => {
+    const u1 = id("rec-nb-u3");
+    const orphan = id("rec-nb-orphan");
+
+    await createUser(u1, "END_USER");
+    await createEntity(orphan, { entityType: "dog", name: "OrphanNearby" });
+
+    // Even though PostGIS would return a candidate, no owned anchors → the graph
+    // anchor query is empty → the nearby signal is skipped entirely.
+    const results = await recommendWith([{ entityId: orphan, distanceMeters: 100 }], u1);
+
+    expect(results.some((r) => r.entityId === orphan)).toBe(false);
   });
 });
 

@@ -22,6 +22,8 @@ import neo4j, {
   type Session,
 } from "neo4j-driver";
 import { createNeptuneAuthTokenManager, parseBoltEndpoint } from "./neptune-auth.js";
+import { getCurrentTenantId } from "@de-otio/saas-foundation/tenant";
+import type { EntityGeoLookup } from "../geo/entity-geo-repository.js";
 
 import type { GraphConnection, GraphService } from "./graph-service.js";
 import {
@@ -85,6 +87,14 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
   private driver: Driver | null = null;
   private connected = false;
   private schemaInitialized = false;
+
+  /**
+   * Geo-proximity lookup (PostGIS). Neptune has no spatial type, so proximity
+   * lives in Postgres ({@link EntityGeoLookup}); the graph contributes only
+   * relationship facts. Injected by the factory; the graph integration tests
+   * pass a fake. When absent, geo-discovery returns empty.
+   */
+  constructor(private readonly geoLookup?: EntityGeoLookup) {}
 
   // =========================================================================
   // Connection Management (GraphConnection)
@@ -1248,16 +1258,17 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
   }
 
   /**
-   * Discover entities by geographic proximity using point.distance().
+   * Discover entities by geographic proximity.
    *
-   * Only returns entities where discoverable is not false, and entities the
-   * user does NOT already have a relationship with.
+   * Proximity + ranking come from Postgres/PostGIS (the graph has no spatial
+   * type, C7); the graph then supplies entity fields and filters to discoverable
+   * entities the user does NOT already relate to.
    *
    * SECURITY: Exact distances are withheld for all results — only a coarse
    * distance band is returned to prevent location triangulation (security
-   * review Finding 15). Coordinates are pre-coarsened to ~1km precision at
-   * sync time for additional protection. Entities with existing relationships
-   * are excluded so exact distance is never needed here.
+   * review Finding 15). Full precision is stored in Postgres; exposure
+   * coarsening is a read-time policy applied here. Entities with existing
+   * relationships are excluded so exact distance is never needed.
    */
   async discoverNearby(
     userId: string,
@@ -1267,62 +1278,72 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
     filters?: NearbyFilters,
   ): Promise<DiscoveryResult[]> {
     const limit = filters?.limit ?? 20;
+    if (!this.geoLookup) return [];
 
-    // These clauses are safe because the filter values come from $params
+    // Proximity comes from Postgres/PostGIS — Neptune has no spatial type (C7).
+    // Tenant is resolved from the ambient request context.
+    const tenantId = getCurrentTenantId();
+    if (!tenantId) return [];
+    // Over-fetch so graph-side filtering (already-related / discoverable / type /
+    // breed) still leaves up to `limit` results.
+    const candidates = await this.geoLookup.findNearby(
+      tenantId,
+      lat,
+      lng,
+      radiusMeters,
+      Math.min(limit * 4, 200),
+    );
+    if (candidates.length === 0) return [];
+    const ids = candidates.map((c) => c.entityId);
+
+    // These clauses are safe because the filter values come from $params.
     const entityTypeFilter = filters?.entityType ? "AND entity.entityType = $entityType" : "";
     const breedFilter = filters?.breed ? "AND entity.breed = $breed" : "";
 
-    const query = `
-      MATCH (entity:Entity)
-      WHERE (entity.discoverable IS NULL OR entity.discoverable = true)
-        AND entity.lat IS NOT NULL
-        AND entity.lng IS NOT NULL
-        ${entityTypeFilter}
-        ${breedFilter}
-        AND point.distance(
-          point({latitude: entity.lat, longitude: entity.lng}),
-          point({latitude: $lat, longitude: $lng})
-        ) < $radiusMeters
-      WITH entity,
-           point.distance(
-             point({latitude: entity.lat, longitude: entity.lng}),
-             point({latitude: $lat, longitude: $lng})
-           ) AS distanceMeters
-      OPTIONAL MATCH (me:User {id: $userId})-[rel:RELATES_TO]->(entity)
-      WITH entity, distanceMeters, rel
-      WHERE rel IS NULL
-      RETURN entity.id        AS entityId,
-             entity.name      AS name,
-             entity.entityType AS entityType,
-             entity.breed     AS breed,
-             distanceMeters
-      ORDER BY distanceMeters ASC
-      LIMIT $limit
-    `;
-
-    const params: Record<string, unknown> = { userId, lat, lng, radiusMeters, limit: neo4j.int(limit) };
+    // The graph supplies entity fields + discoverable + exclude-already-related,
+    // restricted to the Postgres-provided candidate set. No spatial Cypher.
+    const params: Record<string, unknown> = { userId, ids };
     if (filters?.entityType) params.entityType = filters.entityType;
     if (filters?.breed) params.breed = filters.breed;
+    const result = await this.executeQuery(
+      `
+      MATCH (entity:Entity)
+      WHERE entity.id IN $ids
+        AND (entity.discoverable IS NULL OR entity.discoverable = true)
+        AND NOT (:User {id: $userId})-[:RELATES_TO]->(entity)
+        ${entityTypeFilter}
+        ${breedFilter}
+      RETURN entity.id AS entityId, entity.name AS name, entity.entityType AS entityType, entity.breed AS breed
+      `,
+      params,
+    );
 
-    const result = await this.executeQuery(query, params);
+    const fieldsById = new Map<string, { name: string; entityType: string; breed: string | null }>();
+    for (const rec of result.records) {
+      fieldsById.set(rec.get("entityId") as string, {
+        name: rec.get("name") as string,
+        entityType: rec.get("entityType") as string,
+        breed: (rec.get("breed") as string | null) ?? null,
+      });
+    }
 
-    return result.records.map((record) => {
-      const entityId = record.get("entityId") as string;
-      const name = record.get("name") as string;
-      const entityType = record.get("entityType") as string;
-      const breed = record.get("breed") as string | null;
-      const distMeters = record.get("distanceMeters") as number;
-
+    // Preserve the Postgres distance ordering; drop graph-filtered candidates;
+    // expose a coarse band only (never exact distance for unrelated entities).
+    const out: DiscoveryResult[] = [];
+    for (const c of candidates) {
+      const f = fieldsById.get(c.entityId);
+      if (!f) continue;
       const discovery: DiscoveryResult = {
-        entityId,
-        name,
-        entityType,
-        // SECURITY: Coarse band only — never exact distance for unrelated entities
-        distanceBand: Neo4jGraphService.toDistanceBand(distMeters),
+        entityId: c.entityId,
+        name: f.name,
+        entityType: f.entityType,
+        distanceBand: Neo4jGraphService.toDistanceBand(c.distanceMeters),
       };
-      if (breed) discovery.breed = breed;
-      return discovery;
-    });
+      if (f.breed) discovery.breed = f.breed;
+      out.push(discovery);
+      if (out.length >= limit) break;
+    }
+    return out;
   }
 
   /**
@@ -1380,45 +1401,12 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
       LIMIT $limit
     `;
 
-    // Signal 3: Geographic proximity to user's owned entities
-    const nearbyQuery = `
-      MATCH (me:User {id: $userId})-[:OWNS]->(myEntity:Entity)
-      WHERE myEntity.lat IS NOT NULL AND myEntity.lng IS NOT NULL
-      WITH me, collect(myEntity) AS myEntities
-      MATCH (candidate:Entity)
-      WHERE candidate.lat IS NOT NULL
-        AND candidate.lng IS NOT NULL
-        AND NOT (me)-[:RELATES_TO]->(candidate)
-        AND NOT (me)-[:OWNS]->(candidate)
-        AND (candidate.discoverable IS NULL OR candidate.discoverable = true)
-      WITH candidate, myEntities,
-           reduce(minD = 999999999.0, e IN myEntities |
-             CASE
-               WHEN point.distance(
-                 point({latitude: candidate.lat, longitude: candidate.lng}),
-                 point({latitude: e.lat, longitude: e.lng})
-               ) < minD
-               THEN point.distance(
-                 point({latitude: candidate.lat, longitude: candidate.lng}),
-                 point({latitude: e.lat, longitude: e.lng})
-               )
-               ELSE minD
-             END
-           ) AS minDist
-      WHERE minDist < 5000
-      RETURN candidate.id        AS entityId,
-             candidate.name      AS name,
-             candidate.entityType AS entityType,
-             (1.0 - (minDist / 10000.0)) * 0.5 AS score,
-             'nearby'             AS reason
-      ORDER BY minDist ASC
-      LIMIT $limit
-    `;
-
-    const [sharedResult, breedResult, nearbyResult] = await Promise.all([
+    // Signal 3: Geographic proximity — served from Postgres/PostGIS, not the
+    // graph (Neptune has no spatial type, C7). See computeNearbyRecommendations.
+    const [sharedResult, breedResult, nearbyRows] = await Promise.all([
       this.executeQuery(sharedConnectionsQuery, params),
       this.executeQuery(sameBreedQuery, params),
-      this.executeQuery(nearbyQuery, params),
+      this.computeNearbyRecommendations(userId, limit),
     ]);
 
     // Merge and deduplicate: keep highest-scoring entry per entity
@@ -1427,20 +1415,20 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
       { entityId: string; name: string; entityType: string; score: number; reason: string }
     >();
 
-    for (const queryResult of [sharedResult, breedResult, nearbyResult]) {
-      for (const record of queryResult.records) {
-        const entityId = record.get("entityId") as string;
-        const existing = candidateMap.get(entityId);
-        const score = record.get("score") as number;
-        if (!existing || score > existing.score) {
-          candidateMap.set(entityId, {
-            entityId,
-            name: record.get("name") as string,
-            entityType: record.get("entityType") as string,
-            score,
-            reason: record.get("reason") as string,
-          });
-        }
+    const graphRows = [sharedResult, breedResult].flatMap((qr) =>
+      qr.records.map((record) => ({
+        entityId: record.get("entityId") as string,
+        name: record.get("name") as string,
+        entityType: record.get("entityType") as string,
+        score: record.get("score") as number,
+        reason: record.get("reason") as string,
+      })),
+    );
+
+    for (const row of [...graphRows, ...nearbyRows]) {
+      const existing = candidateMap.get(row.entityId);
+      if (!existing || row.score > existing.score) {
+        candidateMap.set(row.entityId, row);
       }
     }
 
@@ -1454,6 +1442,80 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
         reason: c.reason as import("./types.js").RecommendationReason,
         confidence: Math.min(1.0, Math.max(0.0, c.score)),
       }));
+  }
+
+  /**
+   * The recommendations "nearby" signal, served from Postgres/PostGIS (C7).
+   * Anchors are the user's owned entities (a graph fact); proximity + ranking
+   * come from PostGIS (findNearAnchors); the candidate set is then filtered
+   * against graph facts (not already related/owned, discoverable). Returns
+   * scored rows with reason "nearby", nearest first, capped at `limit`. Empty
+   * when geo is unavailable, no tenant is in context, or the user owns no
+   * located entities. Replaces the old reduce()/point.distance() Cypher.
+   */
+  private async computeNearbyRecommendations(
+    userId: string,
+    limit: number,
+  ): Promise<Array<{ entityId: string; name: string; entityType: string; score: number; reason: string }>> {
+    if (!this.geoLookup) return [];
+    const tenantId = getCurrentTenantId();
+    if (!tenantId) return [];
+
+    // Anchors: the user's owned entities (graph). Their locations live in
+    // Postgres — anchors without a location row simply contribute no matches.
+    const anchorResult = await this.executeQuery(
+      `MATCH (me:User {id: $userId})-[:OWNS]->(myEntity:Entity)
+       RETURN DISTINCT myEntity.id AS id`,
+      { userId },
+    );
+    const anchorIds = anchorResult.records.map((r) => r.get("id") as string);
+    if (anchorIds.length === 0) return [];
+
+    const NEARBY_RADIUS_METERS = 5000;
+    const candidates = await this.geoLookup.findNearAnchors(
+      tenantId,
+      anchorIds,
+      NEARBY_RADIUS_METERS,
+      Math.min(limit * 4, 200),
+    );
+    if (candidates.length === 0) return [];
+    const ids = candidates.map((c) => c.entityId);
+
+    // Filter the proximity candidates against graph facts: exclude entities the
+    // user already relates to or owns, and non-discoverable ones.
+    const filtered = await this.executeQuery(
+      `MATCH (candidate:Entity)
+       WHERE candidate.id IN $ids
+         AND NOT (:User {id: $userId})-[:RELATES_TO]->(candidate)
+         AND NOT (:User {id: $userId})-[:OWNS]->(candidate)
+         AND (candidate.discoverable IS NULL OR candidate.discoverable = true)
+       RETURN candidate.id AS entityId, candidate.name AS name, candidate.entityType AS entityType`,
+      { userId, ids },
+    );
+    const fieldsById = new Map<string, { name: string; entityType: string }>();
+    for (const rec of filtered.records) {
+      fieldsById.set(rec.get("entityId") as string, {
+        name: rec.get("name") as string,
+        entityType: rec.get("entityType") as string,
+      });
+    }
+
+    // Preserve nearest-first order; score mirrors the old Cypher
+    // ((1 - minDist/10000) * 0.5), reason "nearby".
+    const rows: Array<{ entityId: string; name: string; entityType: string; score: number; reason: string }> = [];
+    for (const c of candidates) {
+      const f = fieldsById.get(c.entityId);
+      if (!f) continue;
+      rows.push({
+        entityId: c.entityId,
+        name: f.name,
+        entityType: f.entityType,
+        score: (1.0 - c.distanceMeters / 10000.0) * 0.5,
+        reason: "nearby",
+      });
+      if (rows.length >= limit) break;
+    }
+    return rows;
   }
 
   // =========================================================================
@@ -1949,16 +2011,12 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
         e.entityType = $entityType,
         e.name       = $name,
         e.breed      = $breed,
-        e.lifeStage  = $lifeStage,
-        e.lat        = $lat,
-        e.lng        = $lng
+        e.lifeStage  = $lifeStage
       ON MATCH SET
         e.entityType = $entityType,
         e.name       = $name,
         e.breed      = $breed,
-        e.lifeStage  = $lifeStage,
-        e.lat        = $lat,
-        e.lng        = $lng
+        e.lifeStage  = $lifeStage
       `,
       {
         id: input.id,
@@ -1966,10 +2024,25 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
         name: input.name,
         breed: input.breed ?? null,
         lifeStage: input.lifeStage ?? null,
-        lat: input.lat ?? null,
-        lng: input.lng ?? null,
       },
     );
+
+    // Geo lives in Postgres/PostGIS, not the graph (Neptune has no spatial type,
+    // C7). Redirect the location dual-write here at FULL precision (exposure
+    // coarsening is a read-time policy, not a storage one). Tenant comes from
+    // the input or the ambient request context; without it we can't tenant-scope
+    // the location row, so the geo write is skipped (the graph node still syncs).
+    if (this.geoLookup) {
+      const tenantId = input.tenantId ?? getCurrentTenantId();
+      if (input.lat != null && input.lng != null) {
+        if (tenantId) {
+          await this.geoLookup.upsertLocation(input.id, tenantId, input.lat, input.lng);
+        }
+      } else {
+        // Location absent/cleared — drop any stored point (idempotent).
+        await this.geoLookup.removeLocation(input.id);
+      }
+    }
   }
 
   async removeEntity(entityId: string): Promise<void> {

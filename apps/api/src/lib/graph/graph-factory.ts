@@ -21,6 +21,27 @@
 import type { GraphService, GraphConnection } from "./graph-service.js";
 import type { GraphConnectionConfig } from "./types.js";
 import { Neo4jGraphService } from "./neo4j-graph-service.js";
+import type { EntityGeoLookup } from "../geo/entity-geo-repository.js";
+import type { EnvWithDb } from "../../db.js";
+
+/**
+ * Build the PostGIS geo-proximity lookup for discoverNearby. Tolerant of
+ * absence — if Postgres config is missing it returns undefined and geo-discovery
+ * yields empty (the graph never does spatial work). NOTE (residency): a single
+ * pooled client at the default region is fine for dev/single-DB; multi-residency
+ * prod should route per request.
+ */
+async function buildGeoLookup(env?: unknown): Promise<EntityGeoLookup | undefined> {
+  try {
+    const e = env as EnvWithDb | undefined;
+    if (!e?.DATABASE_URL) return undefined;
+    const { createPrisma } = await import("../../db.js");
+    const { EntityGeoRepository } = await import("../geo/entity-geo-repository.js");
+    return new EntityGeoRepository(createPrisma(e));
+  } catch {
+    return undefined;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Factory Configuration (from environment variables)
@@ -113,10 +134,11 @@ function intEnv(name: string): number | undefined {
  */
 export async function createGraphService(
   envConfig: GraphServiceEnvConfig,
+  geoLookup?: EntityGeoLookup,
 ): Promise<GraphService & GraphConnection> {
   const config = buildConnectionConfig(envConfig);
 
-  const service = new Neo4jGraphService();
+  const service = new Neo4jGraphService(geoLookup);
   await service.connect(config);
   return service;
 }
@@ -223,6 +245,7 @@ async function buildGraphServiceFromEnv(_env?: unknown): Promise<
   const region = process.env.AWS_REGION ?? "eu-central-1";
   const isLambda = !!process.env.AWS_LAMBDA_FUNCTION_NAME;
   const poolMax = isLambda ? 1 : intEnv("GRAPH_DB_POOL_MAX_SIZE");
+  const geoLookup = await buildGeoLookup(_env);
 
   // IAM path — Amazon Neptune. The Bolt endpoint comes from GRAPH_DB_URI (the
   // construct-published SSM value, injected by the deploy) and auth is SigV4
@@ -241,7 +264,7 @@ async function buildGraphServiceFromEnv(_env?: unknown): Promise<
       maxConnectionLifetime: intEnv("GRAPH_DB_POOL_MAX_LIFETIME_MS"),
       connectionLivenessCheckTimeout: intEnv("GRAPH_DB_POOL_LIVENESS_CHECK_MS"),
       queryTimeoutMs: intEnv("GRAPH_DB_QUERY_TIMEOUT_MS"),
-    });
+    }, geoLookup);
   }
 
   // Direct env-var path — local dev, docker-compose, integration tests.
@@ -256,7 +279,7 @@ async function buildGraphServiceFromEnv(_env?: unknown): Promise<
       maxConnectionLifetime: intEnv("GRAPH_DB_POOL_MAX_LIFETIME_MS"),
       connectionLivenessCheckTimeout: intEnv("GRAPH_DB_POOL_LIVENESS_CHECK_MS"),
       queryTimeoutMs: intEnv("GRAPH_DB_QUERY_TIMEOUT_MS"),
-    });
+    }, geoLookup);
   }
 
   // Runtime SSM fetch — prod / dev AWS. Credentials stay in-memory only.
@@ -278,5 +301,5 @@ async function buildGraphServiceFromEnv(_env?: unknown): Promise<
     maxConnectionLifetime: intEnv("GRAPH_DB_POOL_MAX_LIFETIME_MS"),
     connectionLivenessCheckTimeout: intEnv("GRAPH_DB_POOL_LIVENESS_CHECK_MS"),
     queryTimeoutMs: intEnv("GRAPH_DB_QUERY_TIMEOUT_MS"),
-  });
+  }, geoLookup);
 }

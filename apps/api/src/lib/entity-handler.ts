@@ -266,6 +266,7 @@ export class EntityHandler {
         data: entityData,
       }) as unknown as Promise<{
         id: string;
+        tenantId: string;
         name: string;
         entityType: string | null;
         metadata: any;
@@ -279,16 +280,19 @@ export class EntityHandler {
         const { createGraphServiceFromEnv } = await import("./graph/index.js");
         const graphService = await createGraphServiceFromEnv(env);
 
-        const syncInput: { id: string; entityType: string; name: string; breed?: string; lifeStage?: string; lat?: number; lng?: number } = {
+        const syncInput: { id: string; entityType: string; name: string; tenantId?: string; breed?: string; lifeStage?: string; lat?: number; lng?: number } = {
           id: entity.id,
           entityType: entity.entityType || "",
           name: entity.name,
+          tenantId: entity.tenantId,
         };
         const md = (entity.metadata || {}) as Record<string, any>;
         if (md.breed) syncInput.breed = md.breed;
         if (entity.lifeStage) syncInput.lifeStage = entity.lifeStage;
-        if (typeof md.lat === "number") syncInput.lat = Math.round(md.lat * 1000) / 1000;
-        if (typeof md.lng === "number") syncInput.lng = Math.round(md.lng * 1000) / 1000;
+        // Full precision — geo is stored in Postgres/PostGIS now (C7); exposure
+        // coarsening is a read-time policy, not a write-time mutilation.
+        if (typeof md.lat === "number") syncInput.lat = md.lat;
+        if (typeof md.lng === "number") syncInput.lng = md.lng;
 
         await graphService.syncEntity(syncInput);
         await graphService.syncOwnership({
@@ -795,6 +799,7 @@ export class EntityHandler {
         data: updateData,
       }) as unknown as Promise<{
         id: string;
+        tenantId: string;
         name: string;
         entityType: string | null;
         metadata: any;
@@ -808,16 +813,19 @@ export class EntityHandler {
         const { createGraphServiceFromEnv } = await import("./graph/index.js");
         const graphService = await createGraphServiceFromEnv(env);
 
-        const syncInput: { id: string; entityType: string; name: string; breed?: string; lifeStage?: string; lat?: number; lng?: number } = {
+        const syncInput: { id: string; entityType: string; name: string; tenantId?: string; breed?: string; lifeStage?: string; lat?: number; lng?: number } = {
           id: entity.id,
           entityType: entity.entityType || "",
           name: entity.name,
+          tenantId: entity.tenantId,
         };
         const md = (entity.metadata || {}) as Record<string, any>;
         if (md.breed) syncInput.breed = md.breed;
         if (entity.lifeStage) syncInput.lifeStage = entity.lifeStage;
-        if (typeof md.lat === "number") syncInput.lat = Math.round(md.lat * 1000) / 1000;
-        if (typeof md.lng === "number") syncInput.lng = Math.round(md.lng * 1000) / 1000;
+        // Full precision — geo is stored in Postgres/PostGIS now (C7); exposure
+        // coarsening is a read-time policy, not a write-time mutilation.
+        if (typeof md.lat === "number") syncInput.lat = md.lat;
+        if (typeof md.lng === "number") syncInput.lng = md.lng;
 
         await graphService.syncEntity(syncInput);
       } catch (graphError: any) {

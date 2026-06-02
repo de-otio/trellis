@@ -3,11 +3,13 @@
  *
  * Tests for:
  * - discoverByGraph (multi-hop traversal)
- * - discoverNearby (spatial query with distance band coarsening)
+ * - discoverNearby (PostGIS proximity merged with graph facts)
  * - getRecommendations (multi-signal merge)
  *
  * The Neo4j driver is mocked so these tests run without a live graph instance.
- * Each test verifies query parameterization, result mapping, and security rules.
+ * Proximity is PostGIS's job (EntityGeoRepository, verified in its own suite) —
+ * a fake EntityGeoLookup is injected here, and the discoverNearby / nearby-
+ * recommendation merge against real Neo4j is covered by discovery-scoring.integration.
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -33,6 +35,9 @@ vi.mock("neo4j-driver", () => ({
     auth: {
       basic: vi.fn((user: string, pass: string) => ({ scheme: "basic", principal: user, credentials: pass })),
     },
+    // Static SKIP/LIMIT params are passed as neo4j.int(n); identity is enough
+    // for unit assertions (the real driver returns an Integer wrapper).
+    int: (n: number) => n,
   },
 }));
 
@@ -43,14 +48,14 @@ vi.mock("../../../src/lib/graph/graph-schema-init", () => ({
 
 import { Neo4jGraphService } from "../../../src/lib/graph/neo4j-graph-service.js";
 import type { DiscoveryFilters, NearbyFilters } from "../../../src/lib/graph/types.js";
+import type { EntityGeoLookup, NearbyEntity } from "../../../src/lib/geo/entity-geo-repository.js";
+import { runWithTenantContext, tenantId } from "@de-otio/saas-foundation/tenant";
 
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Build a fake Neo4j record that returns values by field name.
- */
+/** Build a fake Neo4j record that returns values by field name. */
 function makeRecord(fields: Record<string, unknown>) {
   return {
     get: (key: string) => {
@@ -60,20 +65,27 @@ function makeRecord(fields: Record<string, unknown>) {
   };
 }
 
-/**
- * Build a mock QueryResult with the given row objects.
- */
+/** Build a mock QueryResult with the given row objects. */
 function makeQueryResult(rows: Record<string, unknown>[]) {
   return { records: rows.map(makeRecord) };
 }
 
-// ---------------------------------------------------------------------------
-// Test setup
-// ---------------------------------------------------------------------------
+// Fake geo lookup — tests drive `fakeNearby` / `fakeNearAnchors`; the writes
+// are spies (no PostGIS here).
+let fakeNearby: NearbyEntity[] = [];
+let fakeNearAnchors: NearbyEntity[] = [];
+const findNearby = vi.fn(async () => fakeNearby);
+const findNearAnchors = vi.fn(async () => fakeNearAnchors);
+const fakeGeo: EntityGeoLookup = {
+  findNearby,
+  findNearAnchors,
+  upsertLocation: vi.fn(async () => {}),
+  removeLocation: vi.fn(async () => {}),
+};
+const TEST_TENANT = tenantId("t-unit-discovery");
 
-async function createConnectedService(): Promise<Neo4jGraphService> {
-  const svc = new Neo4jGraphService();
-  // We need the driver to be set; connect() calls verifyConnectivity + initSchema
+async function createConnectedService(geo?: EntityGeoLookup): Promise<Neo4jGraphService> {
+  const svc = new Neo4jGraphService(geo);
   await svc.connect({
     endpoint: "bolt://localhost:7687",
     auth: { type: "basic", username: "neo4j", password: "test" },
@@ -90,6 +102,7 @@ describe("Neo4jGraphService.discoverByGraph", () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    mockRun.mockReset();
     service = await createConnectedService();
   });
 
@@ -111,13 +124,7 @@ describe("Neo4jGraphService.discoverByGraph", () => {
       breed: "Labrador",
       hops: 1,
     });
-    expect(results[1]).toMatchObject({
-      entityId: "entity-2",
-      name: "Daisy",
-      entityType: "dog",
-      hops: 2,
-    });
-    // Null breed should not appear in result
+    expect(results[1]).toMatchObject({ entityId: "entity-2", name: "Daisy", entityType: "dog", hops: 2 });
     expect(results[1].breed).toBeUndefined();
   });
 
@@ -134,11 +141,9 @@ describe("Neo4jGraphService.discoverByGraph", () => {
 
     await service.discoverByGraph("user-1", 99);
 
-    // The query string passed to session.run should contain *1..2, not *1..99
     const queryCalled = mockRun.mock.calls[0][0] as string;
     expect(queryCalled).not.toContain("*1..99");
     expect(queryCalled).not.toContain("*3");
-    // Should contain hop range 1..2 or just 1
     expect(queryCalled).toMatch(/\*1\.\.2|\*1[^\.]/);
   });
 
@@ -148,7 +153,6 @@ describe("Neo4jGraphService.discoverByGraph", () => {
     await service.discoverByGraph("user-1", 1);
 
     const queryCalled = mockRun.mock.calls[0][0] as string;
-    // Should not contain *1..2 range; only single-hop
     expect(queryCalled).not.toContain("1..2");
   });
 
@@ -160,7 +164,6 @@ describe("Neo4jGraphService.discoverByGraph", () => {
 
     const params = mockRun.mock.calls[0][1] as Record<string, unknown>;
     expect(params.userId).toBe(userId);
-    // The query itself should reference $userId, not the raw string
     const query = mockRun.mock.calls[0][0] as string;
     expect(query).toContain("$userId");
     expect(query).not.toContain(userId);
@@ -174,8 +177,7 @@ describe("Neo4jGraphService.discoverByGraph", () => {
 
     const params = mockRun.mock.calls[0][1] as Record<string, unknown>;
     expect(params.entityType).toBe("cat");
-    const query = mockRun.mock.calls[0][0] as string;
-    expect(query).toContain("$entityType");
+    expect(mockRun.mock.calls[0][0] as string).toContain("$entityType");
   });
 
   it("applies breed filter via parameter", async () => {
@@ -186,8 +188,7 @@ describe("Neo4jGraphService.discoverByGraph", () => {
 
     const params = mockRun.mock.calls[0][1] as Record<string, unknown>;
     expect(params.breed).toBe("Labrador");
-    const query = mockRun.mock.calls[0][0] as string;
-    expect(query).toContain("$breed");
+    expect(mockRun.mock.calls[0][0] as string).toContain("$breed");
   });
 
   it("applies lifeStage filter via parameter", async () => {
@@ -220,17 +221,18 @@ describe("Neo4jGraphService.discoverByGraph", () => {
     mockRun.mockResolvedValueOnce(makeQueryResult([]));
     await service.discoverByGraph("user-1", 2);
 
-    const query = mockRun.mock.calls[0][0] as string;
-    expect(query).toContain("discoverable");
+    expect(mockRun.mock.calls[0][0] as string).toContain("discoverable");
   });
 
-  it("excludes entities already in user's graph via query clause", async () => {
+  it("excludes entities already in user's graph via a Neptune-portable pattern predicate", async () => {
     mockRun.mockResolvedValueOnce(makeQueryResult([]));
     await service.discoverByGraph("user-1", 2);
 
     const query = mockRun.mock.calls[0][0] as string;
     expect(query).toContain("RELATES_TO");
-    expect(query).toContain("NOT EXISTS");
+    // C2a: pattern predicate, not the Neptune-incompatible EXISTS { } subquery.
+    expect(query).toMatch(/NOT \(me\)-\[:RELATES_TO\]/);
+    expect(query).not.toContain("EXISTS {");
   });
 
   it("uses PLAYMATE|PACK_MATE|SIBLING relationship types", async () => {
@@ -245,7 +247,7 @@ describe("Neo4jGraphService.discoverByGraph", () => {
 });
 
 // ---------------------------------------------------------------------------
-// discoverNearby
+// discoverNearby — proximity from PostGIS, fields/filters from the graph (C7)
 // ---------------------------------------------------------------------------
 
 describe("Neo4jGraphService.discoverNearby", () => {
@@ -253,21 +255,43 @@ describe("Neo4jGraphService.discoverNearby", () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
-    service = await createConnectedService();
+    mockRun.mockReset();
+    fakeNearby = [];
+    fakeNearAnchors = [];
+    service = await createConnectedService(fakeGeo);
   });
 
-  it("returns entities with coarse distance bands", async () => {
-    mockRun.mockResolvedValueOnce(
-      makeQueryResult([
-        { entityId: "entity-1", name: "Rocky", entityType: "dog", breed: "Poodle", distanceMeters: 300 },
-        { entityId: "entity-2", name: "Bella", entityType: "dog", breed: null, distanceMeters: 800 },
-        { entityId: "entity-3", name: "Max",   entityType: "dog", breed: "Husky", distanceMeters: 1500 },
-        { entityId: "entity-4", name: "Luna",  entityType: "dog", breed: null,   distanceMeters: 3000 },
-        { entityId: "entity-5", name: "Coco",  entityType: "dog", breed: null,   distanceMeters: 7000 },
-      ]),
+  /** PostGIS returns these candidates; the graph filter returns these fields. */
+  function withCandidates(
+    candidates: NearbyEntity[],
+    graphRows: Record<string, unknown>[],
+  ) {
+    fakeNearby = candidates;
+    mockRun.mockResolvedValueOnce(makeQueryResult(graphRows));
+  }
+
+  const nearby = (userId: string, lat = 48.2, lng = 16.3, radius = 10000, filters?: NearbyFilters) =>
+    runWithTenantContext(TEST_TENANT, () => service.discoverNearby(userId, lat, lng, radius, filters));
+
+  it("returns entities with coarse distance bands (from the PostGIS distance)", async () => {
+    withCandidates(
+      [
+        { entityId: "entity-1", distanceMeters: 300 },
+        { entityId: "entity-2", distanceMeters: 800 },
+        { entityId: "entity-3", distanceMeters: 1500 },
+        { entityId: "entity-4", distanceMeters: 3000 },
+        { entityId: "entity-5", distanceMeters: 7000 },
+      ],
+      [
+        { entityId: "entity-1", name: "Rocky", entityType: "dog", breed: "Poodle" },
+        { entityId: "entity-2", name: "Bella", entityType: "dog", breed: null },
+        { entityId: "entity-3", name: "Max", entityType: "dog", breed: "Husky" },
+        { entityId: "entity-4", name: "Luna", entityType: "dog", breed: null },
+        { entityId: "entity-5", name: "Coco", entityType: "dog", breed: null },
+      ],
     );
 
-    const results = await service.discoverNearby("user-1", 48.2, 16.3, 10000);
+    const results = await nearby("user-1");
 
     expect(results[0].distanceBand).toBe("< 500m");
     expect(results[1].distanceBand).toBe("500m-1km");
@@ -277,109 +301,98 @@ describe("Neo4jGraphService.discoverNearby", () => {
   });
 
   it("SECURITY: never returns exact distanceMeters for unrelated entities", async () => {
-    mockRun.mockResolvedValueOnce(
-      makeQueryResult([
-        { entityId: "entity-1", name: "Rocky", entityType: "dog", breed: null, distanceMeters: 123.456 },
-      ]),
+    withCandidates(
+      [{ entityId: "entity-1", distanceMeters: 123.456 }],
+      [{ entityId: "entity-1", name: "Rocky", entityType: "dog", breed: null }],
     );
 
-    const results = await service.discoverNearby("user-1", 48.2, 16.3, 1000);
+    const results = await nearby("user-1", 48.2, 16.3, 1000);
 
     expect(results[0].distanceMeters).toBeUndefined();
     expect(results[0].distanceBand).toBeDefined();
   });
 
-  it("passes lat/lng/radius as parameters (never interpolated)", async () => {
-    mockRun.mockResolvedValueOnce(makeQueryResult([]));
+  it("delegates proximity to PostGIS (tenant, lat, lng, radius), not the graph", async () => {
+    fakeNearby = []; // no candidates → no graph query runs (don't queue one)
 
-    await service.discoverNearby("user-1", 48.2082, 16.3738, 5000);
+    await nearby("user-1", 48.2082, 16.3738, 5000);
 
-    const params = mockRun.mock.calls[0][1] as Record<string, unknown>;
-    expect(params.lat).toBe(48.2082);
-    expect(params.lng).toBe(16.3738);
-    expect(params.radiusMeters).toBe(5000);
-
-    const query = mockRun.mock.calls[0][0] as string;
-    expect(query).toContain("$lat");
-    expect(query).toContain("$lng");
-    expect(query).toContain("$radiusMeters");
+    expect(findNearby).toHaveBeenCalledTimes(1);
+    const [tenant, lat, lng, radius] = findNearby.mock.calls[0] as unknown as [string, number, number, number];
+    expect(tenant).toBe(TEST_TENANT);
+    expect(lat).toBe(48.2082);
+    expect(lng).toBe(16.3738);
+    expect(radius).toBe(5000);
   });
 
-  it("passes userId as parameter for relationship exclusion check", async () => {
-    mockRun.mockResolvedValueOnce(makeQueryResult([]));
+  it("the graph filter excludes already-related + non-discoverable, with no spatial Cypher", async () => {
+    withCandidates(
+      [{ entityId: "entity-1", distanceMeters: 100 }],
+      [{ entityId: "entity-1", name: "Rocky", entityType: "dog", breed: null }],
+    );
 
-    await service.discoverNearby("user-42", 0, 0, 1000);
-
-    const params = mockRun.mock.calls[0][1] as Record<string, unknown>;
-    expect(params.userId).toBe("user-42");
-  });
-
-  it("excludes entities the user already has a relationship with", async () => {
-    mockRun.mockResolvedValueOnce(makeQueryResult([]));
-
-    await service.discoverNearby("user-1", 0, 0, 1000);
+    await nearby("user-1", 0, 0, 1000);
 
     const query = mockRun.mock.calls[0][0] as string;
     expect(query).toContain("RELATES_TO");
-    // Verify the exclusion logic is present (rel IS NULL or NOT EXISTS pattern)
-    expect(query).toMatch(/rel IS NULL|NOT EXISTS/);
-  });
-
-  it("excludes non-discoverable entities via query clause", async () => {
-    mockRun.mockResolvedValueOnce(makeQueryResult([]));
-
-    await service.discoverNearby("user-1", 0, 0, 1000);
-
-    const query = mockRun.mock.calls[0][0] as string;
     expect(query).toContain("discoverable");
+    expect(query).not.toContain("point.distance");
+    expect(query).not.toContain("point({latitude:");
+    const params = mockRun.mock.calls[0][1] as Record<string, unknown>;
+    expect(params.userId).toBe("user-1");
+    expect(params.ids).toEqual(["entity-1"]);
   });
 
-  it("uses point.distance() for spatial filtering", async () => {
-    mockRun.mockResolvedValueOnce(makeQueryResult([]));
+  it("applies entityType filter via parameter on the graph query", async () => {
+    withCandidates(
+      [{ entityId: "e1", distanceMeters: 100 }],
+      [{ entityId: "e1", name: "Rocky", entityType: "dog", breed: null }],
+    );
 
-    await service.discoverNearby("user-1", 48.2, 16.3, 2000);
-
-    const query = mockRun.mock.calls[0][0] as string;
-    expect(query).toContain("point.distance");
-    expect(query).toContain("point({latitude:");
-  });
-
-  it("applies entityType filter via parameter", async () => {
-    mockRun.mockResolvedValueOnce(makeQueryResult([]));
-
-    const filters: NearbyFilters = { entityType: "dog" };
-    await service.discoverNearby("user-1", 0, 0, 1000, filters);
+    await nearby("user-1", 0, 0, 1000, { entityType: "dog" });
 
     const params = mockRun.mock.calls[0][1] as Record<string, unknown>;
     expect(params.entityType).toBe("dog");
   });
 
-  it("applies breed filter via parameter", async () => {
-    mockRun.mockResolvedValueOnce(makeQueryResult([]));
+  it("applies breed filter via parameter on the graph query", async () => {
+    withCandidates(
+      [{ entityId: "e1", distanceMeters: 100 }],
+      [{ entityId: "e1", name: "Rocky", entityType: "dog", breed: "Bernese Mountain Dog" }],
+    );
 
-    const filters: NearbyFilters = { breed: "Bernese Mountain Dog" };
-    await service.discoverNearby("user-1", 0, 0, 1000, filters);
+    await nearby("user-1", 0, 0, 1000, { breed: "Bernese Mountain Dog" });
 
     const params = mockRun.mock.calls[0][1] as Record<string, unknown>;
     expect(params.breed).toBe("Bernese Mountain Dog");
   });
 
-  it("returns empty array when no entities in radius", async () => {
-    mockRun.mockResolvedValueOnce(makeQueryResult([]));
+  it("returns empty array (and runs no graph query) when PostGIS finds nothing", async () => {
+    fakeNearby = [];
 
-    const results = await service.discoverNearby("user-1", 0, 0, 100);
+    const results = await nearby("user-1", 0, 0, 100);
 
     expect(results).toHaveLength(0);
+    expect(mockRun).not.toHaveBeenCalled();
+  });
+
+  it("returns empty array when there is no tenant in context", async () => {
+    fakeNearby = [{ entityId: "e1", distanceMeters: 100 }];
+
+    // No runWithTenantContext wrapper → getCurrentTenantId() is undefined.
+    const results = await service.discoverNearby("user-1", 0, 0, 1000);
+
+    expect(results).toHaveLength(0);
+    expect(findNearby).not.toHaveBeenCalled();
   });
 
   it("omits breed field when null", async () => {
-    mockRun.mockResolvedValueOnce(
-      makeQueryResult([
-        { entityId: "e1", name: "Rocky", entityType: "dog", breed: null, distanceMeters: 200 },
-      ]),
+    withCandidates(
+      [{ entityId: "e1", distanceMeters: 200 }],
+      [{ entityId: "e1", name: "Rocky", entityType: "dog", breed: null }],
     );
 
-    const results = await service.discoverNearby("user-1", 0, 0, 1000);
+    const results = await nearby("user-1", 0, 0, 1000);
 
     expect(results[0].breed).toBeUndefined();
   });
@@ -394,29 +407,30 @@ describe("Neo4jGraphService.getRecommendations", () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    mockRun.mockReset();
+    // No geo injected → the "nearby" signal is skipped here (it is exercised
+    // end-to-end in discovery-scoring.integration). Only the two graph signals
+    // (shared_connections, same_breed) run, in array order.
     service = await createConnectedService();
   });
 
-  /**
-   * getRecommendations runs 3 queries in parallel. We set up mockRun to return
-   * different results for each call.
-   */
-  function setupThreeSignals(
+  /** The two graph signals run via Promise.all in array order: shared, then breed. */
+  function setupGraphSignals(
     sharedConnections: Record<string, unknown>[],
     sameBreed: Record<string, unknown>[],
-    nearby: Record<string, unknown>[],
   ) {
     mockRun
       .mockResolvedValueOnce(makeQueryResult(sharedConnections))
-      .mockResolvedValueOnce(makeQueryResult(sameBreed))
-      .mockResolvedValueOnce(makeQueryResult(nearby));
+      .mockResolvedValueOnce(makeQueryResult(sameBreed));
   }
 
   it("returns recommendations sorted by confidence descending", async () => {
-    setupThreeSignals(
-      [{ entityId: "e1", name: "Rocky",  entityType: "dog", score: 0.8, reason: "shared_connections" }],
-      [{ entityId: "e2", name: "Bella",  entityType: "dog", score: 0.6, reason: "same_breed" }],
-      [{ entityId: "e3", name: "Cooper", entityType: "dog", score: 0.4, reason: "nearby" }],
+    setupGraphSignals(
+      [
+        { entityId: "e1", name: "Rocky", entityType: "dog", score: 0.8, reason: "shared_connections" },
+        { entityId: "e3", name: "Cooper", entityType: "dog", score: 0.4, reason: "shared_connections" },
+      ],
+      [{ entityId: "e2", name: "Bella", entityType: "dog", score: 0.6, reason: "same_breed" }],
     );
 
     const results = await service.getRecommendations("user-1", 10);
@@ -427,11 +441,9 @@ describe("Neo4jGraphService.getRecommendations", () => {
   });
 
   it("deduplicates entities appearing in multiple signals (keeps highest score)", async () => {
-    // entity-1 appears in both shared_connections (0.8) and same_breed (0.6)
-    setupThreeSignals(
+    setupGraphSignals(
       [{ entityId: "entity-1", name: "Rocky", entityType: "dog", score: 0.8, reason: "shared_connections" }],
       [{ entityId: "entity-1", name: "Rocky", entityType: "dog", score: 0.6, reason: "same_breed" }],
-      [],
     );
 
     const results = await service.getRecommendations("user-1", 10);
@@ -448,9 +460,9 @@ describe("Neo4jGraphService.getRecommendations", () => {
       name: `Dog${i}`,
       entityType: "dog",
       score: (8 - i) * 0.1,
-      reason: "nearby",
+      reason: "shared_connections",
     }));
-    setupThreeSignals([], [], rows);
+    setupGraphSignals(rows, []);
 
     const results = await service.getRecommendations("user-1", 3);
 
@@ -458,11 +470,8 @@ describe("Neo4jGraphService.getRecommendations", () => {
   });
 
   it("SECURITY: never returns owner_proximity as reason", async () => {
-    // Even if a query somehow returns owner_proximity, the result mapping should
-    // not expose it. In practice the queries always return 'shared_connections'.
-    setupThreeSignals(
+    setupGraphSignals(
       [{ entityId: "e1", name: "Rocky", entityType: "dog", score: 0.9, reason: "shared_connections" }],
-      [],
       [],
     );
 
@@ -475,10 +484,9 @@ describe("Neo4jGraphService.getRecommendations", () => {
 
   it("returns valid RecommendationReason values", async () => {
     const validReasons = ["shared_connections", "same_breed", "nearby", "popular_in_circle"];
-    setupThreeSignals(
+    setupGraphSignals(
       [{ entityId: "e1", name: "A", entityType: "dog", score: 0.8, reason: "shared_connections" }],
       [{ entityId: "e2", name: "B", entityType: "dog", score: 0.6, reason: "same_breed" }],
-      [{ entityId: "e3", name: "C", entityType: "dog", score: 0.4, reason: "nearby" }],
     );
 
     const results = await service.getRecommendations("user-1", 10);
@@ -489,12 +497,11 @@ describe("Neo4jGraphService.getRecommendations", () => {
   });
 
   it("clamps confidence to [0.0, 1.0]", async () => {
-    setupThreeSignals(
+    setupGraphSignals(
       [
         { entityId: "e1", name: "A", entityType: "dog", score: 9999, reason: "shared_connections" },
-        { entityId: "e2", name: "B", entityType: "dog", score: -5,   reason: "shared_connections" },
+        { entityId: "e2", name: "B", entityType: "dog", score: -5, reason: "shared_connections" },
       ],
-      [],
       [],
     );
 
@@ -506,31 +513,28 @@ describe("Neo4jGraphService.getRecommendations", () => {
     }
   });
 
-  it("passes userId as parameterized value to all three queries", async () => {
-    setupThreeSignals([], [], []);
+  it("passes userId as a parameterized value to the graph signal queries", async () => {
+    setupGraphSignals([], []);
 
     await service.getRecommendations("user-special", 10);
 
-    // All 3 calls should receive userId
     for (const call of mockRun.mock.calls) {
       const params = call[1] as Record<string, unknown>;
       expect(params.userId).toBe("user-special");
     }
   });
 
-  it("runs exactly three queries in parallel", async () => {
-    setupThreeSignals([], [], []);
+  it("runs the two graph signal queries (the nearby signal is PostGIS-backed)", async () => {
+    setupGraphSignals([], []);
 
     await service.getRecommendations("user-1", 10);
 
-    // 1 call from connect's schema init + 3 discovery queries
-    // (schema init mock is separate — mockRun covers all session.run calls)
-    // We check that at least 3 calls happened from the discovery
-    expect(mockRun.mock.calls.length).toBeGreaterThanOrEqual(3);
+    // Without an injected geo lookup, only shared_connections + same_breed run.
+    expect(mockRun.mock.calls.length).toBe(2);
   });
 
   it("returns empty array when no candidates found", async () => {
-    setupThreeSignals([], [], []);
+    setupGraphSignals([], []);
 
     const results = await service.getRecommendations("user-1", 10);
 
@@ -538,9 +542,8 @@ describe("Neo4jGraphService.getRecommendations", () => {
   });
 
   it("includes entityType in each recommendation", async () => {
-    setupThreeSignals(
+    setupGraphSignals(
       [{ entityId: "e1", name: "Rocky", entityType: "cat", score: 0.5, reason: "shared_connections" }],
-      [],
       [],
     );
 
@@ -559,14 +562,16 @@ describe("distance band coarsening (via discoverNearby)", () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
-    service = await createConnectedService();
+    mockRun.mockReset();
+    fakeNearby = [];
+    service = await createConnectedService(fakeGeo);
   });
 
   const bandCases: [number, string][] = [
-    [0,    "< 500m"],
-    [499,  "< 500m"],
-    [500,  "500m-1km"],
-    [999,  "500m-1km"],
+    [0, "< 500m"],
+    [499, "< 500m"],
+    [500, "500m-1km"],
+    [999, "500m-1km"],
     [1000, "1-2km"],
     [1999, "1-2km"],
     [2000, "2-5km"],
@@ -577,13 +582,14 @@ describe("distance band coarsening (via discoverNearby)", () => {
 
   for (const [meters, expectedBand] of bandCases) {
     it(`returns "${expectedBand}" for ${meters}m`, async () => {
+      fakeNearby = [{ entityId: "e1", distanceMeters: meters }];
       mockRun.mockResolvedValueOnce(
-        makeQueryResult([
-          { entityId: "e1", name: "Dog", entityType: "dog", breed: null, distanceMeters: meters },
-        ]),
+        makeQueryResult([{ entityId: "e1", name: "Dog", entityType: "dog", breed: null }]),
       );
 
-      const results = await service.discoverNearby("user-1", 0, 0, meters + 1);
+      const results = await runWithTenantContext(TEST_TENANT, () =>
+        service.discoverNearby("user-1", 0, 0, meters + 1),
+      );
 
       expect(results[0].distanceBand).toBe(expectedBand);
     });
