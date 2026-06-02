@@ -23,7 +23,7 @@ The two heavy efforts — **standing up the cluster (skybber)** and
 **auditing/fixing Cypher (trellis)** — have no dependency on each other and
 run fully concurrently. That is the core parallelization win.
 
-## Status (2026-06-01)
+## Status (2026-06-02)
 
 - **Phase 0:** DEC1 (IAM auth), DEC3 (no Lambda graph access → **C6 dropped**),
   DEC4 (construct lives in `skybber/infra/lib/constructs/`) settled. DEC2 locked
@@ -98,15 +98,30 @@ run fully concurrently. That is the core parallelization win.
   Verified: **full graph suite 7 files / 172 tests green** (C2a+b+c+d together),
   tsc clean, linter no-exists-subquery → 0.
 - **All self-contained Cypher rewrites are DONE** (C2a/b/c/d). `neo4j-graph-service.ts`
-  linter findings remaining: only **no-spatial 12 + no-reduce 1** — entirely
-  inside `discoverNearby` + the recommendations nearby-signal, which **C7
-  removes by moving geo to Postgres** (not Cypher rewrites). Plus
-  `graph-schema-init.ts`: constraints 3 / index 5 / show 2 (C3).
-- **Not yet (each bigger than a single increment):** C7 (geo→Postgres PostGIS
-  subsystem — spans the Postgres schema + a new migration; **needs PostGIS,
-  which the dev Docker `postgres:16-alpine` lacks** → not verifiable locally as
-  is), C3 (schema-init, coupled to business-id→`~id`), C8 (datetime — settle via
-  the against-cluster spike). Then Track D and the API cutover.
+  now has **zero** error-level linter findings (no-spatial + no-reduce cleared by
+  C7, below). The only error-level findings left are in `graph-schema-init.ts`:
+  constraints 3 / index 5 / show 2 (C3).
+- **C7 (geo → Postgres/PostGIS) — DONE and verified (trellis), 2026-06-02.**
+  Dev Docker Postgres switched to `postgis/postgis:16-3.4`; `entity_location`
+  table (`geography(Point,4326)` + GiST) + migration; `EntityGeoRepository`
+  (`findNearby` / `findNearAnchors` / `upsert` / `remove`) injected into
+  `Neo4jGraphService` via an `EntityGeoLookup` (graph tests inject a fake, prod
+  wires the repo through the factory). `syncEntity` writes location to PostGIS at
+  **full precision** (coarsening is now a read-time policy, not a write-time
+  mutilation) and no longer stores `lat`/`lng` on the graph node; `discoverNearby`
+  + the recommendations nearby-signal use the repo (a `MIN`-over-anchors query
+  replaces `reduce()`/`point.distance()`) merged with graph facts (discoverable,
+  exclude-already-related). **Verified:** linter no-spatial + no-reduce → 0;
+  graph unit 326 + integration 174 + a new `entity-geo-repository.integration` 8
+  (real PostGIS — `ST_DWithin` radius, `<->` KNN, MIN-over-anchors, tenant
+  scoping, upsert/remove) green; tsc clean. Deploy prereq: `CREATE EXTENSION
+  postgis` on the consuming RDS (as master) before the migration deploys. See
+  [`../entity-location-subsystem.md`](../entity-location-subsystem.md).
+- **Not yet (each bigger than a single increment):** C3 (schema-init, coupled to
+  business-id→`~id`), C8 (datetime — settle via the against-cluster spike), and
+  the smaller audit-independent C4/C5 (failover reconnection + errors host-regex).
+  Then Track D (D1 lint→CI gate, D2 integration vs the real cluster, D3 failover)
+  and the API cutover.
 
 ## Phase 0 — Decisions & kickoff (small, unblocks the tracks)
 
@@ -180,16 +195,17 @@ estimate**. This is the gate that turns "1–2 days?" into a real number.
 | **C2c** `FOREACH` conditional writes (3 sites) | **B** | after audit |
 | **C2d** `LIMIT toInteger($x)` → `LIMIT $x` sweep (9 sites) | **B** | after audit (trivial) |
 | **C3** Schema-init → connectivity check only (Neptune auto-indexes; no `CREATE CONSTRAINT/INDEX`/`SHOW`) | **B, DEC2** | after audit |
-| **C7** Geo → Postgres entity-location subsystem ([`../entity-location-subsystem.md`](../entity-location-subsystem.md)): PostGIS `ST_DWithin`/`<->`, precise-store + exposure-policy; delete spatial Cypher; graph returns relationship signals only (merged app-side) | **B, DEC2** | **long pole (~3–5 d); trellis-core Postgres feature** |
+| **C7** Geo → Postgres entity-location subsystem ([`../entity-location-subsystem.md`](../entity-location-subsystem.md)): PostGIS `ST_DWithin`/`<->`, precise-store + exposure-policy; delete spatial Cypher; graph returns relationship signals only (merged app-side) | **B, DEC2** | **✅ DONE 2026-06-02** (verified; was the long pole) |
 | **C8** datetime: pin engine ≥ 1.3.2.0 + **verify** on the cluster; epoch-millis rewrite only if the spike fails | **B, DEC2, A3** | small unless fallback |
 
 C1/C4/C5 are "free" parallel fill — do them while Track A brings up the
 cluster and Track B audits. **C2a–d are independent methods → parallelize.**
-**C7 is the long pole** — but it is largely *Postgres-side* work (the graph
-just stops doing geo), so it parallelizes against the trellis-Cypher tasks.
-C8 is small unless the datetime spike fails. The audit
-([`10`](10-opencypher-audit.md)) puts Track C at **~3–5 days** (4–7 only if
-the datetime fallback is needed).
+**C7 was the long pole** — now done (it was largely *Postgres-side* work; the
+graph just stopped doing geo, so it parallelized against the trellis-Cypher
+tasks). The remaining Track C work is **C3** (schema-init), **C8** (datetime —
+small unless the spike fails), and the small **C4/C5**. The audit
+([`10`](10-opencypher-audit.md)) originally put Track C at **~3–5 days**; with
+C7 + C2a–d landed, the residual is C3 + C8 + C4/C5.
 
 ### Track D — testing *(static part independent; live part converges)*
 
