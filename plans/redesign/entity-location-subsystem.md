@@ -1,7 +1,31 @@
 # Entity-location subsystem (trellis core)
 
-**Date:** 2026-06-01
-**Status:** Design — not yet built.
+**Date:** 2026-06-01 (foundation built 2026-06-02)
+**Status:** Foundation BUILT + verified; cross-store rewiring remains.
+- **PostGIS in dev:** docker-compose `postgres:16-alpine` → `postgis/postgis:16-3.4`,
+  verified `postgis_version()` 3.4.
+- **Migration applied:** the pre-existing un-migrated drift (`tenant_id` on
+  `link_checks`/`post_geo_index`/`post_media`/`post_sentiments`/`product_taxonomy_tags`
+  + the `audit_event` table) was captured by resetting the dev DB (empty tables →
+  the `NOT NULL` adds succeed) and bundling it with `entity_location` into
+  `20260602054730_add_entity_geo_and_pending_schema` (hand-edited to add
+  `CREATE EXTENSION postgis` + the `USING GIST` index; no RLS — trellis scopes
+  tenants app-level, not via RLS). `entity_location.location` is `geography(Point,4326)`
+  with a GiST index, verified.
+- **Access layer:** `apps/api/src/lib/geo/entity-geo-repository.ts`
+  (`upsertLocation` / `removeLocation` / `findNearby` via raw `ST_DWithin`+`<->`).
+  Spatial logic smoke-verified against PostGIS (130 m / 3338 m ordered, 53 km
+  excluded at a 5 km radius).
+- **REMAINING (cross-store rewiring):** redirect `syncEntity` to `upsertLocation`;
+  reimplement `discoverNearby` + the recommendations nearby-signal to use
+  `findNearby` (Postgres) merged with the graph's exclude-already-related, return
+  the existing coarse distance bands; delete the spatial Cypher (`point.distance`/
+  `reduce`) from `neo4j-graph-service.ts`. This needs `tenantId` threaded into
+  `discoverNearby` (signature → discovery handler) and a decision on where
+  proximity-discovery lives (likely a discovery layer over GraphService + the geo
+  repo, not GraphService itself). Plus the test cascade (graph discovery tests →
+  Postgres+graph). **Deploy note:** skybber's RDS needs PostGIS enabled
+  (`CREATE EXTENSION postgis` as the master user) before this migration deploys.
 **Trigger:** The Neptune Serverless migration ([`graph-db-neptune-serverless/`](graph-db-neptune-serverless/README.md))
 removes spatial from the graph layer ([audit F1](graph-db-neptune-serverless/10-opencypher-audit.md));
 geo-proximity must move to Postgres. Rather than a minimal port, this is the

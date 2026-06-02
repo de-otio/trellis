@@ -94,6 +94,28 @@ model PostGeoIndex {
   @@map("post_geo_index")
 }
 
+/// Entity geo-location for proximity discovery (C7). Neptune (the graph DB) has
+/// no spatial type, so geo-proximity lives here and is queried with PostGIS
+/// (ST_DWithin / KNN over a GiST index) via $queryRaw. Populated from the
+/// dual-write (syncEntity). Location is sensitive → own tenant_id for direct RLS
+/// (mirrors post_geo_index). See plans/redesign/entity-location-subsystem.md.
+model EntityLocation {
+  entityId  String @id @map("entity_id")
+  tenantId  String @map("tenant_id")
+  // PostGIS geography(Point,4326). Prisma Client cannot filter/order on it —
+  // spatial reads/writes go through $queryRaw. The geography column type, GiST
+  // index, and RLS are added in the migration SQL (not derivable from Prisma).
+  location  Unsupported("geography(Point, 4326)")
+  lat       Float
+  lng       Float
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@map("entity_location")
+}
+
 model IngestState {
   id            String   @id @default(cuid())
   cursor        String?  @unique
@@ -1556,6 +1578,7 @@ model Tenant {
   linkChecks          LinkCheck[]
   postGeoIndexes      PostGeoIndex[]
   productTaxonomyTags ProductTaxonomyTag[]
+  entityLocations     EntityLocation[]
 
   // Personal-tenant owner back-relation (uses @relation name to disambiguate)
   personalOwner User? @relation("PersonalTenantOwner", fields: [personalOwnerUserId], references: [id])

@@ -1,6 +1,9 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    # PostGIS-enabled Postgres 16 — the entity-location subsystem (C7) needs
+    # geography columns + ST_DWithin/GiST for geo-proximity. Same PG16 on-disk
+    # format as postgres:16-alpine, so the existing volume is reused.
+    image: postgis/postgis:16-3.4
     ports:
       - "5432:5432"
     environment:
