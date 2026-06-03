@@ -22,7 +22,10 @@ jobs:
     timeout-minutes: 15
     services:
       postgres:
-        image: postgres:16-alpine
+        # PostGIS image (matches docker-compose): the entity_location migration
+        # runs `CREATE EXTENSION IF NOT EXISTS postgis`, which needs the
+        # extension control files the plain postgres:alpine image lacks (C7).
+        image: postgis/postgis:16-3.4
         env:
           POSTGRES_DB: trellis_test
           POSTGRES_USER: trellis
@@ -94,7 +97,10 @@ jobs:
     timeout-minutes: 15
     services:
       postgres:
-        image: postgres:16-alpine
+        # PostGIS image (matches docker-compose): the entity_location migration
+        # runs `CREATE EXTENSION IF NOT EXISTS postgis`, which needs the
+        # extension control files the plain postgres:alpine image lacks (C7).
+        image: postgis/postgis:16-3.4
         env:
           POSTGRES_DB: trellis_dev
           POSTGRES_USER: trellis
