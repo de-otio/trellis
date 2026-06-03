@@ -157,6 +157,8 @@ describe("POST /api/admin/super-admin/feature-toggles", () => {
       false,
       "admin@example.com",
       "Test toggle description",
+      // setToggle now takes an audit context (userId/region/env) as a 5th arg.
+      expect.objectContaining({ userId: "user-123", region: "EU" }),
     );
   });
 

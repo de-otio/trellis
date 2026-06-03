@@ -448,10 +448,10 @@ describe("User Routes", () => {
         .mockResolvedValueOnce({
           dataRegion: "US",
         })
+        // Append-only consent write returns { consent, previousConsented }.
         .mockResolvedValueOnce({
-          consented: true,
-          dataRegion: "US",
-          accessRegion: "EU",
+          consent: { consented: true, dataRegion: "US", accessRegion: "EU" },
+          previousConsented: null,
         });
 
       const response = await route!.handler(request, mockEnv);
@@ -602,9 +602,8 @@ describe("User Routes", () => {
           dataRegion: "US",
         })
         .mockResolvedValueOnce({
-          consented: false,
-          dataRegion: "US",
-          accessRegion: "EU",
+          consent: { consented: false, dataRegion: "US", accessRegion: "EU" },
+          previousConsented: true,
         });
 
       const response = await route!.handler(request, mockEnv);
@@ -636,10 +635,10 @@ describe("User Routes", () => {
         .mockResolvedValueOnce({
           dataRegion: "US",
         })
+        // Append-only consent write returns { consent, previousConsented }.
         .mockResolvedValueOnce({
-          consented: true,
-          dataRegion: "US",
-          accessRegion: "EU",
+          consent: { consented: true, dataRegion: "US", accessRegion: "EU" },
+          previousConsented: null,
         });
 
       await route!.handler(request, mockEnv);

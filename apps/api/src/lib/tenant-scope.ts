@@ -63,6 +63,10 @@ export const TENANT_SCOPED_MODELS: ReadonlySet<string> = new Set([
   "TaxonomyDimension",
   "TaxonomyCategory",
   "TaxonomyTaxon",
+  // Carries its own tenantId. Spatial reads/writes go through $queryRaw and so
+  // bypass this middleware (scoped manually + RLS backstop), but classifying it
+  // here keeps the model honest and auto-scopes any future Prisma-Client op.
+  "EntityLocation",
 ]);
 
 /**
