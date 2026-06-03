@@ -20,9 +20,11 @@ import neo4j, { type AuthToken, type AuthTokenManager } from "neo4j-driver";
 import { HttpRequest } from "@smithy/protocol-http";
 import { SignatureV4 } from "@smithy/signature-v4";
 import { defaultProvider } from "@aws-sdk/credential-provider-node";
-// `@aws-crypto/sha256-js` ships CJS; default-import then destructure (matches AWS sample).
-import crypto from "@aws-crypto/sha256-js";
-const { Sha256 } = crypto;
+// `@aws-crypto/sha256-js` exposes Sha256 as a named CJS export (no `default`).
+// Use the named import so it resolves under Node ESM / esbuild AND vite SSR —
+// the standalone lane boots the server via vite SSR, where a default import of
+// this package is `undefined` and destructuring it throws at module load.
+import { Sha256 } from "@aws-crypto/sha256-js";
 
 const SERVICE_NAME = "neptune-db";
 const DUMMY_USERNAME = "username";
