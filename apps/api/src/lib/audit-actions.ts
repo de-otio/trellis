@@ -59,6 +59,24 @@ export const AUTH_AGENT_SESSION_APPROVED: AuditAction = "auth.agent_session.appr
 export const AUTH_AGENT_SESSION_REVOKED: AuditAction = "auth.agent_session.revoked";
 export const AUTH_REFRESH_REPLAY: AuditAction = "auth.refresh_replay";
 
+// ── Research / Experiment / Platform-control actions ─────────────────
+//
+// CONVENTION — research.query events MUST NEVER store raw query text in
+// metadata; query text may contain PII. Store a hash or template string
+// with parameters redacted. See doc/02-technical/development/audit-and-toggle-conventions.md.
+export const RESEARCH_QUERY: AuditAction = "research.query";
+export const RESEARCH_EXTRACT: AuditAction = "research.extract";
+export const EXPERIMENT_ASSIGN: AuditAction = "experiment.assign";
+
+// FEATURE_TOGGLE_CHANGED: emitted by FeatureToggleService.setToggle on
+// every toggle write. Metadata: { key, oldEnabled, newEnabled, changedBy }
+// where changedBy is the admin's USER ID (not email).
+export const FEATURE_TOGGLE_CHANGED: AuditAction = "feature_toggle.changed";
+
+// CONSENT_CHANGED: canonical action for user consent mutations emitted
+// by the consent-management layer (another agent owns the emit sites).
+export const CONSENT_CHANGED: AuditAction = "consent.changed";
+
 /**
  * Old tenant/IdP `AuditEventType` string -> `AuditAction` constant.
  * The values are identical (preserved verbatim), so this is an identity
@@ -90,4 +108,10 @@ export const AuditEventType = {
   AUTH_AGENT_SESSION_APPROVED,
   AUTH_AGENT_SESSION_REVOKED,
   AUTH_REFRESH_REPLAY,
+  // Research / Experiment / Platform-control
+  RESEARCH_QUERY,
+  RESEARCH_EXTRACT,
+  EXPERIMENT_ASSIGN,
+  FEATURE_TOGGLE_CHANGED,
+  CONSENT_CHANGED,
 } as const;

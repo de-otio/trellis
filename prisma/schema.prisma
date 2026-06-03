@@ -234,7 +234,7 @@ model User {
   securityEvents      SecurityEvent[]
   createdInvitations  Invitation[]         @relation("CreatedInvitations")
   usedInvitations     Invitation[]         @relation("UsedInvitations")
-  crossRegionConsents CrossRegionConsent[]
+  consents            Consent[]
 
   // Circle configuration and read state
   circleConfig     CircleConfig?
@@ -297,6 +297,14 @@ model User {
   // Safer Social Design: Age verification (Phase 1)
   dateOfBirth DateTime? @map("date_of_birth")
   ageTier     AgeTier   @default(ADULT) @map("age_tier")
+
+  // Fail-CLOSED age signal for research/cohort inclusion. Distinct from
+  // `ageTier` (which fails OPEN at ADULT — a deliberate, accepted product-side
+  // minor-safety choice, see PSEUDONYM.md / RESEARCH-AGE-SIGNAL note). Any
+  // future research or cohort query MUST gate on `ageVerified = true`. `ageTier`
+  // is NEVER an includability signal: an unverified user defaults to ADULT and
+  // would otherwise leak into adult cohorts.
+  ageVerified Boolean   @default(false) @map("age_verified")
 
   // Parental links
   parentalLinks ParentalLink[] @relation("ChildParentalLinks")
@@ -389,28 +397,70 @@ model UserEncryptionKey {
   @@map("user_encryption_keys")
 }
 
-// Cross-region access consent for GDPR compliance
-// Tracks user consent for accessing data from different regions
-model CrossRegionConsent {
-  id           String    @id @default(cuid())
-  userId       String    @map("user_id")
-  dataRegion   String    @map("data_region") // Where data is stored (e.g., "EU")
-  accessRegion String    @map("access_region") // Region user is accessing from (e.g., "US")
-  consented    Boolean   @default(false)
-  consentedAt  DateTime? @map("consented_at")
-  withdrawnAt  DateTime? @map("withdrawn_at")
-  ipAddress    String?   @map("ip_address")
-  userAgent    String?   @map("user_agent")
-  createdAt    DateTime  @default(now()) @map("created_at")
-  updatedAt    DateTime  @updatedAt @map("updated_at")
+// Purpose discriminator for the unified Consent model.
+//   CROSS_REGION           — GDPR cross-region data-access consent (sets
+//                            dataRegion/accessRegion; studyId is NULL).
+//   RESEARCH_OBSERVATION   — opt-in to observational research (no per-study
+//                            intervention; studyId set).
+//   RESEARCH_PARTICIPATION — opt-in to active study participation (studyId set).
+enum ConsentPurpose {
+  CROSS_REGION
+  RESEARCH_OBSERVATION
+  RESEARCH_PARTICIPATION
+}
+
+// Purpose-tagged consent (generalised from the old CrossRegionConsent).
+//
+// CONSENT-HISTORY DESIGN — APPEND-ONLY (GDPR Art.7(1)/(3), IRB audit):
+//   Each grant or withdrawal is a NEW row. A grant/withdraw never mutates an
+//   earlier row, so the original `consentedAt` of every grant is preserved
+//   forever and the full lifecycle is reconstructable. The CURRENT state for a
+//   (user, purpose, key) is the single row with `active = true`; superseding a
+//   row sets `active = false` + `supersededAt = now()`. `withdrawnAt` records
+//   when consent was withdrawn ON the row that recorded it (a withdrawal row
+//   carries consented=false + withdrawnAt set and PRESERVES the grant's
+//   consentedAt if it descends from one — never null it).
+//
+//   Uniqueness is therefore keyed on ACTIVE rows only:
+//     - research rows (studyId non-null): @@unique([userId, purpose, studyId]).
+//       NOTE Postgres treats NULLs as DISTINCT, so this composite does NOT
+//       constrain CROSS_REGION rows (studyId is NULL there) — by design.
+//     - CROSS_REGION rows: a RAW partial unique index in the migration:
+//         CREATE UNIQUE INDEX consent_cross_region_key
+//           ON consent (user_id, data_region, access_region)
+//           WHERE purpose = 'CROSS_REGION' AND active;
+//       This preserves the pre-existing @@unique([userId, dataRegion,
+//       accessRegion]) guarantee for the active cross-region row.
+model Consent {
+  id           String         @id @default(cuid())
+  userId       String         @map("user_id")
+  purpose      ConsentPurpose @default(CROSS_REGION)
+  // Research consents only. NULL for CROSS_REGION rows.
+  studyId      String?        @map("study_id")
+  // Cross-region consents only. NULL for research rows.
+  dataRegion   String?        @map("data_region") // Where data is stored (e.g., "EU")
+  accessRegion String?        @map("access_region") // Region user is accessing from (e.g., "US")
+  consented    Boolean        @default(false)
+  consentedAt  DateTime?      @map("consented_at")
+  withdrawnAt  DateTime?      @map("withdrawn_at")
+  ipAddress    String?        @map("ip_address")
+  userAgent    String?        @map("user_agent")
+  // Append-only history discriminators.
+  active       Boolean        @default(true)
+  supersededAt DateTime?      @map("superseded_at")
+  createdAt    DateTime       @default(now()) @map("created_at")
+  updatedAt    DateTime       @updatedAt @map("updated_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@unique([userId, dataRegion, accessRegion])
+  // Research-row uniqueness (studyId non-null). Does NOT cover CROSS_REGION
+  // rows — those are constrained by the raw partial index in the migration.
+  @@unique([userId, purpose, studyId])
   @@index([userId])
   @@index([consented])
   @@index([dataRegion, accessRegion])
-  @@map("cross_region_consent")
+  @@index([userId, purpose, active])
+  @@map("consent")
 }
 
 // Posting radius — how far content radiates on the author's social graph

@@ -31,7 +31,7 @@ describe("deleteUserData", () => {
       customAudienceMember: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
       customAudience: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
       securityEvent: { deleteMany: vi.fn().mockResolvedValue({ count: 4 }) },
-      crossRegionConsent: { deleteMany: vi.fn().mockResolvedValue({ count: 1 }) },
+      consent: { deleteMany: vi.fn().mockResolvedValue({ count: 1 }) },
       invitation: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
       user: { delete: vi.fn().mockResolvedValue({ id: "user-123" }) },
     };

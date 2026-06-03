@@ -2,14 +2,16 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { DataRouter } from "../../src/lib/data-router.js";
 import type { DataRouterEnv } from "../../src/lib/data-router.js";
 
-// Mock db module
+// Mock db module. `mockFindUnique` is kept as the variable name for diff
+// minimalism, but the unified `consent` model is now queried via `findFirst`
+// (append-only: the current decision is the single active row).
 const mockFindUnique = vi.fn();
 
 vi.mock("../../src/db", () => ({
   createPrismaForRegion: vi.fn((region: string, env: any) => {
     return {
-      crossRegionConsent: {
-        findUnique: mockFindUnique,
+      consent: {
+        findFirst: mockFindUnique,
       },
       user: {
         findUnique: vi.fn(),
@@ -102,11 +104,11 @@ describe("DataRouter - Cross-Region Consent", () => {
       expect(result).toBe(true);
       expect(mockFindUnique).toHaveBeenCalledWith({
         where: {
-          userId_dataRegion_accessRegion: {
-            userId: "user-123",
-            dataRegion: "EU",
-            accessRegion: "US",
-          },
+          userId: "user-123",
+          purpose: "CROSS_REGION",
+          dataRegion: "EU",
+          accessRegion: "US",
+          active: true,
         },
       });
     });
@@ -375,11 +377,11 @@ describe("DataRouter - Cross-Region Consent", () => {
 
       expect(mockFindUnique).toHaveBeenCalledWith({
         where: {
-          userId_dataRegion_accessRegion: {
-            userId: "user-123",
-            dataRegion: "EU",
-            accessRegion: "US",
-          },
+          userId: "user-123",
+          purpose: "CROSS_REGION",
+          dataRegion: "EU",
+          accessRegion: "US",
+          active: true,
         },
       });
     });

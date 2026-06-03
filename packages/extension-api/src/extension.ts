@@ -132,6 +132,25 @@ export interface ExtensionContext {
 // Extension Hooks — lifecycle events extensions can react to
 // ---------------------------------------------------------------------------
 
+/**
+ * VERSIONED CONTRACT — any signature change to any hook in this interface
+ * requires a semver bump of `@de-otio/trellis-extension-api`.
+ *
+ * Hooks are called by Trellis core after the named operation completes.
+ * All hooks are optional; omit them if the extension has no interest in
+ * the event.
+ *
+ * Compatibility rules:
+ * - Adding a new optional hook → minor bump (e.g. 0.2.x → 0.3.0).
+ * - Changing the signature of an existing hook (parameter type, order,
+ *   return type) → major bump if 1.x, minor bump while still 0.x
+ *   (breaking for consumers regardless — coordinate with Skybber and any
+ *   other known extension authors before merging).
+ * - Removing a hook → same as a signature change.
+ *
+ * Keep this interface in sync with `EXTENSION_API_VERSION` (below) and
+ * the `version` field in `packages/extension-api/package.json`.
+ */
 export interface ExtensionHooks {
   /** Called after a post is created */
   onPostCreated?: (post: any, ctx: ExtensionContext) => Promise<void>;
@@ -161,6 +180,23 @@ export interface ExtensionHooks {
     ctx: ExtensionContext,
   ) => Promise<void>;
 }
+
+/**
+ * The current version of the extension API contract.
+ *
+ * This must match the `version` field in
+ * `packages/extension-api/package.json`.  If they diverge, a release
+ * has been cut without updating one of them — fix before publishing.
+ *
+ * Extensions may read this at startup to verify they are running against
+ * the expected API version (useful during coordinated Trellis + extension
+ * upgrades).
+ *
+ * When to update:
+ *   - Bump alongside every `package.json` version change.
+ *   - Never change one without changing the other.
+ */
+export const EXTENSION_API_VERSION = "0.2.0" as const;
 
 // ---------------------------------------------------------------------------
 // Strategy Interfaces — pluggable domain-specific behavior

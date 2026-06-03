@@ -121,8 +121,8 @@ export async function deleteUserData(
     where: { userId },
   });
 
-  // 14. Delete cross-region consents
-  const crossRegionConsents = await db.crossRegionConsent.deleteMany({
+  // 14. Delete consents (all purposes: cross-region + research)
+  const crossRegionConsents = await db.consent.deleteMany({
     where: { userId },
   });
 

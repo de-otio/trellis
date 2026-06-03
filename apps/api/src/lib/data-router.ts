@@ -89,13 +89,17 @@ export class DataRouter {
   ): Promise<boolean> {
     try {
       const db = this.getDatabaseForRegion(accessRegion, env);
-      const consent = await db.crossRegionConsent.findUnique({
+      // Consent history is append-only: the CURRENT cross-region decision is
+      // the single `active` row for this (user, dataRegion, accessRegion).
+      // (The raw partial unique index `consent_cross_region_key` guarantees at
+      // most one active CROSS_REGION row per triple.)
+      const consent = await db.consent.findFirst({
         where: {
-          userId_dataRegion_accessRegion: {
-            userId,
-            dataRegion,
-            accessRegion,
-          },
+          userId,
+          purpose: "CROSS_REGION",
+          dataRegion,
+          accessRegion,
+          active: true,
         },
       });
 

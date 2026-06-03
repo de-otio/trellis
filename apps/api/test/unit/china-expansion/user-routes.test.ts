@@ -99,6 +99,13 @@ vi.mock("../../../src/lib/validation", () => ({
 vi.mock("../../../src/worker", () => ({
   addCorsHeaders: (response: Response) => response,
 }));
+// The consent handler emits a best-effort audit event via a dynamic import
+// of audit-composer; stub it so tests stay hermetic (no saas-foundation / DB).
+vi.mock("../../../src/lib/audit-composer", () => ({
+  createAuditLogger: () => ({
+    log: vi.fn().mockResolvedValue(undefined),
+  }),
+}));
 
 describe("User Routes - Region Preference", () => {
   let mockEnv: Env;
@@ -108,17 +115,24 @@ describe("User Routes - Region Preference", () => {
     vi.clearAllMocks();
     mockWithQueryTimeoutAndRetry.mockImplementation(
       async (dbManager, region, env, callback) => {
+        const consentRow = {
+          id: "consent-1",
+          consented: true,
+          dataRegion: "EU",
+          accessRegion: "US",
+        };
+        const tx = {
+          consent: {
+            findFirst: vi.fn().mockResolvedValue(null),
+            update: vi.fn().mockResolvedValue({}),
+            create: vi.fn().mockResolvedValue(consentRow),
+          },
+        };
         const mockDb = {
           user: {
             findUnique: vi.fn().mockResolvedValue({ dataRegion: "EU" }),
           },
-          crossRegionConsent: {
-            upsert: vi.fn().mockResolvedValue({
-              consented: true,
-              dataRegion: "EU",
-              accessRegion: "US",
-            }),
-          },
+          $transaction: vi.fn(async (fn: any) => fn(tx)),
         };
         return await callback(mockDb);
       },
@@ -410,7 +424,9 @@ describe("User Routes - Region Preference", () => {
         userAgent: "test-agent",
       };
 
-      const mockUpsert = vi.fn().mockResolvedValue(mockConsent);
+      const mockFindFirst = vi.fn().mockResolvedValue(null); // no prior consent
+      const mockUpdate = vi.fn();
+      const mockCreate = vi.fn().mockResolvedValue(mockConsent);
 
       // First call: get user
       mockWithQueryTimeoutAndRetry.mockImplementationOnce(
@@ -426,13 +442,18 @@ describe("User Routes - Region Preference", () => {
           return await callback(mockDb);
         },
       );
-      // Second call: upsert consent
+      // Second call: append-only consent write inside a $transaction
       mockWithQueryTimeoutAndRetry.mockImplementationOnce(
         async (dbManager, region, env, callback) => {
-          const mockDb = {
-            crossRegionConsent: {
-              upsert: mockUpsert,
+          const tx = {
+            consent: {
+              findFirst: mockFindFirst,
+              update: mockUpdate,
+              create: mockCreate,
             },
+          };
+          const mockDb = {
+            $transaction: vi.fn(async (fn: any) => fn(tx)),
           };
           return await callback(mockDb);
         },
@@ -447,25 +468,17 @@ describe("User Routes - Region Preference", () => {
       expect(body.dataRegion).toBe("EU");
       expect(body.accessRegion).toBe("US");
 
-      // Verify upsert was called with correct parameters
-      expect(mockUpsert).toHaveBeenCalledWith({
-        where: {
-          userId_dataRegion_accessRegion: {
-            userId: "user-123",
-            dataRegion: "EU",
-            accessRegion: "US",
-          },
-        },
-        create: expect.objectContaining({
+      // A fresh active CROSS_REGION row is created; no prior row to supersede.
+      expect(mockUpdate).not.toHaveBeenCalled();
+      expect(mockCreate).toHaveBeenCalledWith({
+        data: expect.objectContaining({
           userId: "user-123",
+          purpose: "CROSS_REGION",
           dataRegion: "EU",
           accessRegion: "US",
           consented: true,
-          ipAddress: "192.168.1.1",
-          userAgent: "test-agent",
-        }),
-        update: expect.objectContaining({
-          consented: true,
+          withdrawnAt: null,
+          active: true,
           ipAddress: "192.168.1.1",
           userAgent: "test-agent",
         }),
@@ -502,7 +515,19 @@ describe("User Routes - Region Preference", () => {
         userAgent: "test-agent",
       };
 
-      const mockUpsert = vi.fn().mockResolvedValue(mockConsent);
+      // Prior active GRANT row — its consentedAt MUST be preserved across
+      // the withdrawal (append-only / GDPR Art.7(3)).
+      const priorGrantedAt = new Date("2024-06-01T00:00:00Z");
+      const priorRow = {
+        id: "consent-prior",
+        consented: true,
+        consentedAt: priorGrantedAt,
+        withdrawnAt: null,
+        active: true,
+      };
+      const mockFindFirst = vi.fn().mockResolvedValue(priorRow);
+      const mockUpdate = vi.fn().mockResolvedValue({});
+      const mockCreate = vi.fn().mockResolvedValue(mockConsent);
 
       // First call: get user
       mockWithQueryTimeoutAndRetry.mockImplementationOnce(
@@ -518,13 +543,18 @@ describe("User Routes - Region Preference", () => {
           return await callback(mockDb);
         },
       );
-      // Second call: upsert consent
+      // Second call: append-only withdrawal inside a $transaction
       mockWithQueryTimeoutAndRetry.mockImplementationOnce(
         async (dbManager, region, env, callback) => {
-          const mockDb = {
-            crossRegionConsent: {
-              upsert: mockUpsert,
+          const tx = {
+            consent: {
+              findFirst: mockFindFirst,
+              update: mockUpdate,
+              create: mockCreate,
             },
+          };
+          const mockDb = {
+            $transaction: vi.fn(async (fn: any) => fn(tx)),
           };
           return await callback(mockDb);
         },
@@ -537,15 +567,21 @@ describe("User Routes - Region Preference", () => {
       expect(body.success).toBe(true);
       expect(body.consented).toBe(false);
 
-      // Verify withdrawnAt is set when consenting is false
-      expect(mockUpsert).toHaveBeenCalledWith(
-        expect.objectContaining({
-          update: expect.objectContaining({
-            consented: false,
-            withdrawnAt: expect.any(Date),
-          }),
+      // The prior grant row is SUPERSEDED, not mutated in place.
+      expect(mockUpdate).toHaveBeenCalledWith({
+        where: { id: "consent-prior" },
+        data: { active: false, supersededAt: expect.any(Date) },
+      });
+      // The withdrawal row sets withdrawnAt and PRESERVES the original
+      // grant's consentedAt (never nulled).
+      expect(mockCreate).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          consented: false,
+          withdrawnAt: expect.any(Date),
+          consentedAt: priorGrantedAt,
+          active: true,
         }),
-      );
+      });
     });
 
     it("should handle database errors gracefully", async () => {
@@ -566,23 +602,31 @@ describe("User Routes - Region Preference", () => {
         consented: true,
       });
 
-      const mockDb = {
-        user: {
-          findUnique: vi.fn().mockResolvedValue({
-            id: "user-123",
-            dataRegion: "EU",
-          }),
+      // First call: get user (succeeds). Second call: the consent write
+      // transaction rejects, which the handler must surface as a 500.
+      mockWithQueryTimeoutAndRetry.mockImplementationOnce(
+        async (dbManager, region, env, callback) => {
+          const mockDb = {
+            user: {
+              findUnique: vi.fn().mockResolvedValue({
+                id: "user-123",
+                dataRegion: "EU",
+              }),
+            },
+          };
+          return await callback(mockDb);
         },
-        crossRegionConsent: {
-          upsert: vi.fn().mockRejectedValue(new Error("Database error")),
+      );
+      mockWithQueryTimeoutAndRetry.mockImplementationOnce(
+        async (dbManager, region, env, callback) => {
+          const mockDb = {
+            $transaction: vi
+              .fn()
+              .mockRejectedValue(new Error("Database error")),
+          };
+          return await callback(mockDb);
         },
-      };
-      mockSharedInstance.getDatabaseForRegion = vi
-        .fn()
-        .mockResolvedValue(mockDb);
-      mockWithQueryTimeoutAndRetry.mockImplementation(async (callback) => {
-        return await callback();
-      });
+      );
 
       const response = await route.handler(consentRequest, mockEnv);
       const body = await response.json();

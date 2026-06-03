@@ -56,6 +56,13 @@ export interface Env {
   DEVICE_AUTH_TABLE?: string;
   /** KMS key ARN/id used to wrap the device-auth KEK. */
   DEVICE_AUTH_KMS_KEY_ID?: string;
+  /**
+   * KMS HMAC key id/ARN (HMAC_SHA_256) used to derive `User.anonymousId` via
+   * KMS `GenerateMac`. The key material lives in a FIPS HSM and never leaves
+   * KMS. See `lib/pseudonym.ts` + `lib/PSEUDONYM.md`. If unset, anonymousId
+   * population is SKIPPED (fail-safe) — never fall back to an unkeyed hash.
+   */
+  PSEUDONYM_HMAC_KMS_KEY_ID?: string;
   /** DynamoDB table holding refresh-jti dedup + agent-session metadata. */
   AGENT_REFRESH_TABLE?: string;
   /** DynamoDB table backing idempotency-key dedup (T9b-c). Default: {stage}-trellis-idempotency */
@@ -408,6 +415,7 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     COGNITO_AGENT_CLIENT_ID: process.env.COGNITO_AGENT_CLIENT_ID,
     DEVICE_AUTH_TABLE: process.env.DEVICE_AUTH_TABLE,
     DEVICE_AUTH_KMS_KEY_ID: process.env.DEVICE_AUTH_KMS_KEY_ID,
+    PSEUDONYM_HMAC_KMS_KEY_ID: process.env.PSEUDONYM_HMAC_KMS_KEY_ID,
     AGENT_REFRESH_TABLE: process.env.AGENT_REFRESH_TABLE,
     IDEMPOTENCY_TABLE: process.env.IDEMPOTENCY_TABLE,
     RATE_LIMIT_TABLE: process.env.RATE_LIMIT_TABLE,

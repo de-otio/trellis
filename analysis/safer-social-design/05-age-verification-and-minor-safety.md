@@ -93,3 +93,16 @@ Building these protections now positions Trellis ahead of likely regulation rath
 > [07-safe-by-design-and-governance.md](07-safe-by-design-and-governance.md#L66)
 > for the privacy-preserving age-assurance constraint that should govern any
 > Phase 3 work.
+
+> **Reinforced by the 2026 GoodAttention policy brief** (see
+> [09-attention-regulation-and-age-limits/](09-attention-regulation-and-age-limits/README.md)):
+> the brief argues age verification is *both* ineffective (minors migrate /
+> falsify) *and* a new privacy harm (it pushes toward biometric/identity
+> collection), and that age limits leave the real problem — concentrated
+> attentional power — untouched. The design implication for Trellis: lean on
+> **mechanism-level protection (calm default ranking, no micro-targeting of
+> minors, finite views) + privacy-preserving age assurance**, and treat any
+> identity-document Phase 3 as a last resort gated on explicit regulatory
+> demand — not a default ambition. The protective minor *defaults* below
+> (max-privacy, no personalisation, location off) are consistent with the
+> brief; the *verification escalation* is where the tension lives.

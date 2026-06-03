@@ -45,6 +45,7 @@ import { ClaimsCache, createClaimsCacheFromEnv, type CachedClaims } from "../lib
 import { deriveEmailDomain } from "../lib/tenant/derive-domain.js";
 import { resolveTenantRole, type RoleMappingInput } from "../lib/tenant/resolve-role.js";
 import { deriveHandle } from "../lib/user/derive-handle.js";
+import { computeAnonymousId } from "../lib/pseudonym.js";
 
 const secretsClient = new SecretsManagerClient({ region: process.env.AWS_REGION });
 let prisma: PrismaClient | null = null;
@@ -180,6 +181,13 @@ export const handler: PostConfirmationTriggerHandler = async (event) => {
     }
   }
 
+  // Populate the research pseudonym (best-effort, fail-safe). Done AFTER the
+  // provisioning transaction so a KMS hiccup can never roll back account
+  // creation. No backfill: only set when currently null (idempotent on Cognito
+  // retries). If no KMS HMAC key is configured, computeAnonymousId throws and
+  // we skip — never an unkeyed fallback. See lib/PSEUDONYM.md.
+  await populateAnonymousId(db, result.userId);
+
   await primeClaimsCache(cognitoSub, result);
 
   console.log(
@@ -239,6 +247,10 @@ async function provisionUserAndTenancy(
         email,
         handle: initialHandle,
         role: federated ? "B2B_PARTNER" : "END_USER",
+        // Fail-CLOSED research age signal: a new account is NOT age-verified
+        // until an explicit verification flow sets it. Distinct from `ageTier`
+        // (which fails open at ADULT). See prisma User.ageVerified doc + PSEUDONYM.md.
+        ageVerified: false,
         ...(dateOfBirth && { dateOfBirth, ageTier }),
       },
     });
@@ -428,6 +440,43 @@ async function provisionUserAndTenancy(
     orgTenantSlug,
     orgTenantRole,
   };
+}
+
+/**
+ * Best-effort, fail-safe population of `User.anonymousId` (the research
+ * pseudonym). Only sets it when currently null (no backfill, idempotent on
+ * Cognito's up-to-3 retries). A KMS / config failure is logged and swallowed —
+ * account provisioning has already committed and must not be undone by a
+ * pseudonym hiccup. NEVER falls back to an unkeyed hash (computeAnonymousId
+ * throws when no KMS HMAC key is configured).
+ */
+async function populateAnonymousId(db: PrismaClient, userId: string): Promise<void> {
+  try {
+    const existing = await db.user.findUnique({
+      where: { id: userId },
+      select: { anonymousId: true },
+    });
+    if (existing?.anonymousId) return; // no backfill / already set
+
+    const anonymousId = await computeAnonymousId(userId, {
+      PSEUDONYM_HMAC_KMS_KEY_ID: process.env.PSEUDONYM_HMAC_KMS_KEY_ID,
+      AWS_REGION: process.env.AWS_REGION,
+    });
+
+    // Guard against the unique-collision race on concurrent retries.
+    await db.user.update({
+      where: { id: userId },
+      data: { anonymousId },
+    });
+  } catch (err) {
+    console.warn(
+      JSON.stringify({
+        event: "postconfirm.anonymous_id_skipped",
+        userId,
+        reason: (err as { name?: string }).name ?? "unknown",
+      }),
+    );
+  }
 }
 
 async function primeClaimsCache(cognitoSub: string, result: ProvisioningResult): Promise<void> {

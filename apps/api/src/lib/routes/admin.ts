@@ -782,6 +782,11 @@ export const adminRoutes: Route[] = [
             enabled,
             user.email,
             description,
+            {
+              userId: session.userId,
+              env,
+              region: detectRegionSync(request, env),
+            },
           );
 
           const responseHeaders: Record<string, string> = {
@@ -1060,6 +1065,11 @@ export const adminRoutes: Route[] = [
                       toggleKey === "global_public_posting_enabled"
                         ? "Globally enable public posting for all users"
                         : undefined,
+                      {
+                        userId: session.userId,
+                        env,
+                        region,
+                      },
                     );
                   },
                   {
@@ -1190,6 +1200,11 @@ export const adminRoutes: Route[] = [
             enabled,
             user.email,
             description,
+            {
+              userId: session.userId,
+              env,
+              region: detectRegionSync(request, env),
+            },
           );
 
           const response = securityHeaders.createSecureResponse(

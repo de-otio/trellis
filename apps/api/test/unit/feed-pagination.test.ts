@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  ALLOWED_SORT_FIELDS,
+  FEED_RANKING_VERSION,
   computePaginationMetadata,
   getPaginationConfig,
   validateSortField,
@@ -72,5 +74,45 @@ describe("validateSortField", () => {
 
   it("should return false for empty string", () => {
     expect(validateSortField("")).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// REPRODUCIBILITY INVARIANT — feed sort field allowlist
+//
+// These tests pin the exact allowlist that defines the chronological-only
+// feed treatment used in research studies.  If they break, ALLOWED_SORT_FIELDS
+// has changed, which constitutes a new experimental condition that requires
+// a FEED_RANKING_VERSION bump and a research-lead sign-off before merging.
+// ---------------------------------------------------------------------------
+
+describe("feed sort-field reproducibility invariant", () => {
+  it("ALLOWED_SORT_FIELDS contains exactly ['createdAt'] — engagement metrics are prohibited by design", () => {
+    // The feed is a fixed treatment; engagement-based or algorithmic fields
+    // must never be added without a research audit and version bump.
+    expect(Array.from(ALLOWED_SORT_FIELDS)).toEqual(["createdAt"]);
+  });
+
+  it("engagement metric fields are rejected by validateSortField", () => {
+    // Spot-check a representative set of fields that must never be allowed.
+    const prohibited = [
+      "sentimentCount",
+      "commentCount",
+      "shareCount",
+      "viewCount",
+      "reactionCount",
+      "score",
+      "relevance",
+      "popularity",
+    ];
+    for (const field of prohibited) {
+      expect(validateSortField(field), `"${field}" must be rejected`).toBe(false);
+    }
+  });
+
+  it("FEED_RANKING_VERSION is 1 (chronological-only, no engagement ranking)", () => {
+    // Version 1 = createdAt DESC, no personalisation.  Bump this if the
+    // ranking changes and update the provenance manifest in analysis/research-platform/.
+    expect(FEED_RANKING_VERSION).toBe(1);
   });
 });

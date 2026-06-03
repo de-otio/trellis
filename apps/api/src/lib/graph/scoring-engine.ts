@@ -13,6 +13,12 @@
  *
  * @see /analysis/redesign/06-entities-over-people/09-scoring-without-reciprocity.md
  * @see /analysis/redesign/02-new-core-primitives.md
+ *
+ * CODEBOOK: Every constant in this file (weights, decay half-lives, engagement
+ * scores, connection bonuses, tier thresholds) is documented with rationale in
+ * the sibling file SCORING-CODEBOOK.md.  The codebook and this file are
+ * versioned together — change a constant here, update the codebook in the same
+ * commit/PR.
  */
 
 import type {

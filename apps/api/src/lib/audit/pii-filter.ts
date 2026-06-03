@@ -53,6 +53,13 @@ export const PII_ALLOWED_FIELDS = new Set<string>([
   "dataRegion",
   "requestedRegion",
   "actualDataRegion",
+  // Feature-toggle audit fields (feature_toggle.changed events).
+  // key is a system identifier (no PII); oldEnabled/newEnabled are booleans;
+  // changedBy carries the admin's USER ID (never email — see convention doc).
+  "key",
+  "oldEnabled",
+  "newEnabled",
+  "changedBy",
 ]);
 
 export interface FilterResult {

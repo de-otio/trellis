@@ -55,7 +55,23 @@ Trellis ships via npm. Tag-triggered publish workflow (`.github/workflows/publis
 
 ## Packages
 
-| Package | Description |
-|---------|-------------|
-| `@de-otio/trellis` | Core HTTP API server and all handlers |
-| `@de-otio/trellis-extension-api` | Extension interface and types |
+| Package | Description | License |
+|---------|-------------|---------|
+| `@de-otio/trellis` | Core HTTP API server and all handlers | AGPL-3.0-or-later |
+| `@de-otio/trellis-extension-api` | Extension interface and types | MIT |
+
+## License
+
+Trellis is **dual-licensed**.
+
+- The **core** (this repository and `@de-otio/trellis`) is licensed under the
+  **GNU Affero General Public License v3.0 or later** ([`LICENSE`](LICENSE)).
+  If you run a modified Trellis as a network service, the AGPL requires you to
+  make your modified source available to its users.
+- A **commercial license** is available for use without the AGPL's
+  source-disclosure obligations — see [`COMMERCIAL.md`](COMMERCIAL.md).
+- The **extension API** (`@de-otio/trellis-extension-api`) is **MIT**-licensed,
+  so you can build extensions — including proprietary ones — freely.
+
+External contributions are accepted under a [Contributor License
+Agreement](CLA.md), which keeps the dual-licensing model possible.

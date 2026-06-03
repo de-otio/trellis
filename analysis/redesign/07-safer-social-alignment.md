@@ -66,6 +66,8 @@ The circles redesign addresses many of these gaps structurally — not as featur
 
 The existing age-gating infrastructure (`AgeTier`, `ParentalLink`, age-gate middleware) remains unchanged and works alongside circles.
 
+**Reframe (2026 GoodAttention policy brief — see [`../safer-social-design/09-attention-regulation-and-age-limits/`](../safer-social-design/09-attention-regulation-and-age-limits/README.md)):** the brief argues minor safety is best served at the *mechanism* level (calm ranking, no micro-targeting, finite views — all of which circles already deliver) rather than by age-gating + verification, which it holds to be ineffective and a privacy harm. This strengthens the case that the circles model's structural wins *are* the minor-safety story, and that the "age verification at signup" gap below should not escalate to identity verification absent a hard regulatory demand.
+
 ---
 
 ## New Protections Enabled by Circles

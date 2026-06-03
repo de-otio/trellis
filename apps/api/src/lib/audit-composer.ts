@@ -24,6 +24,38 @@
  *   low + medium -> info     (30d)
  *   high         -> warning  (90d)
  *   critical     -> error    (365d)
+ *
+ * ── SECURITY-SENSITIVE READ CONVENTION ───────────────────────────────
+ *
+ * Any BULK, CROSS-USER, or EXPORT read of user data MUST emit an audit
+ * event. An audit trail cannot be backfilled — if the read is not
+ * recorded at the time it occurs, it is permanently invisible to
+ * compliance reviews.
+ *
+ * Worked example — admin bulk-export of user records:
+ *
+ *   await auditLogger.logDataAccess({
+ *     action: DATA_READ,
+ *     resource:    "user",
+ *     resourceId:  `bulk:${requestedCount}`,
+ *     userId:      session.userId,          // the requesting admin's ID
+ *     region:      detectedRegion,
+ *     success:     true,
+ *     metadata: {
+ *       targetType: "user_export",
+ *       reason:     "compliance_request",
+ *     },
+ *   }, env);
+ *
+ * Scope of the rule:
+ *   - Covered NOW:  mutations (data.create / update / delete), auth,
+ *     feature_toggle.changed, tenant / IdP events.
+ *   - Deferred:     individual single-user reads (low priority).
+ *   - IN SCOPE for the research platform: any research.query,
+ *     research.extract, experiment.assign operation.
+ *
+ * See doc/02-technical/development/audit-and-toggle-conventions.md for
+ * naming conventions, prefix rules, and the research.query PII rule.
  */
 
 import { AuditLog, PiiFilter } from "@de-otio/saas-foundation/audit";
@@ -288,6 +320,100 @@ export class TrellisAuditLogger {
     return this.emit({ ...event, type, severity: event.severity ?? defaultSeverity }, env);
   }
 
+  /**
+   * Emit a system-level event where the `action` string is passed directly
+   * to the foundation audit log (bypassing the coarse `actionFor()` mapping).
+   *
+   * Use for platform-control actions like `feature_toggle.changed`,
+   * `consent.changed`, `experiment.assign` that have their own dedicated
+   * action constant and should not be collapsed to a coarse `data.*` label.
+   *
+   * The `action` parameter MUST be a known `AuditAction` constant from
+   * `audit-actions.ts`; do not pass free-form strings.
+   *
+   * Best-effort — never throws into the caller.
+   */
+  public async logSystemAction(
+    action: AuditAction,
+    event: Omit<TrellisAuditEvent, "type" | "action" | "severity"> & {
+      severity?: TrellisSeverity;
+    },
+    env: TrellisAuditLoggerEnv,
+  ): Promise<void> {
+    return this.emitDirect(action, { ...event, severity: event.severity ?? "medium" }, env);
+  }
+
+  private async emitDirect(
+    action: AuditAction,
+    event: Omit<TrellisAuditEvent, "type" | "action"> & { severity: TrellisSeverity },
+    env: TrellisAuditLoggerEnv,
+  ): Promise<void> {
+    const logger = getLogger();
+    try {
+      if (!isValidRegion(event.region)) {
+        logger.error("[Audit] Invalid region in system audit event", {
+          region: event.region,
+          action,
+        });
+        return;
+      }
+
+      const severity = mapSeverity(event.severity);
+      const rawMetadata: Record<string, unknown> = {
+        action,
+        resource: event.resource,
+        ...(event.region !== undefined && { region: event.region }),
+        ...(event.dataRegion !== undefined && { dataRegion: event.dataRegion }),
+        ...event.metadata,
+      };
+      const metadata = scrubMetadata(rawMetadata);
+      const anonIp = event.ipAddress ? anonymizeIp(event.ipAddress) : undefined;
+
+      const prisma = createPrismaForRegion(event.region, env) as AuditPrismaClientLike;
+      const auditLog = getAuditLog(prisma);
+
+      await auditLog.emitAwait({
+        actor: event.userId
+          ? { kind: "user", userSub: event.userId }
+          : { kind: "anonymous" },
+        action,
+        ...(event.resource && event.resourceId
+          ? { resource: { kind: event.resource, id: event.resourceId } }
+          : {}),
+        outcome: event.success ? "success" : "failure",
+        severity,
+        ...(this.requestId !== undefined && { requestId: this.requestId }),
+        ...(anonIp !== undefined && { ipAddress: anonIp }),
+        ...(event.userAgent !== undefined && { userAgent: event.userAgent }),
+        ...(metadata !== undefined && { metadata }),
+      });
+
+      logger.info(`[Audit] ${String(action)} on ${event.resource}${event.resourceId ? ` (${event.resourceId})` : ""} in region ${event.region}`, {
+        action,
+        resource: event.resource,
+        region: event.region,
+        userId: event.userId,
+      });
+    } catch (error) {
+      // Best-effort: never block the in-flight request.
+      // eslint-disable-next-line no-console -- audit-fallback line for ops grep
+      console.error(
+        JSON.stringify({
+          auditEmitFailure: true,
+          action: String(action),
+          resource: event.resource,
+          userId: event.userId,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
+      logger.error("[Audit] Failed to emit system audit event", {
+        error,
+        action,
+        resource: event.resource,
+      });
+    }
+  }
+
   private async emit(event: TrellisAuditEvent, env: TrellisAuditLoggerEnv): Promise<void> {
     const logger = getLogger();
     try {
@@ -361,7 +487,19 @@ export class TrellisAuditLogger {
       }
     } catch (error) {
       // Best-effort: never block the in-flight request on an audit
-      // failure.
+      // failure. Emit a structured stderr line so the event is
+      // recoverable by a compliance grep. Full durable (SQS
+      // at-least-once) delivery is a deferred follow-up.
+      // eslint-disable-next-line no-console -- audit-fallback line for ops grep
+      console.error(
+        JSON.stringify({
+          auditEmitFailure: true,
+          action: event.action,
+          resource: event.resource,
+          userId: event.userId,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
       logger.error("[Audit] Failed to log audit event", {
         error,
         action: event.action,

@@ -98,7 +98,7 @@ export const UNSCOPED_MODELS: ReadonlyMap<string, string> = new Map([
   ["UploadSession", "user"],
   ["MfaEnrollment", "user"],
   ["UserEncryptionKey", "user"],
-  ["CrossRegionConsent", "user"],
+  ["Consent", "user"],
   ["NotificationPreference", "user"],
   ["LinkReport", "user"],
   ["ParentalLink", "user"],

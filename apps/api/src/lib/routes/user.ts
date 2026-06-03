@@ -343,48 +343,114 @@ export const userRoutes: Route[] = [
           return addCorsHeaders(errorResponse, request, env);
         }
 
-        // Upsert consent record
+        // Record consent — APPEND-ONLY (GDPR Art.7(1)/(3), IRB audit).
+        //
+        // The old code upserted a single row and set `consentedAt = consented
+        // ? now : null`, which DESTROYED the original grant timestamp on
+        // withdrawal. Instead we never mutate the consent decision on an
+        // existing row: we supersede the current active row (active=false,
+        // supersededAt=now) and INSERT a fresh row for this event. A
+        // withdrawal row PRESERVES the grant's `consentedAt` (carried forward
+        // from the superseded row) and records `withdrawnAt`. Full history is
+        // retained; the partial unique index keys only `active` rows.
         const ipAddress = getIPAddress(request);
         const userAgent = request.headers.get("User-Agent") || undefined;
+        const now = new Date();
 
-        const consent = (await withQueryTimeoutAndRetry(
+        const { consent, previousConsented } = (await withQueryTimeoutAndRetry(
           dbManager,
           region,
           env,
           async (db) => {
-            return db.crossRegionConsent.upsert({
-              where: {
-                userId_dataRegion_accessRegion: {
+            return db.$transaction(async (tx: any) => {
+              // Current decision for this (user, cross-region triple).
+              const prior = await tx.consent.findFirst({
+                where: {
                   userId: session.userId,
+                  purpose: "CROSS_REGION",
                   dataRegion: body.dataRegion,
                   accessRegion: body.accessRegion,
+                  active: true,
                 },
-              },
-              create: {
-                userId: session.userId,
-                dataRegion: body.dataRegion,
-                accessRegion: body.accessRegion,
-                consented: body.consented,
-                consentedAt: body.consented ? new Date() : null,
-                withdrawnAt: body.consented ? null : new Date(),
-                ipAddress,
-                userAgent,
-              },
-              update: {
-                consented: body.consented,
-                consentedAt: body.consented ? new Date() : null,
-                withdrawnAt: body.consented ? null : new Date(),
-                ipAddress,
-                userAgent,
-              },
+              });
+
+              // Preserve the original grant timestamp across a withdrawal: a
+              // withdrawal carries forward the prior grant's consentedAt; a
+              // grant stamps a fresh consentedAt.
+              const consentedAt = body.consented
+                ? now
+                : (prior?.consentedAt ?? null);
+
+              if (prior) {
+                await tx.consent.update({
+                  where: { id: prior.id },
+                  data: { active: false, supersededAt: now },
+                });
+              }
+
+              const created = await tx.consent.create({
+                data: {
+                  userId: session.userId,
+                  purpose: "CROSS_REGION",
+                  dataRegion: body.dataRegion,
+                  accessRegion: body.accessRegion,
+                  consented: body.consented,
+                  consentedAt,
+                  withdrawnAt: body.consented ? null : now,
+                  ipAddress,
+                  userAgent,
+                  active: true,
+                },
+              });
+
+              return {
+                consent: created,
+                previousConsented: prior?.consented ?? null,
+              };
             });
           },
           QueryTimeoutPresets.USER_FACING,
         )) as {
-          consented: boolean;
-          dataRegion: string;
-          accessRegion: string;
+          consent: {
+            consented: boolean;
+            dataRegion: string | null;
+            accessRegion: string | null;
+          };
+          previousConsented: boolean | null;
         };
+
+        // Audit the consent change (best-effort; never block the request).
+        // `consent.changed` is a string literal — the named constant
+        // CONSENT_CHANGED is added separately in audit-actions.ts; AuditAction
+        // is an open union so the literal typechecks today.
+        try {
+          const { createAuditLogger } = await import("../audit-composer.js");
+          createAuditLogger(env)
+            .log(
+              {
+                type: "user_action",
+                action: "consent.changed",
+                resource: "consent",
+                userId: session.userId,
+                region: region as any,
+                ipAddress,
+                userAgent,
+                success: true,
+                metadata: {
+                  purpose: "CROSS_REGION",
+                  studyId: null,
+                  consented: body.consented,
+                  previousConsented,
+                },
+              },
+              env,
+            )
+            .catch((err) => {
+              logger.warn("[UserRoutes] consent audit logging failed:", err);
+            });
+        } catch (auditErr) {
+          logger.warn("[UserRoutes] consent audit logging failed:", auditErr);
+        }
 
         const successResponse = securityHeaders.createSecureResponse(
           JSON.stringify({

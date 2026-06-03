@@ -25,6 +25,8 @@ export type {
   TaxonomySeedTaxon,
 } from "./extension";
 
+export { EXTENSION_API_VERSION } from "./extension";
+
 export type {
   Route,
   RoutePattern,
