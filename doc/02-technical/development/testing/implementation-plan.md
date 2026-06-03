@@ -297,6 +297,53 @@ thin confirmation layer.
 **Risk:** Cognito-specific assertions (token shape, magic-link) can't move —
 keep them in the deployed shard rather than faking them.
 
+> **Pilot landed (`vitest.e2e.standalone.config.ts`).** The target-agnostic
+> plumbing already existed: suites resolve the API via `getApiUrl()`/`API_URL`
+> and the ~30 pool suites funnel through `shard-user-pool.ts`. A new
+> `standalone-e2e-global-setup.ts` boots the in-process server (reusing the
+> standalone lane's boot) and mints the user pool via `/api/admin/test/users`,
+> seeding each entry's server-minted `trellis_session` cookie;
+> `getShardUser()` was made cookie-aware (seed the cookie, omit the empty
+> Bearer). **4 read suites green (21 tests)** against the in-process server with
+> zero Cognito/AWS.
+>
+> **CSRF-aware `authFetch` landed (writes now work).** Cookie sessions enforce
+> CSRF (deployed Bearer-JWT auth was exempt), so `getShardUser().authFetch`
+> now, in cookie mode only, fetches `/api/csrf-token` before a mutating
+> request, attaches `X-CSRF-Token`, captures the rotated session cookie, and
+> retries once on a stale-token 403. Deployed mode is byte-for-byte unchanged.
+> Lane now **9 suites green (39 tests)**: the read suites + `comments-crud` +
+> `reactions` + `privacy` + `sentiments-read` + `access-control`. A triage
+> sweep of 10 read/social candidates cleanly split the set: the 7 that fail
+> (`circles`, `comment-management`, `connection-codes`, `content-discovery`,
+> `discovery`, `friends-followers`, `relationships`) all hit the same `401`
+> tenancy gate (a couple also have response-shape diffs), confirming the
+> ceiling is uniform — everything tenant-scoped waits on the same work.
+>
+> **Confirmed blocker for the bulk write port — tenancy, not auth.** With a
+> *valid* cookie session (proven: `/api/csrf-token` returns 200), `POST
+> /api/posts` and `GET /api/feeds/home` still return **401**. Root cause traced
+> to **two distinct auth paths**: the suites that pass use
+> `SessionManager.getSession` (cookie) with no tenant requirement; the
+> tenant-scoped routes (posts/feeds/circles/connection-codes/taxonomy) require
+> an `AuthContext` from `buildAuthContext` (`auth/auth-middleware.ts`), which
+> **demands a verified Cognito JWT carrying `custom:activeTenantId`** and
+> returns null without it → 401. A local harness cannot forge a JWT the Cognito
+> JWKS verifier accepts, so this is **not liftable from the test harness**.
+> Unblocking requires either a test-mode seam inside `buildAuthContext` (derive
+> the tenant from the session/a header when `STAGE=test`) — a production-auth
+> change owned by identity-federation, not the test layer — or the planned
+> tenancy work that lets cookie sessions carry tenant context. So `post-crud` /
+> `link-reports` and the 7 tenant-scoped read/social suites all wait on the
+> same change; the non-tenant read/social suites (now ported) are the ceiling
+> until then.
+>
+> Also deferred: `admin-access` (route `/api/admin/users` unmounted in the
+> dummy server → 404 vs deployed 403).
+>
+> CI wiring for this lane is **intentionally deferred** to avoid colliding with
+> the in-flight Neptune graph-CI work in `ci.yml`.
+
 ---
 
 ## Stage 4 — Extension-API contract tests (~2 days)
