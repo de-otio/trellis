@@ -8,9 +8,13 @@
 
 // Strip Bolt URIs and anything that looks like a password before the message
 // reaches Error.message (and hence logs + optional 5xx body echoes).
-// Matches bolt://, bolt+s://, neo4j://, neo4j+s://, and bare neo4j.io host refs.
+// Matches bolt://, bolt+s://, neo4j://, neo4j+s://, and bare host refs for
+// both AuraDB (*.databases.neo4j.io) and Neptune (*.neptune.amazonaws.com).
 const BOLT_URI = /(bolt\+?s?|neo4j\+?s?):\/\/[^\s"']+/gi;
 const NEO4J_HOST = /\b[a-z0-9]+\.databases\.neo4j\.io(?::\d+)?/gi;
+// Neptune endpoints: <cluster>.cluster[-ro]-<hash>.<region>.neptune.amazonaws.com
+// (and reader/instance variants) — match any subdomain of neptune.amazonaws.com.
+const NEPTUNE_HOST = /\b[a-z0-9.-]+\.neptune\.amazonaws\.com(?::\d+)?/gi;
 // Password-like tokens in driver error messages (e.g., "authentication failure (user=neo4j password=...)").
 const PASSWORD_TOKEN = /\b(password|passwd|pwd)\s*[=:]\s*\S+/gi;
 
@@ -18,6 +22,7 @@ function sanitize(msg: string): string {
   return msg
     .replace(BOLT_URI, "[bolt-uri-redacted]")
     .replace(NEO4J_HOST, "[aura-host-redacted]")
+    .replace(NEPTUNE_HOST, "[neptune-host-redacted]")
     .replace(PASSWORD_TOKEN, "$1=[redacted]");
 }
 

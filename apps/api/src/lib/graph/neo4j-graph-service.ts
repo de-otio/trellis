@@ -87,6 +87,10 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
   private driver: Driver | null = null;
   private connected = false;
   private schemaInitialized = false;
+  /** Retained from {@link connect} so {@link reconnect} can rebuild the driver after a failover. */
+  private config: GraphConnectionConfig | null = null;
+  /** Single-flight guard so concurrent in-flight queries trigger at most one reconnect. */
+  private reconnecting: Promise<void> | null = null;
 
   /**
    * Geo-proximity lookup (PostGIS). Neptune has no spatial type, so proximity
@@ -104,6 +108,9 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
     if (this.connected && this.driver) {
       return; // Idempotent
     }
+
+    // Retain config so reconnect() can rebuild the driver after a failover.
+    this.config = config;
 
     try {
       // Resolve authentication
@@ -2165,18 +2172,80 @@ export class Neo4jGraphService implements GraphService, GraphConnection {
     query: string,
     parameters?: Record<string, unknown>,
   ): Promise<QueryResult> {
-    const session = this.getSession();
-    try {
-      return await session.run(query, parameters);
-    } catch (error) {
-      throw new GraphQueryError(
-        `Query failed: ${error instanceof Error ? error.message : String(error)}`,
-        query,
-        { cause: error instanceof Error ? error : undefined },
-      );
-    } finally {
-      await session.close();
+    // Neptune fails the writer over to a promoted reader on maintenance/scaling;
+    // the cluster Bolt endpoint then points at a new instance and any pooled
+    // connection bound to the old one yields ServiceUnavailable / SessionExpired.
+    // Rebuild the driver (fresh pool + DNS resolution) and retry once. One
+    // reconnect is enough: a healthy retry succeeds, a persistent outage surfaces
+    // as GraphQueryError → 5xx for the caller to back off on.
+    const maxReconnects = 1;
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= maxReconnects; attempt++) {
+      const session = this.getSession();
+      try {
+        return await session.run(query, parameters);
+      } catch (error) {
+        lastError = error;
+        if (attempt < maxReconnects && this.isReconnectableError(error)) {
+          try {
+            await this.reconnect();
+          } catch (reconnectError) {
+            lastError = reconnectError;
+            break;
+          }
+          continue;
+        }
+        break;
+      } finally {
+        await session.close().catch(() => {
+          /* best-effort: a dead session can't be closed cleanly */
+        });
+      }
     }
+    throw new GraphQueryError(
+      `Query failed: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
+      query,
+      { cause: lastError instanceof Error ? lastError : undefined },
+    );
+  }
+
+  /**
+   * True for the transient connectivity errors a Neptune writer failover (or a
+   * dropped Bolt connection) raises — the cases a reconnect can recover from.
+   * Query-level errors (syntax, constraint) are NOT reconnectable.
+   */
+  private isReconnectableError(error: unknown): boolean {
+    const code = (error as { code?: unknown } | null)?.code;
+    return code === neo4j.error.SERVICE_UNAVAILABLE || code === neo4j.error.SESSION_EXPIRED;
+  }
+
+  /**
+   * Rebuild the driver from the retained config, releasing the stale pool bound
+   * to the failed-over instance. Single-flight: concurrent callers await one
+   * reconnect rather than racing close()/connect(). Mirrors the factory's
+   * {@link closeSharedGraphService} drop-and-recreate, but in-process so an
+   * in-flight query can retry without bubbling a 5xx to the client.
+   */
+  private async reconnect(): Promise<void> {
+    if (!this.config) {
+      throw new GraphConnectionError("Cannot reconnect: no connection config retained");
+    }
+    if (!this.reconnecting) {
+      const config = this.config;
+      this.reconnecting = (async () => {
+        try {
+          if (this.driver) await this.driver.close();
+        } catch {
+          /* best-effort: the old driver is being discarded anyway */
+        }
+        this.driver = null;
+        this.connected = false;
+        await this.connect(config);
+      })().finally(() => {
+        this.reconnecting = null;
+      });
+    }
+    return this.reconnecting;
   }
 
   /**

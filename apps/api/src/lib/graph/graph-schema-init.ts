@@ -1,122 +1,67 @@
 /**
  * Graph Schema Initialization
  *
- * Creates constraints and indexes in the graph database on first connect.
- * Idempotent — safe to run multiple times. Uses "CREATE ... IF NOT EXISTS"
- * syntax supported by Neo4j 5+ (AuraDB and Community).
+ * On Neptune Serverless there is **no DDL to run**:
  *
- * @see /analysis/redesign/07-graph-database/04-graph-schema.md
+ *   - Neptune auto-indexes every property — there is no `CREATE INDEX`
+ *     (and no `CREATE POINT INDEX`; spatial lives in Postgres/PostGIS now,
+ *     see ../entity-location-subsystem.md).
+ *   - Neptune has no property-level uniqueness constraint — only the internal
+ *     `~id` is unique — so `CREATE CONSTRAINT … IS UNIQUE` is unsupported.
+ *   - `SHOW CONSTRAINTS` / `SHOW INDEXES` do not exist.
+ *
+ * (Audit findings F6/F7/F8 — see
+ * plans/redesign/graph-db-neptune-serverless/10-opencypher-audit.md.)
+ *
+ * So schema-init reduces to a **connectivity probe**. This still runs on both
+ * the Neptune target and the local Docker Neo4j test loop (`RETURN 1` is
+ * portable), keeping the two engines in parity.
+ *
+ * ## Where uniqueness comes from
+ *
+ * Business `id`s (User/Entity/Post) are minted in Postgres as unique primary
+ * keys; the graph only ever *mirrors* them via `MERGE (n:Label {id: $id})` in
+ * the sync path — it never generates an id. The MERGE is an idempotent upsert
+ * keyed on that already-unique id, so duplicate nodes cannot arise from the
+ * graph layer. Uniqueness is therefore enforced upstream + app-layer, not by a
+ * DB constraint. (DEC2 names the business id as the conceptual `~id`; we keep
+ * it as a regular, auto-indexed property rather than rewriting every MATCH/
+ * RETURN to Neptune's non-portable `~id` accessor — same guarantee, and the
+ * queries stay runnable on Docker Neo4j.)
  */
 
 import type { Session } from "neo4j-driver";
-
-// ---------------------------------------------------------------------------
-// Constraints (uniqueness + implicit index on id properties)
-// ---------------------------------------------------------------------------
-
-const CONSTRAINTS = [
-  {
-    name: "user_id_unique",
-    query: "CREATE CONSTRAINT user_id_unique IF NOT EXISTS FOR (u:User) REQUIRE u.id IS UNIQUE",
-  },
-  {
-    name: "entity_id_unique",
-    query:
-      "CREATE CONSTRAINT entity_id_unique IF NOT EXISTS FOR (e:Entity) REQUIRE e.id IS UNIQUE",
-  },
-  {
-    name: "post_id_unique",
-    query: "CREATE CONSTRAINT post_id_unique IF NOT EXISTS FOR (p:Post) REQUIRE p.id IS UNIQUE",
-  },
-];
-
-// ---------------------------------------------------------------------------
-// Indexes (for discovery filtering and temporal ordering)
-// ---------------------------------------------------------------------------
-
-const INDEXES = [
-  {
-    name: "entity_type_breed",
-    query:
-      "CREATE INDEX entity_type_breed IF NOT EXISTS FOR (e:Entity) ON (e.entityType, e.breed)",
-  },
-  {
-    name: "entity_type_lifestage",
-    query:
-      "CREATE INDEX entity_type_lifestage IF NOT EXISTS FOR (e:Entity) ON (e.entityType, e.lifeStage)",
-  },
-  {
-    name: "entity_location",
-    query: "CREATE POINT INDEX entity_location IF NOT EXISTS FOR (e:Entity) ON (e.location)",
-  },
-  {
-    name: "post_created",
-    query: "CREATE INDEX post_created IF NOT EXISTS FOR (p:Post) ON (p.createdAt)",
-  },
-  {
-    name: "post_author",
-    query: "CREATE INDEX post_author IF NOT EXISTS FOR (p:Post) ON (p.authorId)",
-  },
-];
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
 /**
- * Initialize all graph schema constraints and indexes.
+ * Initialize the graph schema.
  *
- * Each statement runs in its own implicit transaction (Neo4j requires
- * schema operations to be the only statement in a transaction).
+ * Neptune needs no constraints or indexes (it auto-indexes all properties and
+ * supports no `CREATE CONSTRAINT`/`CREATE INDEX`), so this is a connectivity
+ * probe rather than DDL. Trivially idempotent — safe to run on every connect.
  *
- * @param session - An open Neo4j session
- * @throws If any constraint or index creation fails (non-idempotent errors)
+ * @param session - An open graph session (Neptune Bolt or Docker Neo4j)
+ * @throws If the database is unreachable
  */
 export async function initGraphSchema(session: Session): Promise<void> {
-  // Create constraints first (they create implicit indexes on the constrained property)
-  for (const constraint of CONSTRAINTS) {
-    await session.run(constraint.query);
-  }
-
-  // Create additional indexes for query performance
-  for (const index of INDEXES) {
-    await session.run(index.query);
-  }
+  // Connectivity probe — no schema objects to create on Neptune.
+  await session.run("RETURN 1");
 }
 
 /**
- * Verify that all expected constraints and indexes exist.
+ * Verify the graph schema for health checks / diagnostics.
  *
- * Useful for health checks and diagnostics. Returns the names of
- * any missing constraints or indexes.
+ * There are no DB-enforced schema objects on Neptune to verify, so this
+ * confirms connectivity and reports nothing missing. Kept (returning an empty
+ * list) so callers and the public `index.ts` surface are unchanged.
  *
- * @param session - An open Neo4j session
- * @returns List of missing constraint/index names (empty if all present)
+ * @param session - An open graph session
+ * @returns Always `[]` — there is no DB-level schema to be missing
  */
 export async function verifyGraphSchema(session: Session): Promise<string[]> {
-  const missing: string[] = [];
-
-  const constraintResult = await session.run("SHOW CONSTRAINTS");
-  const existingConstraints = new Set(
-    constraintResult.records.map((r) => r.get("name") as string),
-  );
-
-  for (const constraint of CONSTRAINTS) {
-    if (!existingConstraints.has(constraint.name)) {
-      missing.push(constraint.name);
-    }
-  }
-
-  const indexResult = await session.run("SHOW INDEXES");
-  const existingIndexes = new Set(
-    indexResult.records.map((r) => r.get("name") as string),
-  );
-
-  for (const index of INDEXES) {
-    if (!existingIndexes.has(index.name)) {
-      missing.push(index.name);
-    }
-  }
-
-  return missing;
+  await session.run("RETURN 1");
+  return [];
 }

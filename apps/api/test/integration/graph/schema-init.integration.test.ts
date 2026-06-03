@@ -1,11 +1,15 @@
 /**
  * Graph Schema Initialization — Integration Test
  *
- * Exercises initGraphSchema / verifyGraphSchema against a real Neo4j 5 instance:
- *   - init creates every constraint + index; verify then reports none missing
- *   - init is idempotent (safe to run repeatedly — uses IF NOT EXISTS)
- *   - verify detects a dropped constraint, and a re-init restores it
- *   - the uniqueness constraints actually enforce uniqueness
+ * On Neptune Serverless schema-init is a no-op beyond a connectivity probe
+ * (Neptune auto-indexes all properties and supports no CREATE CONSTRAINT /
+ * CREATE INDEX / SHOW — audit F6/F7/F8). This suite asserts that contract
+ * against a real graph session:
+ *   - init succeeds against a reachable database (connectivity probe)
+ *   - init is idempotent (safe to run on every connect)
+ *   - verify reports nothing missing (there is no DB-level schema to verify)
+ *   - it issues no DDL — uniqueness is upstream (Postgres PKs) + MERGE-keyed,
+ *     not a DB constraint
  *
  * Prerequisites (same as the rest of the graph lane): a running Neo4j and
  * NEO4J_TEST_* env vars. Run: npm run test:graph -w @de-otio/trellis
@@ -16,26 +20,12 @@ import type { Session } from "neo4j-driver";
 import { getTestDatabase, getTestDriver, closeTestDriver } from "./setup.js";
 import { initGraphSchema, verifyGraphSchema } from "../../../src/lib/graph/graph-schema-init.js";
 
-const ALL_SCHEMA_OBJECTS = [
-  // constraints
-  "user_id_unique",
-  "entity_id_unique",
-  "post_id_unique",
-  // indexes
-  "entity_type_breed",
-  "entity_type_lifestage",
-  "entity_location",
-  "post_created",
-  "post_author",
-];
-
 function session(): Session {
   return getTestDriver().session({ database: getTestDatabase() });
 }
 
 describe("graph schema initialization", () => {
   beforeAll(async () => {
-    // Ensure a known-good baseline: every constraint/index present.
     const s = session();
     try {
       await initGraphSchema(s);
@@ -45,96 +35,54 @@ describe("graph schema initialization", () => {
   });
 
   afterAll(async () => {
-    // Leave the schema intact for the rest of the lane, then drop the driver.
-    const s = session();
-    try {
-      await initGraphSchema(s);
-    } finally {
-      await s.close();
-    }
     await closeTestDriver();
   });
 
-  it("creates every documented constraint and index (verify reports none missing)", async () => {
+  it("init succeeds against a reachable database (connectivity probe)", async () => {
     const s = session();
     try {
-      await initGraphSchema(s);
-      const missing = await verifyGraphSchema(s);
-      expect(missing).toEqual([]);
+      await expect(initGraphSchema(s)).resolves.toBeUndefined();
     } finally {
       await s.close();
     }
   });
 
-  it("is idempotent — running init twice does not throw and leaves nothing missing", async () => {
+  it("is idempotent — running init repeatedly does not throw", async () => {
     const s = session();
     try {
       await initGraphSchema(s);
       await expect(initGraphSchema(s)).resolves.toBeUndefined();
+    } finally {
+      await s.close();
+    }
+  });
+
+  it("verify reports nothing missing (no DB-level schema to verify on Neptune)", async () => {
+    const s = session();
+    try {
       expect(await verifyGraphSchema(s)).toEqual([]);
     } finally {
       await s.close();
     }
   });
 
-  it("verifyGraphSchema reports a dropped constraint, and re-init restores it", async () => {
+  it("creates no constraints or indexes (Neptune auto-indexes; uniqueness is upstream)", async () => {
+    // Drop anything a prior, pre-C3 build may have left, then prove init does
+    // not re-create it: schema-init must issue no DDL.
     const s = session();
     try {
-      await initGraphSchema(s);
-      await s.run("DROP CONSTRAINT user_id_unique IF EXISTS");
-
-      const missing = await verifyGraphSchema(s);
-      expect(missing).toContain("user_id_unique");
-
-      await initGraphSchema(s);
-      expect(await verifyGraphSchema(s)).toEqual([]);
-    } finally {
-      await s.close();
-    }
-  });
-
-  it("the uniqueness constraint actually rejects a duplicate id", async () => {
-    const s = session();
-    try {
-      await initGraphSchema(s);
-      const id = `schema-init-dupe-${Math.abs(hashString("seed"))}`;
-      // Clean any prior node with this id, then create one.
-      await s.run("MATCH (u:User {id: $id}) DETACH DELETE u", { id });
-      await s.run("CREATE (u:User {id: $id})", { id });
-
-      await expect(s.run("CREATE (u:User {id: $id})", { id })).rejects.toThrow();
-
-      // Cleanup
-      await s.run("MATCH (u:User {id: $id}) DETACH DELETE u", { id });
-    } finally {
-      await s.close();
-    }
-  });
-
-  it("exposes the full documented set of schema object names via verify", async () => {
-    // Drop the lot is unsafe for the shared lane; instead assert that after a
-    // clean init, none of the known names are reported missing (i.e. verify
-    // knows about exactly the documented objects).
-    const s = session();
-    try {
-      await initGraphSchema(s);
-      const missing = await verifyGraphSchema(s);
-      for (const name of ALL_SCHEMA_OBJECTS) {
-        expect(missing).not.toContain(name);
+      for (const name of ["user_id_unique", "entity_id_unique", "post_id_unique"]) {
+        await s.run(`DROP CONSTRAINT ${name} IF EXISTS`);
       }
+      await initGraphSchema(s);
+
+      const constraints = await s.run("SHOW CONSTRAINTS");
+      const names = new Set(constraints.records.map((r) => r.get("name") as string));
+      expect(names.has("user_id_unique")).toBe(false);
+      expect(names.has("entity_id_unique")).toBe(false);
+      expect(names.has("post_id_unique")).toBe(false);
     } finally {
       await s.close();
     }
   });
 });
-
-// Deterministic small hash so the duplicate-id node has a stable, unique-ish id
-// without relying on Date.now()/random (which the graph lane avoids).
-function hashString(s: string): number {
-  let h = 0;
-  for (let i = 0; i < s.length; i++) {
-    h = (h << 5) - h + s.charCodeAt(i);
-    h |= 0;
-  }
-  return h;
-}

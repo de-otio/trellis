@@ -99,8 +99,27 @@ run fully concurrently. That is the core parallelization win.
   tsc clean, linter no-exists-subquery → 0.
 - **All self-contained Cypher rewrites are DONE** (C2a/b/c/d). `neo4j-graph-service.ts`
   now has **zero** error-level linter findings (no-spatial + no-reduce cleared by
-  C7, below). The only error-level findings left are in `graph-schema-init.ts`:
-  constraints 3 / index 5 / show 2 (C3).
+  C7, below).
+- **C3 (schema-init → health check) — DONE and verified (trellis), 2026-06-03.**
+  `graph-schema-init.ts` reduced to a connectivity probe (`RETURN 1`):
+  `CREATE CONSTRAINT` ×3 / `CREATE INDEX` ×5 / `SHOW` ×2 all removed (F6/F7/F8),
+  `initGraphSchema`/`verifyGraphSchema` signatures kept (verify returns `[]`).
+  **DEC2 nuance:** business `id` stays a *regular* (Neptune-auto-indexed)
+  property rather than rewriting ~80 MATCH/RETURN sites to Neptune's `~id`
+  accessor — uniqueness is already guaranteed upstream (Postgres PKs minted
+  there; the graph only MERGE-mirrors them, never mints an id) and `~id` is
+  not settable on Docker Neo4j, so keeping `id` preserves engine parity for
+  the local test loop with the same guarantee. Audit sized C3 at 0.25d, which
+  matches this narrow scope (not a full `~id` query rewrite). **Verified:**
+  repo-wide `tsc` clean; linter no-create-constraint/-index/-show → 0; the
+  rewritten `schema-init.integration` (4 cases: probe succeeds, idempotent,
+  verify reports nothing missing, **issues no DDL**) green against Docker Neo4j.
+- **Graph layer is now at ZERO error-level lint findings** (C2a–d + C7 + C3).
+  The D1 informational scan was **flipped to a strict gate** —
+  `neptune-opencypher-lint.test.ts` now asserts `findings === []` over
+  `src/lib/graph` and fails the build on any new incompatible Cypher. It runs
+  under the default `npm test` (matches `test/**/*.test.ts`, not excluded), so
+  **D1's CI gate (and D4) is satisfied** — no separate wiring needed.
 - **C7 (geo → Postgres/PostGIS) — DONE and verified (trellis), 2026-06-02.**
   Dev Docker Postgres switched to `postgis/postgis:16-3.4`; `entity_location`
   table (`geography(Point,4326)` + GiST) + migration; `EntityGeoRepository`
@@ -117,11 +136,34 @@ run fully concurrently. That is the core parallelization win.
   scoping, upsert/remove) green; tsc clean. Deploy prereq: `CREATE EXTENSION
   postgis` on the consuming RDS (as master) before the migration deploys. See
   [`../entity-location-subsystem.md`](../entity-location-subsystem.md).
-- **Not yet (each bigger than a single increment):** C3 (schema-init, coupled to
-  business-id→`~id`), C8 (datetime — settle via the against-cluster spike), and
-  the smaller audit-independent C4/C5 (failover reconnection + errors host-regex).
-  Then Track D (D1 lint→CI gate, D2 integration vs the real cluster, D3 failover)
-  and the API cutover.
+- **C5 (errors.ts host-redaction) — DONE and verified (trellis), 2026-06-03.**
+  `sanitize()` gains a `NEPTUNE_HOST` rule (`*.neptune.amazonaws.com[:port]` →
+  `[neptune-host-redacted]`) so a Neptune cluster/reader endpoint can't leak via
+  `Error.message` → logs / 5xx bodies (the Bolt-URI rule already covered the
+  `bolt+s://…neptune…` scheme form). Aura + password rules kept. **Verified:**
+  `errors-sanitize` 17/17 (3 new Neptune cases), tsc clean.
+- **C4 (failover reconnection) — DONE and verified (trellis), 2026-06-03.**
+  `executeQuery` (the central query chokepoint — all reads/writes route through
+  it) now retries once on a Neptune writer failover: catches
+  `ServiceUnavailable`/`SessionExpired` (`neo4j.error.*` codes), rebuilds the
+  driver from a retained `config` (fresh pool + DNS to the promoted writer) via
+  a **single-flight `reconnect()`** (concurrent in-flight queries share one
+  rebuild, not a race), and retries on a new session. Non-transient (query)
+  errors fail fast with no rebuild; a persistent outage surfaces as
+  `GraphQueryError` → 5xx. Mirrors the factory's `closeSharedGraphService`
+  drop-and-recreate but in-process, so an in-flight request recovers without
+  bubbling a 5xx. **Verified:** new `reconnection.test.ts` 5/5 (retry-then-
+  succeed, both transient codes, fail-fast on query error, at-most-once retry,
+  single-flight under concurrency); full graph unit+lint 340 + integration lane
+  173 green; tsc clean. *Live D3 (kill the real writer, assert reconnect) still
+  pending the cluster.*
+- **Not yet:** **C8** (datetime — settle via the against-cluster spike; pin
+  engine ≥ 1.3.2.0 and verify, epoch-millis rewrite only if it fails). Then the
+  converging live Track D — **D2** integration vs the real cluster and **D3**
+  failover (need A3 + the runtime work, now all landed) — and the API cutover
+  (`Skybber-dev-Api` env-swap after a new trellis image ships C1 + the
+  rewrites). **C1/C4/C5 + D1/D4 are DONE**; the residual is C8 + the live
+  cluster tests + cutover.
 
 ## Phase 0 — Decisions & kickoff (small, unblocks the tracks)
 
@@ -186,15 +228,15 @@ estimate**. This is the gate that turns "1–2 days?" into a real number.
 
 | Task | Depends on | Can start |
 |---|---|---|
-| **C5** `errors.ts` host-redaction regex (Aura → `*.neptune.amazonaws.com`) | — | day 0 (trivial) |
-| **C4** Failover reconnection wrapper (catch `ServiceUnavailable`/`SessionExpired`, reuse `closeSharedGraphService`) | — | day 0 |
+| **C5** `errors.ts` host-redaction regex (Aura → `*.neptune.amazonaws.com`) | — | **✅ DONE 2026-06-03** (NEPTUNE_HOST rule; 17/17) |
+| **C4** Failover reconnection wrapper (catch `ServiceUnavailable`/`SessionExpired`, reuse `closeSharedGraphService`) | — | **✅ DONE 2026-06-03** (in-`executeQuery` single-flight reconnect+retry; 5/5; live D3 pending cluster) |
 | **C1** Auth path in `graph-factory.ts` (SigV4 token provider, or `AUTH_MODE`/`auth.none()`) | DEC1 | after Phase 0 |
 | ~~C6~~ Lambda HTTPS path | — | **DROPPED** — DEC3 confirmed no Lambda graph access |
 | **C2a** `EXISTS{}` → anti-join (8 sites) | **B** | after audit |
 | **C2b** `CALL{}`/UNION feed query → app-side merge | **B** | after audit |
 | **C2c** `FOREACH` conditional writes (3 sites) | **B** | after audit |
 | **C2d** `LIMIT toInteger($x)` → `LIMIT $x` sweep (9 sites) | **B** | after audit (trivial) |
-| **C3** Schema-init → connectivity check only (Neptune auto-indexes; no `CREATE CONSTRAINT/INDEX`/`SHOW`) | **B, DEC2** | after audit |
+| **C3** Schema-init → connectivity check only (Neptune auto-indexes; no `CREATE CONSTRAINT/INDEX`/`SHOW`) | **B, DEC2** | **✅ DONE 2026-06-03** (verified; `id` kept as regular prop, not `~id` — see status) |
 | **C7** Geo → Postgres entity-location subsystem ([`../entity-location-subsystem.md`](../entity-location-subsystem.md)): PostGIS `ST_DWithin`/`<->`, precise-store + exposure-policy; delete spatial Cypher; graph returns relationship signals only (merged app-side) | **B, DEC2** | **✅ DONE 2026-06-02** (verified; was the long pole) |
 | **C8** datetime: pin engine ≥ 1.3.2.0 + **verify** on the cluster; epoch-millis rewrite only if the spike fails | **B, DEC2, A3** | small unless fallback |
 
@@ -211,10 +253,10 @@ C7 + C2a–d landed, the residual is C3 + C8 + C4/C5.
 
 | Task | Depends on | Notes |
 |---|---|---|
-| **D1** Static openCypher lint / CI guard | — | build early; the only pre-cluster safety net (Docker Neo4j is full Cypher and **won't** catch Neptune gaps) |
+| **D1** Static openCypher lint / CI guard | — | **✅ DONE** — strict `findings===[]` gate over `src/lib/graph`, runs under default `npm test` (= in CI) |
 | **D2** Integration tests against the **dev Neptune cluster** | A3 + C1/C2/C3 | the real verification; replaces the Docker-only suite for graph code |
 | **D3** Failover test (kill writer, assert reconnect) | A3 + C4 | validates the reconnection wrapper |
-| **D4** Wire D1 into CI | D1 | gate future Cypher against the openCypher subset |
+| **D4** Wire D1 into CI | D1 | **✅ DONE** — D1 lives in the default vitest suite, so CI already runs it; no extra job |
 
 ## Critical path
 
@@ -233,8 +275,8 @@ trellis side. A4 + C1 must both land before D2 (the task can reach a cluster
 - [ ] Dev Neptune Serverless cluster (writer + tier-0 reader) reachable from a skybber dev ECS task via IAM auth.
 - [ ] `graph-factory.ts` connects with the chosen auth mode and survives a forced failover (D3 green).
 - [ ] Zero `FOREACH`-in-write, zero `CREATE CONSTRAINT`, zero list-property, zero integer-`id()` assumptions remain (B fix-list fully closed).
-- [ ] `graph-schema-init.ts` provisions indexes only; uniqueness enforced via `~id` / app layer.
-- [ ] D1 openCypher lint runs in CI and is green.
+- [x] `graph-schema-init.ts` provisions no DDL (connectivity probe only); uniqueness enforced via Postgres-origin business ids + MERGE-keyed upsert (kept `id` as a regular auto-indexed property rather than `~id` — see C3 status).
+- [x] D1 openCypher lint runs in CI and is green (strict `findings===[]` gate over `src/lib/graph`, in the default suite).
 - [ ] D2 integration suite passes against real Neptune (not Docker).
 - [ ] Greenfield data-model conventions (DEC2) documented in the trellis graph layer so new Cypher stays compliant.
 

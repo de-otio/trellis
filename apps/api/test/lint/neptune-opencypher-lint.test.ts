@@ -54,22 +54,24 @@ describe("lintNeptuneCompat — rules", () => {
   });
 });
 
-// Informational scan of the real graph layer — proves the linter catches the
-// audit's documented findings. Not asserted on exact counts (those shrink as
-// the C2/C3/C7 rewrites land); wire a strict `errors === 0` gate into CI once
-// the migration rewrites are complete.
-describe("current graph layer (informational)", () => {
-  it("reports Neptune-incompatible Cypher in src/lib/graph", () => {
+// Strict gate over the real graph layer. The C2 (EXISTS/CALL/FOREACH/LIMIT),
+// C3 (schema-init) and C7 (geo → PostGIS) rewrites cleared every error-level
+// finding, so this now asserts zero and guards against regression: any new
+// Neptune-incompatible Cypher (point/reduce/EXISTS{}/CALL{}/FOREACH/CREATE
+// CONSTRAINT/CREATE INDEX/SHOW/LIMIT toInteger) added to src/lib/graph fails
+// the build. `warn`-level findings (datetime, engine-gated) are not gated.
+describe("current graph layer (strict gate)", () => {
+  it("has zero Neptune error-level incompatibilities in src/lib/graph", () => {
     const dir = join(process.cwd(), "src/lib/graph");
     const files = readdirSync(dir).filter((f) => f.endsWith(".ts"));
-    const byRule = new Map<string, number>();
+    const findings: { file: string; line: number; ruleId: string; text: string }[] = [];
     for (const f of files) {
       for (const v of lintNeptuneCompat(readFileSync(join(dir, f), "utf8"))) {
-        if (v.severity === "error") byRule.set(v.ruleId, (byRule.get(v.ruleId) ?? 0) + 1);
+        if (v.severity === "error") {
+          findings.push({ file: f, line: v.line, ruleId: v.ruleId, text: v.text.trim() });
+        }
       }
     }
-    // eslint-disable-next-line no-console
-    console.log("[neptune-lint] current error-level findings by rule:", Object.fromEntries(byRule));
-    expect(byRule).toBeInstanceOf(Map); // soft: this block documents state, it does not gate
+    expect(findings).toEqual([]);
   });
 });

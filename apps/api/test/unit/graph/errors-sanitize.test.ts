@@ -55,6 +55,34 @@ describe("GraphError sanitize()", () => {
     });
   });
 
+  describe("Neptune host redaction", () => {
+    it("redacts a bare Neptune cluster endpoint (writer)", () => {
+      const err = new GraphConnectionError(
+        "Failed to reach mycluster.cluster-abc123.eu-central-1.neptune.amazonaws.com",
+      );
+      expect(err.message).toContain("[neptune-host-redacted]");
+      expect(err.message).not.toContain("mycluster");
+      expect(err.message).not.toContain("eu-central-1");
+    });
+
+    it("redacts a Neptune reader endpoint with port", () => {
+      const err = new GraphConnectionError(
+        "Timeout connecting to mycluster.cluster-ro-abc123.eu-central-1.neptune.amazonaws.com:8182",
+      );
+      expect(err.message).toContain("[neptune-host-redacted]");
+      expect(err.message).not.toContain("cluster-ro");
+    });
+
+    it("redacts a bolt+s:// Neptune URI via the URI rule", () => {
+      const err = new GraphConnectionError(
+        "Connection refused: bolt+s://mycluster.cluster-abc.eu-central-1.neptune.amazonaws.com:8182",
+      );
+      expect(err.message).toContain("[bolt-uri-redacted]");
+      expect(err.message).not.toContain("mycluster");
+      expect(err.message).not.toContain("neptune.amazonaws.com");
+    });
+  });
+
   describe("Password/token redaction", () => {
     it("preserves the password= key but redacts the value", () => {
       const err = new GraphAuthorizationError(
