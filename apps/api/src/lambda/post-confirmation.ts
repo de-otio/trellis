@@ -33,7 +33,8 @@ import type {
   PostConfirmationTriggerEvent,
   PostConfirmationTriggerHandler,
 } from "aws-lambda";
-import { SecretsManagerClient, GetSecretValueCommand } from "@aws-sdk/client-secrets-manager";
+import { Logger } from "@aws-lambda-powertools/logger";
+import { getSecret } from "@aws-lambda-powertools/parameters/secrets";
 import {
   PrismaClient,
   type AgeTier,
@@ -52,16 +53,22 @@ import {
 } from "../lib/signup-metadata.js";
 import type { SignupMethod } from "@prisma/client";
 
-const secretsClient = new SecretsManagerClient({ region: process.env.AWS_REGION });
+const logger = new Logger({ serviceName: "post-confirmation" });
 let prisma: PrismaClient | null = null;
 let cache: ClaimsCache | null = null;
 
 async function getPrisma(): Promise<PrismaClient> {
   if (prisma) return prisma;
-  const secret = await secretsClient.send(
-    new GetSecretValueCommand({ SecretId: process.env.DB_SECRET_ARN! }),
-  );
-  const { username, password, host, port, dbname } = JSON.parse(secret.SecretString!);
+  const { username, password, host, port, dbname } = (await getSecret(
+    process.env.DB_SECRET_ARN!,
+    { transform: "json" },
+  )) as unknown as {
+    username: string;
+    password: string;
+    host: string;
+    port: string | number;
+    dbname: string;
+  };
   prisma = new PrismaClient({
     datasources: {
       db: {
@@ -161,7 +168,7 @@ export const handler: PostConfirmationTriggerHandler = async (event) => {
   const attrs = event.request.userAttributes;
   const email = attrs.email?.toLowerCase();
   if (!email) {
-    console.warn(JSON.stringify({ event: "postconfirm.no_email", cognitoSub }));
+    logger.warn("postconfirm.no_email", { cognitoSub });
     return event;
   }
 
@@ -247,16 +254,13 @@ export const handler: PostConfirmationTriggerHandler = async (event) => {
     logger: { warn: (...args) => console.warn(...args) },
   });
 
-  console.log(
-    JSON.stringify({
-      event: "postconfirm.ok",
-      cognitoSub,
-      userId: result.userId,
-      personalTenantId: result.personalTenantId,
-      orgTenantId: result.orgTenantId,
-      federated,
-    }),
-  );
+  logger.info("postconfirm.ok", {
+    cognitoSub,
+    userId: result.userId,
+    personalTenantId: result.personalTenantId,
+    orgTenantId: result.orgTenantId,
+    federated,
+  });
 
   return event;
 };
@@ -420,9 +424,7 @@ async function provisionUserAndTenancy(
     // creation above is unaffected — Cognito has already authenticated them.
     const emailVerified = input.emailVerified === "true";
     if (!emailVerified) {
-      console.warn(
-        JSON.stringify({ event: "postconfirm.federated.email_unverified", cognitoSub }),
-      );
+      logger.warn("postconfirm.federated.email_unverified", { cognitoSub });
       return {
         userId: user.id,
         globalRole: user.role,
@@ -438,7 +440,7 @@ async function provisionUserAndTenancy(
     }
     const domain = deriveEmailDomain(email);
     if (!domain) {
-      console.warn(JSON.stringify({ event: "postconfirm.federated.invalid_email", cognitoSub }));
+      logger.warn("postconfirm.federated.invalid_email", { cognitoSub });
     } else {
       const tenantDomain = await tx.tenantDomain.findUnique({
         where: { domain },
@@ -457,28 +459,20 @@ async function provisionUserAndTenancy(
       });
 
       if (!tenantDomain) {
-        console.warn(
-          JSON.stringify({ event: "postconfirm.federated.no_domain_match", cognitoSub }),
-        );
+        logger.warn("postconfirm.federated.no_domain_match", { cognitoSub });
       } else if (!tenantDomain.verifiedAt) {
-        console.warn(
-          JSON.stringify({
-            event: "postconfirm.federated.unverified_domain",
-            cognitoSub,
-            tenantId: tenantDomain.tenantId,
-          }),
-        );
+        logger.warn("postconfirm.federated.unverified_domain", {
+          cognitoSub,
+          tenantId: tenantDomain.tenantId,
+        });
       } else if (
         !tenantDomain.tenant.identityProvider ||
         tenantDomain.tenant.identityProvider.status !== "ACTIVE"
       ) {
-        console.warn(
-          JSON.stringify({
-            event: "postconfirm.federated.inactive_idp",
-            cognitoSub,
-            tenantId: tenantDomain.tenantId,
-          }),
-        );
+        logger.warn("postconfirm.federated.inactive_idp", {
+          cognitoSub,
+          tenantId: tenantDomain.tenantId,
+        });
       } else {
         const role = resolveTenantRole(
           idpGroups,
@@ -486,13 +480,10 @@ async function provisionUserAndTenancy(
           tenantDomain.tenant.identityProvider.defaultRole,
         );
         if (!role) {
-          console.warn(
-            JSON.stringify({
-              event: "postconfirm.federated.no_role",
-              cognitoSub,
-              tenantId: tenantDomain.tenantId,
-            }),
-          );
+          logger.warn("postconfirm.federated.no_role", {
+            cognitoSub,
+            tenantId: tenantDomain.tenantId,
+          });
         } else {
           await tx.tenantMember.upsert({
             where: {
@@ -561,13 +552,10 @@ async function populateAnonymousId(db: PrismaClient, userId: string): Promise<vo
       data: { anonymousId },
     });
   } catch (err) {
-    console.warn(
-      JSON.stringify({
-        event: "postconfirm.anonymous_id_skipped",
-        userId,
-        reason: (err as { name?: string }).name ?? "unknown",
-      }),
-    );
+    logger.warn("postconfirm.anonymous_id_skipped", {
+      userId,
+      reason: (err as { name?: string }).name ?? "unknown",
+    });
   }
 }
 
@@ -586,12 +574,9 @@ async function primeClaimsCache(cognitoSub: string, result: ProvisioningResult):
   try {
     await getCache().put(cognitoSub, claims);
   } catch (err) {
-    console.warn(
-      JSON.stringify({
-        event: "postconfirm.cache_prime_failed",
-        cognitoSub,
-        error: (err as { code?: string }).code ?? "unknown",
-      }),
-    );
+    logger.warn("postconfirm.cache_prime_failed", {
+      cognitoSub,
+      error: (err as { code?: string }).code ?? "unknown",
+    });
   }
 }
