@@ -1,4 +1,6 @@
 import { createHmac } from "node:crypto";
+import { getParameter } from "@aws-lambda-powertools/parameters/ssm";
+import { resolveSecret, secretRef } from "@de-otio/saas-foundation/secrets";
 import type { PrismaClient } from "@prisma/client";
 
 /**
@@ -6,24 +8,55 @@ import type { PrismaClient } from "@prisma/client";
  * records (Surveillance-hardening Phase 0, P4). Replaces the plaintext user ID
  * in ACCOUNT-report `resourceId` so aggregate pattern analysis survives while
  * the identifier does not — "pattern analysis" is NOT an Art. 17(3) exemption.
- * Same input → same tombstone, so per-target report counts stay coherent.
+ * Same (key, userId) → same tombstone, so per-target report counts stay
+ * coherent within a deletion.
  *
  * KEYED HMAC, not a bare hash (security review H1): user IDs are short,
  * enumerable CUIDs, so an unsalted SHA-256 tombstone is rainbow-table
  * reversible by any party holding ONLY the database (operator, backup
- * exfiltration, compelled disclosure). The HMAC key lives in env/SSM —
- * never in the database or the public npm tarball — so the DB alone cannot
- * reverse the tombstone. A dedicated REPORT_PSEUDONYM_SECRET is preferred (it
- * can be rotated/escrowed separately); it falls back to SESSION_SECRET, which
- * is always present (it's a required, server-only secret). An empty key would
- * degrade to ~unkeyed, but erasure must never throw, so a misconfigured env
- * fails open to a still-pseudonymized (if weaker) value rather than blocking
- * deletion.
+ * exfiltration, compelled disclosure). The key lives in a managed secret
+ * store — never in the database or the public npm tarball — so the DB alone
+ * cannot reverse the tombstone. The key is supplied by the caller
+ * (`resolvePseudonymSecret`), NOT read from process.env here: in production
+ * the real secret is resolved onto the app's Env/SSM and process.env is empty.
  */
-export function pseudonymizeUserId(userId: string): string {
-  const key =
-    process.env.REPORT_PSEUDONYM_SECRET || process.env.SESSION_SECRET || "";
-  return `deleted:${createHmac("sha256", key).update(userId).digest("hex").slice(0, 32)}`;
+export function pseudonymizeUserId(userId: string, secret: string): string {
+  return `deleted:${createHmac("sha256", secret).update(userId).digest("hex").slice(0, 32)}`;
+}
+
+/**
+ * Resolve the erasure-tombstone HMAC key. Resolution order:
+ *   1. `REPORT_PSEUDONYM_SECRET` — plaintext (local / dev / CI / tests).
+ *   2. `REPORT_PSEUDONYM_SECRET_PARAM` — name of an SSM Parameter Store
+ *      SecureString, fetched + KMS-decrypted + cached via AWS Lambda
+ *      Powertools. This is the production path (a dedicated key, separately
+ *      rotatable; destroying it crypto-shreds all prior tombstones).
+ *   3. Fallback to the session secret (plaintext `SESSION_SECRET`, else
+ *      `SESSION_SECRET_ARN` resolved from Secrets Manager via the foundation
+ *      resolver) so a deployment without a dedicated key is still keyed, not
+ *      unkeyed.
+ *
+ * Never reads the HMAC key from `process.env` for production secrets — the app
+ * resolves those onto Env and deliberately leaves process.env empty.
+ * Caches the SSM value across deletions (Powertools default cache).
+ */
+export async function resolvePseudonymSecret(): Promise<string> {
+  if (process.env.REPORT_PSEUDONYM_SECRET) {
+    return process.env.REPORT_PSEUDONYM_SECRET;
+  }
+  const ssmParam = process.env.REPORT_PSEUDONYM_SECRET_PARAM;
+  if (ssmParam) {
+    const value = await getParameter(ssmParam, { decrypt: true });
+    if (value) return value;
+  }
+  // Fallback: the session secret (Secrets Manager ARN or plaintext).
+  if (process.env.SESSION_SECRET) return process.env.SESSION_SECRET;
+  if (process.env.SESSION_SECRET_ARN) {
+    return (
+      await resolveSecret(secretRef(process.env.SESSION_SECRET_ARN))
+    ).toString("utf-8");
+  }
+  return "";
 }
 
 export interface DeletionResult {
@@ -181,9 +214,10 @@ export async function deleteUserData(
   //      reports exist until Phase 1, but the erasure path ships with the model
   //      so Phase 1 cannot forget it.) Reports filed BY the user cascade via the
   //      reporter FK on user.delete().
+  const pseudonymSecret = await resolvePseudonymSecret();
   const accountReports = await db.report.updateMany({
     where: { reportType: "ACCOUNT", resourceType: "user", resourceId: userId },
-    data: { resourceId: pseudonymizeUserId(userId) },
+    data: { resourceId: pseudonymizeUserId(userId, pseudonymSecret) },
   });
 
   // 16. Delete the user (cascades to MfaEnrollment, UserEncryptionKey, Report

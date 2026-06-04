@@ -11,10 +11,7 @@
 
 import { PrismaClient } from "@prisma/client";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import {
-  deleteUserData,
-  pseudonymizeUserId,
-} from "../../src/lib/services/user-data-deletion.js";
+import { deleteUserData } from "../../src/lib/services/user-data-deletion.js";
 
 const TEST_DB_URL =
   process.env.DATABASE_URL ??
@@ -105,10 +102,13 @@ describe("Report erasure (GDPR Art. 17, P4)", () => {
     const filedBySubject = await prisma.report.count({ where: { reporterUserId: subject } });
     expect(filedBySubject).toBe(0);
 
-    // The ACCOUNT report survives but no longer carries the plaintext id.
+    // The ACCOUNT report survives but no longer carries the plaintext id —
+    // it now holds a keyed tombstone (the key is resolved at runtime).
     const plaintext = await prisma.report.count({ where: { resourceId: subject } });
     expect(plaintext).toBe(0);
-    const tombstoned = await prisma.report.count({ where: { resourceId: pseudonymizeUserId(subject) } });
+    const tombstoned = await prisma.report.count({
+      where: { reportType: "ACCOUNT", resourceId: { startsWith: "deleted:" } },
+    });
     expect(tombstoned).toBe(1);
 
     // cleanup

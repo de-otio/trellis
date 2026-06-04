@@ -65,12 +65,20 @@ export interface Env {
   PSEUDONYM_HMAC_KMS_KEY_ID?: string;
   /**
    * HMAC key for GDPR-erasure tombstones (Surveillance-hardening Phase 0, P4 /
-   * security review H1): `pseudonymizeUserId` keys the ACCOUNT-report
-   * resourceId tombstone so the database alone cannot rainbow-table a deleted
-   * user's ID back. Optional — falls back to SESSION_SECRET. Set a dedicated
-   * value to rotate/escrow it separately from session signing.
+   * security review H1): keys the ACCOUNT-report resourceId tombstone so the
+   * database alone cannot rainbow-table a deleted user's ID back. Resolved by
+   * `resolvePseudonymSecret` in `lib/services/user-data-deletion.ts`, NOT here.
+   * This plaintext var is the LOCAL/DEV/CI override only.
    */
   REPORT_PSEUDONYM_SECRET?: string;
+  /**
+   * Production source for the erasure-tombstone key: the NAME of an SSM
+   * Parameter Store SecureString, fetched + KMS-decrypted + cached via AWS
+   * Lambda Powertools (`@aws-lambda-powertools/parameters/ssm`). A dedicated,
+   * separately-rotatable key — destroying it crypto-shreds prior tombstones.
+   * If unset, the tombstone key falls back to the resolved SESSION_SECRET.
+   */
+  REPORT_PSEUDONYM_SECRET_PARAM?: string;
   /** DynamoDB table holding refresh-jti dedup + agent-session metadata. */
   AGENT_REFRESH_TABLE?: string;
   /** DynamoDB table backing idempotency-key dedup (T9b-c). Default: {stage}-trellis-idempotency */

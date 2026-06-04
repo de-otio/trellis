@@ -144,9 +144,11 @@ describe("deleteUserData", () => {
   it("pseudonymizes ACCOUNT reports about the deleted user (GDPR Art. 17, P4)", async () => {
     await deleteUserData(mockDb, "user-123");
 
+    // The tombstone key is resolved at runtime (resolvePseudonymSecret), so
+    // assert the where-clause exactly and the resourceId structurally.
     expect(mockDb.report.updateMany).toHaveBeenCalledWith({
       where: { reportType: "ACCOUNT", resourceType: "user", resourceId: "user-123" },
-      data: { resourceId: pseudonymizeUserId("user-123") },
+      data: { resourceId: expect.stringMatching(/^deleted:[0-9a-f]{32}$/) },
     });
   });
 
@@ -158,15 +160,23 @@ describe("deleteUserData", () => {
 });
 
 describe("pseudonymizeUserId", () => {
-  it("is deterministic and does not leak the plaintext id", () => {
-    const a = pseudonymizeUserId("user-123");
-    const b = pseudonymizeUserId("user-123");
+  const KEY = "test-pseudonym-key-32-characters!!";
+
+  it("is deterministic per (key, id) and does not leak the plaintext id", () => {
+    const a = pseudonymizeUserId("user-123", KEY);
+    const b = pseudonymizeUserId("user-123", KEY);
     expect(a).toBe(b);
     expect(a).not.toContain("user-123");
     expect(a.startsWith("deleted:")).toBe(true);
   });
 
   it("maps different ids to different tombstones", () => {
-    expect(pseudonymizeUserId("a")).not.toBe(pseudonymizeUserId("b"));
+    expect(pseudonymizeUserId("a", KEY)).not.toBe(pseudonymizeUserId("b", KEY));
+  });
+
+  it("is keyed — a different key yields a different tombstone for the same id", () => {
+    expect(pseudonymizeUserId("user-123", KEY)).not.toBe(
+      pseudonymizeUserId("user-123", "a-different-key-32-characters-long!"),
+    );
   });
 });
