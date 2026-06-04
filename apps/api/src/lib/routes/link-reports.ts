@@ -466,7 +466,9 @@ async function notifyModeratorsOfAutoBlock(
       await emailProvider.sendEmail({
         from: env.FROM_EMAIL || "noreply@example.com",
         to: moderatorEmails,
-        subject: `Domain Auto-Blocked: ${domain}`,
+        // Escaped in the subject too (security review M1): some mail clients
+        // render the subject as HTML.
+        subject: `Domain Auto-Blocked: ${safeDomain}`,
         html: `
           <h2>Domain Auto-Blocked</h2>
           <p>The domain <strong>${safeDomain}</strong> has been automatically blocked due to reaching the report threshold.</p>

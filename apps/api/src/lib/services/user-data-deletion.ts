@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHmac } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
 
 /**
@@ -7,9 +7,23 @@ import type { PrismaClient } from "@prisma/client";
  * in ACCOUNT-report `resourceId` so aggregate pattern analysis survives while
  * the identifier does not — "pattern analysis" is NOT an Art. 17(3) exemption.
  * Same input → same tombstone, so per-target report counts stay coherent.
+ *
+ * KEYED HMAC, not a bare hash (security review H1): user IDs are short,
+ * enumerable CUIDs, so an unsalted SHA-256 tombstone is rainbow-table
+ * reversible by any party holding ONLY the database (operator, backup
+ * exfiltration, compelled disclosure). The HMAC key lives in env/SSM —
+ * never in the database or the public npm tarball — so the DB alone cannot
+ * reverse the tombstone. A dedicated REPORT_PSEUDONYM_SECRET is preferred (it
+ * can be rotated/escrowed separately); it falls back to SESSION_SECRET, which
+ * is always present (it's a required, server-only secret). An empty key would
+ * degrade to ~unkeyed, but erasure must never throw, so a misconfigured env
+ * fails open to a still-pseudonymized (if weaker) value rather than blocking
+ * deletion.
  */
 export function pseudonymizeUserId(userId: string): string {
-  return `deleted:${createHash("sha256").update(userId).digest("hex").slice(0, 32)}`;
+  const key =
+    process.env.REPORT_PSEUDONYM_SECRET || process.env.SESSION_SECRET || "";
+  return `deleted:${createHmac("sha256", key).update(userId).digest("hex").slice(0, 32)}`;
 }
 
 export interface DeletionResult {

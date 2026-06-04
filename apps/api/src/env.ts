@@ -63,6 +63,14 @@ export interface Env {
    * population is SKIPPED (fail-safe) — never fall back to an unkeyed hash.
    */
   PSEUDONYM_HMAC_KMS_KEY_ID?: string;
+  /**
+   * HMAC key for GDPR-erasure tombstones (Surveillance-hardening Phase 0, P4 /
+   * security review H1): `pseudonymizeUserId` keys the ACCOUNT-report
+   * resourceId tombstone so the database alone cannot rainbow-table a deleted
+   * user's ID back. Optional — falls back to SESSION_SECRET. Set a dedicated
+   * value to rotate/escrow it separately from session signing.
+   */
+  REPORT_PSEUDONYM_SECRET?: string;
   /** DynamoDB table holding refresh-jti dedup + agent-session metadata. */
   AGENT_REFRESH_TABLE?: string;
   /** DynamoDB table backing idempotency-key dedup (T9b-c). Default: {stage}-trellis-idempotency */
