@@ -82,3 +82,4 @@ Extensions live in `extensions/{name}/` as separate npm workspace packages (e.g.
 | [18-dynamodb-single-table.md](18-dynamodb-single-table.md) | DynamoDB key design, access patterns, TTL |
 | [19-ai-operated-sdlc.md](19-ai-operated-sdlc.md) | AI-operated SDLC: local dev, deploy, ops, incidents |
 | [14-graph-and-circles.md](14-graph-and-circles.md) | Entity-centric model, Neo4j AuraDB, circles, dual-write |
+| [../surveillance-threat-model/](../surveillance-threat-model/) | **Surveillance threat model** — scraping/OSINT, ADINT, avatar infiltration, legal compulsion; gaps and roadmap |
