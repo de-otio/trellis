@@ -143,6 +143,19 @@ export interface Env {
   // Analytics
   ANALYTICS?: AnalyticsEngineDataset;
 
+  // --- P3 signup-metadata config (surveillance-hardening Phase 0, E2) ---
+  /**
+   * Retention window, in DAYS, for `signup`-type SecurityEvents (the
+   * retention-bound client-signal record written at account creation). Longer
+   * than InteractionEvent because signup cohorts are the slowest-moving abuse
+   * signal — still bounded, never unset. Defaults to
+   * `DEFAULT_SIGNUP_EVENT_RETENTION_DAYS` (180) when absent/invalid. Config-
+   * driven per the threshold-secrecy invariant — see
+   * `lib/signup-metadata.ts` + 07-data-minimization.md.
+   */
+  SIGNUP_EVENT_RETENTION_DAYS?: string;
+  // --- end P3 signup-metadata config ---
+
   // Cost protection
   OPENAI_BUDGET_ENABLED?: string;
   OPENAI_BUDGET_HOURLY_MAX?: string;
@@ -480,6 +493,10 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
 
     // Admin
     SECURITY_WEBHOOK_URL: process.env.SECURITY_WEBHOOK_URL,
+
+    // --- P3 signup-metadata config (surveillance-hardening Phase 0, E2) ---
+    SIGNUP_EVENT_RETENTION_DAYS: process.env.SIGNUP_EVENT_RETENTION_DAYS,
+    // --- end P3 signup-metadata config ---
 
     // Cost protection
     OPENAI_BUDGET_ENABLED: process.env.OPENAI_BUDGET_ENABLED || "true",

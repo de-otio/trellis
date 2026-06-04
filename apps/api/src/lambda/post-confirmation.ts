@@ -46,6 +46,11 @@ import { deriveEmailDomain } from "../lib/tenant/derive-domain.js";
 import { resolveTenantRole, type RoleMappingInput } from "../lib/tenant/resolve-role.js";
 import { deriveHandle } from "../lib/user/derive-handle.js";
 import { computeAnonymousId } from "../lib/pseudonym.js";
+import {
+  emitSignupSecurityEvent,
+  signupUserData,
+} from "../lib/signup-metadata.js";
+import type { SignupMethod } from "@prisma/client";
 
 const secretsClient = new SecretsManagerClient({ region: process.env.AWS_REGION });
 let prisma: PrismaClient | null = null;
@@ -98,6 +103,24 @@ function isFederatedEvent(event: PostConfirmationTriggerEvent): boolean {
   }
 }
 
+/**
+ * Parse an explicit `signupMethod` hint from clientMetadata, if present and
+ * valid. Returns undefined for anything we don't recognize (the caller then
+ * derives the method from the invitation code / defaults to COGNITO).
+ */
+function parseSignupMethodHint(
+  raw: string | undefined | null,
+): SignupMethod | undefined {
+  switch (raw) {
+    case "COGNITO":
+    case "INVITE":
+    case "MAGIC_LINK":
+      return raw;
+    default:
+      return undefined;
+  }
+}
+
 function parseIdpGroups(raw: string | undefined | null): string[] {
   if (!raw) return [];
   // Split on `,` and `;` only — IdPs (notably Okta in displayName mode) may
@@ -119,6 +142,11 @@ interface ProvisioningResult {
   orgTenantId: string | null;
   orgTenantSlug: string | null;
   orgTenantRole: TenantRole | null;
+  // Signup-metadata (P3): how this account was created and which invitation it
+  // redeemed. Populated only for freshly created users (existing users keep
+  // their NULL legacy state — no backfill).
+  signupMethod: SignupMethod;
+  invitationId: string | null;
 }
 
 const SUPPORTED_TRIGGERS = new Set([
@@ -151,6 +179,17 @@ export const handler: PostConfirmationTriggerHandler = async (event) => {
     }
   }
 
+  // Signup-metadata (P3): how the account was created. An explicit
+  // `signupMethod` hint in clientMetadata wins (e.g. a passwordless/MAGIC_LINK
+  // signup labels itself); otherwise an invitation code present at signup means
+  // INVITE, and the default is COGNITO. The invitation FK is resolved inside the
+  // transaction below (only when a matching Prisma Invitation exists).
+  const invitationCode =
+    event.request.clientMetadata?.invitationCode?.trim() || undefined;
+  const requestedMethod = parseSignupMethodHint(
+    event.request.clientMetadata?.signupMethod,
+  );
+
   const db = await getPrisma();
 
   const result = await db.$transaction(
@@ -163,6 +202,8 @@ export const handler: PostConfirmationTriggerHandler = async (event) => {
       dateOfBirth,
       ageTier,
       providedHandle: attrs["custom:handle"],
+      invitationCode,
+      requestedMethod,
     }),
     { timeout: 8000 },
   );
@@ -190,6 +231,22 @@ export const handler: PostConfirmationTriggerHandler = async (event) => {
 
   await primeClaimsCache(cognitoSub, result);
 
+  // Signup-metadata SecurityEvent (P3). Emitted AFTER the provisioning
+  // transaction commits so a telemetry hiccup can never roll back account
+  // creation; the helper itself also fails open. Cognito's PostConfirmation
+  // event exposes no client source IP/UA (callerContext carries only
+  // awsSdkVersion + clientId), so this records method + invitation + tenant
+  // only — no fabricated client signals. Retention is config-driven.
+  await emitSignupSecurityEvent({
+    db,
+    userId: result.userId,
+    method: result.signupMethod,
+    invitationId: result.invitationId,
+    tenantId: result.orgTenantId ?? result.personalTenantId,
+    config: { SIGNUP_EVENT_RETENTION_DAYS: process.env.SIGNUP_EVENT_RETENTION_DAYS },
+    logger: { warn: (...args) => console.warn(...args) },
+  });
+
   console.log(
     JSON.stringify({
       event: "postconfirm.ok",
@@ -213,6 +270,10 @@ interface ProvisioningInput {
   dateOfBirth: Date | undefined;
   ageTier: AgeTier;
   providedHandle: string | undefined;
+  /** Invitation code presented at signup (clientMetadata), if any. */
+  invitationCode: string | undefined;
+  /** Explicit signupMethod hint from clientMetadata, if recognized. */
+  requestedMethod: SignupMethod | undefined;
 }
 
 async function provisionUserAndTenancy(
@@ -227,10 +288,33 @@ async function provisionUserAndTenancy(
     dateOfBirth,
     ageTier,
     providedHandle,
+    invitationCode,
+    requestedMethod,
   } = input;
 
   const existing = await tx.user.findFirst({
     where: { OR: [{ cognitoSub }, { email }] },
+  });
+
+  // Signup-metadata (P3): resolve the redeemed Prisma Invitation (if the code
+  // presented at signup matches one) so we can set the FK. Codes are stored
+  // upper-cased on the Invitation model. A code that doesn't resolve to a
+  // Prisma invitation simply yields no FK (still a valid signup).
+  let redeemedInvitationId: string | null = null;
+  if (invitationCode) {
+    const inv = await tx.invitation.findUnique({
+      where: { code: invitationCode.toUpperCase() },
+      select: { id: true },
+    });
+    redeemedInvitationId = inv?.id ?? null;
+  }
+  // Method precedence: explicit hint > resolved invitation FK > COGNITO default.
+  const signupMethod: SignupMethod =
+    requestedMethod ?? (redeemedInvitationId ? "INVITE" : "COGNITO");
+  // Choke point: the only place User signup-metadata is assembled.
+  const signupFields = signupUserData({
+    method: signupMethod,
+    invitationId: redeemedInvitationId,
   });
 
   let user = existing;
@@ -251,6 +335,10 @@ async function provisionUserAndTenancy(
         // until an explicit verification flow sets it. Distinct from `ageTier`
         // (which fails open at ADULT). See prisma User.ageVerified doc + PSEUDONYM.md.
         ageVerified: false,
+        // Signup-metadata (P3): how the account was created + redeemed
+        // invitation FK. Client signals (IP/UA) go to SecurityEvent, never here.
+        signupMethod: signupFields.signupMethod,
+        invitationId: signupFields.invitationId,
         ...(dateOfBirth && { dateOfBirth, ageTier }),
       },
     });
@@ -344,6 +432,8 @@ async function provisionUserAndTenancy(
         orgTenantId: null,
         orgTenantSlug: null,
         orgTenantRole: null,
+        signupMethod,
+        invitationId: redeemedInvitationId,
       };
     }
     const domain = deriveEmailDomain(email);
@@ -439,6 +529,8 @@ async function provisionUserAndTenancy(
     orgTenantId,
     orgTenantSlug,
     orgTenantRole,
+    signupMethod,
+    invitationId: redeemedInvitationId,
   };
 }
 
