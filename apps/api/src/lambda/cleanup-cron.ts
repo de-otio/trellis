@@ -1,5 +1,8 @@
 import { DynamoDBClient, DeleteItemCommand, PutItemCommand, QueryCommand } from "@aws-sdk/client-dynamodb";
 import { marshall } from "@aws-sdk/util-dynamodb";
+import { Logger } from "@aws-lambda-powertools/logger";
+
+const logger = new Logger({ serviceName: "cleanup-cron" });
 
 const dynamo = new DynamoDBClient({ region: process.env.AWS_REGION });
 const TABLE = process.env.DYNAMODB_TABLE!;
@@ -27,11 +30,11 @@ export const handler = async (): Promise<void> => {
       }),
     );
   } catch {
-    console.log(JSON.stringify({ level: "info", msg: "Cleanup cron already running, skipping" }));
+    logger.info("Cleanup cron already running, skipping");
     return;
   }
 
-  console.log(JSON.stringify({ level: "info", msg: "Cleanup cron started" }));
+  logger.info("Cleanup cron started");
   // Additional cleanup logic goes here
-  console.log(JSON.stringify({ level: "info", msg: "Cleanup cron complete" }));
+  logger.info("Cleanup cron complete");
 };

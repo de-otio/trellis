@@ -1,18 +1,25 @@
 import { DynamoDBClient, PutItemCommand } from "@aws-sdk/client-dynamodb";
-import { SecretsManagerClient, GetSecretValueCommand } from "@aws-sdk/client-secrets-manager";
 import { marshall } from "@aws-sdk/util-dynamodb";
 import { PrismaClient } from "@prisma/client";
+import { Logger } from "@aws-lambda-powertools/logger";
+import { getSecret } from "@aws-lambda-powertools/parameters/secrets";
+
+const logger = new Logger({ serviceName: "maintenance-cron" });
 
 const dynamo = new DynamoDBClient({ region: process.env.AWS_REGION });
-const secretsClient = new SecretsManagerClient({ region: process.env.AWS_REGION });
 const TABLE = process.env.DYNAMODB_TABLE!;
 
 let prisma: PrismaClient | null = null;
 
 async function getPrisma(): Promise<PrismaClient> {
   if (prisma) return prisma;
-  const secret = await secretsClient.send(new GetSecretValueCommand({ SecretId: process.env.DB_SECRET_ARN! }));
-  const { username, password, host, port, dbname } = JSON.parse(secret.SecretString!);
+  const { username, password, host, port, dbname } = (await getSecret(process.env.DB_SECRET_ARN!, { transform: "json" })) as unknown as {
+    username: string;
+    password: string;
+    host: string;
+    port: string | number;
+    dbname: string;
+  };
   prisma = new PrismaClient({
     datasources: { db: { url: `postgresql://${username}:${encodeURIComponent(password)}@${host}:${port}/${dbname}?connection_limit=1` } },
   });
@@ -37,11 +44,11 @@ export const handler = async (): Promise<void> => {
       ExpressionAttributeValues: marshall({ ":now": now }),
     }));
   } catch {
-    console.log(JSON.stringify({ level: "info", msg: "Maintenance cron already running, skipping" }));
+    logger.info("Maintenance cron already running, skipping");
     return;
   }
 
-  console.log(JSON.stringify({ level: "info", msg: "Maintenance cron started" }));
+  logger.info("Maintenance cron started");
 
   const db = await getPrisma();
 
@@ -67,12 +74,12 @@ export const handler = async (): Promise<void> => {
             TableName: TABLE,
             Key: marshall({ pk, sk: "lock" }),
           }));
-          console.log(JSON.stringify({ level: "info", msg: "Stale cron lock removed", lock: pk }));
+          logger.info("Stale cron lock removed", { lock: pk });
         }
       }
     }
   } catch (err) {
-    console.error(JSON.stringify({ level: "error", msg: "Stale lock cleanup failed", error: String(err) }));
+    logger.error("Stale lock cleanup failed", { error: err });
   }
 
   // 3. Vacuum analyze critical tables (via advisory lock to prevent concurrent runs)
@@ -83,13 +90,13 @@ export const handler = async (): Promise<void> => {
       await db.$executeRawUnsafe("ANALYZE posts");
       await db.$executeRawUnsafe("ANALYZE media_files");
       await db.$executeRawUnsafe("ANALYZE follows");
-      console.log(JSON.stringify({ level: "info", msg: "ANALYZE completed on critical tables" }));
+      logger.info("ANALYZE completed on critical tables");
     } finally {
       await db.$executeRaw`SELECT pg_advisory_unlock(42)`;
     }
   } catch (err) {
-    console.error(JSON.stringify({ level: "error", msg: "ANALYZE failed", error: String(err) }));
+    logger.error("ANALYZE failed", { error: err });
   }
 
-  console.log(JSON.stringify({ level: "info", msg: "Maintenance cron complete" }));
+  logger.info("Maintenance cron complete");
 };

@@ -21,12 +21,13 @@ import {
   AdminDeleteUserCommand,
 } from "@aws-sdk/client-cognito-identity-provider";
 import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
-import {
-  CloudWatchClient,
-  PutMetricDataCommand,
-} from "@aws-sdk/client-cloudwatch";
 import { DynamoDBClient, PutItemCommand } from "@aws-sdk/client-dynamodb";
 import { marshall } from "@aws-sdk/util-dynamodb";
+import { Logger } from "@aws-lambda-powertools/logger";
+import { Metrics, MetricUnit } from "@aws-lambda-powertools/metrics";
+
+const logger = new Logger({ serviceName: "e2e-sweeper" });
+const metrics = new Metrics({ namespace: "Trellis/E2E", serviceName: "e2e-sweeper" });
 
 const region = process.env.AWS_REGION || "eu-central-1";
 const stage = process.env.STAGE || "dev";
@@ -36,7 +37,6 @@ const dynamoTable = process.env.DYNAMODB_TABLE!;
 
 const cognito = new CognitoIdentityProviderClient({ region });
 const sqs = new SQSClient({ region });
-const cloudwatch = new CloudWatchClient({ region });
 const dynamo = new DynamoDBClient({ region });
 
 const STALE_THRESHOLD_HOURS = 2;
@@ -57,11 +57,11 @@ export const handler = async (): Promise<void> => {
       ExpressionAttributeValues: marshall({ ":now": now }),
     }));
   } catch {
-    console.log(JSON.stringify({ level: "info", msg: "E2E sweeper already running, skipping" }));
+    logger.info("E2E sweeper already running, skipping");
     return;
   }
 
-  console.log(JSON.stringify({ level: "info", msg: "E2E sweeper started", cutoff: cutoff.toISOString() }));
+  logger.info("E2E sweeper started", { cutoff: cutoff.toISOString() });
 
   let totalQueued = 0;
 
@@ -93,9 +93,9 @@ export const handler = async (): Promise<void> => {
               MessageBody: JSON.stringify({ userId: sub }),
             }));
             totalQueued++;
-            console.log(JSON.stringify({ level: "info", msg: `Queued deletion for ${email}`, userId: sub }));
+            logger.info(`Queued deletion for ${email}`, { userId: sub });
           } catch (err) {
-            console.warn(JSON.stringify({ level: "warn", msg: `Failed to queue deletion for ${email}`, error: String(err) }));
+            logger.warn(`Failed to queue deletion for ${email}`, { error: err });
           }
         }
 
@@ -107,9 +107,9 @@ export const handler = async (): Promise<void> => {
             UserPoolId: userPoolId,
             Username: user.Username,
           }));
-          console.log(JSON.stringify({ level: "info", msg: `Deleted Cognito user ${email}` }));
+          logger.info(`Deleted Cognito user ${email}`);
         } catch (err) {
-          console.warn(JSON.stringify({ level: "warn", msg: `Cognito delete failed for ${email}`, error: String(err) }));
+          logger.warn(`Cognito delete failed for ${email}`, { error: err });
         }
       }
 
@@ -118,23 +118,17 @@ export const handler = async (): Promise<void> => {
     } while (paginationToken && pages < MAX_PAGES);
 
   } catch (err) {
-    console.error(JSON.stringify({ level: "error", msg: "Failed to list Cognito users", error: String(err) }));
+    logger.error("Failed to list Cognito users", { error: err });
   }
 
   // Step 4: Emit metric
   try {
-    await cloudwatch.send(new PutMetricDataCommand({
-      Namespace: "Trellis/E2E",
-      MetricData: [{
-        MetricName: "E2eLeakedRecords",
-        Value: totalQueued,
-        Unit: "Count",
-        Dimensions: [{ Name: "Stage", Value: stage }],
-      }],
-    }));
+    const m = metrics.singleMetric();
+    m.addDimension("Stage", stage);
+    m.addMetric("E2eLeakedRecords", MetricUnit.Count, totalQueued);
   } catch (err) {
-    console.error(JSON.stringify({ level: "error", msg: "Failed to emit metric", error: String(err) }));
+    logger.error("Failed to emit metric", { error: err });
   }
 
-  console.log(JSON.stringify({ level: "info", msg: "E2E sweeper complete", totalQueued }));
+  logger.info("E2E sweeper complete", { totalQueued });
 };
