@@ -30,7 +30,7 @@ const PHASE0_NEW_FILES = [
   // P2 — interaction event capture
   "src/lib/graph/postgres/interaction-events.ts",
   // P3 — signup metadata capture
-  //   "src/lib/signup-metadata.ts",
+  "src/lib/signup-metadata.ts",
 ];
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

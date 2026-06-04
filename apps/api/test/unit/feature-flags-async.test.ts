@@ -40,7 +40,8 @@ describe("getFeatureFlags (async)", () => {
     const flags = await getFeatureFlags(undefined, mockDb);
 
     expect(flags.posts).toBe(false);
-    expect(mockGetToggle).toHaveBeenCalledWith("posts_enabled");
+    // P5: getFeatureFlags threads the tenantId (here undefined) into getToggle.
+    expect(mockGetToggle).toHaveBeenCalledWith("posts_enabled", undefined);
   });
 
   it("should use default value when toggle does not exist", async () => {
@@ -59,13 +60,13 @@ describe("getFeatureFlags (async)", () => {
 
     await getFeatureFlags(undefined, mockDb);
 
-    expect(mockGetToggle).toHaveBeenCalledWith("posts_enabled");
-    expect(mockGetToggle).toHaveBeenCalledWith("comments_enabled");
-    expect(mockGetToggle).toHaveBeenCalledWith("entity_profiles_enabled");
-    expect(mockGetToggle).toHaveBeenCalledWith("friends_enabled");
-    expect(mockGetToggle).toHaveBeenCalledWith("sentiments_enabled");
-    expect(mockGetToggle).toHaveBeenCalledWith("feeds_enabled");
-    expect(mockGetToggle).toHaveBeenCalledWith("map_enabled");
+    expect(mockGetToggle).toHaveBeenCalledWith("posts_enabled", undefined);
+    expect(mockGetToggle).toHaveBeenCalledWith("comments_enabled", undefined);
+    expect(mockGetToggle).toHaveBeenCalledWith("entity_profiles_enabled", undefined);
+    expect(mockGetToggle).toHaveBeenCalledWith("friends_enabled", undefined);
+    expect(mockGetToggle).toHaveBeenCalledWith("sentiments_enabled", undefined);
+    expect(mockGetToggle).toHaveBeenCalledWith("feeds_enabled", undefined);
+    expect(mockGetToggle).toHaveBeenCalledWith("map_enabled", undefined);
   });
 
   it("should fall back to defaults on error", async () => {
