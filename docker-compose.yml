@@ -39,29 +39,10 @@ services:
       - localstack_data:/var/lib/localstack
       - /var/run/docker.sock:/var/run/docker.sock
 
-  # Neo4j backs the graph layer (relationships, circles, discovery). The
-  # standalone test lane and `npm run test:graph` use the `test` database on
-  # this instance — no manual setup required once the stack is up.
-  neo4j:
-    image: neo4j:5-community
-    ports:
-      - "7474:7474" # HTTP browser
-      - "7687:7687" # Bolt
-    environment:
-      NEO4J_AUTH: neo4j/trellis_dev_password
-      # Community edition allows only the default "neo4j" db; the graph/standalone
-      # configs target it directly (NEO4J_TEST_DATABASE=neo4j).
-      NEO4J_dbms_security_auth__minimum__password__length: "8"
-    volumes:
-      - neo4j_data:/data
-    healthcheck:
-      test:
-        ["CMD-SHELL", "wget -qO- http://localhost:7474 >/dev/null 2>&1 || exit 1"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
+  # (Neo4j removed 2026-06: the graph layer — relationships, circles,
+  # discovery — runs in Postgres above. `npm run test:graph` targets it via
+  # DATABASE_URL.)
 
 volumes:
   postgres_data:
   localstack_data:
-  neo4j_data:

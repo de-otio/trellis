@@ -1,35 +1,29 @@
 /**
  * Graph Service Factory
  *
- * Creates and configures the GraphService implementation (Neo4j over Bolt)
- * against either AuraDB (dev/prod) or a local Docker Neo4j (local/integration
- * tests). Both targets speak the same Cypher dialect, so the factory only
- * varies authentication and connection string.
+ * Creates and memoizes the GraphService implementation. The graph serving
+ * path runs on Postgres (PostgresGraphService — joins + recursive CTEs on
+ * the existing RDS); there is no separate graph database. (Graph-db revisit
+ * 2026-06. The Neo4j/Neptune backend was removed; restore it from git
+ * history if a dedicated graph DB is ever re-adopted.)
  *
  * @example
  * ```typescript
- * const graphService = await createGraphService({
- *   uri: "bolt://localhost:7687",
- *   user: "neo4j",
- *   password: "test-password",
- * });
- *
- * const health = await graphService.healthCheck();
+ * const graphService = await createGraphServiceFromEnv(env);
+ * const health = await graphService.healthCheck(); // backend: "postgres"
  * ```
  */
 
 import type { GraphService, GraphConnection } from "./graph-service.js";
-import type { GraphConnectionConfig } from "./types.js";
-import { Neo4jGraphService } from "./neo4j-graph-service.js";
 import type { EntityGeoLookup } from "../geo/entity-geo-repository.js";
 import type { EnvWithDb } from "../../db.js";
 
 /**
  * Build the PostGIS geo-proximity lookup for discoverNearby. Tolerant of
- * absence — if Postgres config is missing it returns undefined and geo-discovery
- * yields empty (the graph never does spatial work). NOTE (residency): a single
- * pooled client at the default region is fine for dev/single-DB; multi-residency
- * prod should route per request.
+ * absence — if Postgres config is missing it returns undefined and
+ * geo-discovery yields empty. NOTE (residency): a single pooled client at
+ * the default region is fine for dev/single-DB; multi-residency prod should
+ * route per request.
  */
 async function buildGeoLookup(env?: unknown): Promise<EntityGeoLookup | undefined> {
   try {
@@ -43,169 +37,14 @@ async function buildGeoLookup(env?: unknown): Promise<EntityGeoLookup | undefine
   }
 }
 
-// ---------------------------------------------------------------------------
-// Factory Configuration (from environment variables)
-// ---------------------------------------------------------------------------
-
-export interface GraphServiceEnvConfig {
-  /** Graph database Bolt endpoint (bolt:// for local Neo4j, bolt+s:// for AuraDB) */
-  uri: string;
-  /** Username for basic auth. */
-  user?: string;
-  /** Password for basic auth. */
-  password?: string;
-  /**
-   * Auth scheme. "iam" → Amazon Neptune SigV4 via the task role (no stored
-   * credential). Omitted → inferred: "basic" when user+password are present,
-   * else "none". Neo4j/AuraDB use basic; local/docker use none.
-   */
-  authMode?: "iam" | "basic" | "none";
-  /** AWS region — used by SSM credential lookup and required for IAM (Neptune) auth. */
-  region?: string;
-  maxConnectionPoolSize?: number;
-  connectionAcquisitionTimeout?: number;
-  maxConnectionLifetime?: number;
-  connectionLivenessCheckTimeout?: number;
-  /** Per-query timeout in milliseconds. */
-  queryTimeoutMs?: number;
-}
-
-/**
- * Build a GraphConnectionConfig from environment-style config.
- */
-function buildConnectionConfig(
-  env: GraphServiceEnvConfig,
-): GraphConnectionConfig {
-  let auth: GraphConnectionConfig["auth"];
-  if (env.authMode === "iam") {
-    if (!env.region) {
-      // Fail at startup (ECS health check → rollback) rather than connect un-authed.
-      throw new Error("GRAPH_DB_AUTH_MODE=iam requires a region (set AWS_REGION)");
-    }
-    auth = { type: "iam", region: env.region };
-  } else if (env.user && env.password) {
-    auth = { type: "basic", username: env.user, password: env.password };
-  } else {
-    auth = { type: "none" };
-  }
-
-  return {
-    endpoint: env.uri,
-    auth,
-    pool: {
-      maxConnectionPoolSize: env.maxConnectionPoolSize,
-      connectionAcquisitionTimeout: env.connectionAcquisitionTimeout,
-      maxConnectionLifetime: env.maxConnectionLifetime,
-      connectionLivenessCheckTimeout: env.connectionLivenessCheckTimeout,
-    },
-    queryTimeoutMs: env.queryTimeoutMs,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Environment Variable Helpers
-// ---------------------------------------------------------------------------
-
-function intEnv(name: string): number | undefined {
-  const raw = process.env[name];
-  if (raw === undefined || raw === "") return undefined;
-  const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0 || String(parsed) !== raw.trim()) {
-    // Throwing at startup fails the ECS health check, triggering a
-    // rollback via ECS circuitBreaker instead of running with bad config.
-    throw new Error(`${name} must be a positive integer, got: ${JSON.stringify(raw)}`);
-  }
-  return parsed;
-}
-
-// ---------------------------------------------------------------------------
-// Factory Function
-// ---------------------------------------------------------------------------
-
-/**
- * Create a connected GraphService instance.
- *
- * Reads connection config, creates the appropriate implementation,
- * and establishes the connection (including schema initialization).
- *
- * @param envConfig - Connection configuration (typically from process.env)
- * @returns A connected GraphService instance that also implements GraphConnection
- * @throws GraphConnectionError if the database is unreachable
- */
-export async function createGraphService(
-  envConfig: GraphServiceEnvConfig,
-  geoLookup?: EntityGeoLookup,
-): Promise<GraphService & GraphConnection> {
-  const config = buildConnectionConfig(envConfig);
-
-  const service = new Neo4jGraphService(geoLookup);
-  await service.connect(config);
-  return service;
-}
-
-/**
- * Fetch AuraDB credentials from an SSM SecureString without touching process.env.
- * The returned values live only on the returned object and are passed directly
- * into the neo4j driver; `process.env` is never mutated.
- */
-async function fetchGraphCredentialsFromSsm(
-  paramName: string,
-  region: string,
-): Promise<{ uri: string; user: string; password: string }> {
-  const { SSMClient, GetParameterCommand } = await import("@aws-sdk/client-ssm");
-  const client = new SSMClient({ region });
-  const response = await client.send(
-    new GetParameterCommand({ Name: paramName, WithDecryption: true }),
-  );
-  const raw = response.Parameter?.Value;
-  if (!raw) {
-    throw new Error(`SSM parameter ${paramName} has no value`);
-  }
-
-  let parsed: Record<string, unknown>;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    throw new Error(`SSM parameter ${paramName} is not valid JSON`);
-  }
-
-  const uri = parsed.NEO4J_URI;
-  const user = parsed.NEO4J_USERNAME;
-  const password = parsed.NEO4J_PASSWORD;
-
-  if (typeof uri !== "string" || typeof user !== "string" || typeof password !== "string") {
-    throw new Error(
-      `SSM parameter ${paramName} missing required fields NEO4J_URI / NEO4J_USERNAME / NEO4J_PASSWORD`,
-    );
-  }
-
-  return { uri, user, password };
-}
-
-/**
- * Create a GraphService from standard environment variables or SSM.
- *
- * Resolution order:
- *   1. If GRAPH_DB_URI is set, use direct env vars (local dev, integration tests).
- *   2. Else if GRAPH_DB_CREDENTIALS_SSM_PARAM is set, fetch and decrypt from SSM.
- *
- * Credentials fetched from SSM are kept in function-local scope and passed
- * directly to the neo4j driver. They never enter process.env, so child
- * processes, core dumps, and `env` in a shell exec don't leak them.
- *
- * @returns A connected GraphService instance
- * @throws GraphConnectionError if the database is unreachable
- * @throws Error if neither GRAPH_DB_URI nor GRAPH_DB_CREDENTIALS_SSM_PARAM is set
- */
 /**
  * Process-wide shared graph service.
  *
- * A neo4j Driver is designed to be a long-lived singleton (one per app),
- * owning its own connection pool. `createGraphServiceFromEnv` is called from
- * ~10 per-request handlers; creating (and never closing) a fresh driver per
- * request leaks a Bolt connection + liveness timer each time. Memoize the
- * connected service so all callers share one driver. Config comes from env /
- * SSM, which is stable for the process, so a single instance is correct.
+ * createGraphServiceFromEnv is called from ~10 per-request handlers + the
+ * extension wrapper. Memoize the connected service so all callers share one
+ * instance (and one underlying Prisma client) instead of building a fresh
+ * one per request. Config comes from env, which is stable for the process,
+ * so a single instance is correct.
  */
 let sharedGraphService: Promise<GraphService & GraphConnection> | null = null;
 
@@ -224,8 +63,7 @@ export async function createGraphServiceFromEnv(
 
 /**
  * Close the shared graph service and clear the cache. Call on graceful
- * shutdown / test teardown so the Bolt connection + timers are released and
- * the process can exit cleanly.
+ * shutdown / test teardown so the process can exit cleanly.
  */
 export async function closeSharedGraphService(): Promise<void> {
   if (!sharedGraphService) return;
@@ -239,89 +77,28 @@ export async function closeSharedGraphService(): Promise<void> {
   }
 }
 
-async function buildGraphServiceFromEnv(_env?: unknown): Promise<
-  GraphService & GraphConnection
-> {
-  const region = process.env.AWS_REGION ?? "eu-central-1";
-  const isLambda = !!process.env.AWS_LAMBDA_FUNCTION_NAME;
-  const poolMax = isLambda ? 1 : intEnv("GRAPH_DB_POOL_MAX_SIZE");
-  const geoLookup = await buildGeoLookup(_env);
-
-  // Postgres serving path (graph-DB revisit 2026-06) — now the DEFAULT. The
-  // graph runs in the existing Postgres (joins + recursive CTEs); no separate
-  // graph DB, no dual-write. The legacy Neo4j/Neptune backend below is retained
-  // as an instant rollback via GRAPH_BACKEND=neo4j (reversibility discipline #3).
-  // See skybber/plans/redesign/graph-db/graph-db-postgres-migration-plan.md.
-  if (process.env.GRAPH_BACKEND !== "neo4j") {
-    const e = _env as EnvWithDb | undefined;
-    if (!e?.DATABASE_URL) {
-      throw new Error(
-        "Postgres graph backend requires a DATABASE_URL. " +
-          "(Set GRAPH_BACKEND=neo4j to use the legacy Neo4j/Neptune backend.)",
-      );
-    }
-    const { createPrisma } = await import("../../db.js");
-    const { PostgresGraphService } = await import(
-      "./postgres/postgres-graph-service.js"
-    );
-    const service = new PostgresGraphService(createPrisma(e), geoLookup);
-    await service.connect({ endpoint: "postgres", auth: { type: "none" } });
-    return service;
-  }
-
-  // IAM path — Amazon Neptune. The Bolt endpoint comes from GRAPH_DB_URI (the
-  // construct-published SSM value, injected by the deploy) and auth is SigV4
-  // via the task role — no stored credential, no SSM credential fetch.
-  if (process.env.GRAPH_DB_AUTH_MODE === "iam") {
-    const uri = process.env.GRAPH_DB_URI;
-    if (!uri) {
-      throw new Error("GRAPH_DB_AUTH_MODE=iam requires GRAPH_DB_URI (the Neptune Bolt endpoint)");
-    }
-    return createGraphService({
-      uri,
-      authMode: "iam",
-      region,
-      maxConnectionPoolSize: poolMax,
-      connectionAcquisitionTimeout: intEnv("GRAPH_DB_POOL_ACQUIRE_TIMEOUT_MS"),
-      maxConnectionLifetime: intEnv("GRAPH_DB_POOL_MAX_LIFETIME_MS"),
-      connectionLivenessCheckTimeout: intEnv("GRAPH_DB_POOL_LIVENESS_CHECK_MS"),
-      queryTimeoutMs: intEnv("GRAPH_DB_QUERY_TIMEOUT_MS"),
-    }, geoLookup);
-  }
-
-  // Direct env-var path — local dev, docker-compose, integration tests.
-  if (process.env.GRAPH_DB_URI) {
-    return createGraphService({
-      uri: process.env.GRAPH_DB_URI,
-      user: process.env.GRAPH_DB_USER,
-      password: process.env.GRAPH_DB_PASSWORD,
-      region,
-      maxConnectionPoolSize: poolMax,
-      connectionAcquisitionTimeout: intEnv("GRAPH_DB_POOL_ACQUIRE_TIMEOUT_MS"),
-      maxConnectionLifetime: intEnv("GRAPH_DB_POOL_MAX_LIFETIME_MS"),
-      connectionLivenessCheckTimeout: intEnv("GRAPH_DB_POOL_LIVENESS_CHECK_MS"),
-      queryTimeoutMs: intEnv("GRAPH_DB_QUERY_TIMEOUT_MS"),
-    }, geoLookup);
-  }
-
-  // Runtime SSM fetch — prod / dev AWS. Credentials stay in-memory only.
-  const paramName = process.env.GRAPH_DB_CREDENTIALS_SSM_PARAM;
-  if (!paramName) {
+async function buildGraphServiceFromEnv(
+  _env?: unknown,
+): Promise<GraphService & GraphConnection> {
+  if (process.env.GRAPH_BACKEND === "neo4j") {
     throw new Error(
-      "Graph DB config missing: set either GRAPH_DB_URI (local) or GRAPH_DB_CREDENTIALS_SSM_PARAM (AWS)",
+      "GRAPH_BACKEND=neo4j is no longer supported — the Neo4j/Neptune backend " +
+        "was removed (the graph runs in Postgres; graph-db revisit 2026-06). " +
+        "Restore it from git history if a dedicated graph DB is ever re-adopted.",
     );
   }
 
-  const creds = await fetchGraphCredentialsFromSsm(paramName, region);
-  return createGraphService({
-    uri: creds.uri,
-    user: creds.user,
-    password: creds.password,
-    region,
-    maxConnectionPoolSize: poolMax,
-    connectionAcquisitionTimeout: intEnv("GRAPH_DB_POOL_ACQUIRE_TIMEOUT_MS"),
-    maxConnectionLifetime: intEnv("GRAPH_DB_POOL_MAX_LIFETIME_MS"),
-    connectionLivenessCheckTimeout: intEnv("GRAPH_DB_POOL_LIVENESS_CHECK_MS"),
-    queryTimeoutMs: intEnv("GRAPH_DB_QUERY_TIMEOUT_MS"),
-  }, geoLookup);
+  const e = _env as EnvWithDb | undefined;
+  if (!e?.DATABASE_URL) {
+    throw new Error("Postgres graph backend requires a DATABASE_URL");
+  }
+
+  const geoLookup = await buildGeoLookup(_env);
+  const { createPrisma } = await import("../../db.js");
+  const { PostgresGraphService } = await import(
+    "./postgres/postgres-graph-service.js"
+  );
+  const service = new PostgresGraphService(createPrisma(e), geoLookup);
+  await service.connect({ endpoint: "postgres", auth: { type: "none" } });
+  return service;
 }
