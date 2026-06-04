@@ -64,6 +64,9 @@ Extensions live in `extensions/{name}/` as separate npm workspace packages (e.g.
 | [04-storage-cdn.md](04-storage-cdn.md) | S3, CloudFront OAC, media pipeline |
 | [05-auth.md](05-auth.md) | Cognito with cached token trigger |
 | [../identity-federation/](../identity-federation/) | **Multi-tenant identity & IdP federation** — Tenant model, per-tenant SAML/OIDC, self-service onboarding, tenant-scoped roles, agent-friendly setup + compliance discovery |
+| [../user-profile/](../user-profile/) | **User profile core** — Profile management, privacy settings, account transparency, profile API, data model |
+| [../data-portability/](../data-portability/) | **Data portability (GDPR Art. 15)** — Export API, JSON/ActivityPub data format, validation, versioning |
+| [../media/](../media/) | **Media pipeline & metadata** — Media data model, API, metadata extraction, processing, privacy/security considerations |
 | [06-async-processing.md](06-async-processing.md) | SQS (6 queues), EventBridge, cron locks |
 | [07-activitypub.md](07-activitypub.md) | ActivityPub federation on AWS |
 | [08-cdk-structure.md](08-cdk-structure.md) | CDK project layout and patterns |
