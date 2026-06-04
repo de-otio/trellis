@@ -1,0 +1,2010 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "rhel-openssl-3.0.x", "linux-arm64-openssl-3.0.x"]
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_DATABASE_URL")
+  // Note: Prisma 7 will require moving url/directUrl to prisma.config.ts
+  // This schema is correct for Prisma 5.x
+}
+
+// Generic Entity model (replaces Dog model)
+// NO tenantId - schema-per-tenant provides isolation
+model Entity {
+  id         String  @id @default(cuid())
+  // Multi-tenancy (v0.7) — every entity belongs to exactly one tenant.
+  tenantId   String  @map("tenant_id")
+  name       String
+  entityType String? @map("entity_type") // 'pet', 'product', 'event', etc. (defaults to 'dog' for MVP)
+  metadata   Json? // Flexible schema for entity-specific fields (breed, bio, birthdate, breedSize, etc.)
+
+  // Entity lifecycle
+  status           EntityStatus @default(ACTIVE)
+  deceasedAt       DateTime?    @map("deceased_at")
+  memorialSettings Json?        @map("memorial_settings") // { commentsOpen: boolean, ... }
+
+  // Life stage fields (auto-calculated from birthdate and breedSize in metadata)
+  lifeStage               String?   @map("life_stage") // Taxonomy ID: "life-stage:puppy"
+  lifeStageManualOverride Boolean   @default(false) @map("life_stage_manual_override")
+  lifeStageCalculatedAt   DateTime? @map("life_stage_calculated_at")
+
+  // ActivityPub federation fields
+  actorUri     String? @unique @map("actor_uri") // e.g. https://example.com/ap/entities/{id}
+  inboxUrl     String? @map("inbox_url")
+  outboxUrl    String? @map("outbox_url")
+  followersUrl String? @map("followers_url")
+  publicKey    String? @map("public_key") // PEM-encoded RSA public key
+  privateKey   String? @map("private_key") // PEM-encoded RSA private key (encrypted at rest)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Co-ownership (replaces single ownerId)
+  owners EntityOwnership[]
+  // Relationships and follower counts live in the graph DB (AuraDB), not Prisma
+
+  subjectPosts PostSubject[]
+  primaryPosts Post[]              @relation("PrimaryEntityPosts")
+  taxonomyTags EntityTaxonomyTag[]
+
+  connectionCodes ConnectionCode[]
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([tenantId, entityType, status])
+  @@index([status])
+  @@index([entityType, status])
+  @@map("entities")
+}
+
+enum EntityStatus {
+  ACTIVE
+  MEMORIAL
+  TRANSFERRED
+}
+
+model PostGeoIndex {
+  postUri   String   @id @map("post_uri")
+  // Multi-tenancy — denormalized from the owning post; location data is
+  // sensitive, so geo rows carry their own tenant_id for direct RLS.
+  tenantId  String   @map("tenant_id")
+  entityRef String?  @map("entity_ref") // Generic entity reference
+  geohash   String
+  lat       Float
+  lng       Float
+  createdAt DateTime @default(now()) @map("created_at")
+  place     String?
+  labels    Json?    @default("[]")
+
+  // PREPARATORY: Data classification for Border Safety Mode
+  // Classify location data as sensitive, benign, or decoy for future selective wiping
+  sensitivityLevel String @default("benign") @map("sensitivity_level")
+  // Values: 'benign', 'sensitive', 'decoy'
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([entityRef])
+  @@index([geohash])
+  @@index([sensitivityLevel]) // Index for sensitivity level queries
+  @@map("post_geo_index")
+}
+
+/// Entity geo-location for proximity discovery (C7). Neptune (the graph DB) has
+/// no spatial type, so geo-proximity lives here and is queried with PostGIS
+/// (ST_DWithin / KNN over a GiST index) via $queryRaw. Populated from the
+/// dual-write (syncEntity). Location is sensitive → own tenant_id for direct RLS
+/// (mirrors post_geo_index). See plans/redesign/entity-location-subsystem.md.
+model EntityLocation {
+  entityId  String                                @id @map("entity_id")
+  tenantId  String                                @map("tenant_id")
+  // PostGIS geography(Point,4326). Prisma Client cannot filter/order on it —
+  // spatial reads/writes go through $queryRaw. The geography column type, GiST
+  // index, and RLS are added in the migration SQL (not derivable from Prisma).
+  location  Unsupported("geography(Point, 4326)")
+  lat       Float
+  lng       Float
+  updatedAt DateTime                              @default(now()) @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@map("entity_location")
+}
+
+model IngestState {
+  id            String   @id @default(cuid())
+  cursor        String?  @unique
+  lastProcessed DateTime @default(now()) @map("last_processed")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  @@map("ingest_state")
+}
+
+// User roles
+enum UserRole {
+  END_USER
+  B2B_PARTNER
+  PARTNER_ADMIN
+  INTERNAL
+  CONTENT_CREATOR
+  MODERATOR // Surveillance-hardening Phase 0 (E5): moderation-queue access; routes are Phase 1
+  SUPER_ADMIN
+}
+
+// Surveillance-hardening Phase 0 (E2): how an account was created. Nullable on
+// User — existing accounts predate capture and stay NULL (unknown), never
+// backfilled. See doc/02-technical/surveillance-threat-model/03-signup-...
+enum SignupMethod {
+  COGNITO
+  INVITE
+  MAGIC_LINK
+}
+
+// Surveillance-hardening Phase 0 (E3): discriminator for the generalized Report
+// model. LINK reports exist today (folded in from LinkReport, P4); ACCOUNT
+// reports are Phase 1 (just a new reportType, not a new subsystem).
+enum ReportType {
+  LINK
+  ACCOUNT
+}
+
+// Role metadata for UI display and documentation
+model RoleMetadata {
+  role        UserRole @id // Maps to enum value
+  displayName String   @map("display_name") // Human-readable name (e.g., "Partner Administrator")
+  description String? // Detailed description of role permissions
+  category    String // 'partner', 'internal', 'system', 'end_user'
+  permissions Json? // Role-specific permissions (for UI display)
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("role_metadata")
+}
+
+// User model for feed posts
+// Using Cognito sub (UUID) as primary key via cognitoSub field
+// actorUri is the ActivityPub actor identifier
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  role      UserRole @default(END_USER)
+  actorUri  String?  @unique @map("actor_uri") // ActivityPub actor URI (e.g., "https://example.com/users/{username}")
+  handle    String? // ActivityPub handle (e.g., "@user@example.com")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // Cognito Auth integration
+  cognitoSub String? @unique @map("cognito_sub") // Cognito user pool sub (UUID), nullable for migration safety
+
+  // User Deprovisioning
+  suspended       Boolean   @default(false)
+  suspendedAt     DateTime? @map("suspended_at")
+  suspendedReason String?   @map("suspended_reason")
+
+  // Multi-tenancy (v0.7) — user's auto-created personal tenant.
+  // Nullable to allow brief moments during sign-up before personal tenant exists.
+  personalTenantId String? @unique @map("personal_tenant_id")
+
+  // Account Deletion Grace Period
+  deletionRequestedAt DateTime? @map("deletion_requested_at") // When user requested deletion
+  deletionScheduledAt DateTime? @map("deletion_scheduled_at") // When hard deletion will occur (7 days after request)
+  deletionConfirmedAt DateTime? @map("deletion_confirmed_at") // When user confirmed deletion (2FA/confirmation)
+
+  // PREPARATORY CHANGE: Username field for future pseudonymous sign-up
+  // Currently optional, will be required when implementing pseudonymous authentication
+  // This field allows users to sign up without email (for at-risk users)
+  username String? @unique
+
+  // PREPARATORY CHANGE: Privacy settings for future spy-protection features
+  // All fields default to current behavior (no breaking changes)
+  // These will be used when implementing stealth mode and location safety features
+
+  // Stealth mode: Hide online status, typing indicators, last seen
+  // FUTURE USE: When stealth mode is enabled, hide user's online presence
+  stealthMode Boolean @default(false) @map("stealth_mode")
+
+  // Online status visibility controls
+  // FUTURE USE: Control what presence information is visible to others
+  showOnlineStatus    Boolean @default(true) @map("show_online_status")
+  showTypingIndicator Boolean @default(true) @map("show_typing_indicator")
+  showLastSeen        Boolean @default(true) @map("show_last_seen")
+
+  // Location tracking and anonymization
+  // FUTURE USE: Allow users to disable location tracking or anonymize location data
+  locationTrackingEnabled    Boolean @default(true) @map("location_tracking_enabled")
+  // 0=exact, 1=100m, 2=1km, 3=city-level
+  // FUTURE USE: Automatically round location coordinates based on this level
+  locationAnonymizationLevel Int     @default(0) @map("location_anonymization_level")
+
+  // Analytics opt-out
+  // FUTURE USE: Respect user preference when sending analytics events
+  analyticsOptOut Boolean @default(false) @map("analytics_opt_out")
+
+  // Surveillance-hardening Phase 0 (E2): signup-metadata capture (P3 wires it).
+  // signupMethod records how the account was created; invitationId links the
+  // redeemed invitation. Client signals (IP/UA) go to SecurityEvent (retention-
+  // bound), NEVER as columns here — see 07-data-minimization.md. Both nullable:
+  // existing accounts stay NULL (unknown), no fabricated backfill.
+  signupMethod SignupMethod? @map("signup_method")
+  invitationId String?       @map("invitation_id")
+
+  // Verification Status (synced from Cognito)
+  emailVerified   Boolean   @default(false) @map("email_verified")
+  emailVerifiedAt DateTime? @map("email_verified_at")
+
+  // Badge Display Preferences
+  showVerifiedBadge Boolean @default(true) @map("show_verified_badge") // User can hide badge
+
+  // Identity Verification (Anti-Impersonation)
+  // Helps users identify real accounts vs fake/impersonation accounts
+  identityVerified             Boolean   @default(false) @map("identity_verified")
+  identityVerifiedAt           DateTime? @map("identity_verified_at")
+  identityVerificationMethod   String?   @map("identity_verification_method") // 'automated', 'manual', 'self_service'
+  identityVerificationProvider String?   @map("identity_verification_provider") // 'jumio', 'onfido', 'veriff', 'manual'
+  showIdentityVerifiedBadge    Boolean   @default(true) @map("show_identity_verified_badge")
+
+  // PREPARATORY CHANGE: Region tracking for multi-region support
+  // region: User's detected region (where they're located)
+  // dataRegion: Where user's data is stored (for compliance)
+  // FUTURE USE: When CN-region support is enabled, dataRegion will be used
+  // to route data to the correct regional database
+  region     String  @default("EU") @map("region") // User's region (US, EU, CN)
+  dataRegion String? @map("data_region") // Where data is stored (for compliance)
+
+  posts              Post[]
+  securityEvents     SecurityEvent[]
+  createdInvitations Invitation[]    @relation("CreatedInvitations")
+  usedInvitations    Invitation[]    @relation("UsedInvitations")
+  consents           Consent[]
+
+  // Circle configuration and read state
+  circleConfig     CircleConfig?
+  circleReadStates CircleReadState[]
+
+  // Entity co-ownership
+  ownedEntities   EntityOwnership[] @relation("EntityOwners")
+  addedOwnerships EntityOwnership[] @relation("OwnershipAddedBy")
+
+  // Relationships and follower counts live in the graph DB (AuraDB), not Prisma
+
+  // Direct messages
+  sentMessages     DirectMessage[] @relation("SentMessages")
+  receivedMessages DirectMessage[] @relation("ReceivedMessages")
+
+  // Custom audiences
+  createdAudiences    CustomAudience[]       @relation("AudienceCreator")
+  audienceMemberships CustomAudienceMember[] @relation("AudienceMembers")
+
+  // Surveillance-hardening Phase 0: behavioral-event actor side (E1, P2) and
+  // generalized reports filed BY this user (E3, P4). Both cascade on delete.
+  interactionEvents InteractionEvent[] @relation("InteractionActor")
+  filedReports      Report[]           @relation("ReportReporter")
+
+  // Surveillance-hardening Phase 0 (E2): the invitation this user redeemed at
+  // signup, if any. Distinct from createdInvitations / usedInvitations.
+  signupInvitation Invitation? @relation("SignupInvitation", fields: [invitationId], references: [id])
+
+  // ActivityPub protocol fields
+  inboxUrl     String? @map("inbox_url") // ActivityPub inbox endpoint
+  outboxUrl    String? @map("outbox_url") // ActivityPub outbox endpoint
+  followersUrl String? @map("followers_url") // Followers collection URL
+  followingUrl String? @map("following_url") // Following collection URL
+  friendsUrl   String? @map("friends_url") // Friends collection URL (optional)
+  publicKey    String? @map("public_key") // Public key in PEM format
+  privateKey   String? @map("private_key") // Private key in PEM format (encrypted at rest)
+
+  // PREPARATORY: Border Safety Mode support
+  // Default encryption key ID (currently unused, for future E2E encryption)
+  encryptionKeyId String? @map("encryption_key_id")
+
+  // Default profile context (currently always 'primary')
+  defaultContext String @default("primary") @map("default_context")
+
+  // Travel mode status (dormant feature flag)
+  travelModeActive      Boolean   @default(false) @map("travel_mode_active")
+  travelModeActivatedAt DateTime? @map("travel_mode_activated_at")
+
+  // Panic action configuration (JSON, dormant)
+  panicActionConfig String? @map("panic_action_config") // JSON: { enabled: boolean, action: 'wipe' | 'lock' }
+
+  // Privacy fields for email hashing and anonymous IDs
+  emailHash   String? @unique @map("email_hash") // SHA-256 hash of email (for privacy)
+  anonymousId String? @unique @map("anonymous_id") // Anonymous identifier for privacy
+
+  // Data retention settings
+  messageRetentionDays Int? @map("message_retention_days") // How long to keep messages
+  autoDeleteAfterDays  Int? @map("auto_delete_after_days") // Auto-delete data after N days
+
+  // Encryption keys relation
+  encryptionKeys UserEncryptionKey[]
+
+  // MFA enrollment relation
+  mfaEnrollment MfaEnrollment?
+
+  // Safer Social Design: Age verification (Phase 1)
+  dateOfBirth DateTime? @map("date_of_birth")
+  ageTier     AgeTier   @default(ADULT) @map("age_tier")
+
+  // Fail-CLOSED age signal for research/cohort inclusion. Distinct from
+  // `ageTier` (which fails OPEN at ADULT — a deliberate, accepted product-side
+  // minor-safety choice, see PSEUDONYM.md / RESEARCH-AGE-SIGNAL note). Any
+  // future research or cohort query MUST gate on `ageVerified = true`. `ageTier`
+  // is NEVER an includability signal: an unverified user defaults to ADULT and
+  // would otherwise leak into adult cohorts.
+  ageVerified Boolean @default(false) @map("age_verified")
+
+  // Parental links
+  parentalLinks ParentalLink[] @relation("ChildParentalLinks")
+  guardianLinks ParentalLink[] @relation("GuardianParentalLinks")
+
+  // Safer Social Design: Quiet hours (Phase 2)
+  quietHoursStart   Int?    @map("quiet_hours_start") // minutes from midnight (e.g., 1320 = 10PM)
+  quietHoursEnd     Int?    @map("quiet_hours_end") // minutes from midnight (e.g., 420 = 7AM)
+  quietHoursEnabled Boolean @default(false) @map("quiet_hours_enabled")
+
+  // Safer Social Design: Profile visibility and DM access (Phase 5)
+  profileVisibility ProfileVisibility @default(PUBLIC) @map("profile_visibility")
+  dmAccess          DmAccess          @default(CONNECTIONS) @map("dm_access")
+
+  // Safer Social Design: Notifications (Phase 4)
+  notifications          Notification[]
+  notificationPreference NotificationPreference?
+
+  // Connection codes (out-of-band invite mechanism)
+  createdConnectionCodes  ConnectionCode[]           @relation("ConnectionCodeCreator")
+  redeemedConnectionCodes ConnectionCodeRedemption[]
+
+  // Multi-tenancy relations (v0.7)
+  personalTenant       Tenant?            @relation("PersonalTenantOwner")
+  tenantMemberships    TenantMember[]     @relation("TenantMemberships")
+  invitedTenantMembers TenantMember[]     @relation("TenantInvitedBy")
+  sentInvitations      TenantInvitation[] @relation("TenantInvitationInviter")
+  acceptedInvitations  TenantInvitation[] @relation("TenantInvitationAcceptedBy")
+
+  @@index([role])
+  @@index([region])
+  @@index([dataRegion])
+  @@index([suspended])
+  @@index([username])
+  @@index([emailVerified])
+  @@index([identityVerified])
+  @@index([actorUri]) // Index for ActivityPub actor lookups
+  @@index([encryptionKeyId]) // Index for encryption key lookups
+  @@index([travelModeActive]) // Index for travel mode queries
+  @@index([defaultContext]) // Index for context queries
+  @@index([emailHash]) // Index for email hash lookups
+  @@index([anonymousId]) // Index for anonymous ID lookups
+  @@index([cognitoSub]) // Index for Cognito sub lookups
+  @@index([personalTenantId])
+  @@index([invitationId]) // Phase 0 (E2): invitation-chain traversal, Phase 2 detection only
+  @@map("users")
+}
+
+// MFA enrollment for admin roles (AUTH-1)
+model MfaEnrollment {
+  id              String    @id @default(uuid())
+  userId          String    @unique @map("user_id")
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  encryptedSecret String    @map("encrypted_secret") @db.Text
+  backupCodes     String[]  @map("backup_codes") // hashed, one-time use
+  enrolledAt      DateTime  @default(now()) @map("enrolled_at")
+  lastUsedAt      DateTime? @map("last_used_at")
+
+  @@map("mfa_enrollments")
+}
+
+// User encryption keys (for Border Safety Mode and future E2E message encryption)
+model UserEncryptionKey {
+  id        String @id @default(cuid())
+  userId    String @map("user_id")
+  contextId String @map("context_id") // 'primary' or 'decoy'
+
+  // Encrypted key material (encrypted with user's password-derived key)
+  encryptedKey String @map("encrypted_key") @db.Text
+
+  // Key derivation parameters (for PBKDF2 or Argon2)
+  kdfParams String @map("kdf_params") @db.Text // JSON
+
+  // Key metadata
+  algorithm  String @default("AES-256-GCM")
+  keyPurpose String // 'data_encryption', 'backup', 'export', 'message_encryption'
+
+  // FUTURE: Support for E2E message encryption
+  // Distinguishes between Border Safety Mode keys and E2E message keys
+  keyType String @default("border_safety") @map("key_type")
+  // Values: 'border_safety' (user's own data), 'e2e_messages' (message encryption)
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  rotatedAt DateTime? @map("rotated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, contextId, keyPurpose, keyType])
+  @@index([userId])
+  @@index([userId, keyType]) // For querying keys by type
+  @@map("user_encryption_keys")
+}
+
+// Purpose discriminator for the unified Consent model.
+//   CROSS_REGION           — GDPR cross-region data-access consent (sets
+//                            dataRegion/accessRegion; studyId is NULL).
+//   RESEARCH_OBSERVATION   — opt-in to observational research (no per-study
+//                            intervention; studyId set).
+//   RESEARCH_PARTICIPATION — opt-in to active study participation (studyId set).
+enum ConsentPurpose {
+  CROSS_REGION
+  RESEARCH_OBSERVATION
+  RESEARCH_PARTICIPATION
+}
+
+// Purpose-tagged consent (generalised from the old CrossRegionConsent).
+//
+// CONSENT-HISTORY DESIGN — APPEND-ONLY (GDPR Art.7(1)/(3), IRB audit):
+//   Each grant or withdrawal is a NEW row. A grant/withdraw never mutates an
+//   earlier row, so the original `consentedAt` of every grant is preserved
+//   forever and the full lifecycle is reconstructable. The CURRENT state for a
+//   (user, purpose, key) is the single row with `active = true`; superseding a
+//   row sets `active = false` + `supersededAt = now()`. `withdrawnAt` records
+//   when consent was withdrawn ON the row that recorded it (a withdrawal row
+//   carries consented=false + withdrawnAt set and PRESERVES the grant's
+//   consentedAt if it descends from one — never null it).
+//
+//   Uniqueness is therefore keyed on ACTIVE rows only:
+//     - research rows (studyId non-null): @@unique([userId, purpose, studyId]).
+//       NOTE Postgres treats NULLs as DISTINCT, so this composite does NOT
+//       constrain CROSS_REGION rows (studyId is NULL there) — by design.
+//     - CROSS_REGION rows: a RAW partial unique index in the migration:
+//         CREATE UNIQUE INDEX consent_cross_region_key
+//           ON consent (user_id, data_region, access_region)
+//           WHERE purpose = 'CROSS_REGION' AND active;
+//       This preserves the pre-existing @@unique([userId, dataRegion,
+//       accessRegion]) guarantee for the active cross-region row.
+model Consent {
+  id           String         @id @default(cuid())
+  userId       String         @map("user_id")
+  purpose      ConsentPurpose @default(CROSS_REGION)
+  // Research consents only. NULL for CROSS_REGION rows.
+  studyId      String?        @map("study_id")
+  // Cross-region consents only. NULL for research rows.
+  dataRegion   String?        @map("data_region") // Where data is stored (e.g., "EU")
+  accessRegion String?        @map("access_region") // Region user is accessing from (e.g., "US")
+  consented    Boolean        @default(false)
+  consentedAt  DateTime?      @map("consented_at")
+  withdrawnAt  DateTime?      @map("withdrawn_at")
+  ipAddress    String?        @map("ip_address")
+  userAgent    String?        @map("user_agent")
+  // Append-only history discriminators.
+  active       Boolean        @default(true)
+  supersededAt DateTime?      @map("superseded_at")
+  createdAt    DateTime       @default(now()) @map("created_at")
+  updatedAt    DateTime       @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Research-row uniqueness (studyId non-null). Does NOT cover CROSS_REGION
+  // rows — those are constrained by the raw partial index in the migration.
+  @@unique([userId, purpose, studyId])
+  @@index([userId])
+  @@index([consented])
+  @@index([dataRegion, accessRegion])
+  @@index([userId, purpose, active])
+  @@map("consent")
+}
+
+// Posting radius — how far content radiates on the author's social graph
+enum PostRadius {
+  WHISPER // Inner circle only (tier 0)
+  NORMAL // Close friends + inner circle (tiers 0-1)
+  LOUD // Community and closer (tiers 0-2)
+  SHOUT // Everyone (all tiers)
+}
+
+// Privacy levels for follow relationships
+enum Privacy {
+  PUBLIC
+  FOLLOWERS
+  PRIVATE
+}
+
+// Post model (unified for all visibility levels)
+model Post {
+  id              String     @id @default(cuid())
+  // Multi-tenancy (v0.7) — set to author's active tenant at write time.
+  tenantId        String     @map("tenant_id")
+  authorId        String     @map("author_id")
+  text            String     @db.Text
+  radius          PostRadius @default(NORMAL)
+  geoData         Json?      @map("geo_data")
+  uri             String? // ActivityPub URI (for public posts)
+  contentWarnings String[]   @map("content_warnings")
+  deletedAt       DateTime?  @map("deleted_at")
+  hiddenByAuthor  Boolean    @default(false) @map("hidden_by_author")
+  createdAt       DateTime   @default(now()) @map("created_at")
+  updatedAt       DateTime   @updatedAt @map("updated_at")
+  editedAt        DateTime?  @map("edited_at") // Timestamp of last user edit (null if never edited)
+
+  author          User              @relation(fields: [authorId], references: [id])
+  tenant          Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  group           Group?            @relation(fields: [groupId], references: [id])
+  groupId         String?           @map("group_id") // Group this post belongs to
+  media           PostMedia[]
+  sentiments      PostSentiment[]
+  comments        PostComment[]
+  subjectEntities PostSubject[]
+  primaryEntityId String?           @map("primary_entity_id")
+  primaryEntity   Entity?           @relation("PrimaryEntityPosts", fields: [primaryEntityId], references: [id])
+  taxonomyTags    PostTaxonomyTag[]
+  linkChecks      LinkCheck[]
+
+  // PREPARATORY CHANGE: Region tracking for multi-region support
+  // dataRegion: Where post data is stored (for compliance)
+  // FUTURE USE: When CN-region support is enabled, dataRegion will be used
+  // to route data to the correct regional database
+  dataRegion String? @map("data_region") // Where post data is stored (for compliance)
+
+  // ActivityPub fields (nullable for backward compatibility)
+  activityId String?   @unique @map("activity_id") // Activity URI (e.g., "https://example.com/posts/{id}/activity")
+  objectId   String?   @unique @map("object_id") // Note object URI (e.g., "https://example.com/posts/{id}")
+  to         Json? // Audience targeting (array of URIs)
+  cc         Json? // Additional audience
+  bto        Json? // Blind recipients (for private posts)
+  bcc        Json? // Blind carbon copy
+  published  DateTime? @map("published") // ISO 8601 timestamp (for ActivityPub, defaults to createdAt)
+
+  // Link security fields
+  hasBlockedLinks Boolean @default(false) @map("has_blocked_links")
+
+  // PREPARATORY: Data classification for Border Safety Mode
+  // Classify data as sensitive, benign, or decoy for future selective wiping
+  sensitivityLevel String @default("benign") @map("sensitivity_level")
+  // Values: 'benign', 'sensitive', 'decoy'
+  // Currently all posts are 'benign' (default)
+
+  // Profile context that owns this data
+  ownerContext String @default("primary") @map("owner_context")
+  // Currently always 'primary'
+
+  // Screening risk level (for content screening)
+  screeningRiskLevel String @default("low") @map("screening_risk_level")
+  // Values: 'low', 'medium', 'high'
+
+  // Content category (optional classification)
+  contentCategory String? @map("content_category")
+
+  @@index([tenantId, createdAt])
+  @@index([authorId, createdAt])
+  @@index([authorId, radius, createdAt])
+  @@index([primaryEntityId])
+  @@index([createdAt])
+  @@index([uri])
+  @@index([deletedAt])
+  @@index([dataRegion, createdAt]) // Composite index for feed queries: filters by region and orders by creation time (most selective fields first)
+  @@index([activityId]) // For ActivityPub activity lookups
+  @@index([objectId]) // For ActivityPub object lookups
+  @@index([groupId]) // Index for group posts
+  @@index([authorId, ownerContext, sensitivityLevel]) // Composite index for context-aware data access
+  @@index([sensitivityLevel]) // Index for sensitivity level queries
+  @@index([ownerContext]) // Index for context queries
+  @@index([screeningRiskLevel]) // Index for risk level queries
+  @@index([editedAt]) // Index for querying edited posts
+  @@map("posts")
+}
+
+// Media files (content-addressed storage)
+model MediaFile {
+  id           String  @id @default(cuid())
+  contentHash  String  @unique @map("content_hash") // SHA-256 hash
+  cid          String? @unique // AT Protocol CID (optional, for compatibility)
+  mimeType     String  @map("mime_type")
+  size         Int
+  originalKey  String  @map("original_key") // S3 key: media/{hash}.{ext}
+  thumbnailKey String? @map("thumbnail_key") // S3 key: media/{hash}_thumb.webp
+  optimizedKey String? @map("optimized_key") // S3 key: media/{hash}_opt.webp
+
+  // Media metadata (extracted from file headers)
+  width    Int? // Image/video width in pixels
+  height   Int? // Image/video height in pixels
+  duration Int? @map("duration") // Video duration in seconds
+
+  // Raw metadata payloads (JSON)
+  exifData      Json? @map("exif_data")
+  iptcData      Json? @map("iptc_data")
+  videoMetadata Json? @map("video_metadata")
+
+  // Denormalized/unified metadata fields
+  dateTaken    DateTime? @map("date_taken")
+  gpsLatitude  Float?    @map("gps_latitude")
+  gpsLongitude Float?    @map("gps_longitude")
+  keywords     String[]  @default([]) @map("keywords")
+
+  // Privacy flags
+  metadataVisible Boolean @default(true) @map("metadata_visible")
+  locationVisible Boolean @default(false) @map("location_visible")
+
+  // Media visibility and deletion tracking
+  hidden    Boolean   @default(false) // Hide from posts (soft delete)
+  deletedAt DateTime? @map("deleted_at") // Permanent deletion timestamp
+  hiddenAt  DateTime? @map("hidden_at") // When media was hidden
+  hiddenBy  String?   @map("hidden_by") // User ID who hid the media
+
+  // Reconciliation fields (Option 2: Eventual Consistency)
+  uploadStatus             String    @default("PENDING") @map("upload_status") // PENDING, RECONCILING, COMPLETE, FAILED
+  uploadedBy               String?   @map("uploaded_by")
+  uploadBatchId            String?   @map("upload_batch_id")
+  reconciledAt             DateTime? @map("reconciled_at")
+  reconcileAttempts        Int       @default(0) @map("reconcile_attempts")
+  createdViaReconciliation Boolean   @default(false) @map("created_via_reconciliation")
+
+  // Optimistic upload tracking (for orphaned media cleanup)
+  attachedToPost Boolean   @default(false) @map("attached_to_post") // Whether media is attached to a post
+  orphanedAt     DateTime? @map("orphaned_at") // When media was marked as orphaned
+  lastAccessedAt DateTime  @default(now()) @map("last_accessed_at") // Last time media was accessed
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  posts PostMedia[] // Many-to-many with posts
+
+  @@index([contentHash])
+  @@index([cid])
+  @@index([hidden, deletedAt]) // For filtering visible media
+  @@index([createdAt]) // For chronological sorting
+  @@index([dateTaken])
+  @@index([metadataVisible])
+  @@index([locationVisible])
+  @@index([gpsLatitude, gpsLongitude])
+  @@index([uploadStatus])
+  @@index([uploadedBy])
+  @@index([uploadBatchId])
+  @@index([reconciledAt])
+  @@index([uploadStatus, reconciledAt]) // For cleanup queries
+  @@index([attachedToPost, createdAt]) // For orphaned media queries
+  @@index([orphanedAt]) // For cleanup job queries
+  @@map("media_files")
+}
+
+// Upload session for optimistic image uploads
+model UploadSession {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  mediaIds  String[] @map("media_ids") // Array of uploaded media IDs
+  status    String   @default("active") // 'active', 'completed', 'abandoned'
+  createdAt DateTime @default(now()) @map("created_at")
+  expiresAt DateTime @map("expires_at")
+
+  @@index([userId, status])
+  @@index([expiresAt])
+  @@map("upload_sessions")
+}
+
+// Post media
+model PostMedia {
+  id       String  @id @default(cuid())
+  // Multi-tenancy — denormalized from the owning post; same scope.
+  tenantId String  @map("tenant_id")
+  postId   String  @map("post_id")
+  mediaId  String  @map("media_id")
+  alt      String?
+  order    Int     @default(0)
+
+  post   Post      @relation(fields: [postId], references: [id], onDelete: Cascade)
+  media  MediaFile @relation(fields: [mediaId], references: [id], onDelete: Restrict)
+  tenant Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([postId, mediaId])
+  @@index([tenantId])
+  @@index([postId])
+  @@index([mediaId])
+  @@map("post_media")
+}
+
+// Post sentiment reactions
+model PostSentiment {
+  id        String   @id @default(cuid())
+  // Multi-tenancy — denormalized from the owning post; same scope.
+  tenantId  String   @map("tenant_id")
+  postId    String   @map("post_id")
+  postUri   String?  @map("post_uri")
+  authorId  String   @map("author_id")
+  sentiment String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  post   Post   @relation(fields: [postId], references: [id], onDelete: Cascade)
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([postId, authorId])
+  @@unique([postUri, authorId])
+  @@index([postId])
+  @@index([postUri])
+  @@index([authorId])
+  @@index([postId, sentiment]) // For faster sentiment count aggregation (groupBy)
+  @@index([postId, createdAt]) // For time-based sentiment queries
+  @@index([postId, sentiment, createdAt(sort: Desc)], name: "idx_post_sentiment_summary") // For window function query (top 3 users per sentiment)
+  @@index([postId, sentiment, createdAt(sort: Desc), id(sort: Desc)], name: "idx_post_sentiment_pagination") // For cursor-based pagination
+  @@index([tenantId])
+  @@map("post_sentiments")
+}
+
+// Post comments
+model PostComment {
+  id                String   @id @default(cuid())
+  // Multi-tenancy (v0.7) — denormalized from the parent post; same scope.
+  tenantId          String   @map("tenant_id")
+  postId            String   @map("post_id")
+  postUri           String?  @map("post_uri")
+  authorId          String   @map("author_id")
+  text              String   @db.Text
+  rootUri           String?  @map("root_uri")
+  replyToUri        String?  @map("reply_to_uri")
+  hiddenByPostOwner Boolean  @default(false) @map("hidden_by_post_owner")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  // Edit tracking
+  editedAt     DateTime? @map("edited_at") // When last edited
+  originalText String?   @map("original_text") @db.Text // Preserve original on first edit
+
+  // Soft delete tracking
+  deletedAt DateTime? @map("deleted_at") // When deleted (soft delete)
+  deletedBy String?   @map("deleted_by") // User ID who deleted (author or post owner)
+
+  // Link security fields
+  hasBlockedLinks Boolean @default(false) @map("has_blocked_links")
+
+  // PREPARATORY: Data classification for Border Safety Mode
+  // Classify data as sensitive, benign, or decoy for future selective wiping
+  sensitivityLevel String @default("benign") @map("sensitivity_level")
+  // Values: 'benign', 'sensitive', 'decoy'
+
+  // Profile context that owns this data
+  ownerContext String @default("primary") @map("owner_context")
+  // Currently always 'primary'
+
+  // Screening risk level (for content screening)
+  screeningRiskLevel String @default("low") @map("screening_risk_level")
+  // Values: 'low', 'medium', 'high'
+
+  // Content category (optional classification)
+  contentCategory String? @map("content_category")
+
+  post       Post               @relation(fields: [postId], references: [id], onDelete: Cascade)
+  tenant     Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  media      PostCommentMedia[]
+  sentiments CommentSentiment[]
+  linkChecks LinkCheck[]
+
+  @@index([tenantId])
+  @@index([postId, createdAt])
+  @@index([postUri, createdAt])
+  @@index([authorId])
+  @@index([hiddenByPostOwner])
+  @@index([deletedAt]) // Filter deleted comments
+  @@index([authorId, ownerContext]) // Composite index for context-aware data access
+  @@index([sensitivityLevel]) // Index for sensitivity level queries
+  @@index([ownerContext]) // Index for context queries
+  @@index([screeningRiskLevel]) // Index for risk level queries
+  // Threading indexes
+  @@index([rootUri]) // Find all comments in a thread
+  @@index([replyToUri]) // Find direct replies to a comment
+  @@index([rootUri, createdAt]) // Thread comments ordered by time
+  @@index([postId, rootUri]) // Thread comments within a specific post
+  @@map("post_comments")
+}
+
+// Comment media (placeholder - MediaFile model to be defined separately)
+model PostCommentMedia {
+  id        String  @id @default(cuid())
+  commentId String  @map("comment_id")
+  mediaId   String  @map("media_id")
+  alt       String?
+  order     Int     @default(0)
+
+  comment PostComment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+
+  @@unique([commentId, mediaId])
+  @@index([commentId])
+  @@index([mediaId])
+  @@map("post_comment_media")
+}
+
+// Comment sentiment reactions
+model CommentSentiment {
+  id         String   @id @default(cuid())
+  commentId  String   @map("comment_id")
+  commentUri String?  @map("comment_uri")
+  authorId   String   @map("author_id")
+  sentiment  String
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  comment PostComment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+
+  @@unique([commentId, authorId])
+  @@unique([commentUri, authorId])
+  @@index([commentId])
+  @@index([commentUri])
+  @@index([authorId])
+  @@index([commentId, sentiment]) // For faster sentiment count aggregation (groupBy)
+  @@index([commentId, createdAt]) // For time-based sentiment queries
+  @@map("comment_sentiments")
+}
+
+// Post-Subject junction — which entities a post is about (primary content model)
+model PostSubject {
+  id        String   @id @default(cuid())
+  postId    String   @map("post_id")
+  entityId  String   @map("entity_id")
+  isPrimary Boolean  @default(false) @map("is_primary") // The "main" entity when multiple are featured
+  createdAt DateTime @default(now()) @map("created_at")
+
+  post   Post   @relation(fields: [postId], references: [id], onDelete: Cascade)
+  entity Entity @relation(fields: [entityId], references: [id], onDelete: Cascade)
+
+  @@unique([postId, entityId])
+  @@index([postId])
+  @@index([entityId, createdAt]) // Core query: "posts about this entity, newest first"
+  @@index([entityId])
+  @@map("post_subjects")
+}
+
+// Security Events for SSO monitoring and compliance.
+// In v0.7, this also serves as the audit-log substrate (T7 wires admin actions here).
+model SecurityEvent {
+  id        String   @id @default(cuid())
+  type      String // sso_login, sso_failed, sso_config_error, rate_limit_exceeded, suspicious_activity, unauthorized_access, tenant_*, member_*, idp_*, etc.
+  severity  String // low, medium, high, critical
+  userId    String?
+  // Tenancy scope (v0.7) — replaces the old `partnerId` field.
+  // Nullable because some events (system-level) have no tenant context.
+  tenantId  String?  @map("tenant_id")
+  ipAddress String?  @map("ip_address")
+  userAgent String?  @map("user_agent")
+  details   String // JSON string
+  timestamp DateTime @default(now())
+
+  // Retention bound — NON-NULLABLE (Surveillance-hardening Phase 0, P1). A NULL
+  // row escapes the hourly-cron pruning forever: exactly the unbounded client-
+  // metadata log the threat model forbids (07-data-minimization.md), and P3
+  // writes IP/UA `signup` rows into this table. The hourly cron deletes events
+  // where retention_until < NOW(). Retention by severity: critical=365d,
+  // high=90d, medium=30d, low=7d (see security-monitor.calculateRetentionUntil).
+  retentionUntil DateTime @map("retention_until")
+
+  user User? @relation(fields: [userId], references: [id])
+
+  @@index([type])
+  @@index([severity])
+  @@index([timestamp])
+  @@index([userId])
+  @@index([tenantId])
+  @@index([ipAddress])
+  @@index([retentionUntil]) // Index for efficient cleanup job queries
+  @@map("security_events")
+}
+
+// AuditEvent model (phase 1.C.2)
+//
+// Backing store for `@de-otio/saas-foundation/audit` via
+// `PostgresAuditStore` (the `auditEvent.create` shape). Column names
+// and nullability mirror foundation's `PrismaAuditClient` contract
+// EXACTLY — see foundation `src/audit/prisma.ts`. The frozen
+// `AuditEvent` type owns this shape; changes require the frozen-type
+// RFC process.
+//
+// Append-only posture: foundation's PostgresAuditStore performs INSERT
+// only. A separate sweeper deletes rows where `retention_until < now()`.
+// `id` is a foundation-minted ulid (NOT a Prisma cuid default).
+model AuditEvent {
+  id             String   @id
+  timestamp      DateTime
+  tenantId       String?  @map("tenant_id")
+  actorKind      String   @map("actor_kind")
+  actorId        String   @map("actor_id")
+  action         String
+  resourceKind   String?  @map("resource_kind")
+  resourceId     String?  @map("resource_id")
+  outcome        String
+  failureReason  String?  @map("failure_reason")
+  severity       String
+  requestId      String?  @map("request_id")
+  traceId        String?  @map("trace_id")
+  ipAddress      String?  @map("ip_address")
+  userAgent      String?  @map("user_agent")
+  metadata       Json?
+  retentionUntil DateTime @map("retention_until")
+
+  @@index([tenantId])
+  @@index([timestamp])
+  @@index([action])
+  @@index([retentionUntil]) // sweeper: DELETE WHERE retention_until < now()
+  @@map("audit_event")
+}
+
+// Feature Toggle model — global or per-tenant (Surveillance-hardening Phase 0,
+// E4). tenantId NULL = global row; a non-NULL row overrides the global for that
+// tenant. Resolution (tenant → global → coded default) is P5.
+//
+// Uniqueness: `@@unique([key, tenantId])` lets each tenant hold one row per key.
+// Postgres treats NULLs as DISTINCT, so that constraint alone would permit
+// DUPLICATE global rows for the same key — the migration adds a PARTIAL unique
+// index `feature_toggles_key_global ON (key) WHERE tenant_id IS NULL` to forbid
+// it. That partial index is NOT expressible in schema.prisma; it lives only in
+// the migration SQL. Do not let a later `prisma migrate dev` treat it as drift.
+model FeatureToggle {
+  id          String   @id @default(cuid())
+  key         String // e.g., "global_public_posting_enabled"
+  enabled     Boolean  @default(false)
+  description String? // Human-readable description
+  tenantId    String?  @map("tenant_id") // NULL = global; non-NULL = per-tenant override
+  changedBy   String?  @map("changed_by") // Email of user who last changed it
+  changedAt   DateTime @default(now()) @updatedAt @map("last_changed")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@unique([key, tenantId])
+  @@index([key])
+  @@index([enabled])
+  @@index([tenantId])
+  @@map("feature_toggles")
+}
+
+// Invitation model for user-to-user invitations
+model Invitation {
+  id        String    @id @default(cuid())
+  code      String    @unique // Unique invitation code (e.g., "ABC123XYZ")
+  createdBy String    @map("created_by") // User ID who created the invitation
+  email     String? // Optional: restrict invitation to specific email
+  used      Boolean   @default(false) // Whether invitation has been used
+  usedBy    String?   @map("used_by") // User ID who used the invitation
+  usedAt    DateTime? @map("used_at") // When invitation was used
+  scannedAt DateTime? @map("scanned_at") // When invitation code was first scanned/claimed
+  scannedBy String?   @map("scanned_by") // Temporary identifier for who scanned it (session ID or similar)
+  expiresAt DateTime? @map("expires_at") // Optional expiration date
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  creator User? @relation("CreatedInvitations", fields: [createdBy], references: [id])
+  user    User? @relation("UsedInvitations", fields: [usedBy], references: [id])
+
+  // Phase 0 (E2): accounts that recorded this invitation as their signup origin.
+  signupUsers User[] @relation("SignupInvitation")
+
+  @@index([code])
+  @@index([createdBy])
+  @@index([createdBy, createdAt]) // Composite index for efficient listing queries (filter by createdBy, order by createdAt)
+  @@index([usedBy])
+  @@index([used])
+  @@index([email])
+  @@index([expiresAt])
+  @@map("invitations")
+}
+
+// ============================================================================
+// Taxonomy System (Phase 1: Core Taxonomy Foundation)
+// ============================================================================
+
+// Taxonomy dimension (top-level category)
+model TaxonomyDimension {
+  id          String   @id @default(cuid())
+  tenantId    String   @map("tenant_id") // REQUIRED - Tenant-specific taxonomy
+  code        String // e.g., "behavior", "context"
+  displayName String   @map("display_name")
+  description String?  @db.Text
+  order       Int      @default(0) // For UI ordering
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  categories TaxonomyCategory[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@index([tenantId, code])
+  @@index([tenantId, isActive])
+  @@map("taxonomy_dimensions")
+}
+
+// Taxonomy category (second-level, e.g., "training" under "behavior")
+model TaxonomyCategory {
+  id          String   @id @default(cuid())
+  tenantId    String   @map("tenant_id") // REQUIRED - Tenant-specific taxonomy
+  dimensionId String   @map("dimension_id")
+  code        String // e.g., "training", "issues"
+  displayName String   @map("display_name")
+  description String?  @db.Text
+  order       Int      @default(0)
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  dimension TaxonomyDimension @relation(fields: [dimensionId], references: [id], onDelete: Cascade)
+  taxons    TaxonomyTaxon[]
+
+  @@unique([tenantId, dimensionId, code])
+  @@index([tenantId])
+  @@index([tenantId, dimensionId])
+  @@index([tenantId, isActive])
+  @@map("taxonomy_categories")
+}
+
+// Taxonomy taxon (specific term, e.g., "recall" under "behavior:training")
+model TaxonomyTaxon {
+  id          String  @id @default(cuid())
+  tenantId    String  @map("tenant_id") // REQUIRED - Tenant-specific taxonomy
+  categoryId  String  @map("category_id")
+  taxonId     String // Full ID: "behavior:training:recall"
+  displayName String  @map("display_name")
+  description String? @db.Text
+  order       Int     @default(0)
+  isActive    Boolean @default(true) @map("is_active")
+
+  // Synonyms and user terms for search matching
+  synonyms  Json? // Array of alternative terms: ["obedience", "foundation-training"]
+  userTerms Json? // Array of user search terms: ["sit-stay-come", "basic-commands"]
+
+  // Hierarchical support
+  parentTaxonId String?         @map("parent_taxon_id")
+  parentTaxon   TaxonomyTaxon?  @relation("TaxonHierarchy", fields: [parentTaxonId], references: [id])
+  childTaxons   TaxonomyTaxon[] @relation("TaxonHierarchy")
+
+  // Translations (stored as JSON for now, can be normalized later)
+  translations Json? // { "en": {...}, "de": {...}, "fr": {...} }
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  category    TaxonomyCategory     @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  tags        PostTaxonomyTag[]
+  entityTags  EntityTaxonomyTag[]
+  productTags ProductTaxonomyTag[]
+
+  @@unique([tenantId, taxonId])
+  @@index([tenantId])
+  @@index([tenantId, categoryId])
+  @@index([tenantId, taxonId])
+  @@index([tenantId, isActive])
+  @@index([parentTaxonId])
+  @@map("taxonomy_taxons")
+}
+
+// Junction table for post-taxonomy tag relationships
+model PostTaxonomyTag {
+  id        String   @id @default(cuid())
+  postId    String   @map("post_id")
+  taxonId   String   @map("taxon_id")
+  addedBy   String   @map("added_by") // User ID
+  createdAt DateTime @default(now()) @map("created_at")
+
+  post  Post          @relation(fields: [postId], references: [id], onDelete: Cascade)
+  taxon TaxonomyTaxon @relation(fields: [taxonId], references: [id], onDelete: Cascade)
+
+  @@unique([postId, taxonId])
+  @@index([postId])
+  @@index([taxonId])
+  @@index([addedBy])
+  @@map("post_taxonomy_tags")
+}
+
+// Junction table for entity-taxonomy tag relationships
+model EntityTaxonomyTag {
+  id        String   @id @default(cuid())
+  entityId  String   @map("entity_id")
+  taxonId   String   @map("taxon_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  entity Entity        @relation(fields: [entityId], references: [id], onDelete: Cascade)
+  taxon  TaxonomyTaxon @relation(fields: [taxonId], references: [id], onDelete: Cascade)
+
+  @@unique([entityId, taxonId])
+  @@index([entityId])
+  @@index([taxonId])
+  @@map("entity_taxonomy_tags")
+}
+
+// Junction table for product-taxonomy tag relationships
+// Tags a tenant's Shopify product (an external `productId` string — there is
+// no local `Product` table) with internal taxonomy taxa. This is tenant-owned
+// data, so it carries its own tenant_id for direct RLS. (Without it,
+// `findMany({ where: { productId } })` leaks tags across tenants that happen to
+// reference the same Shopify product id.)
+model ProductTaxonomyTag {
+  id        String   @id @default(cuid())
+  tenantId  String   @map("tenant_id")
+  productId String   @map("product_id")
+  taxonId   String   @map("taxon_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  taxon  TaxonomyTaxon @relation(fields: [taxonId], references: [id], onDelete: Cascade)
+  tenant Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, taxonId])
+  @@index([tenantId])
+  @@index([productId])
+  @@index([taxonId])
+  @@map("product_taxonomy_tags")
+}
+
+// ============================================================================
+// Relationships (scored edges live in the graph DB — see graph-service.ts)
+// Follow and Friendship models removed — replaced by :RELATES_TO edges in graph DB
+// ============================================================================
+
+// ============================================================================
+// Co-Ownership
+// ============================================================================
+
+// Entity co-ownership — replaces single Entity.ownerId FK
+model EntityOwnership {
+  id       String        @id @default(cuid())
+  // Multi-tenancy (v0.7) — denormalized from entity; same scope.
+  tenantId String        @map("tenant_id")
+  entityId String        @map("entity_id")
+  userId   String        @map("user_id")
+  role     OwnershipRole @default(CO_OWNER)
+
+  addedByUserId String          @map("added_by_user_id")
+  addedAt       DateTime        @default(now()) @map("added_at")
+  status        OwnershipStatus @default(ACTIVE)
+  removedAt     DateTime?       @map("removed_at")
+
+  entity  Entity @relation(fields: [entityId], references: [id], onDelete: Cascade)
+  user    User   @relation("EntityOwners", fields: [userId], references: [id], onDelete: Cascade)
+  tenant  Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  addedBy User   @relation("OwnershipAddedBy", fields: [addedByUserId], references: [id])
+
+  @@unique([entityId, userId])
+  @@index([tenantId])
+  @@index([entityId])
+  @@index([userId])
+  @@index([entityId, role])
+  @@map("entity_ownerships")
+}
+
+enum OwnershipRole {
+  PRIMARY_OWNER // Full control, can transfer primary, can delete entity
+  CO_OWNER // Post and manage, cannot delete entity
+  CARETAKER // Can post about entity, cannot modify profile
+}
+
+enum OwnershipStatus {
+  ACTIVE
+  REMOVED
+  LEFT
+}
+
+// ============================================================================
+// Circle Configuration & Read State
+// ============================================================================
+
+// User's circle tier thresholds and view preferences
+model CircleConfig {
+  id     String @id @default(cuid())
+  userId String @unique @map("user_id")
+
+  // Tier thresholds (score >= threshold = in this tier)
+  innerThreshold       Float @default(0.8) @map("inner_threshold") // tier 0
+  closeFriendThreshold Float @default(0.5) @map("close_friend_threshold") // tier 1
+  communityThreshold   Float @default(0.2) @map("community_threshold") // tier 2
+  // Below communityThreshold = ambient (tier 3)
+
+  // View preferences
+  dailyDeckSize   Int? @map("daily_deck_size") // null = no daily limit
+  glanceLimit     Int  @default(20) @map("glance_limit") // Max items in glance mode
+  depthWindowDays Int  @default(7) @map("depth_window_days") // How far back depth mode goes
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("circle_configs")
+}
+
+// Per-user, per-tier read tracking for "you're caught up" signal
+model CircleReadState {
+  id     String @id @default(cuid())
+  userId String @map("user_id")
+  tier   Int // 0 = inner, 1 = close friends, 2 = community, 3 = ambient
+
+  lastReadAt     DateTime @map("last_read_at")
+  lastReadPostId String?  @map("last_read_post_id") // Cursor for pagination
+  caughtUp       Boolean  @default(true) @map("caught_up") // Server-computed
+
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, tier])
+  @@index([userId])
+  @@map("circle_read_states")
+}
+
+// ============================================================================
+// ActivityPub Private Groups
+// ============================================================================
+
+// Group model for ActivityPub private groups
+model Group {
+  id           String       @id @default(cuid())
+  // Multi-tenancy (v0.7) — group is owned by exactly one tenant.
+  tenantId     String       @map("tenant_id")
+  name         String
+  description  String?      @db.Text
+  actorUri     String       @unique @map("actor_uri") // Group actor URI
+  inboxUrl     String       @map("inbox_url")
+  outboxUrl    String       @map("outbox_url")
+  followersUrl String       @map("followers_url") // Members collection
+  publicKey    String       @map("public_key") // Public key in PEM format
+  privateKey   String       @map("private_key") // Private key in PEM format (encrypted at rest)
+  privacy      GroupPrivacy
+  createdAt    DateTime     @default(now()) @map("created_at")
+  updatedAt    DateTime     @updatedAt @map("updated_at")
+
+  members GroupMember[]
+  posts   Post[]
+  tenant  Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([actorUri])
+  @@index([privacy])
+  @@map("groups")
+}
+
+// Group membership model
+model GroupMember {
+  id       String    @id @default(cuid())
+  // Multi-tenancy (v0.7) — denormalized from group.
+  tenantId String    @map("tenant_id")
+  groupId  String    @map("group_id")
+  actorUri String    @map("actor_uri") // User's actor URI
+  role     GroupRole
+  joinedAt DateTime  @default(now()) @map("joined_at")
+
+  group  Group  @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([groupId, actorUri])
+  @@index([tenantId])
+  @@index([groupId])
+  @@index([actorUri])
+  @@index([groupId, role])
+  @@map("group_members")
+}
+
+enum GroupPrivacy {
+  PUBLIC // Anyone can join
+  PRIVATE // Invite-only
+  FRIENDS_ONLY // Only friends can join
+}
+
+enum GroupRole {
+  MEMBER
+  MODERATOR
+  ADMIN
+}
+
+// ============================================================================
+// ActivityPub System
+// ============================================================================
+
+// Activity model for ActivityPub inbox/outbox
+model Activity {
+  id         String   @id @default(cuid())
+  actorUri   String   @map("actor_uri") // Actor who created this activity
+  type       String // Create, Like, Follow, etc.
+  objectId   String?  @map("object_id") // ActivityStreams object URI
+  targetId   String?  @map("target_id") // Target actor/object
+  to         Json? // Audience (array of URIs)
+  cc         Json? // Additional audience
+  bto        Json? // Blind recipients
+  bcc        Json? // Blind carbon copy
+  published  DateTime // ISO 8601 timestamp
+  receivedAt DateTime @default(now()) @map("received_at")
+
+  // Inbox/outbox tracking
+  inboxActorUri  String? @map("inbox_actor_uri") // For inbox activities
+  outboxActorUri String? @map("outbox_actor_uri") // For outbox activities
+
+  @@index([actorUri])
+  @@index([inboxActorUri, receivedAt])
+  @@index([outboxActorUri, published])
+  @@index([published])
+  @@map("activities")
+}
+
+// Direct Message model for ActivityPub DMs
+model DirectMessage {
+  id          String @id @default(cuid())
+  senderId    String @map("sender_id") // Sender's user ID (not actor URI, for foreign key)
+  recipientId String @map("recipient_id") // Recipient's user ID (not actor URI, for foreign key)
+  text        String @db.Text
+
+  // PREPARATORY: E2E message encryption support (for future implementation)
+  // Currently messages are plaintext. These fields prepare for E2E encryption.
+  encryptedText       String? @map("encrypted_text") @db.Text // Encrypted message content (future)
+  encryptionKeyId     String? @map("encryption_key_id") // Reference to UserEncryptionKey (keyType: 'e2e_messages')
+  encryptionAlgorithm String? @default("AES-256-GCM") @map("encryption_algorithm") // Encryption algorithm
+  encryptionIV        String? @map("encryption_iv") // Initialization vector for encryption
+
+  objectId   String?   @unique @map("object_id") // ActivityStreams object URI
+  activityId String?   @unique @map("activity_id") // Create activity URI
+  read       Boolean   @default(false)
+  readAt     DateTime? @map("read_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  sender    User @relation("SentMessages", fields: [senderId], references: [id], onDelete: Cascade)
+  recipient User @relation("ReceivedMessages", fields: [recipientId], references: [id], onDelete: Cascade)
+
+  @@index([senderId])
+  @@index([recipientId])
+  @@index([recipientId, read])
+  @@index([encryptionKeyId]) // Index for encryption key lookups
+  @@map("direct_messages")
+}
+
+// Custom Audience model for ActivityPub custom audience targeting
+model CustomAudience {
+  id           String   @id @default(cuid())
+  name         String
+  creatorId    String   @map("creator_id") // Creator's user ID
+  collectionId String   @unique @map("collection_id") // Collection URI (e.g., "https://example.com/audiences/{id}")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  creator User                   @relation("AudienceCreator", fields: [creatorId], references: [id], onDelete: Cascade)
+  members CustomAudienceMember[]
+
+  @@index([creatorId])
+  @@map("custom_audiences")
+}
+
+// Custom Audience Member model (many-to-many relationship)
+model CustomAudienceMember {
+  id         String   @id @default(cuid())
+  audienceId String   @map("audience_id")
+  memberId   String   @map("member_id") // Member's user ID
+  addedAt    DateTime @default(now()) @map("added_at")
+
+  audience CustomAudience @relation(fields: [audienceId], references: [id], onDelete: Cascade)
+  member   User           @relation("AudienceMembers", fields: [memberId], references: [id], onDelete: Cascade)
+
+  @@unique([audienceId, memberId]) // Prevent duplicate members
+  @@index([audienceId])
+  @@index([memberId])
+  @@map("custom_audience_members")
+}
+
+// ============================================================================
+// Link Security System
+// ============================================================================
+
+// Domain reputation tracking
+model DomainReputation {
+  id          String   @id @default(cuid())
+  domain      String   @unique
+  reputation  Int      @default(0) // -100 to +100
+  status      String   @default("unknown") // unknown, safe, warning, blocked
+  lastChecked DateTime @default(now()) @map("last_checked")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  linkChecks LinkCheck[]
+
+  @@index([domain])
+  @@index([status])
+  @@index([reputation])
+  @@map("domain_reputations")
+}
+
+// Link check results (for posts/comments)
+model LinkCheck {
+  id            String    @id @default(cuid())
+  // Multi-tenancy — denormalized from the owning post/comment (both are
+  // tenant-scoped); required so geo/link rows are directly RLS-able.
+  tenantId      String    @map("tenant_id")
+  postId        String?   @map("post_id") // Nullable for comments
+  commentId     String?   @map("comment_id") // Nullable for posts
+  originalUrl   String    @map("original_url")
+  normalizedUrl String    @map("normalized_url")
+  finalUrl      String?   @map("final_url") // After redirect resolution
+  domain        String
+  status        String // pending, safe, warning, blocked
+  checkType     String    @map("check_type") // immediate, async
+  threatIntel   Json?     @map("threat_intel") // Results from external APIs
+  createdAt     DateTime  @default(now()) @map("created_at")
+  checkedAt     DateTime? @map("checked_at")
+
+  // Relations
+  post             Post?            @relation(fields: [postId], references: [id], onDelete: Cascade)
+  comment          PostComment?     @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  domainReputation DomainReputation @relation(fields: [domain], references: [domain])
+  tenant           Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([postId])
+  @@index([commentId])
+  @@index([domain])
+  @@index([status])
+  @@map("link_checks")
+}
+
+// LinkReport was folded into the generalized `Report` model (Surveillance-
+// hardening Phase 0, P4): reportType=LINK, resourceType="url", resourceId=url,
+// reporterUserId=userId, plus the indexed `domain` column. The link_reports
+// table is dropped in the P4 migration.
+
+// ============================================================================
+// Surveillance-hardening Phase 0 (doc/02-technical/surveillance-threat-model/)
+// ============================================================================
+
+// E1 — Append-only behavioral event log. Preserves the TEMPORAL signal that
+// `Relationship.signals` aggregate counters destroy, bounded to a rolling
+// retention window. P2 writes the rows (dual-write alongside aggregation);
+// Phase 0 ships ZERO read paths — any future read is restricted to the Phase 2
+// detection path + moderator surfaces (MODERATOR/SUPER_ADMIN, audited).
+//
+// Data-minimization invariants (security review blocks on these):
+//   - NO free-text/content column — event type + references only. The table
+//     must be useless as a content archive.
+//   - `expiresAt` is NON-NULLABLE: no schema path to an unbounded behavioral
+//     log. P2 sets it to createdAt + retentionDays (config).
+//   - `targetId` has no FK (polymorphic; the target may be a deleted user) —
+//     so cascade can't reach rows ABOUT a deleted user. P2 adds the explicit
+//     deleteMany to user-data-deletion.ts (GDPR Art. 17).
+model InteractionEvent {
+  id          String @id @default(cuid())
+  actorUserId String @map("actor_user_id")
+
+  // Polymorphic target, no FK (matches Relationship's convention). Vocabulary:
+  // "user" | "entity" | "post" — the GraphNodeType strings P2 dual-writes from.
+  targetType String @map("target_type")
+  targetId   String @map("target_id")
+
+  // Interaction vocabulary — exactly InteractionCounts in graph/postgres/
+  // scoring.ts: view | react | comment | share | depth_mode | profile_visit |
+  // content_creation. A string, not an enum, to track that vocabulary cheaply.
+  interactionType String @map("interaction_type")
+
+  tenantId  String?  @map("tenant_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // Retention bound — NON-NULLABLE. Append-only: no updatedAt, no update path.
+  expiresAt DateTime @map("expires_at")
+
+  actor User @relation("InteractionActor", fields: [actorUserId], references: [id], onDelete: Cascade)
+
+  @@index([actorUserId, createdAt])
+  @@index([targetType, targetId, createdAt])
+  @@index([expiresAt]) // pruning: DELETE WHERE expires_at < now()
+  @@map("interaction_events")
+}
+
+// E3 — Generalized report model. Folds in LinkReport (P4) and makes Phase 1
+// account reporting "add a reportType", not a new subsystem. Queue fields
+// (assignee/resolution) exist now but are unused until Phase 1.
+//
+// Erasure:
+//   - `reporterUserId` cascades (a deleted reporter's reports go with them —
+//     matches the old LinkReport behavior).
+//   - `resourceId` is an OPAQUE string, no FK: an ACCOUNT report's reported
+//     user may be deleted. P4 pseudonymizes resourceId on erasure of the
+//     reported user (aggregate pattern analysis survives; plaintext ID does
+//     not — "pattern analysis" is not an Art. 17(3) exemption).
+//   - `assigneeUserId` is a plain string (no FK): a deleted moderator must not
+//     cascade-delete the reports they were assigned.
+model Report {
+  id             String     @id @default(cuid())
+  reportType     ReportType @map("report_type")
+  resourceType   String     @map("resource_type") // "url" (LINK) | "user" (ACCOUNT)
+  resourceId     String     @map("resource_id") // opaque; no FK by design
+  reporterUserId String     @map("reporter_user_id")
+  reason         String? // free-text; P4 enforces a 1000-char Zod bound at the boundary
+  status         String     @default("pending") // pending | reviewed | resolved
+  // LINK-report registrable domain (P4 fold-in of LinkReport). Indexed +
+  // queried hot by DomainReputationService (auto-block threshold counts by
+  // domain). Nullable: ACCOUNT reports have no domain.
+  domain         String?
+  assigneeUserId String?    @map("assignee_user_id") // Phase 1 moderator queue
+  resolvedAt     DateTime?  @map("resolved_at")
+  resolution     String? // Phase 1 moderator queue
+  createdAt      DateTime   @default(now()) @map("created_at")
+
+  reporter User @relation("ReportReporter", fields: [reporterUserId], references: [id], onDelete: Cascade)
+
+  @@index([reportType, status])
+  @@index([resourceType, resourceId])
+  @@index([reporterUserId])
+  @@index([domain])
+  @@map("reports")
+}
+
+// ============================================================================
+// Email Suppression (AWS SES bounce/complaint handling)
+// ============================================================================
+
+model EmailSuppression {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  reason       String // "bounce" | "complaint"
+  bounceType   String? // "permanent" | "transient" for bounces
+  suppressedAt DateTime @default(now())
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([email])
+}
+
+// ============================================================================
+// Deletion Audit Log (GDPR compliance proof — NOT cascade-deleted)
+// ============================================================================
+
+model DeletionAuditLog {
+  id           String    @id @default(cuid())
+  userId       String    @map("user_id")
+  email        String
+  requestedAt  DateTime  @map("requested_at")
+  confirmedAt  DateTime? @map("confirmed_at")
+  completedAt  DateTime  @default(now()) @map("completed_at")
+  itemsDeleted Json      @map("items_deleted")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@map("deletion_audit_logs")
+}
+
+// ============================================================================
+// Safer Social Design (Plan 003)
+// ============================================================================
+
+// Age tiers for age-gated behavior
+enum AgeTier {
+  CHILD // under 13
+  TEEN // 13-17
+  ADULT // 18+
+}
+
+// Profile visibility levels
+enum ProfileVisibility {
+  PUBLIC // discoverable in search, visible to all
+  CONNECTIONS // visible only to mutual follows
+  PRIVATE // visible only to self and guardian
+}
+
+// DM access control
+enum DmAccess {
+  ANYONE // anyone can DM
+  CONNECTIONS // only mutual follows
+  NOBODY // DMs disabled
+}
+
+// Parental link status
+enum ParentalLinkStatus {
+  PENDING
+  ACTIVE
+  REVOKED
+}
+
+// Parental link between guardian and child accounts
+model ParentalLink {
+  id          String             @id @default(cuid())
+  childId     String             @map("child_id")
+  guardianId  String             @map("guardian_id")
+  status      ParentalLinkStatus @default(PENDING)
+  createdAt   DateTime           @default(now()) @map("created_at")
+  confirmedAt DateTime?          @map("confirmed_at")
+
+  child    User @relation("ChildParentalLinks", fields: [childId], references: [id])
+  guardian User @relation("GuardianParentalLinks", fields: [guardianId], references: [id])
+
+  @@unique([childId, guardianId])
+  @@index([guardianId])
+  @@map("parental_links")
+}
+
+// Notification types (safe by default — no re-engagement or social proof)
+enum NotificationType {
+  DIRECT_MESSAGE
+  SAFETY_ALERT
+  PARENTAL_LINK
+  FOLLOW
+  SENTIMENT_DIGEST
+  SYSTEM
+  RELATIONSHIP_CREATED
+  RELATIONSHIP_RECIPROCATED
+  TIER_CHANGED
+  ENTITY_RELATIONSHIP_PROPOSED
+  ENTITY_RELATIONSHIP_CONFIRMED
+  CONNECTION_CODE_REDEEMED
+}
+
+// Notification model (poll-based, never pushed)
+model Notification {
+  id          String           @id @default(cuid())
+  // Multi-tenancy (v0.7) — set to recipient's active tenant at write time.
+  tenantId    String           @map("tenant_id")
+  userId      String           @map("user_id")
+  type        NotificationType
+  title       String
+  body        String
+  data        Json?
+  read        Boolean          @default(false)
+  createdAt   DateTime         @default(now()) @map("created_at")
+  deliveredAt DateTime?        @map("delivered_at")
+  batchId     String?          @map("batch_id")
+
+  user   User   @relation(fields: [userId], references: [id])
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, userId, read, createdAt])
+  @@index([userId, read, createdAt])
+  @@index([userId, batchId])
+  @@map("notifications")
+}
+
+// Notification preferences (safety and parental always enabled, not configurable)
+model NotificationPreference {
+  id                  String  @id @default(cuid())
+  userId              String  @unique @map("user_id")
+  dmEnabled           Boolean @default(true) @map("dm_enabled")
+  followEnabled       Boolean @default(true) @map("follow_enabled")
+  digestEnabled       Boolean @default(true) @map("digest_enabled")
+  systemEnabled       Boolean @default(true) @map("system_enabled")
+  relationshipEnabled Boolean @default(true) @map("relationship_enabled")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("notification_preferences")
+}
+
+// Out-of-band invite codes — users share codes privately; redemption establishes
+// a relationship in the graph DB. Entity-scoped codes can be created by entity owners.
+model ConnectionCode {
+  id        String   @id @default(cuid())
+  // Multi-tenancy (v0.7) — code's owning tenant (creator's active tenant at create time).
+  tenantId  String   @map("tenant_id")
+  code      String   @unique
+  creatorId String   @map("creator_id")
+  entityId  String?  @map("entity_id")
+  expiresAt DateTime @map("expires_at")
+  maxUses   Int      @map("max_uses")
+  useCount  Int      @default(0) @map("use_count")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  creator     User                       @relation("ConnectionCodeCreator", fields: [creatorId], references: [id])
+  entity      Entity?                    @relation(fields: [entityId], references: [id])
+  tenant      Tenant                     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  redemptions ConnectionCodeRedemption[]
+
+  @@index([tenantId])
+  @@index([creatorId, expiresAt])
+  @@index([entityId])
+  @@map("connection_codes")
+}
+
+// One row per (code, redeemer). Composite unique prevents double-redemption under races.
+model ConnectionCodeRedemption {
+  id        String   @id @default(cuid())
+  codeId    String   @map("code_id")
+  userId    String   @map("user_id")
+  tenantId  String   @map("tenant_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  code   ConnectionCode @relation(fields: [codeId], references: [id])
+  user   User           @relation(fields: [userId], references: [id])
+  tenant Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([codeId, userId])
+  @@index([userId])
+  @@index([tenantId])
+  @@map("connection_code_redemptions")
+}
+
+// ============================================================================
+// MULTI-TENANCY MODEL (added in v0.7 — see plans/mvp/10-trellis-stages/01-schema-migration.md)
+// ============================================================================
+
+model Tenant {
+  id          String       @id @default(cuid())
+  slug        String       @unique
+  displayName String       @map("display_name")
+  type        TenantType
+  status      TenantStatus @default(ACTIVE)
+
+  // Data-residency region for the tenant. Surfaced in the per-tenant
+  // compliance bundle (`/api/tenants/:id/compliance.json`). Defaults to
+  // "EU" since the platform's primary region is Frankfurt; tenants can
+  // elect a different region during onboarding.
+  region String @default("EU")
+
+  // For PERSONAL tenants only — the single owner. Always equals the User.id who created it.
+  personalOwnerUserId String? @unique @map("personal_owner_user_id")
+
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+  suspendedAt   DateTime? @map("suspended_at")
+  suspendReason String?   @map("suspend_reason")
+
+  members          TenantMember[]
+  domains          TenantDomain[]
+  identityProvider TenantIdentityProvider?
+  roleMappings     TenantRoleMapping[]
+  invitations      TenantInvitation[]
+
+  // Tenant-scoped resources
+  entities                  Entity[]
+  posts                     Post[]
+  postComments              PostComment[]
+  groups                    Group[]
+  groupMembers              GroupMember[]
+  entityOwnerships          EntityOwnership[]
+  connectionCodes           ConnectionCode[]
+  connectionCodeRedemptions ConnectionCodeRedemption[]
+  notifications             Notification[]
+
+  // Denormalized tenant_id on by-relation children (P1 — for direct RLS).
+  postMedia           PostMedia[]
+  postSentiments      PostSentiment[]
+  linkChecks          LinkCheck[]
+  postGeoIndexes      PostGeoIndex[]
+  productTaxonomyTags ProductTaxonomyTag[]
+  entityLocations     EntityLocation[]
+
+  // Personal-tenant owner back-relation (uses @relation name to disambiguate)
+  personalOwner User? @relation("PersonalTenantOwner", fields: [personalOwnerUserId], references: [id])
+
+  @@index([slug])
+  @@index([type, status])
+  @@map("tenants")
+}
+
+enum TenantType {
+  PERSONAL
+  ORGANIZATION
+}
+
+enum TenantStatus {
+  ACTIVE
+  SUSPENDED
+  DELETING // Phase 3 — soft state during cascade-delete
+}
+
+model TenantMember {
+  id       String             @id @default(cuid())
+  tenantId String             @map("tenant_id")
+  userId   String             @map("user_id")
+  role     TenantRole
+  status   TenantMemberStatus @default(ACTIVE)
+
+  isJitProvisioned Boolean   @default(false) @map("is_jit_provisioned")
+  invitedByUserId  String?   @map("invited_by_user_id")
+  invitedAt        DateTime? @map("invited_at")
+  joinedAt         DateTime? @map("joined_at")
+  removedAt        DateTime? @map("removed_at")
+  lastActiveAt     DateTime? @map("last_active_at")
+
+  tenant    Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user      User   @relation("TenantMemberships", fields: [userId], references: [id], onDelete: Cascade)
+  invitedBy User?  @relation("TenantInvitedBy", fields: [invitedByUserId], references: [id])
+
+  @@unique([tenantId, userId])
+  @@index([userId])
+  @@index([tenantId, status])
+  @@index([tenantId, role])
+  @@map("tenant_members")
+}
+
+enum TenantRole {
+  OWNER
+  ADMIN
+  MEMBER
+  GUEST
+}
+
+enum TenantMemberStatus {
+  INVITED
+  ACTIVE
+  SUSPENDED
+  REMOVED
+}
+
+model TenantDomain {
+  id                String    @id @default(cuid())
+  tenantId          String    @map("tenant_id")
+  domain            String    @unique // lowercased; no protocol
+  verificationToken String    @map("verification_token") // 32 hex chars
+  // Token expires 7 days after creation; admin must re-claim if expired (sec finding #5)
+  tokenExpiresAt    DateTime  @map("token_expires_at")
+  verifiedAt        DateTime? @map("verified_at")
+  verifyAttemptedAt DateTime? @map("verify_attempted_at")
+  verifyAttempts    Int       @default(0) @map("verify_attempts")
+  createdAt         DateTime  @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([verifiedAt])
+  @@index([tokenExpiresAt])
+  @@map("tenant_domains")
+}
+
+model TenantIdentityProvider {
+  id       String @id @default(cuid())
+  tenantId String @unique @map("tenant_id")
+
+  kind IdpKind
+
+  // Cognito's IdP record name. Max 32 chars (Cognito quota), unique within the user pool.
+  cognitoIdpName String @unique @map("cognito_idp_name")
+
+  // SAML configuration
+  metadataUrl String? @map("metadata_url")
+  metadataXml String? @map("metadata_xml") @db.Text
+
+  // OIDC configuration
+  issuerUrl       String? @map("issuer_url")
+  clientId        String? @map("client_id")
+  clientSecretArn String? @map("client_secret_arn") // never the raw secret — Secrets Manager ARN
+  scopes          String  @default("openid email profile groups")
+
+  attributeMapping Json @default("{}") @map("attribute_mapping")
+
+  // Default role applied when no TenantRoleMapping matches the user's IdP groups.
+  // null means "deny if no group match."
+  defaultRole TenantRole? @map("default_role")
+
+  status      IdpStatus @default(PENDING)
+  enabledAt   DateTime? @map("enabled_at")
+  lastError   String?   @map("last_error") @db.Text
+  lastErrorAt DateTime? @map("last_error_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([cognitoIdpName])
+  @@index([status])
+  @@map("tenant_identity_providers")
+}
+
+enum IdpKind {
+  SAML
+  OIDC
+}
+
+enum IdpStatus {
+  PENDING
+  ACTIVE
+  DISABLED
+  ERROR
+}
+
+model TenantRoleMapping {
+  id           String     @id @default(cuid())
+  tenantId     String     @map("tenant_id")
+  idpGroupName String     @map("idp_group_name")
+  tenantRole   TenantRole @map("tenant_role")
+  // Lower priority = higher precedence (admin-grants beat member-grants).
+  priority     Int        @default(100)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, idpGroupName])
+  @@index([tenantId, priority])
+  @@map("tenant_role_mappings")
+}
+
+model TenantInvitation {
+  id               String     @id @default(cuid())
+  tenantId         String     @map("tenant_id")
+  email            String
+  role             TenantRole
+  token            String     @unique // signed JWT or random opaque token; one-shot
+  expiresAt        DateTime   @map("expires_at")
+  acceptedAt       DateTime?  @map("accepted_at")
+  acceptedByUserId String?    @map("accepted_by_user_id")
+
+  invitedByUserId String   @map("invited_by_user_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  tenant     Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  invitedBy  User   @relation("TenantInvitationInviter", fields: [invitedByUserId], references: [id])
+  acceptedBy User?  @relation("TenantInvitationAcceptedBy", fields: [acceptedByUserId], references: [id])
+
+  @@unique([tenantId, email])
+  @@index([token])
+  @@index([email])
+  @@index([expiresAt])
+  @@map("tenant_invitations")
+}
+
+// ============================================================================
+// Graph edges in Postgres (graph-db revisit 2026-06: see
+// plans/redesign/graph-backend-contract.md)
+//
+// These two tables hold the edges that previously lived only in the graph DB
+// (RELATES_TO and typed entity-to-entity edges). OWNS (entity_ownerships) and
+// ABOUT (post_subjects) already existed in Postgres. Modeled as standalone
+// tables (no Prisma @relation) so the migration is self-contained and
+// non-breaking; targetId is polymorphic (user|entity) so it cannot carry a
+// single FK. Cascade-on-delete is enforced in app code by the GraphService
+// remove* methods, exactly as the graph layer did. Read by the Postgres
+// GraphService adapter (apps/api/src/lib/graph/postgres/).
+// ============================================================================
+
+// RELATES_TO — a scored relationship from a user to a target (user or entity).
+model Relationship {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id") // denormalized scope, like entity_ownerships
+  userId   String @map("user_id")
+
+  // Polymorphic target: "user" | "entity" (matches GraphNodeType). No FK.
+  targetType String @map("target_type")
+  targetId   String @map("target_id")
+
+  computedScore     Float     @default(0) @map("computed_score")
+  manualScore       Float?    @map("manual_score") // null = no override
+  tier              Int       @default(3) // CircleTier 0..3
+  interactionCount  Int       @default(0) @map("interaction_count")
+  lastInteractionAt DateTime? @map("last_interaction_at")
+  connectionMethod  String    @map("connection_method") // code|import|suggestion|discovery
+  reciprocated      Boolean   @default(false)
+  // Per-interaction-type signal breakdown used by scoring-engine.ts.
+  // Shape finalized in Phase 1 (B5) against the scoring engine; JSON keeps the
+  // migration stable while that lands.
+  signals           Json?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([userId, targetType, targetId])
+  @@index([userId]) // forward: a user's relationships
+  @@index([targetType, targetId]) // reverse: who relates to X (FoF, recompute)
+  @@index([targetId])
+  @@index([userId, tier]) // circle-tier membership
+  @@index([tenantId])
+  @@map("relationships")
+}
+
+// Typed, unscored entity-to-entity edge (PACK_MATE, SIBLING, …), confirmable.
+model EntityRelationship {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
+
+  entityId         String                   @map("entity_id")
+  relatedEntityId  String                   @map("related_entity_id")
+  type             EntityRelationshipType
+  status           EntityRelationshipStatus @default(PENDING)
+  proposedByUserId String                   @map("proposed_by_user_id")
+
+  since     DateTime @default(now())
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([entityId, relatedEntityId, type])
+  @@index([entityId, type, status]) // discovery / list-by-entity
+  @@index([relatedEntityId, type, status]) // reverse / pending-by-owner
+  @@index([tenantId])
+  @@map("entity_relationships")
+}
+
+enum EntityRelationshipType {
+  PACK_MATE
+  SIBLING
+  PLAYMATE
+  PARENT
+  OFFSPRING
+  WALK_BUDDY
+}
+
+enum EntityRelationshipStatus {
+  PENDING
+  CONFIRMED
+  REJECTED
+}

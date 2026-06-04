@@ -1,0 +1,169 @@
+{
+  "sections": [
+    {
+      "title": "General",
+      "items": [
+        {
+          "title": "Overview",
+          "path": "internal/OVERVIEW.md"
+        },
+        {
+          "title": "Architecture",
+          "path": "internal/ARCHITECTURE.md"
+        }
+      ]
+    },
+    {
+      "title": "Sales",
+      "items": [
+        {
+          "title": "Sales Guide",
+          "path": "internal/SALES_GUIDE.md"
+        },
+        {
+          "title": "Sales Documentation",
+          "path": "internal/SALES_DOCS.md"
+        }
+      ]
+    },
+    {
+      "title": "Business Analysts",
+      "items": [
+        {
+          "title": "Business Analyst Guide",
+          "path": "internal/BUSINESS_ANALYST_GUIDE.md"
+        },
+        {
+          "title": "Business Analyst Documentation",
+          "path": "internal/BUSINESS_ANALYST_DOCS.md"
+        }
+      ]
+    },
+    {
+      "title": "Support",
+      "items": [
+        {
+          "title": "Support Guide",
+          "path": "internal/SUPPORT_GUIDE.md"
+        },
+        {
+          "title": "Support Documentation",
+          "path": "internal/SUPPORT_DOCS.md"
+        }
+      ]
+    },
+    {
+      "title": "Operations",
+      "items": [
+        {
+          "title": "Operations Guide",
+          "path": "internal/OPERATIONS_GUIDE.md"
+        },
+        {
+          "title": "Operations Documentation",
+          "path": "internal/OPERATIONS_DOCS.md"
+        }
+      ]
+    },
+    {
+      "title": "Market Analysis",
+      "items": [
+        {
+          "title": "Market Analysis Documentation",
+          "path": "internal/MARKET_ANALYSIS_DOCS.md"
+        },
+        {
+          "title": "Competitor Analysis Overview",
+          "path": "internal/market-analysis/README.md"
+        },
+        {
+          "title": "Competitor Analysis Details",
+          "path": "internal/market-analysis/competitor-analysis.md"
+        },
+        {
+          "title": "Dogpack Deep Analysis",
+          "path": "internal/market-analysis/dogpack-deep-analysis.md"
+        }
+      ]
+    },
+    {
+      "title": "Compliance",
+      "items": [
+        {
+          "title": "Compliance Guide",
+          "path": "internal/COMPLIANCE_GUIDE.md"
+        },
+        {
+          "title": "Compliance Documentation",
+          "path": "internal/COMPLIANCE_DOCS.md"
+        }
+      ]
+    },
+    {
+      "title": "Formal Compliance Documents",
+      "items": [
+        {
+          "title": "Bavaria Compliance Overview",
+          "path": "internal/bavaria-compliance/README.md"
+        },
+        {
+          "title": "Handelsregisterauszug",
+          "path": "internal/bavaria-compliance/handelsregisterauszug.md"
+        },
+        {
+          "title": "Gewerbeanmeldung",
+          "path": "internal/bavaria-compliance/gewerbeanmeldung.md"
+        },
+        {
+          "title": "Steuerliche Erfassung",
+          "path": "internal/bavaria-compliance/steuerliche-erfassung.md"
+        },
+        {
+          "title": "Umsatzsteuer-Voranmeldung",
+          "path": "internal/bavaria-compliance/umsatzsteuer-voranmeldung.md"
+        },
+        {
+          "title": "Umsatzsteuererklärung",
+          "path": "internal/bavaria-compliance/umsatzsteuererklaerung.md"
+        },
+        {
+          "title": "E-Rechnungsverfahren",
+          "path": "internal/bavaria-compliance/e-rechnungsverfahren.md"
+        },
+        {
+          "title": "Datenschutzerklärung",
+          "path": "internal/bavaria-compliance/datenschutzerklaerung.md"
+        },
+        {
+          "title": "Verarbeitungsverzeichnis",
+          "path": "internal/bavaria-compliance/verarbeitungsverzeichnis.md"
+        },
+        {
+          "title": "Datenschutz-Folgenabschätzung",
+          "path": "internal/bavaria-compliance/datenschutz-folgenabschaetzung.md"
+        }
+      ]
+    },
+    {
+      "title": "Developers",
+      "items": [
+        {
+          "title": "Developer Guide",
+          "path": "internal/DEVELOPER_GUIDE.md"
+        },
+        {
+          "title": "Developer Documentation",
+          "path": "internal/DEVELOPER_DOCS.md"
+        },
+        {
+          "title": "Implementation Guide",
+          "path": "internal/IMPLEMENTATION.md"
+        },
+        {
+          "title": "Sync Strategy",
+          "path": "internal/SYNC_STRATEGY.md"
+        }
+      ]
+    }
+  ]
+}

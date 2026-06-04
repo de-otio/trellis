@@ -1,0 +1,32 @@
+{
+  "name": "trellis-monorepo",
+  "version": "0.1.0",
+  "license": "AGPL-3.0-or-later",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w @de-otio/trellis",
+    "build": "npm run build -w @de-otio/trellis",
+    "test": "npm test -w @de-otio/trellis",
+    "test:watch": "npm run test:watch -w @de-otio/trellis",
+    "test:coverage": "npm run test:coverage -w @de-otio/trellis",
+    "test:graph": "npm run test:graph -w @de-otio/trellis",
+    "test:graph:failover": "npm run test:graph:failover -w @de-otio/trellis",
+    "lint": "npm run lint -w @de-otio/trellis",
+    "format": "prettier --write \"**/*.{ts,tsx,dart,json,md}\" --ignore-path .gitignore",
+    "prisma:generate": "npm run -w @de-otio/trellis prisma:generate",
+    "prisma:migrate:dev": "npm run -w @de-otio/trellis prisma:migrate:dev",
+    "prisma:migrate:deploy": "npm run -w @de-otio/trellis prisma:migrate:deploy",
+    "seed:feature-toggles": "npm run -w @de-otio/trellis seed:feature-toggles",
+    "test:agents": "STAGE=dev AWS_REGION=eu-central-1 AWS_PROFILE=dot-dev npx vitest run --config apps/api/vitest.agents.config.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "prettier": "^3.3.3",
+    "typescript": "^5.6.0"
+  },
+  "dependencies": {}
+}

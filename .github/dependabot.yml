@@ -1,0 +1,28 @@
+# Dependency monitoring — see doc/02-technical/surveillance-threat-model/09-public-project-exposure.md
+# (supply-chain hardening) and 08-implementation-roadmap.md §E8.
+#
+# Dependabot PRs are reviewed by the org-shared Claude supply-chain check
+# (.github/workflows/dependabot-handler.yml) and auto-merged on approval.
+
+version: 2
+updates:
+  # npm workspaces share the root package-lock.json, so one entry covers
+  # apps/api and packages/extension-api.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      aws-sdk:
+        patterns:
+          - "@aws-sdk/*"
+      dev-dependencies:
+        dependency-type: development
+
+  # Keeps the SHA-pinned actions in .github/workflows/ current (Dependabot
+  # updates the pin and the trailing version comment together).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

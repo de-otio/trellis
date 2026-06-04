@@ -1,0 +1,217 @@
+/**
+ * Unit tests: routes/agent-sessions.ts (T9b-d).
+ *
+ * Covers:
+ *  - GET returns only the requesting user's sessions.
+ *  - POST revoke calls Cognito globalSignOut + records audit.
+ *  - 404 when revoking a session that belongs to another user.
+ */
+
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const {
+  mockAuthMiddleware,
+  mockListAgentSessions,
+  mockGetAgentSession,
+  mockRevokeAgentSession,
+  mockGlobalSignOut,
+  mockAuditEmit,
+} = vi.hoisted(() => ({
+  mockAuthMiddleware: vi.fn(),
+  mockListAgentSessions: vi.fn(),
+  mockGetAgentSession: vi.fn(),
+  mockRevokeAgentSession: vi.fn(),
+  mockGlobalSignOut: vi.fn(),
+  mockAuditEmit: vi.fn(),
+}));
+
+vi.mock("../../../../src/lib/auth/auth-middleware", () => ({
+  authMiddleware: (...a: unknown[]) => mockAuthMiddleware(...a),
+}));
+
+vi.mock("../../../../src/lib/oauth/refresh-detection", () => ({
+  listAgentSessions: (...a: unknown[]) => mockListAgentSessions(...a),
+  getAgentSession: (...a: unknown[]) => mockGetAgentSession(...a),
+  revokeAgentSession: (...a: unknown[]) => mockRevokeAgentSession(...a),
+}));
+
+vi.mock("../../../../src/lib/security-headers", () => ({
+  SecurityHeaders: class {
+    constructor(_env: unknown) {}
+    createSecureResponse(body: BodyInit, init: ResponseInit) {
+      return new Response(body, init);
+    }
+    addSecurityHeaders(response: Response) {
+      return response;
+    }
+  },
+}));
+
+vi.mock("../../../../src/db", () => ({
+  createPrisma: () => ({}),
+}));
+
+import {
+  agentSessionsRoutes,
+  _resetAgentSessionDepsForTest,
+  _setAgentSessionDepsForTest,
+} from "../../../../src/lib/routes/agent-sessions.js";
+import type { Env } from "../../../../src/env.js";
+
+const ENV = {
+  COGNITO_USER_POOL_ID: "us-east-1_pool",
+} as Env;
+
+const AUTH = {
+  cognitoSub: "sub-alice",
+  userId: "u_alice",
+  globalRole: "B2B_PARTNER",
+  activeTenantId: "t_one",
+  tenantSlug: "demo",
+  tenantRole: "ADMIN",
+  handle: "alice",
+  membershipsLoader: async () => [],
+};
+
+function findRoute(path: string, method: string) {
+  return agentSessionsRoutes.find(
+    (r) => (typeof r.path === "string" ? r.path === path : (r.path as RegExp).test(path)) && r.method === method,
+  );
+}
+
+beforeEach(() => {
+  mockAuthMiddleware.mockReset();
+  mockListAgentSessions.mockReset();
+  mockGetAgentSession.mockReset();
+  mockRevokeAgentSession.mockReset();
+  mockGlobalSignOut.mockReset();
+  mockAuditEmit.mockReset();
+  _resetAgentSessionDepsForTest();
+  _setAgentSessionDepsForTest({
+    cognito: { globalSignOut: mockGlobalSignOut },
+    auditEmitter: { emit: mockAuditEmit } as unknown as import("../../../../src/lib/audit-composer.js").TenantAuditEmitter,
+  });
+});
+
+describe("GET /api/users/me/agent-sessions", () => {
+  it("returns 401 without auth", async () => {
+    mockAuthMiddleware.mockResolvedValue(null);
+    const route = findRoute("/api/users/me/agent-sessions", "GET")!;
+    const request = new Request("http://localhost/api/users/me/agent-sessions");
+    const response = await route.handler(request, ENV, {
+      url: new URL(request.url),
+      pathname: "/api/users/me/agent-sessions",
+      params: {},
+    });
+    expect(response.status).toBe(401);
+  });
+
+  it("returns the user's sessions", async () => {
+    mockAuthMiddleware.mockResolvedValue(AUTH);
+    mockListAgentSessions.mockResolvedValue([
+      {
+        sessionId: "s_a",
+        userId: "u_alice",
+        cognitoSub: "sub-alice",
+        tenantId: "t_one",
+        currentJti: "j_a",
+        status: "active",
+        agentLabel: "claude-code/1.0",
+        sourceIp: "1.2.3.4",
+        createdAt: 1700000000,
+        lastUsedAt: 1700000010,
+      },
+    ]);
+    const route = findRoute("/api/users/me/agent-sessions", "GET")!;
+    const request = new Request("http://localhost/api/users/me/agent-sessions");
+    const response = await route.handler(request, ENV, {
+      url: new URL(request.url),
+      pathname: "/api/users/me/agent-sessions",
+      params: {},
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { sessions: Array<{ id: string; agentLabel: string }> };
+    expect(body.sessions).toHaveLength(1);
+    expect(body.sessions[0]!.id).toBe("s_a");
+    expect(body.sessions[0]!.agentLabel).toBe("claude-code/1.0");
+
+    expect(mockListAgentSessions).toHaveBeenCalledWith("u_alice");
+  });
+});
+
+describe("POST /api/users/me/agent-sessions/{id}/revoke", () => {
+  it("returns 401 without auth", async () => {
+    mockAuthMiddleware.mockResolvedValue(null);
+    const route = findRoute("/api/users/me/agent-sessions/s_a/revoke", "POST")!;
+    const request = new Request("http://localhost/api/users/me/agent-sessions/s_a/revoke", { method: "POST" });
+    const response = await route.handler(request, ENV, {
+      url: new URL(request.url),
+      pathname: "/api/users/me/agent-sessions/s_a/revoke",
+      params: {},
+    });
+    expect(response.status).toBe(401);
+  });
+
+  it("returns 404 when revoking a session belonging to another user", async () => {
+    mockAuthMiddleware.mockResolvedValue(AUTH);
+    mockGetAgentSession.mockResolvedValue({
+      sessionId: "s_b",
+      userId: "u_bob",
+      cognitoSub: "sub-bob",
+      tenantId: "t_two",
+      currentJti: "j_b",
+      status: "active",
+      createdAt: 0,
+      lastUsedAt: 0,
+    });
+    const route = findRoute("/api/users/me/agent-sessions/s_b/revoke", "POST")!;
+    const request = new Request("http://localhost/api/users/me/agent-sessions/s_b/revoke", { method: "POST" });
+    const response = await route.handler(request, ENV, {
+      url: new URL(request.url),
+      pathname: "/api/users/me/agent-sessions/s_b/revoke",
+      params: {},
+    });
+    expect(response.status).toBe(404);
+    expect(mockRevokeAgentSession).not.toHaveBeenCalled();
+  });
+
+  it("revokes a session belonging to the user (calls globalSignOut)", async () => {
+    mockAuthMiddleware.mockResolvedValue(AUTH);
+    mockGetAgentSession.mockResolvedValue({
+      sessionId: "s_a",
+      userId: "u_alice",
+      cognitoSub: "sub-alice",
+      tenantId: "t_one",
+      currentJti: "j_a",
+      status: "active",
+      createdAt: 0,
+      lastUsedAt: 0,
+    });
+
+    const route = findRoute("/api/users/me/agent-sessions/s_a/revoke", "POST")!;
+    const request = new Request("http://localhost/api/users/me/agent-sessions/s_a/revoke", { method: "POST" });
+    const response = await route.handler(request, ENV, {
+      url: new URL(request.url),
+      pathname: "/api/users/me/agent-sessions/s_a/revoke",
+      params: {},
+    });
+    expect(response.status).toBe(200);
+    expect(mockRevokeAgentSession).toHaveBeenCalledTimes(1);
+    const callArgs = mockRevokeAgentSession.mock.calls[0]![0] as { sessionId: string; cognitoUsername: string };
+    expect(callArgs.sessionId).toBe("s_a");
+    expect(callArgs.cognitoUsername).toBe("sub-alice");
+  });
+
+  it("returns 404 when the session is unknown", async () => {
+    mockAuthMiddleware.mockResolvedValue(AUTH);
+    mockGetAgentSession.mockResolvedValue(null);
+    const route = findRoute("/api/users/me/agent-sessions/s_a/revoke", "POST")!;
+    const request = new Request("http://localhost/api/users/me/agent-sessions/s_a/revoke", { method: "POST" });
+    const response = await route.handler(request, ENV, {
+      url: new URL(request.url),
+      pathname: "/api/users/me/agent-sessions/s_a/revoke",
+      params: {},
+    });
+    expect(response.status).toBe(404);
+  });
+});

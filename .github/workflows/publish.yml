@@ -1,0 +1,116 @@
+name: Publish
+
+# Tag-triggered npm publish for the two publishable packages in this
+# monorepo. Uses npm Trusted Publishing via OIDC — the package must be
+# registered as a Trusted Publisher on npmjs.org first; once set up,
+# subsequent tagged releases publish without any manual OTP.
+#
+# Tag formats:
+#   v<version>                  → @de-otio/trellis            (apps/api)
+#   extension-api-v<version>    → @de-otio/trellis-extension-api  (packages/extension-api)
+#
+# The workflow verifies that the tag's version matches the target
+# package.json's version before publishing, so a bad tag can't publish
+# the wrong thing.
+
+on:
+  push:
+    tags:
+      - 'v*'
+      - 'extension-api-v*'
+
+permissions:
+  contents: read
+  id-token: write  # OIDC for Trusted Publishing
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      # Node 24 ships npm v11. npm Trusted Publishing requires npm >= 11.5.1;
+      # Node 22 ships npm 10 which fails with a misleading "404 Not Found"
+      # on PUT immediately after provenance is signed.
+      # Ref: https://medium.com/@kenricktan11/npm-trusted-publishers-the-weird-404-error-and-the-node-js-24-fix-a9f1d717a5dd
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run build
+
+      - name: Determine target package from tag
+        id: pkg
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          case "$TAG" in
+            extension-api-v*)
+              DIR="packages/extension-api"
+              NAME="@de-otio/trellis-extension-api"
+              EXPECTED_VERSION="${TAG#extension-api-v}"
+              ;;
+            v*)
+              DIR="apps/api"
+              NAME="@de-otio/trellis"
+              EXPECTED_VERSION="${TAG#v}"
+              ;;
+            *)
+              echo "::error::Unrecognised tag format: $TAG (expected v<x> or extension-api-v<x>)"
+              exit 1
+              ;;
+          esac
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "expected_version=$EXPECTED_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Verify package.json version matches tag
+        run: |
+          cd "${{ steps.pkg.outputs.dir }}"
+          ACTUAL=$(node -p "require('./package.json').version")
+          EXPECTED="${{ steps.pkg.outputs.expected_version }}"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::Tag version ($EXPECTED) does not match package.json version ($ACTUAL) for ${{ steps.pkg.outputs.name }}"
+            exit 1
+          fi
+
+      # Consumer-install smoke for @de-otio/trellis: pack, install with
+      # --omit=dev into a fresh project, require every published entry
+      # point. Catches runtime imports of devDeps and unshipped
+      # relative imports before publishing. Skipped for the
+      # extension-api package because that one has no Lambda/server
+      # entry points to load.
+      - name: Consumer-install smoke (trellis only)
+        if: steps.pkg.outputs.name == '@de-otio/trellis'
+        run: bash apps/api/scripts/smoke-pack.sh
+
+      - name: Select dist-tag from version
+        id: disttag
+        run: |
+          VERSION="${{ steps.pkg.outputs.expected_version }}"
+          case "$VERSION" in
+            *-alpha*) TAG=alpha ;;
+            *-beta*)  TAG=beta ;;
+            *-rc*)    TAG=rc ;;
+            *-*)      TAG=next ;;
+            *)        TAG=latest ;;
+          esac
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      # The `prepack` script in apps/api/package.json copies
+      # ../../prisma into ./prisma so the published tarball ships the
+      # schema + migrations alongside dist/. The `postpack` script
+      # cleans up afterwards. We rely on this — do NOT add
+      # --ignore-scripts.
+      #
+      # No --provenance: npm provenance requires a public source repo,
+      # but this repo is private. TP (OIDC auth) still works; we just
+      # skip the sigstore attestation. If the repo is later made public,
+      # add --provenance back.
+      - name: Publish ${{ steps.pkg.outputs.name }}@${{ steps.pkg.outputs.expected_version }}
+        working-directory: ${{ steps.pkg.outputs.dir }}
+        run: npm publish --access public --tag "${{ steps.disttag.outputs.tag }}"

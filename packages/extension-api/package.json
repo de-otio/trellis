@@ -1,0 +1,29 @@
+{
+  "name": "@de-otio/trellis-extension-api",
+  "version": "0.2.0",
+  "description": "Shared types for Trellis extensions: TrellisExtension, Route, strategy interfaces",
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "scripts": {
+    "build": "tsc --build tsconfig.json",
+    "dev": "tsc --watch",
+    "prepare": "tsc --build tsconfig.json",
+    "lint": "prettier --check .",
+    "format": "prettier -w ."
+  },
+  "author": "Trellis",
+  "license": "MIT",
+  "files": [
+    "lib",
+    "README.md"
+  ],
+  "dependencies": {
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "prettier": "^3.3.3",
+    "typescript": "^5.6.0"
+  }
+}

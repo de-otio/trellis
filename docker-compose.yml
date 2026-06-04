@@ -1,0 +1,48 @@
+services:
+  postgres:
+    # PostGIS-enabled Postgres 16 — the entity-location subsystem (C7) needs
+    # geography columns + ST_DWithin/GiST for geo-proximity. Same PG16 on-disk
+    # format as postgres:16-alpine, so the existing volume is reused.
+    image: postgis/postgis:16-3.4
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: trellis_dev
+      POSTGRES_USER: trellis
+      POSTGRES_PASSWORD: trellis_dev_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trellis -d trellis_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  dynamodb:
+    image: amazon/dynamodb-local:latest
+    ports:
+      - "8000:8000"
+    # In-memory mode: ephemeral and fast, the recommended mode for tests. The
+    # file-backed (-dbPath) engine can deadlock on the mounted volume, hanging
+    # every DynamoDB operation while the HTTP port still answers.
+    command: "-jar DynamoDBLocal.jar -sharedDb -inMemory"
+
+  localstack:
+    image: localstack/localstack:latest
+    ports:
+      - "4566:4566"
+    environment:
+      SERVICES: s3,sqs,ses
+      DEFAULT_REGION: us-east-1
+      DEBUG: 0
+    volumes:
+      - localstack_data:/var/lib/localstack
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  # (Neo4j removed 2026-06: the graph layer — relationships, circles,
+  # discovery — runs in Postgres above. `npm run test:graph` targets it via
+  # DATABASE_URL.)
+
+volumes:
+  postgres_data:
+  localstack_data:

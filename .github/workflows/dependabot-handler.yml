@@ -1,0 +1,27 @@
+# Calls the org-shared workflow that runs Claude against each Dependabot PR
+# to check for supply-chain attack signals, then enables auto-merge if
+# approved. See https://github.com/de-otio/.github for implementation.
+#
+# DISABLED 2026-06-04: the per-PR Bedrock review is too expensive to run on
+# every Dependabot PR, so the automatic `pull_request_target` trigger is
+# removed. `workflow_dispatch` is retained only to keep this a valid workflow
+# (the `if: github.actor == 'dependabot[bot]'` guard skips manual runs anyway).
+# To re-enable automatic review, restore the `pull_request_target` trigger.
+
+name: Dependabot review
+
+on:
+  workflow_dispatch:
+  # pull_request_target:
+  #   types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+
+jobs:
+  review:
+    if: github.actor == 'dependabot[bot]'
+    uses: de-otio/.github/.github/workflows/dependabot-claude-review.yml@main
+    secrets: inherit
