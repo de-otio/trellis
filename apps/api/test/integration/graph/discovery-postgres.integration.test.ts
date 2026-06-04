@@ -18,6 +18,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Prisma, PrismaClient } from "@prisma/client";
+import { PrismaPg } from "@prisma/adapter-pg";
 import { runWithTenantContext, tenantId } from "@de-otio/saas-foundation/tenant";
 import { DiscoveryOps } from "../../../src/lib/graph/postgres/discovery.js";
 
@@ -100,7 +101,9 @@ suite("PostgresGraphService.DiscoveryOps (live CTE)", () => {
   }
 
   beforeAll(async () => {
-    prisma = new PrismaClient({ datasources: { db: { url: TEST_DB_URL } } });
+    prisma = new PrismaClient({
+      adapter: new PrismaPg({ connectionString: TEST_DB_URL! }),
+    });
     ops = new DiscoveryOps(prisma);
 
     await wipeTenants([TENANT, OTHER_TENANT], [U]);

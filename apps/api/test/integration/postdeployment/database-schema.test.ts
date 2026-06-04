@@ -21,6 +21,7 @@
  */
 
 import { PrismaClient } from "@prisma/client";
+import { PrismaPg } from "@prisma/adapter-pg";
 import { beforeAll, describe, expect, it } from "vitest";
 import { getSsmParameter } from "../../utils/aws-ssm.js";
 
@@ -160,7 +161,7 @@ describe.skip("Post-Deployment: Database Schema Validation", () => {
 
     const sslUrl = ensureSslConnection(dbUrl);
     const db = new PrismaClient({
-      datasourceUrl: sslUrl,
+      adapter: new PrismaPg({ connectionString: sslUrl }),
       log: process.env.DEBUG ? ["error", "warn"] : [],
     });
 

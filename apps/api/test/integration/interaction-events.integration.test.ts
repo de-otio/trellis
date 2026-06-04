@@ -7,6 +7,7 @@
  */
 
 import { PrismaClient } from "@prisma/client";
+import { PrismaPg } from "@prisma/adapter-pg";
 import { runWithTenantContext, type TenantId } from "@de-otio/saas-foundation/tenant";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -30,7 +31,9 @@ async function makeUser(tag: string): Promise<string> {
 }
 
 beforeAll(async () => {
-  prisma = new PrismaClient({ datasources: { db: { url: TEST_DB_URL } } });
+  prisma = new PrismaClient({
+    adapter: new PrismaPg({ connectionString: TEST_DB_URL }),
+  });
   await prisma.$connect();
 });
 

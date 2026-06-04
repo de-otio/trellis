@@ -338,6 +338,7 @@ let sharedTestPrismaClientPromise: Promise<any> | null = null;
 async function createTestPrismaClient(): Promise<any> {
   // Use dynamic import to avoid ESM module resolution issues
   const { PrismaClient } = await import("@prisma/client");
+  const { PrismaPg } = await import("@prisma/adapter-pg");
   let dbUrl = await getDatabaseUrl();
   if (!dbUrl) {
     throw new Error(
@@ -391,8 +392,9 @@ async function createTestPrismaClient(): Promise<any> {
 
   // Create new shared client
   sharedTestPrismaClientPromise = (async () => {
+    const adapter = new PrismaPg({ connectionString: finalUrl });
     const client = new PrismaClient({
-      datasourceUrl: finalUrl,
+      adapter,
       // Limit connection pool size to prevent exhaustion
       // Use smaller pool for tests since we're reusing a single client
       log: process.env.DEBUG ? ["error", "warn", "query"] : [],
