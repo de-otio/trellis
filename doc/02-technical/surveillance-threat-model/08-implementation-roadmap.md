@@ -22,6 +22,18 @@ impossible. None of them ship user-visible features.
 > [`plans/surveillance-hardening-phase0/`](../../../plans/surveillance-hardening-phase0/)
 > breaks E1–E8 into 7 stages (P1 schema → P2–P7 independent), target
 > release v0.9.0.
+>
+> **Status: Phase 0 COMPLETE (2026-06-04), targeting v0.9.0.** All enablers
+> landed on `main`:
+> - **E1** Raw interaction event log — ✅ P1 (schema) + P2 (capture)
+> - **E2** Signup metadata on User — ✅ P1 (schema) + P3 (capture)
+> - **E3** Generalized Report model — ✅ P1 (schema) + P4 (LinkReport fold-in)
+> - **E4** Per-tenant feature-toggle scoping — ✅ P1 (schema) + P5 (resolution)
+> - **E5** MODERATOR role — ✅ P1
+> - **E6** ActivityPub enablement preconditions + Fedify spike — ✅ P6 (docs)
+> - **E7** Documentation guarantees — ✅ P7
+> - **E8** Public-exposure hardening — ✅ (SHA-pinned actions + Dependabot
+>   2026-06-04; threshold-secrecy rule + go-public gate in P7)
 
 ### E1. Raw interaction event log (enables 03)
 

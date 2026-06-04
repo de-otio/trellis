@@ -97,6 +97,19 @@ See `apps/api/src/env.ts` for the full environment schema.
 4. **Security first** — review for injection, OWASP issues
 5. **Run tests in foreground** — never background test processes
 6. **Database efficiency** — use indexes, limit query complexity, paginate
+7. **Client-metadata storage rule** — IP, User-Agent, and device identifiers
+   are stored **only** through a path that enforces anonymization or an
+   explicit retention bound. The two sanctioned paths are the audit composer
+   (`lib/audit-composer.ts`) and `SecurityEvent` (which carries a non-nullable
+   `retentionUntil`, pruned by the hourly cron). Storing client metadata ad hoc
+   alongside domain data — or on `User` — is a **review blocker**. See
+   `doc/02-technical/surveillance-threat-model/07-data-minimization.md`.
+8. **Threshold-secrecy rule** — operational security parameters (rate limits
+   beyond defaults, detection thresholds, sampling rates, retention windows)
+   are **runtime config** (env vars / feature toggles with defaults), never
+   compiled-in constants sprinkled at call sites. The npm tarball is public, so
+   a hard-coded threshold is a published threshold. See
+   `doc/02-technical/surveillance-threat-model/09-public-project-exposure.md`.
 
 ## When Working on Features
 
@@ -124,6 +137,14 @@ Trellis is extended by verticals that register extensions at startup. An extensi
 - **shutdown** (optional): Cleanup function called on graceful shutdown
 
 See `packages/extension-api/` for the `TrellisExtension` interface.
+
+**Extension review criterion (tracker-free guarantee):** an extension **must
+not** introduce third-party trackers, analytics SDKs, or ad-network
+integrations into server-side request handling, and may store client metadata
+only through the sanctioned anonymized/retention-bound paths (rule 7 above).
+This is stated for vertical developers in
+[`packages/extension-api/README.md`](packages/extension-api/README.md);
+extension review blocks on a violation.
 
 ---
 

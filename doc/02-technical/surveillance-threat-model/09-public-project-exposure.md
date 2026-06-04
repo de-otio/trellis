@@ -112,22 +112,13 @@ the first report has somewhere to go other than a public issue.
 ## The go-public gate
 
 The repo may be opened deliberately or leak effectively (forks, vendored
-copies). Before flipping visibility — treat as blocking, like the
-federation preconditions in 05:
+copies). Before flipping visibility — treat as blocking, like the federation
+preconditions in 05. The checklist now lives in one authoritative place:
+**[doc/02-technical/development/go-public-gate.md](../development/go-public-gate.md)**.
+This doc supplies the rationale (deployment reconnaissance, above); that doc
+supplies the actionable gate.
 
-- [ ] `SECURITY.md` with a private disclosure channel and response
-      expectation
-- [ ] CODEOWNERS + required review on security-sensitive paths and
-      `.github/workflows/`
-- [ ] Branch protection on `main`; tag protection on `v*` /
-      `extension-api-v*` (tags trigger publish)
-- [ ] Actions pinned by commit SHA in all workflows
-- [ ] Secret scanning + push protection enabled
-- [ ] `--provenance` added to `npm publish`
-- [ ] History audit: no internal hostnames, account IDs, or
-      engagement-specific references anywhere in git history
-- [ ] Hardware-key 2FA verified on all maintainer GitHub + npm accounts
-
-Independent of the gate, two items are worth doing **now** (cheap, and the
+Independent of the gate, two items were worth doing **now** (cheap, and the
 npm tarball is already public): SHA-pin the publish workflow's actions, and
-enable Dependabot. See [08 §E8](./08-implementation-roadmap.md#e8-public-exposure-hardening-enables-this-file).
+enable Dependabot — both done 2026-06-04. See
+[08 §E8](./08-implementation-roadmap.md#e8-public-exposure-hardening-enables-this-file).
