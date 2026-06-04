@@ -55,6 +55,10 @@ function makePrisma() {
     entityOwnership: {
       findMany: vi.fn().mockResolvedValue([]),
     },
+    // Surveillance-hardening Phase 0 (P2): the InteractionEvent dual-write.
+    interactionEvent: {
+      create: vi.fn().mockResolvedValue({ id: "ie-1" }),
+    },
     $transaction: vi.fn(async (ops: unknown[]) => ops),
   };
 }
@@ -121,12 +125,44 @@ describe("ScoringOps", () => {
       expect(arg.data.signals.comment).toBe(0);
     });
 
-    it("is a no-op when no relationship exists", async () => {
+    it("is a no-op for AGGREGATION when no relationship exists", async () => {
       prisma.relationship.findUnique.mockResolvedValue(null);
 
       await withTenant(() => ops.recordInteraction(input));
 
       expect(prisma.relationship.update).not.toHaveBeenCalled();
+    });
+
+    it("dual-writes an InteractionEvent even when no relationship exists (P2)", async () => {
+      // The temporal signal must be captured regardless of whether a
+      // Relationship row exists to aggregate into.
+      prisma.relationship.findUnique.mockResolvedValue(null);
+
+      await withTenant(() => ops.recordInteraction(input));
+
+      expect(prisma.interactionEvent.create).toHaveBeenCalledTimes(1);
+      const arg = prisma.interactionEvent.create.mock.calls[0][0];
+      expect(arg.data).toMatchObject({
+        actorUserId: USER,
+        targetType: "user",
+        targetId: "target-1",
+        interactionType: "comment",
+      });
+      expect(arg.data.expiresAt).toBeInstanceOf(Date);
+    });
+
+    it("does not let an InteractionEvent write failure fail the interaction (fail-open)", async () => {
+      prisma.relationship.findUnique.mockResolvedValue({
+        id: "rel-1",
+        tenantId: TENANT,
+        signals: null,
+      });
+      prisma.interactionEvent.create.mockRejectedValue(new Error("insert boom"));
+
+      // Must not throw, and aggregation must still proceed.
+      await withTenant(() => ops.recordInteraction(input));
+
+      expect(prisma.relationship.update).toHaveBeenCalledTimes(1);
     });
 
     it("is a no-op when the relationship belongs to another tenant", async () => {

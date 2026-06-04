@@ -1,10 +1,16 @@
+import { CloudWatchClient, PutMetricDataCommand } from "@aws-sdk/client-cloudwatch";
 import { DynamoDBClient, PutItemCommand } from "@aws-sdk/client-dynamodb";
 import { SecretsManagerClient, GetSecretValueCommand } from "@aws-sdk/client-secrets-manager";
 import { marshall } from "@aws-sdk/util-dynamodb";
 import { PrismaClient } from "@prisma/client";
+import {
+  batchedPruneExpired,
+  resolveInteractionEventConfig,
+} from "../lib/graph/postgres/interaction-events.js";
 
 const dynamo = new DynamoDBClient({ region: process.env.AWS_REGION });
 const secretsClient = new SecretsManagerClient({ region: process.env.AWS_REGION });
+const cloudwatch = new CloudWatchClient({ region: process.env.AWS_REGION });
 const TABLE = process.env.DYNAMODB_TABLE!;
 
 let prisma: PrismaClient | null = null;
@@ -85,19 +91,84 @@ export const handler = async (): Promise<void> => {
     console.error(JSON.stringify({ level: "error", msg: "Orphaned media cleanup failed", error: String(err) }));
   }
 
-  // 3. Clean up expired security events
+  const eventConfig = resolveInteractionEventConfig();
+
+  // 3. Clean up expired security events (retentionUntil < now).
+  //    Surveillance-hardening Phase 0 (P2): retrofitted from a single unbounded
+  //    deleteMany to the SAME batched helper as InteractionEvent — a mass-expiry
+  //    backlog on one deleteMany would lock the table.
   try {
-    const result = await db.securityEvent.deleteMany({
-      where: {
-        retentionUntil: { lte: new Date() },
+    const now = new Date();
+    const result = await batchedPruneExpired({
+      findExpiredIds: async (take) => {
+        const rows = await db.securityEvent.findMany({
+          where: { retentionUntil: { lt: now } },
+          select: { id: true },
+          take,
+        });
+        return rows.map((r) => r.id);
       },
+      deleteByIds: async (ids) => {
+        const res = await db.securityEvent.deleteMany({ where: { id: { in: ids } } });
+        return res.count;
+      },
+      batchSize: eventConfig.pruneBatchSize,
+      maxIterations: eventConfig.pruneMaxIterations,
     });
-    if (result.count > 0) {
-      console.log(JSON.stringify({ level: "info", msg: "Expired security events cleaned", deleted: result.count }));
+    if (result.deleted > 0 || result.circuitBreakerTripped) {
+      console.log(JSON.stringify({ level: "info", msg: "Expired security events cleaned", deleted: result.deleted, circuitBreakerTripped: result.circuitBreakerTripped }));
     }
+    await emitPruneMetrics("SecurityEvent", result, false);
   } catch (err) {
     console.error(JSON.stringify({ level: "error", msg: "Security event cleanup failed", error: String(err) }));
+    await emitPruneMetrics("SecurityEvent", { deleted: 0, circuitBreakerTripped: false }, true);
+  }
+
+  // 4. Prune expired InteractionEvent rows (expiresAt < now), batched with a
+  //    circuit breaker (Surveillance-hardening Phase 0, P2). Silent retention
+  //    failure converts the behavioral log into the unbounded surveillance
+  //    asset the threat model forbids — so prune failure / a tripped breaker
+  //    raises a CloudWatch metric to alarm on.
+  try {
+    const { InteractionEventOps } = await import("../lib/graph/postgres/interaction-events.js");
+    const ops = new InteractionEventOps(db, eventConfig);
+    const result = await ops.prune(new Date());
+    if (result.deleted > 0 || result.circuitBreakerTripped) {
+      console.log(JSON.stringify({ level: "info", msg: "Expired interaction events pruned", deleted: result.deleted, circuitBreakerTripped: result.circuitBreakerTripped }));
+    }
+    await emitPruneMetrics("InteractionEvent", result, false);
+  } catch (err) {
+    console.error(JSON.stringify({ level: "error", msg: "Interaction event pruning failed", error: String(err) }));
+    await emitPruneMetrics("InteractionEvent", { deleted: 0, circuitBreakerTripped: false }, true);
   }
 
   console.log(JSON.stringify({ level: "info", msg: "Hourly cron complete" }));
 };
+
+/**
+ * Emit retention-pruning metrics to CloudWatch (Trellis/Retention namespace),
+ * fail-open. `Pruned` counts deleted rows; `PruneFailed` flags an exception;
+ * `PruneCircuitBreakerTripped` flags a drained-iteration-cap backlog — alarm on
+ * the latter two so retention never silently stops.
+ */
+async function emitPruneMetrics(
+  table: "SecurityEvent" | "InteractionEvent",
+  result: { deleted: number; circuitBreakerTripped: boolean },
+  failed: boolean,
+): Promise<void> {
+  try {
+    const timestamp = new Date();
+    await cloudwatch.send(
+      new PutMetricDataCommand({
+        Namespace: "Trellis/Retention",
+        MetricData: [
+          { MetricName: "Pruned", Value: result.deleted, Unit: "Count", Timestamp: timestamp, Dimensions: [{ Name: "Table", Value: table }] },
+          { MetricName: "PruneFailed", Value: failed ? 1 : 0, Unit: "Count", Timestamp: timestamp, Dimensions: [{ Name: "Table", Value: table }] },
+          { MetricName: "PruneCircuitBreakerTripped", Value: result.circuitBreakerTripped ? 1 : 0, Unit: "Count", Timestamp: timestamp, Dimensions: [{ Name: "Table", Value: table }] },
+        ],
+      }),
+    );
+  } catch (cwErr) {
+    console.error(JSON.stringify({ level: "error", msg: "Retention metrics emit failed", table, error: String(cwErr) }));
+  }
+}

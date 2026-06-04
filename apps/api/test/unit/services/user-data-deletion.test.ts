@@ -33,6 +33,8 @@ describe("deleteUserData", () => {
       securityEvent: { deleteMany: vi.fn().mockResolvedValue({ count: 4 }) },
       consent: { deleteMany: vi.fn().mockResolvedValue({ count: 1 }) },
       invitation: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
+      // Surveillance-hardening Phase 0 (P2): target-side InteractionEvent erasure.
+      interactionEvent: { deleteMany: vi.fn().mockResolvedValue({ count: 5 }) },
       user: { delete: vi.fn().mockResolvedValue({ id: "user-123" }) },
     };
   });
@@ -53,6 +55,7 @@ describe("deleteUserData", () => {
       securityEvents: 4,
       crossRegionConsents: 1,
       invitations: 0,
+      interactionEventsAsTarget: 5,
     });
 
     // Verify deletion order: sentiments before comments, comments before posts, posts before entities
@@ -119,6 +122,16 @@ describe("deleteUserData", () => {
       where: {
         OR: [{ createdBy: "user-123" }, { usedBy: "user-123" }],
       },
+    });
+  });
+
+  it("erases target-side interaction events (GDPR Art. 17, P2)", async () => {
+    await deleteUserData(mockDb, "user-123");
+
+    // Actor-side rows cascade via FK on user.delete(); target-side rows (about
+    // the deleted user) have no FK and need this explicit deleteMany.
+    expect(mockDb.interactionEvent.deleteMany).toHaveBeenCalledWith({
+      where: { targetType: "user", targetId: "user-123" },
     });
   });
 

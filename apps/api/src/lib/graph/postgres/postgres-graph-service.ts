@@ -37,6 +37,7 @@ import { DiscoveryOps } from "./discovery.js";
 import { EntityRelationshipOps } from "./entity-relationships.js";
 import { RelationshipOps } from "./relationships.js";
 import { ScoringOps } from "./scoring.js";
+import type { InteractionEventConfig } from "./interaction-events.js";
 import { SyncOps } from "./sync.js";
 
 export class PostgresGraphService implements GraphService, GraphConnection {
@@ -51,12 +52,16 @@ export class PostgresGraphService implements GraphService, GraphConnection {
   constructor(
     private readonly prisma: PrismaClient,
     geoLookup?: EntityGeoLookup,
+    // Surveillance-hardening Phase 0 (P2): InteractionEvent dual-write config,
+    // threaded from env by graph-factory. Optional — existing call sites
+    // (tests) keep the conservative defaults.
+    eventConfig?: InteractionEventConfig,
   ) {
     this.relationships = new RelationshipOps(prisma);
     this.circles = new CircleOps(prisma);
     this.entityRelationships = new EntityRelationshipOps(prisma);
     this.discovery = new DiscoveryOps(prisma, geoLookup);
-    this.scoring = new ScoringOps(prisma);
+    this.scoring = new ScoringOps(prisma, eventConfig);
     this.sync = new SyncOps(prisma, geoLookup);
   }
 

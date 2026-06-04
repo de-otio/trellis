@@ -16,7 +16,7 @@ import { defineConfig } from "vitest/config";
 
 const PHASE0_INTEGRATION = [
   // P2 — interaction event capture
-  //   "test/integration/interaction-events.integration.test.ts",
+  "test/integration/interaction-events.integration.test.ts",
   // P4 — report model adoption
   //   "test/integration/report-migration.integration.test.ts",
 ];
@@ -27,8 +27,11 @@ export default defineConfig({
     environment: "node",
     include: PHASE0_INTEGRATION,
     passWithNoTests: true,
-    setupFiles: ["test/setup.ts"],
-    globalTeardown: "test/teardown.ts",
+    // NO test/setup.ts: it force-overrides DATABASE_URL to a fake hyperdrive
+    // URL (for the mocked unit suite). These Phase-0 integration tests connect
+    // to a REAL Postgres via the explicit DATABASE_URL — same approach as the
+    // schema lane (vitest.schema.config.ts), which also runs setup-free.
+    setupFiles: [],
     testTimeout: 30000,
     hookTimeout: 30000,
     // Single thread — integration tests share the local Postgres container.

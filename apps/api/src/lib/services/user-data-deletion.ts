@@ -13,6 +13,9 @@ export interface DeletionResult {
   securityEvents: number;
   crossRegionConsents: number;
   invitations: number;
+  /** Target-side InteractionEvent rows (Surveillance-hardening Phase 0, P2).
+   *  Actor-side rows cascade via the FK on user.delete(). */
+  interactionEventsAsTarget: number;
 }
 
 /**
@@ -131,7 +134,17 @@ export async function deleteUserData(
     where: { OR: [{ createdBy: userId }, { usedBy: userId }] },
   });
 
-  // 16. Delete the user (cascades to MfaEnrollment, LinkReport, UserEncryptionKey)
+  // 15b. Delete TARGET-side InteractionEvent rows (Surveillance-hardening Phase
+  //      0, P2 / GDPR Art. 17). The ACTOR side (actor_user_id) cascades via FK
+  //      on user.delete(); targetId has no FK, so rows ABOUT the deleted user
+  //      (targetType "user") need an explicit deleteMany. Erasure must be
+  //      prompt — "ages out in ≤120 days" is not Art. 17 compliance.
+  const interactionEventsAsTarget = await db.interactionEvent.deleteMany({
+    where: { targetType: "user", targetId: userId },
+  });
+
+  // 16. Delete the user (cascades to MfaEnrollment, LinkReport, UserEncryptionKey,
+  //     Report (reporter), and actor-side InteractionEvent rows)
   await db.user.delete({ where: { id: userId } });
 
   return {
@@ -147,5 +160,6 @@ export async function deleteUserData(
     securityEvents: securityEvents.count,
     crossRegionConsents: crossRegionConsents.count,
     invitations: invitations.count,
+    interactionEventsAsTarget: interactionEventsAsTarget.count,
   };
 }

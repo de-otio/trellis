@@ -24,6 +24,10 @@ import type {
   ScoreUpdate,
 } from "../types.js";
 import {
+  InteractionEventOps,
+  type InteractionEventConfig,
+} from "./interaction-events.js";
+import {
   computeDecay,
   computeScore,
   ENTITY_DECAY_HALF_LIFE_DAYS,
@@ -63,7 +67,17 @@ function readCounts(signals: unknown): InteractionCounts {
 }
 
 export class ScoringOps {
-  constructor(private readonly prisma: PrismaClient) {}
+  private readonly events: InteractionEventOps;
+
+  constructor(
+    private readonly prisma: PrismaClient,
+    // Surveillance-hardening Phase 0 (P2): InteractionEvent dual-write config.
+    // Optional so existing/test call sites keep working; production threads it
+    // from env via graph-factory. Defaults are conservative (see the helper).
+    eventConfig?: InteractionEventConfig,
+  ) {
+    this.events = new InteractionEventOps(prisma, eventConfig);
+  }
 
   /**
    * Record a single interaction on an existing relationship.
@@ -75,8 +89,16 @@ export class ScoringOps {
    * Read-modify-write of the JSON column rather than an atomic counter: Prisma
    * has no JSON-path increment, and the Neo4j port has the same race window
    * (interaction recording is best-effort, scores are recomputed in batch).
+   *
+   * Phase 0 (P2): ALSO append an InteractionEvent (the temporal signal the
+   * `signals` aggregate destroys). Done FIRST and fail-open, so it captures
+   * every interaction regardless of whether a Relationship row exists to bump,
+   * and never affects aggregation behavior or the user-facing path.
    */
   async recordInteraction(input: RecordInteractionInput): Promise<void> {
+    // Append-only behavioral event — independent of the aggregation below.
+    await this.events.record(input);
+
     const tenantId = getCurrentTenantId();
     if (!tenantId) return;
 

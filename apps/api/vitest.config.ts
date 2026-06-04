@@ -25,6 +25,9 @@ export default defineConfig({
       // Exclude schema-shape integration tests — require a live local Postgres with migrations applied.
       // Run separately: npm test -w @de-otio/trellis -- run test/integration/schema (with DATABASE_URL set)
       "test/integration/schema/**/*.test.ts",
+      // Surveillance-hardening Phase 0 integration tests — live Postgres only.
+      // Run separately: npm run test:integration:ci (CI lane added in P1).
+      "test/integration/interaction-events.integration.test.ts",
     ],
     setupFiles: ["test/setup.ts"],
     globalTeardown: "test/teardown.ts",

@@ -28,7 +28,7 @@ const PHASE0_NEW_FILES = [
   // P1 — schema enablers
   "src/lib/feature-toggle-global-client.ts",
   // P2 — interaction event capture
-  //   "src/lib/graph/postgres/interaction-events.ts",
+  "src/lib/graph/postgres/interaction-events.ts",
   // P3 — signup metadata capture
   //   "src/lib/signup-metadata.ts",
 ];

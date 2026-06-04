@@ -197,6 +197,26 @@ export interface Env {
   // Storage (S3-backed, same interface as Cloudflare R2)
   MEDIA_BUCKET_R2: R2Bucket;
   EXPORT_FILES_R2: R2Bucket;
+
+  // --- Surveillance-hardening Phase 0 (P2): InteractionEvent capture ---------
+  // Operational parameters are RUNTIME CONFIG, not compiled-in constants — the
+  // npm tarball is public (threshold-secrecy invariant, see
+  // doc/02-technical/surveillance-threat-model/09-public-project-exposure.md).
+  // Parsed by resolveInteractionEventConfig() in
+  // lib/graph/postgres/interaction-events.ts (which holds the defaults); the
+  // graph layer is built without an Env handle, so it reads these from
+  // process.env via that parser. Declared here as the documented home.
+  /** Master kill-switch for the InteractionEvent dual-write. Default on; set
+   *  to "false" to disable (rollback). */
+  INTERACTION_EVENTS_ENABLED?: string;
+  /** Retention window in days (expiresAt = createdAt + N). Default 120. */
+  INTERACTION_EVENT_RETENTION_DAYS?: string;
+  /** Fraction 0..1 of high-volume `view` events to record. Default 0 (skip). */
+  INTERACTION_EVENT_VIEW_SAMPLE_RATE?: string;
+  /** Prune batch size (rows per delete). Default 1000. */
+  INTERACTION_EVENT_PRUNE_BATCH_SIZE?: string;
+  /** Prune circuit-breaker: max iterations per run. Default 1000. */
+  INTERACTION_EVENT_PRUNE_MAX_ITERATIONS?: string;
 }
 
 /**

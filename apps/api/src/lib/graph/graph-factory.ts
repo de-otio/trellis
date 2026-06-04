@@ -98,7 +98,15 @@ async function buildGraphServiceFromEnv(
   const { PostgresGraphService } = await import(
     "./postgres/postgres-graph-service.js"
   );
-  const service = new PostgresGraphService(createPrisma(e), geoLookup);
+  // Surveillance-hardening Phase 0 (P2): thread the InteractionEvent dual-write
+  // config from env (built by env.ts), falling back to the process.env parser.
+  const { resolveInteractionEventConfig } = await import(
+    "./postgres/interaction-events.js"
+  );
+  const eventConfig =
+    (e as { interactionEvents?: ReturnType<typeof resolveInteractionEventConfig> })
+      .interactionEvents ?? resolveInteractionEventConfig();
+  const service = new PostgresGraphService(createPrisma(e), geoLookup, eventConfig);
   await service.connect({ endpoint: "postgres", auth: { type: "none" } });
   return service;
 }

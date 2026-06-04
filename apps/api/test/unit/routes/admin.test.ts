@@ -245,6 +245,11 @@ describe("Admin Routes", () => {
       entityTaxonomyTag: {
         deleteMany: vi.fn(),
       },
+      // Surveillance-hardening Phase 0 (P2): deleteUserData erases target-side
+      // InteractionEvent rows.
+      interactionEvent: {
+        deleteMany: vi.fn(),
+      },
     };
 
     mockRequest = new Request("https://example.com/api/admin/test/users", {
@@ -369,7 +374,7 @@ describe("Admin Routes", () => {
       mockDb.entity.findMany.mockResolvedValue([]);
       mockDb.user.delete.mockResolvedValue({ id: "user-123" });
       // deleteUserData needs deleteMany to return { count: N }
-      for (const model of [mockDb.commentSentiment, mockDb.postSentiment, mockDb.postComment, mockDb.post, mockDb.entity, mockDb.entityOwnership, mockDb.postSubject, mockDb.directMessage, mockDb.customAudienceMember, mockDb.customAudience, mockDb.securityEvent, mockDb.consent, mockDb.invitation]) {
+      for (const model of [mockDb.commentSentiment, mockDb.postSentiment, mockDb.postComment, mockDb.post, mockDb.entity, mockDb.entityOwnership, mockDb.postSubject, mockDb.directMessage, mockDb.customAudienceMember, mockDb.customAudience, mockDb.securityEvent, mockDb.consent, mockDb.invitation, mockDb.interactionEvent]) {
         model.deleteMany.mockResolvedValue({ count: 0 });
       }
       mockWithQueryTimeoutAndRetry.mockImplementation(
