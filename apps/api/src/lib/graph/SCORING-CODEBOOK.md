@@ -232,7 +232,126 @@ tier = first tier T in TIER_THRESHOLDS where score >= T.minScore
 
 ---
 
-## 10. Keeping the Codebook in Sync
+## 10. Discovery Recommendation Signals
+
+`getRecommendations` (`apps/api/src/lib/graph/postgres/discovery.ts`) is a
+**separate** scoring path from the edge-weight engine above. It does not read
+`scoring-engine.ts` constants; it computes its own per-candidate signal scores,
+merges them, and applies a diversity cap. This section is the authoritative
+reference for those constants. Source of truth:
+`apps/api/src/lib/graph/postgres/discovery.ts`.
+
+### 10a. Signal scores
+
+| Signal | Formula | Value range | Meaning & rationale |
+|--------|---------|-------------|---------------------|
+| `shared_connections` | `sharedCount / 10` | unbounded ≥ 0, clamped to 1 at the end | `sharedCount` = number of distinct seed entities (the viewer's owned + related entities) from which the candidate is reachable within a ≤ 2-hop CONFIRMED-edge traversal. Dividing by 10 means 10 shared connections saturate the signal; this keeps a single shared connection (0.1) well below the same-breed baseline while letting genuine hubs dominate. |
+| `same_breed` | `0.6` (fixed) | 0.6 | Flat score for any candidate whose breed matches a breed the viewer already owns. Fixed (not graduated) because breed match is a binary affinity prior, not a strength signal — 0.6 places it above a weak shared connection but below a strong one (≥ 6 shared). |
+| `nearby` | `(1 − d / 10 000) × 0.5` | (0, 0.5] within the 5 km radius | `d` = metres to the nearest of the viewer's owned entities, from PostGIS. Radius capped at `NEARBY_RECO_RADIUS_METERS = 5000` (5 km), so `d ≤ 5000` ⇒ score ∈ [0.25, 0.5]. The `× 0.5` ceiling keeps proximity strictly weaker than a strong shared-connection signal: location is a soft prior, not a strong tie. The `/10 000` denominator (not `/5000`) means even an at-the-boundary candidate retains half its weight, avoiding a hard cliff at 5 km. |
+| `owner_proximity` | (pass-through) | — | Conceptually, "inherited closeness" — a candidate owned by someone the viewer is close to. In the current implementation this is **not a separately computed signal row**; it is folded into `shared_connections` (the owner relationship is one of the graph edges the shared-connection traversal already walks). It is documented here as a pass-through concept, not a query. |
+
+### 10b. `owner_proximity` client-side mapping (security)
+
+The `RecommendationReason` union exposed to clients is
+`shared_connections | same_breed | nearby | popular_in_circle`. It deliberately
+**excludes** `owner_proximity`: surfacing it would let a viewer infer that they
+have a close relationship with an entity's owner even when that relationship is
+not otherwise visible (graph-topology leak). Any internal `owner_proximity`
+reason is therefore mapped to `shared_connections` in the response. See the
+`RecommendationReason` doc comment in `graph/types.ts`.
+
+### 10c. Merge & dedup semantics
+
+`mergeRecommendations(signals, limit)` is a **pure function** (no I/O) so the
+ordering logic is verifiable in isolation. It runs three bounded steps:
+
+1. **Dedup by entity, keep the highest score.** An entity surfaced by multiple
+   signals appears once, with the highest-scoring reason (e.g. an entity that is
+   both same-breed `0.6` and a single shared connection `0.1` keeps the
+   `same_breed` reason). This preserves the pre-cap semantics.
+2. **Capped round-robin fill.** Sources are filled in a fixed order —
+   `shared_connections → same_breed → nearby` — each pre-sorted by score
+   descending. A candidate is admitted only if **every** active owner of the
+   candidate is below the cap; on admit, all its owners' counts increment.
+   One full cycle over all candidates.
+3. **Relaxation pass.** If the page is still under `limit` after the capped
+   pass, **one** relaxation pass admits the remaining skipped candidates by
+   global score descending, ignoring the cap (**fill beats starve**).
+
+Hard bound: exactly two passes, no loop on external state (the
+infinite-loop-prevention rule's degenerate case — one owner owning every
+candidate — is covered by unit + integration tests).
+
+### 10d. `MAX_RECOMMENDATIONS_PER_OWNER = 2`
+
+The per-**owner** diversity cap. Meaning: a single owner contributes at most two
+recommendations to one page during the capped pass. Rationale: a hub owner
+(someone who owns many discoverable entities) would otherwise fill the entire
+recommendations page, narrowing the viewer's exposure to a single account — the
+algorithmic-norm-misperception risk this change addresses (Brady et al., *Nature*
+2026). The cap is **per-owner, not per-entity** (entity dedup is handled in step
+1). A multi-owner entity counts against **every** active owner and is admitted
+only if all are under the cap. Ownerless candidates (empty `ownerIds`) are
+**exempt** — they cannot concentrate exposure on any account. Owner sets are
+aggregated in SQL with `ARRAY_AGG(DISTINCT user_id)` over `entity_ownerships`
+filtered to `status = 'ACTIVE'` and the ambient tenant (an unscoped ownership
+join would be a cross-tenant read).
+
+### 10e. `DISCOVERY_RANKING_VERSION = 1`
+
+Mirrors `FEED_RANKING_VERSION` (`feed-pagination.ts`). Increment on any change to
+the discovery signals, their weights, the merge/dedup semantics, or the cap.
+A version change is a new experimental condition for
+`/api/discovery/recommendations` and must be audited accordingly. **Version 1
+includes the diversity cap** — it is the first version ever served, so the cap
+is part of the definition of version 1, not a bump from an uncapped predecessor
+(no recommendation has been served without it).
+
+---
+
+## 11. Exposure Pathways
+
+This section names where engagement-derived scores actually influence what a
+user sees. It exists because the platform's central invariant —
+**engagement signals never order the feed** — is easy to misread as "engagement
+never affects exposure". It does, through one specific mechanism. Documentation
+only; no behaviour change.
+
+### 11a. The feed is never engagement-ordered
+
+`ALLOWED_SORT_FIELDS = ["createdAt"]` (`feed-pagination.ts`). The feed is
+strictly chronological. The scoring engine's heaviest entity weights —
+`engagement` (0.35, depth of engagement) and `frequency` (0.25, interaction
+count) — **never** appear in a sort key. No amount of engagement reorders the
+timeline. `FEED_RANKING_VERSION` pins this; changing it is a new experimental
+condition (Section on feed ranking in `feed-pagination.ts`).
+
+### 11b. The one engagement-driven exposure mechanism: tier assignment gates composition
+
+Those same engagement/frequency weights **do** feed the edge score, and the edge
+score assigns a **circle tier** (Section 8, `TIER_THRESHOLDS`). Tiers then gate
+**feed composition** — which relationships' content is eligible to appear, and a
+post's broadcast radius (`WHISPER`/`NORMAL`/`LOUD`/`SHOUT`) is matched against the
+viewer's tier for the subject. So engagement does not *order* the feed, but it
+*selects membership* of the candidate set via tier. This tier-assignment pathway
+is the platform's single engagement-driven exposure mechanism, and naming it
+keeps the "engagement never affects exposure" misreading from hiding it.
+
+### 11c. `owner_proximity` compounds hub effects
+
+`ENTITY_WEIGHTS.ownerProximity = 0.15` (Section 2b) is a pass-through of the
+viewer's score with an entity's owner(s): content owned by a close account
+inherits closeness and so reaches a higher tier. For a **hub** account (many
+owned entities, many viewers close to it) this compounds — its entities are
+systematically tier-promoted across many viewers. The discovery-surface
+`MAX_RECOMMENDATIONS_PER_OWNER` cap (Section 10d) is the counterweight on the
+*recommendation* path; the feed path's counterweight is the chronological-floor
+invariant (11a). Both are deliberate limits on a single account's exposure
+concentration.
+
+---
+
+## 12. Keeping the Codebook in Sync
 
 The source of truth for all values above is
 `apps/api/src/lib/graph/scoring-engine.ts`.  A pointer comment at the top
