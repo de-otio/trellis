@@ -1,8 +1,8 @@
 /**
  * PostgresGraphService — the graph serving path backed by Postgres
  * (joins + recursive CTEs on the existing RDS). No separate graph DB,
- * no dual-write. See the graph-DB revisit + migration plan in
- * skybber/plans/redesign/graph-db/.
+ * no dual-write. See the graph-backend contract in
+ * plans/redesign/graph-backend-contract.md.
  *
  * The implementation is split into per-method-group modules (relationships,
  * circles, entity-relationships, discovery, scoring, sync) so Phase 1 can be

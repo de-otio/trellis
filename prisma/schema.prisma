@@ -1804,7 +1804,7 @@ model TenantInvitation {
 
 // ============================================================================
 // Graph edges in Postgres (graph-db revisit 2026-06: see
-// skybber plans/redesign/graph-db/graph-db-revisit-2026-06.md)
+// plans/redesign/graph-backend-contract.md)
 //
 // These two tables hold the edges that previously lived only in the graph DB
 // (RELATES_TO and typed entity-to-entity edges). OWNS (entity_ownerships) and
