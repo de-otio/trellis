@@ -54,7 +54,10 @@ export class FeatureFlagsManager {
    * Checks FeatureToggleService for each feature flag.
    * Falls back to defaults if toggle doesn't exist.
    *
-   * @param tenantId - Optional tenant ID (not used in MVP, reserved for future)
+   * @param tenantId - Optional tenant ID. When provided, each flag resolves the
+   *                   tenant override first, falling back to the global row,
+   *                   then the coded default (P5). When omitted, resolution is
+   *                   global-only — unchanged from before.
    * @returns Feature flags object
    */
   async getFeatureFlags(tenantId?: string): Promise<FeatureFlags> {
@@ -67,12 +70,15 @@ export class FeatureFlagsManager {
       const { FeatureToggleService } = await import("./feature-toggle-service.js");
       const toggleService = new FeatureToggleService(this.db);
 
-      // Helper function to check toggle or use default
+      // Helper function to check toggle or use default. Threads the optional
+      // tenantId through so a tenant override beats the global row, which beats
+      // the coded default. When tenantId is undefined, getToggle stays on the
+      // global (cached) path.
       const checkToggle = async (
         key: string,
         defaultValue: boolean,
       ): Promise<boolean> => {
-        const toggle = await toggleService.getToggle(key);
+        const toggle = await toggleService.getToggle(key, tenantId);
         // If toggle doesn't exist, use default; otherwise use toggle value
         return toggle === null ? defaultValue : toggle.enabled;
       };
