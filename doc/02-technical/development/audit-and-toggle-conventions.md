@@ -28,6 +28,15 @@ Use the prefix to distinguish treatment-eligible toggles from infrastructure con
 | `infra_`| Infrastructure     | Database drivers, connection pool tuning, caching layers, async workers | No                  |
 | `ops_`  | Operations         | Maintenance mode, circuit breakers, rate-limit overrides, kill switches | No                  |
 
+> **Reserved sub-namespace — `ux_feed_ranking_*`:** This prefix is reserved for
+> future per-tenant ranking-strategy selection (see the ranked-surface
+> pre-commitment in
+> [`analysis/enshittification-resistance/05-tenant-policy-floor.md`](../../../analysis/enshittification-resistance/05-tenant-policy-floor.md)).
+> **No key under `ux_feed_ranking_*` may be created until all four constraints
+> in that pre-commitment are satisfied** — versioned, auditable, per-tenant
+> opt-in, and diversity-constrained. No dispatch code for this namespace exists
+> or is being built now.
+
 > **Why the experiment registry filters on `ux_`:** The future treatment allow-list
 > (experiment assignment + holdout logic) gates only over `ux_*` keys.
 > Infrastructure and ops toggles must not become part of a user treatment

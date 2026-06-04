@@ -11,6 +11,7 @@
 import type { Env } from "../env.js";
 import type { TrellisRequestContext } from "./request-context.js";
 import type { Session } from "./session-cookie.js";
+import { recordServedRecommendations } from "./discovery-exposure.js";
 
 // Simple in-memory rate limiter: 5 requests per 60-second window per user.
 // NOTE: Per-process only — does not enforce across multiple ECS tasks. Known tradeoff.
@@ -177,6 +178,10 @@ export class DiscoveryHandler {
       const graphService = await createGraphServiceFromEnv(env);
 
       const recommendations = await graphService.getRecommendations(session.userId, limit);
+
+      // Fire-and-forget: record aggregate exposure counters.
+      // Must not await on the response path — never blocks or fails the response.
+      void recordServedRecommendations(recommendations.map((r) => r.entityId));
 
       return new Response(JSON.stringify({ recommendations }), {
         status: 200,

@@ -41,6 +41,48 @@ Implementation shape:
 - A tenant policy that tries to loosen a floor value is **clamped and logged**,
   not honoured (and surfaced to the tenant as "below platform floor — ignored").
 
+## Ranked-surface pre-commitment
+
+The floor extends to how ranked surfaces are introduced — not just how they are
+configured once live. Four constraints are locked now, before any ranked surface
+is built:
+
+1. **Chronological is the floor.** No tenant, extension, or experiment may make
+   an engagement-ranked feed the default surface for any user. Ranked surfaces
+   are tributaries — a user must affirmatively navigate to one. This is not a
+   tunable platform default.
+
+2. **Any future ranked surface must satisfy all four properties simultaneously:**
+   - **(a) Versioned** — export a named constant (`FEED_RANKING_VERSION` /
+     `DISCOVERY_RANKING_VERSION`) incremented on any change to signals, weights,
+     merge logic, or cap semantics, so the audit trail can attribute behaviour to
+     a specific version.
+   - **(b) Auditable** — the activation, deactivation, and reconfiguration of
+     every ranked surface must produce `feature_toggle.changed` events, providing
+     a durable history of who changed what and when.
+   - **(c) Per-tenant opt-in only** — access to ranked surfaces is controlled
+     via the reserved `ux_feed_ranking_*` toggle namespace; no ranked surface is
+     on-by-default for any tenant.
+   - **(d) Diversity-constrained by default** — a distributional cap (e.g.
+     `MAX_RECOMMENDATIONS_PER_OWNER`) is part of the *definition* of a ranked
+     surface, not a post-hoc option. A ranked surface without a diversity
+     constraint is not a conforming ranked surface; the registry guard must
+     enforce this.
+
+3. **Note for S1 (attention-mechanics-mvp):** when the `RANKING_POLICIES`
+   registry
+   ([`plans/attention-mechanics-mvp/01`](../../plans/attention-mechanics-mvp/01-ranking-policy-boundary.md))
+   is built, its guard must enforce constraint (d) for every registered policy.
+   A policy that does not declare and enforce a diversity cap must be rejected at
+   registration, not at runtime.
+
+4. Brady et al. 2026 ([`analysis/algorithmic-norm-misperception/01-insights.md`](../algorithmic-norm-misperception/01-insights.md))
+   provides the empirical basis for holding the floor without sacrificing user
+   satisfaction: the study found that switching users from engagement-ranked to
+   chronological feeds produced no reliable drop in self-reported satisfaction or
+   sense of social connection. The floor costs nothing measurable; relaxing it
+   risks a norm-misperception spiral that is hard to reverse once it starts.
+
 ## Tests (this is where the invariant lives)
 
 - For each floor-governed field: a tenant policy *stricter* than the floor is

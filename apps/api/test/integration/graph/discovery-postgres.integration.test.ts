@@ -84,12 +84,26 @@ suite("PostgresGraphService.DiscoveryOps (live CTE)", () => {
     });
   }
 
+  // entity_relationships / relationships / ownerships have no FK cascade from
+  // tenant, so a tenant-only deleteMany leaks them — and the global unique
+  // constraint on entity_relationships (entity_id, related_entity_id, type) then
+  // breaks the next seed. Wipe children explicitly, in FK order.
+  async function wipeTenants(ids: string[], userIds: string[]) {
+    for (const t of ids) {
+      await prisma.entityRelationship.deleteMany({ where: { tenantId: t } });
+      await prisma.relationship.deleteMany({ where: { tenantId: t } });
+      await prisma.entityOwnership.deleteMany({ where: { tenantId: t } });
+      await prisma.entity.deleteMany({ where: { tenantId: t } });
+    }
+    await prisma.user.deleteMany({ where: { id: { in: userIds } } });
+    await prisma.tenant.deleteMany({ where: { id: { in: ids } } });
+  }
+
   beforeAll(async () => {
     prisma = new PrismaClient({ datasources: { db: { url: TEST_DB_URL } } });
     ops = new DiscoveryOps(prisma);
 
-    await prisma.tenant.deleteMany({ where: { id: { in: [TENANT, OTHER_TENANT] } } });
-    await prisma.user.deleteMany({ where: { id: U } });
+    await wipeTenants([TENANT, OTHER_TENANT], [U]);
 
     await seedTenant(TENANT);
     await seedTenant(OTHER_TENANT);
@@ -128,8 +142,7 @@ suite("PostgresGraphService.DiscoveryOps (live CTE)", () => {
   });
 
   afterAll(async () => {
-    await prisma.tenant.deleteMany({ where: { id: { in: [TENANT, OTHER_TENANT] } } });
-    await prisma.user.deleteMany({ where: { id: U } });
+    await wipeTenants([TENANT, OTHER_TENANT], [U]);
     await prisma.$disconnect();
   });
 
@@ -179,6 +192,98 @@ suite("PostgresGraphService.DiscoveryOps (live CTE)", () => {
     it("returns [] with no tenant in context", async () => {
       const results = await ops.discoverByGraph(U, 2);
       expect(results).toEqual([]);
+    });
+  });
+
+  describe("getRecommendations per-owner diversity cap (MAX_RECOMMENDATIONS_PER_OWNER = 2)", () => {
+    // A separate, self-contained fixture: a single hub owner owns five entities
+    // that all surface to the viewer via the shared-connections signal. Pre-cap,
+    // the hub would fill the whole page; post-cap, at most two of the hub's
+    // entities may appear (the relaxation pass only kicks in when the page would
+    // otherwise be underfilled — here there are exactly five hub candidates and a
+    // limit of 2, so the cap binds and no relaxation occurs).
+    const CAP_TENANT = tenantId("t-pg-disc-cap");
+    const HUB_TENANT = tenantId("t-pg-disc-cap-hub"); // hub user's personal tenant (personal_tenant_id is unique)
+    const VIEWER = "pgcap-viewer";
+    const HUB = "pgcap-hub";
+    const VSEED = "pgcap-vseed"; // owned by the viewer; the traversal anchor
+    const HUB_ENTITIES = ["pgcap-h1", "pgcap-h2", "pgcap-h3", "pgcap-h4", "pgcap-h5"];
+
+    beforeAll(async () => {
+      await wipeTenants([CAP_TENANT, HUB_TENANT], [VIEWER, HUB]);
+
+      await prisma.tenant.create({
+        data: { id: CAP_TENANT, slug: CAP_TENANT, displayName: CAP_TENANT, type: "ORGANIZATION" },
+      });
+      await prisma.tenant.create({
+        data: { id: HUB_TENANT, slug: HUB_TENANT, displayName: HUB_TENANT, type: "ORGANIZATION" },
+      });
+      await prisma.user.create({
+        data: { id: VIEWER, email: `${VIEWER}@example.com`, role: "END_USER", personalTenantId: CAP_TENANT },
+      });
+      await prisma.user.create({
+        data: { id: HUB, email: `${HUB}@example.com`, role: "END_USER", personalTenantId: HUB_TENANT },
+      });
+
+      // Viewer owns the anchor entity.
+      await prisma.entity.create({
+        data: { id: VSEED, tenantId: CAP_TENANT, name: VSEED, entityType: "dog", metadata: {} },
+      });
+      await prisma.entityOwnership.create({
+        data: {
+          tenantId: CAP_TENANT, entityId: VSEED, userId: VIEWER,
+          role: "PRIMARY_OWNER", addedByUserId: VIEWER, status: "ACTIVE",
+        },
+      });
+
+      // The hub owns five entities, each a CONFIRMED hop-1 neighbour of the anchor.
+      for (const hid of HUB_ENTITIES) {
+        await prisma.entity.create({
+          data: { id: hid, tenantId: CAP_TENANT, name: hid, entityType: "dog", metadata: {} },
+        });
+        await prisma.entityOwnership.create({
+          data: {
+            tenantId: CAP_TENANT, entityId: hid, userId: HUB,
+            role: "PRIMARY_OWNER", addedByUserId: HUB, status: "ACTIVE",
+          },
+        });
+        await prisma.entityRelationship.create({
+          data: {
+            tenantId: CAP_TENANT, entityId: VSEED, relatedEntityId: hid,
+            type: "PLAYMATE", status: "CONFIRMED", proposedByUserId: VIEWER,
+          },
+        });
+      }
+    });
+
+    afterAll(async () => {
+      await wipeTenants([CAP_TENANT, HUB_TENANT], [VIEWER, HUB]);
+    });
+
+    const runCap = <T>(fn: () => Promise<T>) => runWithTenantContext(CAP_TENANT, fn);
+
+    it("caps a single hub owner's contribution at 2 even when it would fill the page", async () => {
+      // No geoLookup → only shared-connections + same-breed run. All five hub
+      // entities are shared-connections candidates owned by the same user.
+      const results = await runCap(() => ops.getRecommendations(VIEWER, 2));
+      // Page limit 2; all candidates owned by HUB; cap holds the page to 2.
+      expect(results).toHaveLength(2);
+      const ids = new Set(results.map((r) => r.entityId));
+      expect(ids.size).toBe(2); // no duplicates
+      for (const id of ids) expect(HUB_ENTITIES).toContain(id);
+    });
+
+    it("admits at most 2 hub entities when more page slots exist (cap binds, relaxation would only add over-cap if underfilled)", async () => {
+      // limit 10, but only the hub's five entities exist. The capped pass admits
+      // exactly 2 (the cap); the page is then underfilled (2 < 10) so the single
+      // relaxation pass admits the remaining hub entities ignoring the cap. This
+      // asserts the documented "fill beats starve" behaviour: with no other owner
+      // to diversify toward, the page fills rather than starving at 2.
+      const results = await runCap(() => ops.getRecommendations(VIEWER, 10));
+      const hubCount = results.filter((r) => HUB_ENTITIES.includes(r.entityId)).length;
+      // All five hub entities are the only candidates, so relaxation fills them in.
+      expect(hubCount).toBe(5);
+      expect(new Set(results.map((r) => r.entityId)).size).toBe(results.length); // no dups
     });
   });
 

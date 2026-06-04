@@ -54,6 +54,153 @@ const TRAVERSAL_EDGE_TYPES = [
 /** Radius (m) for the recommendations nearby signal. Mirrors the Neo4j constant. */
 const NEARBY_RECO_RADIUS_METERS = 5000;
 
+/**
+ * Discovery ranking version — increment whenever the recommendation signals,
+ * their weights, the merge/dedup semantics, or the diversity cap change.
+ *
+ * Mirrors `FEED_RANKING_VERSION` (feed-pagination.ts): a version change is a new
+ * experimental condition for `/api/discovery/recommendations` and must be
+ * audited accordingly. The discovery surface is engagement-adjacent (signals are
+ * derived from the relationship graph), so the same provenance discipline applies.
+ *
+ * Current version 1: shared-connections (count/10) + same-breed (0.6 fixed) +
+ * nearby ((1 − d/10 000) × 0.5, 5 km) signals, dedup-by-entity-keep-highest, and
+ * the per-owner diversity cap (`MAX_RECOMMENDATIONS_PER_OWNER`) with a single
+ * relaxation pass. Version 1 is the FIRST version ever served, so the cap is part
+ * of it — not a bump from an uncapped predecessor (no recommendation has been
+ * served without the cap).
+ */
+export const DISCOVERY_RANKING_VERSION = 1 as const;
+
+/**
+ * Maximum recommendations a single owner may contribute to one page. The cap is
+ * per-OWNER (entity dedup is handled separately): a multi-owner entity counts
+ * against EVERY active owner and is admitted only if all its owners are under the
+ * cap. Ownerless candidates (empty `ownerIds`) are exempt. See SCORING-CODEBOOK.md
+ * "Discovery Recommendation Signals".
+ */
+export const MAX_RECOMMENDATIONS_PER_OWNER = 2;
+
+/**
+ * A merged recommendation candidate carried through the diversity-cap merge.
+ * `ownerIds` are the candidate's ACTIVE owners (same tenant), surfaced by each
+ * signal query so the merge can enforce the per-owner cap without an extra query.
+ */
+interface RecommendationCandidate {
+  entityId: string;
+  name: string;
+  entityType: string;
+  score: number;
+  reason: string;
+  ownerIds: string[];
+}
+
+/**
+ * Pure merge for the recommendation signals (no I/O — business logic isolated for
+ * verification). Three bounded steps, no loop on external state:
+ *
+ *  1. Dedup by entity, keeping the highest-scoring entry per entity (preserves the
+ *     pre-cap semantics the tests pin).
+ *  2. Capped round-robin fill across the signal sources IN ORDER (shared → breed →
+ *     nearby), each source pre-sorted by score desc. A candidate is admitted iff
+ *     every owner in `ownerIds` is below `MAX_RECOMMENDATIONS_PER_OWNER`; on admit
+ *     all its owners' counts increment. Ownerless candidates are always admissible.
+ *     One full cycle over all candidates.
+ *  3. Relaxation: if still under `limit` after the capped pass, admit the remaining
+ *     skipped candidates by GLOBAL score desc, ignoring the cap (fill beats starve).
+ *
+ * Hard bound: exactly two passes (capped, then relaxation). The dedup map and the
+ * cap-count map are the only mutable state; neither can grow unbounded.
+ *
+ * @param signals per-source candidate arrays in fill order: [shared, breed, nearby]
+ * @param limit   maximum page size
+ */
+export function mergeRecommendations(
+  signals: RecommendationCandidate[][],
+  limit: number,
+): RecommendationCandidate[] {
+  if (limit <= 0) return [];
+
+  // Step 1: dedup by entity, keeping the highest score. Track which source the
+  // surviving candidate came from so the round-robin order is stable.
+  const winnerByEntity = new Map<string, { candidate: RecommendationCandidate; source: number }>();
+  signals.forEach((source, sourceIndex) => {
+    for (const candidate of source) {
+      const existing = winnerByEntity.get(candidate.entityId);
+      if (!existing || candidate.score > existing.candidate.score) {
+        winnerByEntity.set(candidate.entityId, { candidate, source: sourceIndex });
+      }
+    }
+  });
+
+  // Re-bucket the de-duplicated winners back into their source lists, each sorted
+  // by score desc, so the round-robin cycles shared → breed → nearby deterministically.
+  const sourceCount = signals.length;
+  const buckets: RecommendationCandidate[][] = Array.from({ length: sourceCount }, () => []);
+  for (const { candidate, source } of winnerByEntity.values()) {
+    buckets[source].push(candidate);
+  }
+  for (const bucket of buckets) bucket.sort((a, b) => b.score - a.score);
+
+  const results: RecommendationCandidate[] = [];
+  const ownerCounts = new Map<string, number>();
+  const admitted = new Set<string>();
+  const skipped: RecommendationCandidate[] = [];
+
+  const ownersUnderCap = (c: RecommendationCandidate): boolean =>
+    c.ownerIds.every((owner) => (ownerCounts.get(owner) ?? 0) < MAX_RECOMMENDATIONS_PER_OWNER);
+
+  const admit = (c: RecommendationCandidate): void => {
+    results.push(c);
+    admitted.add(c.entityId);
+    for (const owner of c.ownerIds) {
+      ownerCounts.set(owner, (ownerCounts.get(owner) ?? 0) + 1);
+    }
+  };
+
+  // Step 2: capped round-robin. One pointer per bucket; cycle through buckets in
+  // order until every bucket is exhausted. The loop is bounded by the total
+  // candidate count (each iteration advances exactly one pointer).
+  const pointers = new Array(sourceCount).fill(0);
+  const totalCandidates = buckets.reduce((n, b) => n + b.length, 0);
+  let processed = 0;
+  while (processed < totalCandidates && results.length < limit) {
+    for (let s = 0; s < sourceCount && results.length < limit; s++) {
+      const bucket = buckets[s];
+      if (pointers[s] >= bucket.length) continue;
+      const candidate = bucket[pointers[s]];
+      pointers[s]++;
+      processed++;
+      if (ownersUnderCap(candidate)) {
+        admit(candidate);
+      } else {
+        skipped.push(candidate);
+      }
+    }
+  }
+
+  // Step 3: single relaxation pass — admit remaining skipped candidates (the ones
+  // a cap turned away, plus any never reached because the page filled) by global
+  // score desc, cap ignored. No new state beyond the already-bounded `skipped`
+  // list and the buckets' untouched tails.
+  if (results.length < limit) {
+    const remaining: RecommendationCandidate[] = [...skipped];
+    for (let s = 0; s < sourceCount; s++) {
+      for (let i = pointers[s]; i < buckets[s].length; i++) {
+        remaining.push(buckets[s][i]);
+      }
+    }
+    remaining.sort((a, b) => b.score - a.score);
+    for (const candidate of remaining) {
+      if (results.length >= limit) break;
+      if (admitted.has(candidate.entityId)) continue;
+      admit(candidate);
+    }
+  }
+
+  return results;
+}
+
 interface DiscoveryRow {
   entity_id: string;
   name: string;
@@ -67,6 +214,7 @@ interface FieldRow {
   name: string;
   entity_type: string | null;
   breed: string | null;
+  owner_ids: string[] | null;
 }
 
 export class DiscoveryOps {
@@ -248,7 +396,10 @@ export class DiscoveryOps {
   /**
    * Entity recommendations merging four signals: shared-connections (≤2-hop
    * traversal), same-breed, nearby, and owner-proximity. Dedup by entity, keeping
-   * the highest-scoring reason.
+   * the highest-scoring reason, then a per-owner DIVERSITY CAP
+   * (`MAX_RECOMMENDATIONS_PER_OWNER`) applied via round-robin fill with a single
+   * relaxation pass (see `mergeRecommendations`). The cap is part of
+   * `DISCOVERY_RANKING_VERSION` 1 — see SCORING-CODEBOOK.md.
    *
    * SECURITY: owner_proximity is never surfaced as a client-facing reason — it is
    * folded into the shared-connections signal and always mapped to
@@ -265,29 +416,19 @@ export class DiscoveryOps {
       this.computeNearbyRecommendations(userId, tenantId, limit),
     ]);
 
-    // Merge + dedup: keep the highest-scoring entry per entity.
-    const candidateMap = new Map<
-      string,
-      { entityId: string; name: string; entityType: string; score: number; reason: string }
-    >();
-    for (const row of [...sharedRows, ...breedRows, ...nearbyRows]) {
-      const existing = candidateMap.get(row.entityId);
-      if (!existing || row.score > existing.score) {
-        candidateMap.set(row.entityId, row);
-      }
-    }
+    // Merge with dedup-by-entity-keep-highest, then a per-owner diversity cap with
+    // round-robin fill (shared → breed → nearby) and a single relaxation pass.
+    // The merge is a pure function so the cap/fill logic is verified in isolation.
+    const merged = mergeRecommendations([sharedRows, breedRows, nearbyRows], limit);
 
-    return Array.from(candidateMap.values())
-      .sort((a, b) => b.score - a.score)
-      .slice(0, limit)
-      .map((c) => ({
-        entityId: c.entityId,
-        name: c.name,
-        entityType: c.entityType,
-        // owner_proximity is mapped to shared_connections client-side (security).
-        reason: (c.reason === "owner_proximity" ? "shared_connections" : c.reason) as RecommendationReason,
-        confidence: Math.min(1.0, Math.max(0.0, c.score)),
-      }));
+    return merged.map((c) => ({
+      entityId: c.entityId,
+      name: c.name,
+      entityType: c.entityType,
+      // owner_proximity is mapped to shared_connections client-side (security).
+      reason: (c.reason === "owner_proximity" ? "shared_connections" : c.reason) as RecommendationReason,
+      confidence: Math.min(1.0, Math.max(0.0, c.score)),
+    }));
   }
 
   // -------------------------------------------------------------------------
@@ -304,7 +445,7 @@ export class DiscoveryOps {
     userId: string,
     tenantId: string,
     limit: number,
-  ): Promise<Array<{ entityId: string; name: string; entityType: string; score: number; reason: string }>> {
+  ): Promise<RecommendationCandidate[]> {
     const params: unknown[] = [userId, tenantId, TRAVERSAL_EDGE_TYPES as unknown as string[], limit];
     const sql = `
       WITH RECURSIVE seed AS (
@@ -340,9 +481,15 @@ export class DiscoveryOps {
         d.id          AS entity_id,
         d.name        AS name,
         d.entity_type AS entity_type,
-        COUNT(DISTINCT r.seed_id)::float / 10.0 AS score
+        COUNT(DISTINCT r.seed_id)::float / 10.0 AS score,
+        -- ACTIVE, tenant-scoped owners only (a multi-owner entity counts against
+        -- every active owner under the per-owner diversity cap). LEFT JOIN so an
+        -- ownerless entity yields NULL → coalesced to '{}' (exempt from the cap).
+        COALESCE(ARRAY_AGG(DISTINCT own.user_id) FILTER (WHERE own.user_id IS NOT NULL), '{}') AS owner_ids
       FROM reachable r
       JOIN entities d ON d.id = r.entity_id
+      LEFT JOIN entity_ownerships own
+        ON own.entity_id = d.id AND own.tenant_id = $2 AND own.status = 'ACTIVE'
       WHERE d.tenant_id = $2
         AND r.entity_id NOT IN (SELECT id FROM seed)
         AND COALESCE((d.metadata->>'discoverable')::boolean, true) = true
@@ -359,7 +506,7 @@ export class DiscoveryOps {
       LIMIT $4
     `;
     const rows = await this.prisma.$queryRawUnsafe<
-      Array<{ entity_id: string; name: string; entity_type: string | null; score: number }>
+      Array<{ entity_id: string; name: string; entity_type: string | null; score: number; owner_ids: string[] | null }>
     >(sql, ...params);
     return rows.map((row) => ({
       entityId: row.entity_id,
@@ -367,6 +514,7 @@ export class DiscoveryOps {
       entityType: row.entity_type ?? "",
       score: Number(row.score),
       reason: "shared_connections",
+      ownerIds: row.owner_ids ?? [],
     }));
   }
 
@@ -379,7 +527,7 @@ export class DiscoveryOps {
     userId: string,
     tenantId: string,
     limit: number,
-  ): Promise<Array<{ entityId: string; name: string; entityType: string; score: number; reason: string }>> {
+  ): Promise<RecommendationCandidate[]> {
     const params: unknown[] = [userId, tenantId, limit];
     const sql = `
       WITH my_breeds AS (
@@ -392,8 +540,12 @@ export class DiscoveryOps {
       SELECT
         d.id          AS entity_id,
         d.name        AS name,
-        d.entity_type AS entity_type
+        d.entity_type AS entity_type,
+        -- ACTIVE, tenant-scoped owners only (same filter as every other signal).
+        COALESCE(ARRAY_AGG(DISTINCT own.user_id) FILTER (WHERE own.user_id IS NOT NULL), '{}') AS owner_ids
       FROM entities d
+      LEFT JOIN entity_ownerships own
+        ON own.entity_id = d.id AND own.tenant_id = $2 AND own.status = 'ACTIVE'
       WHERE d.tenant_id = $2
         AND d.metadata->>'breed' IN (SELECT breed FROM my_breeds)
         AND COALESCE((d.metadata->>'discoverable')::boolean, true) = true
@@ -405,10 +557,11 @@ export class DiscoveryOps {
           SELECT 1 FROM entity_ownerships o2
           WHERE o2.user_id = $1 AND o2.tenant_id = $2 AND o2.entity_id = d.id AND o2.status = 'ACTIVE'
         )
+      GROUP BY d.id, d.name, d.entity_type
       LIMIT $3
     `;
     const rows = await this.prisma.$queryRawUnsafe<
-      Array<{ entity_id: string; name: string; entity_type: string | null }>
+      Array<{ entity_id: string; name: string; entity_type: string | null; owner_ids: string[] | null }>
     >(sql, ...params);
     return rows.map((row) => ({
       entityId: row.entity_id,
@@ -416,6 +569,7 @@ export class DiscoveryOps {
       entityType: row.entity_type ?? "",
       score: 0.6,
       reason: "same_breed",
+      ownerIds: row.owner_ids ?? [],
     }));
   }
 
@@ -430,7 +584,7 @@ export class DiscoveryOps {
     userId: string,
     tenantId: string,
     limit: number,
-  ): Promise<Array<{ entityId: string; name: string; entityType: string; score: number; reason: string }>> {
+  ): Promise<RecommendationCandidate[]> {
     if (!this.geoLookup) return [];
 
     const anchors = await this.prisma.$queryRawUnsafe<Array<{ id: string }>>(
@@ -454,7 +608,7 @@ export class DiscoveryOps {
 
     const fieldsById = await this.fetchDiscoverableFields(userId, tenantId, ids);
 
-    const rows: Array<{ entityId: string; name: string; entityType: string; score: number; reason: string }> = [];
+    const rows: RecommendationCandidate[] = [];
     for (const c of candidates) {
       const f = fieldsById.get(c.entityId);
       if (!f) continue;
@@ -464,6 +618,9 @@ export class DiscoveryOps {
         entityType: f.entityType,
         score: (1.0 - c.distanceMeters / 10000.0) * 0.5,
         reason: "nearby",
+        // ACTIVE, tenant-scoped owners surfaced by fetchDiscoverableFields (same
+        // ownership filter as the SQL signals — no second source of truth).
+        ownerIds: f.ownerIds,
       });
       if (rows.length >= limit) break;
     }
@@ -486,8 +643,8 @@ export class DiscoveryOps {
     tenantId: string,
     ids: string[],
     equality?: { entityType?: string; breed?: string },
-  ): Promise<Map<string, { name: string; entityType: string; breed: string | null }>> {
-    const out = new Map<string, { name: string; entityType: string; breed: string | null }>();
+  ): Promise<Map<string, { name: string; entityType: string; breed: string | null; ownerIds: string[] }>> {
+    const out = new Map<string, { name: string; entityType: string; breed: string | null; ownerIds: string[] }>();
     if (ids.length === 0) return out;
 
     // $1 userId  $2 tenant  $3 ids[]  then optional equality filters.
@@ -508,8 +665,13 @@ export class DiscoveryOps {
         d.id          AS entity_id,
         d.name        AS name,
         d.entity_type AS entity_type,
-        d.metadata->>'breed' AS breed
+        d.metadata->>'breed' AS breed,
+        -- ACTIVE, tenant-scoped owners only (same filter as the SQL signal queries;
+        -- LEFT JOIN + FILTER so ownerless entities yield '{}', not a dropped row).
+        COALESCE(ARRAY_AGG(DISTINCT own.user_id) FILTER (WHERE own.user_id IS NOT NULL), '{}') AS owner_ids
       FROM entities d
+      LEFT JOIN entity_ownerships own
+        ON own.entity_id = d.id AND own.tenant_id = $2 AND own.status = 'ACTIVE'
       WHERE d.id = ANY($3)
         AND d.tenant_id = $2
         AND COALESCE((d.metadata->>'discoverable')::boolean, true) = true
@@ -517,6 +679,7 @@ export class DiscoveryOps {
           SELECT 1 FROM relationships rel
           WHERE rel.user_id = $1 AND rel.tenant_id = $2 AND rel.target_id = d.id
         )${extraFilters}
+      GROUP BY d.id, d.name, d.entity_type, d.metadata->>'breed'
     `;
     const rows = await this.prisma.$queryRawUnsafe<FieldRow[]>(sql, ...params);
     for (const row of rows) {
@@ -524,6 +687,7 @@ export class DiscoveryOps {
         name: row.name,
         entityType: row.entity_type ?? "",
         breed: row.breed,
+        ownerIds: row.owner_ids ?? [],
       });
     }
     return out;

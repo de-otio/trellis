@@ -16,7 +16,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PrismaClient } from "@prisma/client";
 import { runWithTenantContext, tenantId } from "@de-otio/saas-foundation/tenant";
-import { DiscoveryOps } from "../../../../src/lib/graph/postgres/discovery.js";
+import {
+  DISCOVERY_RANKING_VERSION,
+  DiscoveryOps,
+  MAX_RECOMMENDATIONS_PER_OWNER,
+  mergeRecommendations,
+} from "../../../../src/lib/graph/postgres/discovery.js";
 import type { EntityGeoLookup, NearbyEntity } from "../../../../src/lib/geo/entity-geo-repository.js";
 
 const TEST_TENANT = tenantId("t-unit-pg-discovery");
@@ -389,5 +394,144 @@ describe("DiscoveryOps.getRecommendations", () => {
     expect(sharedSql).toMatch(/NOT EXISTS\s*\(\s*SELECT 1 FROM relationships/);
     expect(sharedSql).toMatch(/NOT EXISTS\s*\(\s*SELECT 1 FROM entity_ownerships/);
     expect(sharedSql).toContain("er.status = 'CONFIRMED'");
+  });
+
+  it("aggregates ACTIVE, tenant-scoped owner_ids in every signal query (no cross-tenant join)", async () => {
+    queryRawUnsafe
+      .mockResolvedValueOnce([]) // shared
+      .mockResolvedValueOnce([]); // breed
+    queryRawUnsafe.mockResolvedValueOnce([{ id: "anchor-1" }]); // anchors
+    fakeNearAnchors = [{ entityId: "n1", distanceMeters: 100 }];
+    queryRawUnsafe.mockResolvedValueOnce([
+      { entity_id: "n1", name: "N", entity_type: "dog", breed: null, owner_ids: ["o1"] },
+    ]); // fetchDiscoverableFields
+
+    const ops = new DiscoveryOps(mockPrisma, fakeGeo);
+    await withTenant(() => ops.getRecommendations("user-1", 10));
+
+    const sharedSql = call(0).sql;
+    const breedSql = call(1).sql;
+    const fieldsSql = call(3).sql;
+    for (const sql of [sharedSql, breedSql, fieldsSql]) {
+      // ACTIVE-only, tenant-scoped ownership join (unscoped would be a cross-tenant read).
+      expect(sql).toMatch(/entity_ownerships own[\s\S]*own\.tenant_id = \$2[\s\S]*own\.status = 'ACTIVE'/);
+      expect(sql).toContain("ARRAY_AGG(DISTINCT own.user_id)");
+    }
+  });
+});
+
+// ===========================================================================
+// mergeRecommendations — pure diversity-cap merge (no I/O)
+// ===========================================================================
+
+describe("mergeRecommendations (per-owner diversity cap)", () => {
+  type C = Parameters<typeof mergeRecommendations>[0][number][number];
+  const cand = (entityId: string, score: number, ownerIds: string[], reason = "shared_connections"): C => ({
+    entityId,
+    name: entityId,
+    entityType: "dog",
+    score,
+    reason,
+    ownerIds,
+  });
+
+  it("MAX_RECOMMENDATIONS_PER_OWNER is 2 and DISCOVERY_RANKING_VERSION is 1", () => {
+    expect(MAX_RECOMMENDATIONS_PER_OWNER).toBe(2);
+    expect(DISCOVERY_RANKING_VERSION).toBe(1);
+  });
+
+  it("dedups by entity keeping the highest score (pinned pre-cap semantics)", () => {
+    const shared = [cand("dup", 0.3, ["o1"])];
+    const breed = [cand("dup", 0.6, ["o1"], "same_breed")];
+    const out = mergeRecommendations([shared, breed, []], 10);
+    const dup = out.filter((c) => c.entityId === "dup");
+    expect(dup).toHaveLength(1);
+    expect(dup[0].score).toBeCloseTo(0.6);
+    expect(dup[0].reason).toBe("same_breed");
+  });
+
+  it("one owner owning every candidate: capped pass yields 2, relaxation fills to limit", () => {
+    // 5 candidates, all owned by o1. Cap=2 ⇒ capped pass admits 2; relaxation
+    // fills the rest by global score desc up to the limit. No spin (degenerate case).
+    const shared = [
+      cand("a", 0.9, ["o1"]),
+      cand("b", 0.8, ["o1"]),
+      cand("c", 0.7, ["o1"]),
+      cand("d", 0.6, ["o1"]),
+      cand("e", 0.5, ["o1"]),
+    ];
+    const out = mergeRecommendations([shared, [], []], 4);
+    expect(out).toHaveLength(4); // fill beats starve
+    // highest-scoring four overall, no duplicates.
+    expect(out.map((c) => c.entityId)).toEqual(["a", "b", "c", "d"]);
+    expect(new Set(out.map((c) => c.entityId)).size).toBe(4);
+  });
+
+  it("when limit ≤ cap×owners there is no relaxation and the owner is held to the cap", () => {
+    const shared = [cand("a", 0.9, ["o1"]), cand("b", 0.8, ["o1"]), cand("c", 0.7, ["o2"])];
+    // limit 2: capped pass admits a (o1=1), b (o1=2). c (o2) would also fit but
+    // limit reached. Owner o1 contributed exactly the cap.
+    const out = mergeRecommendations([shared, [], []], 2);
+    expect(out.map((c) => c.entityId)).toEqual(["a", "b"]);
+  });
+
+  it("multi-owner entity counts against ALL its owners", () => {
+    // x is owned by both o1 and o2. After admitting x, both o1 and o2 are at 1.
+    // Then o1 hits the cap after one more, o2 after one more — proving x counted
+    // against both.
+    const shared = [
+      cand("x", 0.9, ["o1", "o2"]),
+      cand("a", 0.8, ["o1"]),
+      cand("b", 0.7, ["o1"]), // o1: x,a ⇒ at cap; b skipped in capped pass
+      cand("c", 0.6, ["o2"]),
+      cand("d", 0.5, ["o2"]), // o2: x,c ⇒ at cap; d skipped in capped pass
+    ];
+    const out = mergeRecommendations([shared, [], []], 4);
+    // capped pass admits x, a, c (o1: x,a=2; o2: x,c=2). b and d are over-cap.
+    // limit 4 ⇒ relaxation admits one more by score desc: b (0.7) > d (0.5).
+    expect(out.map((c) => c.entityId)).toEqual(["x", "a", "c", "b"]);
+  });
+
+  it("cap binds ACROSS signals: same owner surfacing via breed and nearby", () => {
+    // o1 owns one shared, one breed, one nearby candidate. Cap=2 ⇒ at most two
+    // of o1's entities survive the capped pass regardless of which signal they came from.
+    const shared = [cand("s1", 0.9, ["o1"])];
+    const breed = [cand("br1", 0.6, ["o1"], "same_breed")];
+    const nearby = [cand("nb1", 0.45, ["o1"], "nearby")];
+    const out = mergeRecommendations([shared, breed, nearby], 2);
+    expect(out).toHaveLength(2);
+    // round-robin (shared→breed→nearby): s1 then br1; nb1 over o1's cap.
+    expect(out.map((c) => c.entityId)).toEqual(["s1", "br1"]);
+    expect(out.map((c) => c.entityId)).not.toContain("nb1");
+  });
+
+  it("underfill with no skipped candidates: no spin, no duplicates", () => {
+    // Fewer candidates than the limit, none over-cap. Must terminate cleanly.
+    const shared = [cand("a", 0.9, ["o1"]), cand("b", 0.8, ["o2"])];
+    const out = mergeRecommendations([shared, [], []], 10);
+    expect(out.map((c) => c.entityId)).toEqual(["a", "b"]);
+    expect(new Set(out.map((c) => c.entityId)).size).toBe(2);
+  });
+
+  it("ownerless candidates (empty ownerIds) are admitted regardless of the cap", () => {
+    // o1 owns three; cap=2. The two ownerless entities are always admissible and
+    // never consume cap budget.
+    const shared = [
+      cand("o1a", 0.9, ["o1"]),
+      cand("o1b", 0.85, ["o1"]),
+      cand("o1c", 0.8, ["o1"]), // over o1's cap in the capped pass
+      cand("free1", 0.4, []),
+      cand("free2", 0.3, []),
+    ];
+    const out = mergeRecommendations([shared, [], []], 4);
+    // capped pass: o1a, o1b (o1 at cap), o1c skipped, free1, free2 admitted ⇒ 4.
+    expect(out).toHaveLength(4);
+    expect(out.map((c) => c.entityId)).toContain("free1");
+    expect(out.map((c) => c.entityId)).toContain("free2");
+    expect(out.map((c) => c.entityId)).not.toContain("o1c");
+  });
+
+  it("returns [] for a non-positive limit", () => {
+    expect(mergeRecommendations([[cand("a", 0.9, ["o1"])], [], []], 0)).toEqual([]);
   });
 });
