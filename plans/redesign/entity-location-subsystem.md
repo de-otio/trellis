@@ -40,9 +40,11 @@
   repo, not GraphService itself). Plus the test cascade (graph discovery tests →
   Postgres+graph). **Deploy note:** skybber's RDS needs PostGIS enabled
   (`CREATE EXTENSION postgis` as the master user) before this migration deploys.
-**Trigger:** The Neptune Serverless migration ([`graph-db-neptune-serverless/`](graph-db-neptune-serverless/README.md))
-removes spatial from the graph layer ([audit F1](graph-db-neptune-serverless/10-opencypher-audit.md));
-geo-proximity must move to Postgres. Rather than a minimal port, this is the
+**Trigger:** The graph backend contract excludes spatial as a graph
+capability ([`graph-backend-contract.md`](graph-backend-contract.md) — spatial
+proximity ranks via Postgres/PostGIS, and the graph supplies only entity
+fields + the not-already-related filter). Geo-proximity must therefore live
+in Postgres. Rather than a minimal port, this is the
 design for a **generic, multi-vertical entity-location capability** in trellis
 core — geo is a Postgres/PostGIS concern; the graph does relationships only.
 
