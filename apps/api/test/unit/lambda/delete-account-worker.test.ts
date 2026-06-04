@@ -7,9 +7,9 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { mockS3Send, mockSecretsManagerSend, mockCognitoSend, mockDeleteUserData, mockPrismaFindUnique } = vi.hoisted(() => ({
+const { mockS3Send, mockGetSecret, mockCognitoSend, mockDeleteUserData, mockPrismaFindUnique } = vi.hoisted(() => ({
   mockS3Send: vi.fn(),
-  mockSecretsManagerSend: vi.fn(),
+  mockGetSecret: vi.fn(),
   mockCognitoSend: vi.fn(),
   mockDeleteUserData: vi.fn(),
   mockPrismaFindUnique: vi.fn(),
@@ -25,14 +25,9 @@ vi.mock("@aws-sdk/client-s3", () => {
   };
 });
 
-vi.mock("@aws-sdk/client-secrets-manager", () => {
-  const SecretsManagerClient = vi.fn();
-  SecretsManagerClient.prototype.send = mockSecretsManagerSend;
-  return {
-    SecretsManagerClient,
-    GetSecretValueCommand: vi.fn(function (this: any, input: any) { this.input = input; }),
-  };
-});
+vi.mock("@aws-lambda-powertools/parameters/secrets", () => ({
+  getSecret: mockGetSecret,
+}));
 
 vi.mock("@aws-sdk/client-cognito-identity-provider", () => {
   const CognitoIdentityProviderClient = vi.fn();
@@ -65,10 +60,8 @@ describe("DeleteAccountWorker Lambda", () => {
     process.env.DB_SECRET_ARN = "arn:aws:secretsmanager:us-east-1:123:secret:db";
     process.env.COGNITO_USER_POOL_ID = "us-east-1_TestPool";
 
-    // Default: SecretsManager returns DB credentials
-    mockSecretsManagerSend.mockResolvedValue({
-      SecretString: JSON.stringify({ username: "test", password: "pass", host: "localhost", port: 5432, dbname: "testdb" }),
-    });
+    // Default: getSecret returns DB credentials (json-transformed)
+    mockGetSecret.mockResolvedValue({ username: "test", password: "pass", host: "localhost", port: 5432, dbname: "testdb" });
 
     // Default: user exists
     mockPrismaFindUnique.mockResolvedValue({ email: "user@test.com" });

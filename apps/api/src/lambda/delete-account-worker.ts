@@ -1,11 +1,13 @@
 import type { SQSHandler } from "aws-lambda";
 import { PrismaClient } from "@prisma/client";
 import { S3Client, DeleteObjectsCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
-import { SecretsManagerClient, GetSecretValueCommand } from "@aws-sdk/client-secrets-manager";
 import { CognitoIdentityProviderClient, AdminDeleteUserCommand } from "@aws-sdk/client-cognito-identity-provider";
+import { Logger } from "@aws-lambda-powertools/logger";
+import { getSecret } from "@aws-lambda-powertools/parameters/secrets";
+
+const logger = new Logger({ serviceName: "delete-account-worker" });
 
 const s3 = new S3Client({ region: process.env.AWS_REGION });
-const secretsClient = new SecretsManagerClient({ region: process.env.AWS_REGION });
 
 const MAX_PAGES = 100;
 
@@ -13,8 +15,7 @@ let prisma: PrismaClient | null = null;
 
 async function getPrisma(): Promise<PrismaClient> {
   if (prisma) return prisma;
-  const secret = await secretsClient.send(new GetSecretValueCommand({ SecretId: process.env.DB_SECRET_ARN! }));
-  const { username, password, host, port, dbname } = JSON.parse(secret.SecretString!);
+  const { username, password, host, port, dbname } = (await getSecret(process.env.DB_SECRET_ARN!, { transform: "json" })) as unknown as { username: string; password: string; host: string; port: string | number; dbname: string };
   prisma = new PrismaClient({
     datasources: { db: { url: `postgresql://${username}:${encodeURIComponent(password)}@${host}:${port}/${dbname}?connection_limit=1` } },
   });
@@ -27,7 +28,7 @@ async function deleteUserMedia(userId: string, mediaBucket: string): Promise<voi
   let pages = 0;
   do {
     if (pages >= MAX_PAGES) {
-      console.log(JSON.stringify({ level: "warn", msg: "S3 pagination circuit breaker hit", userId, pages: MAX_PAGES }));
+      logger.warn("S3 pagination circuit breaker hit", { userId, pages: MAX_PAGES });
       break;
     }
     const list = await s3.send(new ListObjectsV2Command({
@@ -59,7 +60,7 @@ export const handler: SQSHandler = async (event) => {
       });
 
       if (!user) {
-        console.log(JSON.stringify({ level: "warn", msg: "User not found, may already be deleted", userId }));
+        logger.warn("User not found, may already be deleted", { userId });
         continue;
       }
 
@@ -79,13 +80,13 @@ export const handler: SQSHandler = async (event) => {
             Username: user.email,
           }));
         } catch (cognitoErr) {
-          console.warn(JSON.stringify({ level: "warn", msg: "Cognito deletion failed", userId, error: String(cognitoErr) }));
+          logger.warn("Cognito deletion failed", { userId, error: cognitoErr });
         }
       }
 
-      console.log(JSON.stringify({ level: "info", msg: "Account deleted", userId, itemsDeleted: result }));
+      logger.info("Account deleted", { userId, itemsDeleted: result });
     } catch (err) {
-      console.error(JSON.stringify({ level: "error", msg: "Failed to delete account", err, messageId: record.messageId }));
+      logger.error("Failed to delete account", { error: err, messageId: record.messageId });
       failedIds.push(record.messageId);
     }
   }
