@@ -70,12 +70,26 @@ async function seedFeatureToggles(): Promise<void> {
   const { PrismaClient } = await import("@prisma/client");
   const prisma = new PrismaClient({ datasourceUrl: process.env.DATABASE_URL });
   try {
+    // Seed GLOBAL toggles (tenant_id IS NULL). P1 replaced the `@unique` on
+    // `key` with `@@unique([key, tenantId])`, and SQL treats `(key, NULL)` as
+    // non-unique — so Prisma's compound `key_tenantId` where-input can't select
+    // a global row. Upsert manually (findFirst → update/create), mirroring
+    // `globalScopedFeatureToggleClient` in src/lib/feature-toggle-global-client.ts.
     for (const key of enabled) {
-      await prisma.featureToggle.upsert({
-        where: { key },
-        create: { key, enabled: true, changedBy: "standalone-setup" },
-        update: { enabled: true },
+      const existing = await prisma.featureToggle.findFirst({
+        where: { key, tenantId: null },
+        select: { id: true },
       });
+      if (existing) {
+        await prisma.featureToggle.update({
+          where: { id: existing.id },
+          data: { enabled: true },
+        });
+      } else {
+        await prisma.featureToggle.create({
+          data: { key, enabled: true, changedBy: "standalone-setup", tenantId: null },
+        });
+      }
     }
   } finally {
     await prisma.$disconnect();
