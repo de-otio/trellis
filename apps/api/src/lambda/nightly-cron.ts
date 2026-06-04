@@ -1,14 +1,17 @@
 import { DynamoDBClient, PutItemCommand, DeleteItemCommand } from "@aws-sdk/client-dynamodb";
-import { SecretsManagerClient, GetSecretValueCommand } from "@aws-sdk/client-secrets-manager";
 import { S3Client, DeleteObjectsCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
 import { CognitoIdentityProviderClient, AdminDeleteUserCommand } from "@aws-sdk/client-cognito-identity-provider";
-import { CloudWatchClient, PutMetricDataCommand } from "@aws-sdk/client-cloudwatch";
 import { SESClient, SendEmailCommand } from "@aws-sdk/client-ses";
 import { marshall } from "@aws-sdk/util-dynamodb";
 import { PrismaClient } from "@prisma/client";
+import { Logger } from "@aws-lambda-powertools/logger";
+import { Metrics, MetricUnit } from "@aws-lambda-powertools/metrics";
+import { getSecret } from "@aws-lambda-powertools/parameters/secrets";
+
+const logger = new Logger({ serviceName: "nightly-cron" });
+const metrics = new Metrics({ namespace: "Trellis/Deletion", serviceName: "nightly-cron" });
 
 const dynamo = new DynamoDBClient({ region: process.env.AWS_REGION });
-const secretsClient = new SecretsManagerClient({ region: process.env.AWS_REGION });
 const s3 = new S3Client({ region: process.env.AWS_REGION });
 const TABLE = process.env.DYNAMODB_TABLE!;
 const MEDIA_BUCKET = process.env.MEDIA_BUCKET_NAME!;
@@ -17,8 +20,13 @@ let prisma: PrismaClient | null = null;
 
 async function getPrisma(): Promise<PrismaClient> {
   if (prisma) return prisma;
-  const secret = await secretsClient.send(new GetSecretValueCommand({ SecretId: process.env.DB_SECRET_ARN! }));
-  const { username, password, host, port, dbname } = JSON.parse(secret.SecretString!);
+  const { username, password, host, port, dbname } = (await getSecret(process.env.DB_SECRET_ARN!, { transform: "json" })) as unknown as {
+    username: string;
+    password: string;
+    host: string;
+    port: string | number;
+    dbname: string;
+  };
   prisma = new PrismaClient({
     datasources: { db: { url: `postgresql://${username}:${encodeURIComponent(password)}@${host}:${port}/${dbname}?connection_limit=1` } },
   });
@@ -43,11 +51,11 @@ export const handler = async (): Promise<void> => {
       ExpressionAttributeValues: marshall({ ":now": now }),
     }));
   } catch {
-    console.log(JSON.stringify({ level: "info", msg: "Nightly cron already running, skipping" }));
+    logger.info("Nightly cron already running, skipping");
     return;
   }
 
-  console.log(JSON.stringify({ level: "info", msg: "Nightly cron started" }));
+  logger.info("Nightly cron started");
 
   const db = await getPrisma();
 
@@ -78,7 +86,7 @@ export const handler = async (): Promise<void> => {
               Delete: { Objects: batch.map((Key) => ({ Key })) },
             }));
           } catch (err) {
-            console.error(JSON.stringify({ level: "error", msg: "S3 batch delete failed", error: String(err), batchSize: batch.length }));
+            logger.error("S3 batch delete failed", { error: err, batchSize: batch.length });
           }
         }
       }
@@ -87,10 +95,10 @@ export const handler = async (): Promise<void> => {
       const result = await db.mediaFile.deleteMany({
         where: { id: { in: mediaToDelete.map((m) => m.id) } },
       });
-      console.log(JSON.stringify({ level: "info", msg: "Soft-deleted media purged", dbDeleted: result.count, s3Keys: keys.length }));
+      logger.info("Soft-deleted media purged", { dbDeleted: result.count, s3Keys: keys.length });
     }
   } catch (err) {
-    console.error(JSON.stringify({ level: "error", msg: "Media purge failed", error: String(err) }));
+    logger.error("Media purge failed", { error: err });
   }
 
   // 2. Clean up expired invitations
@@ -99,10 +107,10 @@ export const handler = async (): Promise<void> => {
       where: { expiresAt: { lte: new Date() }, usedAt: null },
     });
     if (result.count > 0) {
-      console.log(JSON.stringify({ level: "info", msg: "Expired invitations cleaned", deleted: result.count }));
+      logger.info("Expired invitations cleaned", { deleted: result.count });
     }
   } catch (err) {
-    console.error(JSON.stringify({ level: "error", msg: "Invitation cleanup failed", error: String(err) }));
+    logger.error("Invitation cleanup failed", { error: err });
   }
 
   // 3. Follower counts removed — relationships now live in graph DB (AuraDB)
@@ -137,7 +145,7 @@ export const handler = async (): Promise<void> => {
           const MAX_PAGES = 100;
           do {
             if (pages >= MAX_PAGES) {
-              console.log(JSON.stringify({ level: "warn", msg: "S3 pagination circuit breaker hit", userId: user.id, pages: MAX_PAGES }));
+              logger.warn("S3 pagination circuit breaker hit", { userId: user.id, pages: MAX_PAGES });
               break;
             }
             const list = await s3.send(new ListObjectsV2Command({
@@ -153,7 +161,7 @@ export const handler = async (): Promise<void> => {
             pages++;
           } while (continuationToken);
         } catch (s3Err) {
-          console.error(JSON.stringify({ level: "error", msg: "S3 media deletion failed", userId: user.id, error: String(s3Err) }));
+          logger.error("S3 media deletion failed", { userId: user.id, error: s3Err });
         }
 
         // 4c. Delete Cognito identity
@@ -166,7 +174,7 @@ export const handler = async (): Promise<void> => {
             }));
           } catch (cognitoErr) {
             // Log but don't fail — user may already be deleted from Cognito
-            console.warn(JSON.stringify({ level: "warn", msg: "Cognito deletion failed", userId: user.id, error: String(cognitoErr) }));
+            logger.warn("Cognito deletion failed", { userId: user.id, error: cognitoErr });
           }
         }
 
@@ -192,7 +200,7 @@ export const handler = async (): Promise<void> => {
             },
           });
         } catch (auditErr) {
-          console.error(JSON.stringify({ level: "error", msg: "Audit log write failed", userId: user.id, error: String(auditErr) }));
+          logger.error("Audit log write failed", { userId: user.id, error: auditErr });
         }
 
         // 4f. Send deletion completion email
@@ -212,20 +220,15 @@ export const handler = async (): Promise<void> => {
               },
             }));
           } catch (emailErr) {
-            console.warn(JSON.stringify({ level: "warn", msg: "Deletion email failed", userId: user.id, error: String(emailErr) }));
+            logger.warn("Deletion email failed", { userId: user.id, error: emailErr });
           }
         }
 
         deletedCount++;
-        console.log(JSON.stringify({
-          level: "info",
-          msg: "Account deleted",
-          userId: user.id,
-          itemsDeleted: result,
-        }));
+        logger.info("Account deleted", { userId: user.id, itemsDeleted: result });
       } catch (err) {
         failedCount++;
-        console.error(JSON.stringify({ level: "error", msg: "Account deletion failed", userId: user.id, error: String(err) }));
+        logger.error("Account deletion failed", { userId: user.id, error: err });
       }
     }
 
@@ -239,32 +242,24 @@ export const handler = async (): Promise<void> => {
 
     // Emit CloudWatch metrics
     try {
-      const cw = new CloudWatchClient({ region: process.env.AWS_REGION });
-      const timestamp = new Date();
-      await cw.send(new PutMetricDataCommand({
-        Namespace: "Trellis/Deletion",
-        MetricData: [
-          { MetricName: "ProcessedCount", Value: deletedCount, Unit: "Count", Timestamp: timestamp },
-          { MetricName: "FailedCount", Value: failedCount, Unit: "Count", Timestamp: timestamp },
-          { MetricName: "PendingCount", Value: pendingCount, Unit: "Count", Timestamp: timestamp },
-        ],
-      }));
+      metrics.addMetric("ProcessedCount", MetricUnit.Count, deletedCount);
+      metrics.addMetric("FailedCount", MetricUnit.Count, failedCount);
+      metrics.addMetric("PendingCount", MetricUnit.Count, pendingCount);
+      metrics.publishStoredMetrics();
     } catch (cwErr) {
-      console.error(JSON.stringify({ level: "error", msg: "CloudWatch metrics failed", error: String(cwErr) }));
+      logger.error("CloudWatch metrics failed", { error: cwErr });
     }
 
     if (usersToDelete.length > 0) {
-      console.log(JSON.stringify({
-        level: "info",
-        msg: "Scheduled account deletions processed",
+      logger.info("Scheduled account deletions processed", {
         total: usersToDelete.length,
         deleted: deletedCount,
         failed: failedCount,
         pending: pendingCount,
-      }));
+      });
     }
   } catch (err) {
-    console.error(JSON.stringify({ level: "error", msg: "Scheduled deletion processing failed", error: String(err) }));
+    logger.error("Scheduled deletion processing failed", { error: err });
   }
 
   // 5. Check age tier transitions (Safer Social Design)
@@ -274,10 +269,10 @@ export const handler = async (): Promise<void> => {
     const appEnv = await buildEnv();
     const result = await checkAgeTierTransitions(appEnv);
     if (result.transitioned > 0 || result.errors > 0) {
-      console.log(JSON.stringify({ level: "info", msg: "Age tier transitions processed", transitioned: result.transitioned, errors: result.errors }));
+      logger.info("Age tier transitions processed", { transitioned: result.transitioned, errors: result.errors });
     }
   } catch (err) {
-    console.error(JSON.stringify({ level: "error", msg: "Age tier transition check failed", error: String(err) }));
+    logger.error("Age tier transition check failed", { error: err });
   }
 
   // 6. Generate sentiment digest notifications (Safer Social Design)
@@ -326,16 +321,16 @@ export const handler = async (): Promise<void> => {
         }
       } catch (digestErr) {
         // Don't fail the whole batch for one user
-        console.error(JSON.stringify({ level: "error", msg: "Digest generation failed for user", userId: user.id, error: String(digestErr) }));
+        logger.error("Digest generation failed for user", { userId: user.id, error: digestErr });
       }
     }
 
     if (digestCount > 0) {
-      console.log(JSON.stringify({ level: "info", msg: "Sentiment digest notifications created", count: digestCount }));
+      logger.info("Sentiment digest notifications created", { count: digestCount });
     }
   } catch (err) {
-    console.error(JSON.stringify({ level: "error", msg: "Sentiment digest delivery failed", error: String(err) }));
+    logger.error("Sentiment digest delivery failed", { error: err });
   }
 
-  console.log(JSON.stringify({ level: "info", msg: "Nightly cron complete" }));
+  logger.info("Nightly cron complete");
 };
