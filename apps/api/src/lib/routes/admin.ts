@@ -755,19 +755,53 @@ export const adminRoutes: Route[] = [
             return addCorsHeaders(errorResponse, request, env);
           }
 
-          // Validate request body
+          // Validate request body. P5: an optional `tenantId` makes this a
+          // tenant-scoped OVERRIDE write instead of a global write.
           const CreateToggleSchema = z.object({
             key: FeatureToggleKeySchema,
             enabled: z.boolean().default(false),
             description: z.string().max(1000).optional(),
+            tenantId: z.string().min(1).max(64).optional(),
           });
-          const { key, enabled, description } = validateBody(
+          const { key, enabled, description, tenantId } = validateBody(
             CreateToggleSchema,
             await request.json(),
           );
 
-          // Check if toggle already exists
-          const existing = await toggleService.getToggle(key);
+          // P5 authz: tenant-scoped writes require SUPER_ADMIN or the caller's
+          // own active tenant. This route is already SUPER_ADMIN-gated above;
+          // the explicit check keeps the authorization boundary fail-closed and
+          // future-proof if that gate is ever relaxed.
+          if (tenantId !== undefined) {
+            const { canWriteTenantToggle } = await import(
+              "../feature-toggle-service.js"
+            );
+            const allowed = canWriteTenantToggle({
+              role: user.role,
+              callerTenantId: undefined, // cookie-session admins carry no tenant
+              targetTenantId: tenantId,
+            });
+            if (!allowed) {
+              const errorResponse = securityHeaders.createSecureResponse(
+                JSON.stringify({
+                  error: "Forbidden: cross-tenant toggle write",
+                }),
+                {
+                  status: 403,
+                  headers: { "content-type": "application/json" },
+                },
+              );
+              return addCorsHeaders(errorResponse, request, env);
+            }
+          }
+
+          // Check if toggle already exists (scoped to the same tenant target).
+          // Keep the global call arity unchanged (no trailing `undefined`) so
+          // the global path stays byte-identical to pre-P5.
+          const existing =
+            tenantId === undefined
+              ? await toggleService.getToggle(key)
+              : await toggleService.getToggle(key, tenantId);
           if (existing) {
             const errorResponse = securityHeaders.createSecureResponse(
               JSON.stringify({ error: "Feature toggle already exists" }),
@@ -776,18 +810,30 @@ export const adminRoutes: Route[] = [
             return addCorsHeaders(errorResponse, request, env);
           }
 
-          // Create the toggle
-          const toggle = await toggleService.setToggle(
-            key,
-            enabled,
-            user.email,
-            description,
-            {
-              userId: session.userId,
-              env,
-              region: detectRegionSync(request, env),
-            },
-          );
+          // Create the toggle (global when tenantId is undefined). Preserve the
+          // 5-arg global call shape; only the tenant path passes the 6th arg.
+          const auditCtx = {
+            userId: session.userId,
+            env,
+            region: detectRegionSync(request, env),
+          };
+          const toggle =
+            tenantId === undefined
+              ? await toggleService.setToggle(
+                  key,
+                  enabled,
+                  user.email,
+                  description,
+                  auditCtx,
+                )
+              : await toggleService.setToggle(
+                  key,
+                  enabled,
+                  user.email,
+                  description,
+                  auditCtx,
+                  tenantId,
+                );
 
           const responseHeaders: Record<string, string> = {
             "content-type": "application/json",

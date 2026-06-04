@@ -294,16 +294,27 @@ async function seedFeatureToggles() {
 
   const allFlags = [...globalFlags, ...regionFlags];
 
+  // P5: optional per-tenant seeding. When SEED_TENANT_ID is set, the same flags
+  // are upserted as that tenant's OVERRIDE rows (tenant_id = <id>) instead of
+  // the global rows (tenant_id NULL). Default (unset) = global-only, identical
+  // to pre-P5 behavior. The `[key, tenantId]` unique (P1) keeps each scope's
+  // row distinct, and Postgres NULL-distinctness keeps the global row untouched.
+  const seedTenantId = process.env.SEED_TENANT_ID?.trim() || null;
+  if (seedTenantId) {
+    console.log(
+      `🏷️  Seeding TENANT-SCOPED toggles for tenant_id=${seedTenantId}\n`,
+    );
+  }
+
   let created = 0;
   let updated = 0;
   let skipped = 0;
 
   for (const flag of allFlags) {
     try {
-      // P1: key is no longer standalone-unique (now [key, tenantId]). Seed
-      // operates on GLOBAL rows (tenant_id IS NULL); P5 adds per-tenant seeding.
+      // Scope the existing-row lookup to the target scope (global vs tenant).
       const existing = await prisma.featureToggle.findFirst({
-        where: { key: flag.key, tenantId: null },
+        where: { key: flag.key, tenantId: seedTenantId },
         select: { id: true },
       });
 
@@ -327,6 +338,7 @@ async function seedFeatureToggles() {
             key: flag.key,
             enabled: flag.enabled,
             description: flag.description,
+            tenantId: seedTenantId,
             changedBy: "system@seed-script",
             lastChanged: new Date(),
           },
