@@ -1,5 +1,8 @@
 import { timingSafeEqual, createHash } from "node:crypto";
 import { DynamoDBClient, DeleteItemCommand } from "@aws-sdk/client-dynamodb";
+import { Logger } from "@aws-lambda-powertools/logger";
+
+const logger = new Logger({ serviceName: "verify-auth-challenge" });
 
 const dynamo = new DynamoDBClient({ region: process.env.AWS_REGION });
 const TABLE = process.env.DYNAMODB_TABLE!;
@@ -29,7 +32,7 @@ export const handler = async (event: any) => {
         },
       }));
     } catch (err) {
-      console.error("Failed to delete magic link token", err);
+      logger.error("Failed to delete magic link token", { error: err });
     }
   }
 
