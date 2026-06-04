@@ -3,7 +3,7 @@
  *
  * Graph-DB revisit (2026-06): the graph serving path runs in Postgres
  * (joins + recursive CTEs), no separate graph DB. See
- * skybber/plans/redesign/graph-db/graph-db-postgres-migration-plan.md.
+ * plans/redesign/graph-backend-contract.md.
  *
  * Phase 0 lands the scaffold (this dir) behind the `GRAPH_BACKEND=postgres`
  * factory flag; the default backend stays Neo4j, so nothing changes until

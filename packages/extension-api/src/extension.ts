@@ -144,8 +144,8 @@ export interface ExtensionContext {
  * - Adding a new optional hook → minor bump (e.g. 0.2.x → 0.3.0).
  * - Changing the signature of an existing hook (parameter type, order,
  *   return type) → major bump if 1.x, minor bump while still 0.x
- *   (breaking for consumers regardless — coordinate with Skybber and any
- *   other known extension authors before merging).
+ *   (breaking for consumers regardless — coordinate with consuming
+ *   applications and any other known extension authors before merging).
  * - Removing a hook → same as a signature change.
  *
  * Keep this interface in sync with `EXTENSION_API_VERSION` (below) and
