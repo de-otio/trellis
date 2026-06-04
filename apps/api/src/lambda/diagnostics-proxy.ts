@@ -3,6 +3,9 @@ import {
   PutItemCommand,
   UpdateItemCommand,
 } from "@aws-sdk/client-dynamodb";
+import { Logger } from "@aws-lambda-powertools/logger";
+
+const logger = new Logger({ serviceName: "diagnostics-proxy" });
 
 const dynamo = new DynamoDBClient({ region: process.env.AWS_REGION });
 const RUNTIME_ID = process.env.RUNTIME_ID!;
@@ -79,13 +82,13 @@ export const handler = async (event: { Records: any[] }) => {
     try {
       alarm = JSON.parse(snsMessage);
     } catch {
-      console.warn("Failed to parse SNS message as JSON, skipping");
+      logger.warn("Failed to parse SNS message as JSON, skipping");
       continue;
     }
 
     // Only act on ALARM state transitions
     if (alarm.NewStateValue !== "ALARM") {
-      console.log(`Skipping non-ALARM state: ${alarm.NewStateValue}`);
+      logger.info("Skipping non-ALARM state", { newStateValue: alarm.NewStateValue });
       continue;
     }
 
@@ -95,14 +98,14 @@ export const handler = async (event: { Records: any[] }) => {
     // Per-alarm cooldown
     const cooldownOk = await checkCooldown(alarmName);
     if (!cooldownOk) {
-      console.log(`Alarm "${alarmName}" is in cooldown, skipping`);
+      logger.info("Alarm is in cooldown, skipping", { alarmName });
       continue;
     }
 
     // Daily invocation cap
     const dailyCount = await incrementDailyCounter();
     if (dailyCount > MAX_DAILY) {
-      console.warn(`Daily cap reached (${dailyCount}/${MAX_DAILY}), skipping`);
+      logger.warn("Daily cap reached, skipping", { dailyCount, maxDaily: MAX_DAILY });
       continue;
     }
 
@@ -128,9 +131,9 @@ export const handler = async (event: { Records: any[] }) => {
           }),
         }),
       );
-      console.log(`Invoked agent for alarm "${alarmName}"`);
+      logger.info("Invoked agent for alarm", { alarmName });
     } catch (err) {
-      console.error(`Failed to invoke agent for alarm "${alarmName}"`, err);
+      logger.error("Failed to invoke agent for alarm", { alarmName, error: err });
       throw err;
     }
   }

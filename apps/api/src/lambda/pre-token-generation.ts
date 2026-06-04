@@ -23,7 +23,8 @@ import type {
   PreTokenGenerationV2TriggerEvent,
   PreTokenGenerationV2TriggerHandler,
 } from "aws-lambda";
-import { SecretsManagerClient, GetSecretValueCommand } from "@aws-sdk/client-secrets-manager";
+import { Logger } from "@aws-lambda-powertools/logger";
+import { getSecret } from "@aws-lambda-powertools/parameters/secrets";
 import { PrismaClient, type TenantRole } from "@prisma/client";
 import {
   ClaimsCache,
@@ -33,16 +34,22 @@ import {
 } from "../lib/auth/claims-cache.js";
 import { resolveTenantRole, type RoleMappingInput } from "../lib/tenant/resolve-role.js";
 
-const secretsClient = new SecretsManagerClient({ region: process.env.AWS_REGION });
+const logger = new Logger({ serviceName: "pre-token-generation" });
 let prisma: PrismaClient | null = null;
 let cache: ClaimsCache | null = null;
 
 async function getPrisma(): Promise<PrismaClient> {
   if (prisma) return prisma;
-  const secret = await secretsClient.send(
-    new GetSecretValueCommand({ SecretId: process.env.DB_SECRET_ARN! }),
-  );
-  const { username, password, host, port, dbname } = JSON.parse(secret.SecretString!);
+  const { username, password, host, port, dbname } = (await getSecret(
+    process.env.DB_SECRET_ARN!,
+    { transform: "json" },
+  )) as unknown as {
+    username: string;
+    password: string;
+    host: string;
+    port: string | number;
+    dbname: string;
+  };
   prisma = new PrismaClient({
     datasources: {
       db: {
@@ -213,18 +220,15 @@ export const handler: PreTokenGenerationV2TriggerHandler = async (event) => {
     try {
       preferredTenantId = await claimsCache.getActiveTenantPreference(cognitoSub);
     } catch (err) {
-      console.warn(
-        JSON.stringify({
-          event: "pretoken.preference_lookup_failed",
-          cognitoSub,
-          error: (err as { code?: string })?.code ?? "unknown",
-        }),
-      );
+      logger.warn("pretoken.preference_lookup_failed", {
+        cognitoSub,
+        error: (err as { code?: string })?.code ?? "unknown",
+      });
     }
     const loaded = await loadFromRds(db, cognitoSub, federated, preferredTenantId);
 
     if (!loaded.user) {
-      console.warn(JSON.stringify({ event: "pretoken.drift", cognitoSub }));
+      logger.warn("pretoken.drift", { cognitoSub });
       claims = { ...DRIFT_CLAIMS };
       writeAccessTokenClaims(event, claims);
       return event;
@@ -235,7 +239,7 @@ export const handler: PreTokenGenerationV2TriggerHandler = async (event) => {
     // value when present). Treat either signal as suspension. Defense-in-depth:
     // even if a writer forgets one column, the other still blocks issuance.
     if (loaded.user.suspended || loaded.user.suspendedAt !== null) {
-      console.warn(JSON.stringify({ event: "pretoken.suspended", cognitoSub }));
+      logger.warn("pretoken.suspended", { cognitoSub });
       claims = { ...DRIFT_CLAIMS };
       writeAccessTokenClaims(event, claims);
       return event;
@@ -274,34 +278,25 @@ export const handler: PreTokenGenerationV2TriggerHandler = async (event) => {
           });
           persisted = true;
         } catch (err) {
-          console.warn(
-            JSON.stringify({
-              event: "pretoken.role_refresh_persist_failed",
-              cognitoSub,
-              error: (err as { code?: string })?.code ?? "unknown",
-            }),
-          );
+          logger.warn("pretoken.role_refresh_persist_failed", {
+            cognitoSub,
+            error: (err as { code?: string })?.code ?? "unknown",
+          });
         }
         if (persisted) {
           claims = { ...claims, tenantRole: refreshed };
           cacheHit = false;
-          console.log(
-            JSON.stringify({
-              event: "pretoken.role_refreshed",
-              cognitoSub,
-              tenantId: claims.activeTenantId,
-            }),
-          );
+          logger.info("pretoken.role_refreshed", {
+            cognitoSub,
+            tenantId: claims.activeTenantId,
+          });
         }
       }
     } catch (err) {
-      console.warn(
-        JSON.stringify({
-          event: "pretoken.role_refresh_failed",
-          cognitoSub,
-          error: (err as { code?: string }).code ?? "unknown",
-        }),
-      );
+      logger.warn("pretoken.role_refresh_failed", {
+        cognitoSub,
+        error: (err as { code?: string }).code ?? "unknown",
+      });
     }
   }
 
