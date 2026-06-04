@@ -55,3 +55,98 @@ authorized fetch and visibility settings reduce bulk harvesting but cannot
 prevent a hostile federated server from retaining what it legitimately
 receives. That residual risk belongs in any vertical's decision to enable
 federation at all — which is exactly why it's a flag, not a default.
+
+## Fedify authorized-fetch findings (2026-06-04)
+
+Spike for [P6](../../../plans/surveillance-hardening-phase0/06-activitypub-preconditions.md),
+resolving the one technical unknown: **does the pinned Fedify support authorized
+fetch (signature-required-on-GET / "secure mode") natively, and if so, can we use
+it as-is?**
+
+**Pinned version:** `@fedify/fedify@1.10.6` (`package-lock.json`,
+`node_modules/@fedify/fedify`).
+
+### Answer: Yes natively — but NOT usable as-wired here. Authorized fetch must still be hand-rolled.
+
+Two facts that together produce a qualified "yes, but":
+
+**1. Fedify supports authorized fetch natively, via per-dispatcher `.authorize()`
+— not a federation-level boolean.** There is **no** `authorizedFetch: true` /
+`secureMode` flag on `createFederation` / `FederationOptions`. The only
+signature-related options in `FederationOptions` govern *inbound POST*
+verification: `signatureTimeWindow` and `skipSignatureVerification`
+(`node_modules/@fedify/fedify/dist/context-C6n2yrj0.d.ts`). Authorized fetch is
+instead implemented per-dispatcher:
+
+- `ActorCallbackSetters.authorize(predicate)` — `context-C6n2yrj0.d.ts:1310`
+- `CollectionCallbackSetters.authorize(predicate)` — `context-C6n2yrj0.d.ts:1357`
+- `ObjectCallbackSetters.authorize(predicate)` — `context-C6n2yrj0.d.ts:1322`
+
+The predicate type (`AuthorizePredicate`, `context-C6n2yrj0.d.ts:246`) receives
+`(context, identifier, signedKey, signedKeyOwner)` and returns `boolean`. The
+underlying primitives `RequestContext.getSignedKey()` /
+`getSignedKeyOwner()` are documented as the "authorized fetch (also known as
+secure mode)" mechanism (`context-C6n2yrj0.d.ts:1965–2024`), present **since
+Fedify 0.7.0** (the two-arg `getSignedKey(options)` overload since 1.5.0). All of
+this exists in our pinned 1.10.6. Confirmed against the Fedify docs
+(`https://fedify.dev/manual/access-control`): authorized fetch is a per-dispatcher
+`authorize()` callback introduced in 0.7.0, with an "instance actor" pattern
+recommended to avoid authentication loops.
+
+**2. This codebase does not serve actor/collection GETs through Fedify's
+dispatcher pipeline, so `.authorize()` never fires for them.** The
+followers/following/actor endpoints are **plain `Route[]` handlers**
+(`apps/api/src/lib/routes/activitypub/collections.ts`,
+`.../actor.ts`), registered in the app's own router (`apps/api/src/lib/app.ts`)
+with `middleware: [corsMiddleware()]`. Fedify is used only for **serialization**
+(`respondWithObject`, `OrderedCollection`) and **key management** (the
+`dispatchers/*` classes) — **not** for request routing via `federation.fetch()`.
+Fedify's native `.authorize()` only runs inside the `federation.fetch()` dispatch
+path, which these routes bypass. So the native control is real but inapplicable to
+the endpoints we actually expose without first re-routing them through Fedify.
+
+**Conclusion:** authorized-fetch-on-GET will be **hand-rolled middleware** here
+regardless of Fedify's native support — either (a) a GET-signature guard added to
+the existing route handlers, or (b) a larger refactor to route actor/collection
+GETs through `federation.fetch()` so `.authorize()` applies. (a) is far cheaper
+and is the recommended seam.
+
+### Custom middleware seam (option (a), recommended)
+
+The verification machinery already exists and is **directly reusable** — no new
+crypto:
+
+- `apps/api/src/lib/activitypub/http-signatures.ts` —
+  `HttpSignatureService.verifyRequest(request, env): Promise<boolean>` is a
+  complete, self-contained RSA-SHA256 HTTP-signature verifier over a web
+  `Request` (parses the `Signature` header, fetches the signer's public key —
+  local or remote, honoring standalone mode — reconstructs and verifies the
+  signature string). It already works for any method, including GET.
+- `apps/api/src/lib/activitypub/listeners/http-signatures.ts` —
+  `verifyHttpSignature(request, env)` is the dispatcher-keyed variant.
+
+**Interception point:** add an `authorizedFetchMiddleware()` to the `middleware`
+array of the GET routes under `apps/api/src/lib/routes/activitypub/`
+(`collections.ts`, `actor.ts`, `outbox.ts`). The middleware calls
+`HttpSignatureService.verifyRequest`; on failure it returns the reduced response
+(401, or `totalItems`-only collection / `publicKey`-stripped actor). The
+follower/following visibility setting (precondition 2) layers on top: even a
+*valid* signature yields only `totalItems` unless the target user has opted into
+member enumeration. The instance deny/allow-list (precondition 3) is a check on
+the signer's origin host in the same middleware, with the abuse-prevention
+service's unimplemented hook
+(`apps/api/src/lib/activitypub/services/abuse-prevention.ts`) as its home.
+Distributed rate limiting (precondition 4) reuses
+`apps/api/src/lib/rate-limit.ts`.
+
+### Estimate for Phase 2 AP-hardening: **M**
+
+Rationale: no native drop-in (rules out S), but the signature-verification core
+is already written and reusable, and the seam is a middleware addition to a small
+number of existing route handlers (rules out L). The four preconditions are
+mostly independent and individually small — authorized-fetch middleware (reuses
+`verifyRequest`), a per-user visibility column + branch in the collection
+handlers, a deny/allow-list table + origin check, and porting the rate-limit
+window to the existing distributed token bucket. The one item that could push
+toward L — re-routing all GETs through `federation.fetch()` to get native
+`.authorize()` — is **not** required; the hand-rolled middleware avoids it.

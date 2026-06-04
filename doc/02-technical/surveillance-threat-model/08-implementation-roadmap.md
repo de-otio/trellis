@@ -170,7 +170,7 @@ Builds directly on the seams; each item independently shippable.
 |---|---|---|
 | **Coordinated-behavior heuristics** ([03](./03-coordinated-inauthentic-behavior.md)) | E1 + E2 **with ≥ ~60–90 days of accumulated events**, E4 (thresholds), Phase 1 queue (output surface) | Schedule once event history exists — this is why E1/E2 are Phase 0 |
 | **Graph-signal ⇄ report corroboration** | above + account reports | Moderator view shows both signals for a reported account |
-| **ActivityPub hardening** ([05](./05-activitypub-exposure.md)): authorized fetch, follower-list visibility, instance deny/allow-list, distributed AP rate limiting | E6 spike result | Only when a vertical actually wants federation — preconditions block the flag until then |
+| **ActivityPub hardening** ([05](./05-activitypub-exposure.md)): authorized fetch, follower-list visibility, instance deny/allow-list, distributed AP rate limiting — **estimate: M** (P6 spike, 2026-06-04) | E6 spike result: Fedify 1.10.6 supports authorized fetch natively (per-dispatcher `.authorize()`, since 0.7.0) but our actor/collection GETs are plain route handlers that bypass Fedify's dispatch pipeline, so it must be hand-rolled as middleware — the existing `HttpSignatureService.verifyRequest` is directly reusable, so no native drop-in (not S) yet no new crypto (not L). See [05 §Fedify authorized-fetch findings](./05-activitypub-exposure.md#fedify-authorized-fetch-findings-2026-06-04). | Only when a vertical actually wants federation — preconditions block the flag until then |
 
 ## Phase 3 — later
 
