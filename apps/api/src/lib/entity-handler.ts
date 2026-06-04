@@ -241,7 +241,7 @@ export class EntityHandler {
       const metadataValidation = extension.metadataSchema.safeParse(metadata);
       if (!metadataValidation.success) {
         return new Response(
-          JSON.stringify({ error: "INVALID_METADATA", message: metadataValidation.error.errors.map((e: any) => e.message).join(", ") }),
+          JSON.stringify({ error: "INVALID_METADATA", message: metadataValidation.error.issues.map((e: any) => e.message).join(", ") }),
           { status: 400, headers: { "content-type": "application/json" } },
         );
       }

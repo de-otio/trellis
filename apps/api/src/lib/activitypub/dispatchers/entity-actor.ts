@@ -6,7 +6,8 @@
  * delegates here rather than maintaining a separate serialization path.
  */
 
-import type { Actor, ActorKeyPair } from "@fedify/fedify";
+import type { ActorKeyPair } from "@fedify/fedify";
+import type { Actor } from "@fedify/fedify/vocab";
 import type { Env } from "../../../env.js";
 import type { Entity } from "@prisma/client";
 import { DatabaseConnectionManager } from "../../database-connection-manager.js";

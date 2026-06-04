@@ -4,7 +4,7 @@
  * Handles creation and processing of Follow activities using Fedify's type-safe Follow class.
  */
 
-import { Follow } from "@fedify/fedify";
+import { Follow } from "@fedify/fedify/vocab";
 import type { Env } from "../../../env.js";
 import type { User } from "@prisma/client";
 import { UserActorDispatcher } from "../dispatchers/user-actor.js";

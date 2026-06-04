@@ -4,7 +4,7 @@
  * Configures Fedify with application-specific settings.
  */
 
-import type { CreateFederationOptions } from "@fedify/fedify";
+import type { FederationOptions } from "@fedify/fedify";
 import type { Env } from "../../../env.js";
 import { getActivityPubBaseUrl } from "./context.js";
 import { getLogger, Logger } from "../../logger.js";
@@ -17,7 +17,7 @@ import { getLogger, Logger } from "../../logger.js";
  */
 export function getFedifyConfig(
   env: Env,
-): Partial<CreateFederationOptions<any>> {
+): Partial<FederationOptions<any>> {
   const logger = getLogger();
   const baseUrl = getActivityPubBaseUrl(env);
 

@@ -228,7 +228,7 @@ export const sentimentsRoutes: Route[] = [
               detail: "Invalid request parameters",
               instance: pathname,
               traceId: Math.random().toString(36).substring(7),
-              errors: validation.error.errors.map((err) => ({
+              errors: validation.error.issues.map((err) => ({
                 path: err.path.join("."),
                 message: err.message,
               })),

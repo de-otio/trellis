@@ -1,4 +1,5 @@
 import type { SQSHandler } from "aws-lambda";
+import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
 import { S3Client, DeleteObjectsCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
 import { CognitoIdentityProviderClient, AdminDeleteUserCommand } from "@aws-sdk/client-cognito-identity-provider";
@@ -16,9 +17,12 @@ let prisma: PrismaClient | null = null;
 async function getPrisma(): Promise<PrismaClient> {
   if (prisma) return prisma;
   const { username, password, host, port, dbname } = (await getSecret(process.env.DB_SECRET_ARN!, { transform: "json" })) as unknown as { username: string; password: string; host: string; port: string | number; dbname: string };
-  prisma = new PrismaClient({
-    datasources: { db: { url: `postgresql://${username}:${encodeURIComponent(password)}@${host}:${port}/${dbname}?connection_limit=1` } },
+  // Prisma 7 removed the `datasources` constructor option; the connection URL
+  // is now supplied via a driver adapter.
+  const adapter = new PrismaPg({
+    connectionString: `postgresql://${username}:${encodeURIComponent(password)}@${host}:${port}/${dbname}?connection_limit=1`,
   });
+  prisma = new PrismaClient({ adapter });
   return prisma;
 }
 

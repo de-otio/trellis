@@ -5,7 +5,8 @@
  * These endpoints return ActivityStreams OrderedCollection documents.
  */
 
-import { OrderedCollection, respondWithObject } from "@fedify/fedify";
+import { respondWithObject } from "@fedify/fedify";
+import { OrderedCollection } from "@fedify/fedify/vocab";
 import { UserActorDispatcher } from "../../activitypub/dispatchers/user-actor.js";
 import { getFedifyContext } from "../../activitypub/fedify/context.js";
 import { sharedDatabaseConnectionManager } from "../../database-connection-manager.js";

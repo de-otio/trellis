@@ -5,8 +5,10 @@
  * DMs use the `bto` (blind recipients) field for privacy.
  */
 
-import { Create, Note } from "@fedify/fedify";
-import { Temporal } from "@js-temporal/polyfill";
+import { Create, Note } from "@fedify/fedify/vocab";
+// See post-service-fedify.ts: polyfill VALUE for runtime, global `Temporal` type
+// (fedify 2 / TS6 lib.esnext.temporal) for the vocab constructor signatures.
+import { Temporal as TemporalPolyfill } from "@js-temporal/polyfill";
 import type { Env } from "../../../env.js";
 import type { User } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
@@ -62,7 +64,9 @@ export class DmServiceFedify {
     );
 
     // Convert Date to Temporal.Instant for Fedify
-    const publishedInstant = Temporal.Instant.from(published.toISOString());
+    const publishedInstant = TemporalPolyfill.Instant.from(
+      published.toISOString(),
+    ) as unknown as Temporal.Instant;
 
     // Create Fedify Note object
     const note = new Note({
@@ -110,7 +114,9 @@ export class DmServiceFedify {
     );
 
     // Convert Date to Temporal.Instant for Fedify
-    const publishedInstant = Temporal.Instant.from(published.toISOString());
+    const publishedInstant = TemporalPolyfill.Instant.from(
+      published.toISOString(),
+    ) as unknown as Temporal.Instant;
 
     // Create Fedify Create activity
     const activity = new Create({

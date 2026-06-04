@@ -68,7 +68,11 @@ async function seedFeatureToggles(): Promise<void> {
     "global_public_posting_enabled",
   ];
   const { PrismaClient } = await import("@prisma/client");
-  const prisma = new PrismaClient({ datasourceUrl: process.env.DATABASE_URL });
+  // Prisma 7 removed the `datasourceUrl` constructor option; the URL is supplied
+  // via a driver adapter (matches the lambda clients).
+  const { PrismaPg } = await import("@prisma/adapter-pg");
+  const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
+  const prisma = new PrismaClient({ adapter });
   try {
     // Seed GLOBAL toggles (tenant_id IS NULL). P1 replaced the `@unique` on
     // `key` with `@@unique([key, tenantId])`, and SQL treats `(key, NULL)` as

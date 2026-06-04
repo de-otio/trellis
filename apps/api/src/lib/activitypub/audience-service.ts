@@ -8,7 +8,7 @@
 import type { Env } from "../../env.js";
 import type { User } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
-import { OrderedCollection } from "@fedify/fedify";
+import { OrderedCollection } from "@fedify/fedify/vocab";
 import { Logger } from "../logger.js";
 import { getActivityPubBaseUrl } from "./fedify/context.js";
 import { UserActorDispatcher } from "./dispatchers/user-actor.js";

@@ -25,7 +25,8 @@ const { mockGetActivityPubBaseUrl, MockOrderedCollection, mockGenerateActorUri }
     return { mockGetActivityPubBaseUrl, MockOrderedCollection, mockGenerateActorUri };
   });
 
-vi.mock("@fedify/fedify", () => ({
+// fedify 2 moved vocab classes to the `/vocab` subpath; mock that, not the root.
+vi.mock("@fedify/fedify/vocab", () => ({
   OrderedCollection: MockOrderedCollection,
 }));
 

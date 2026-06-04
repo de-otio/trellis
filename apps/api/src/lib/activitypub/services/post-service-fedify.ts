@@ -5,8 +5,13 @@
  * This provides type-safe activity creation with automatic JSON-LD serialization.
  */
 
-import { Create, Update, Note, PUBLIC_COLLECTION } from "@fedify/fedify";
-import { Temporal } from "@js-temporal/polyfill";
+import { Create, Update, Note, PUBLIC_COLLECTION } from "@fedify/fedify/vocab";
+// Node has no global `Temporal` runtime yet, so we use the polyfill VALUE; but
+// fedify 2's vocab types reference the global `Temporal` (TS6 lib.esnext.temporal),
+// whose Instant signatures differ slightly from the polyfill's. Import the
+// polyfill under an alias and type the instances as the global `Temporal.Instant`
+// fedify expects (single runtime copy, so the bridge cast is sound).
+import { Temporal as TemporalPolyfill } from "@js-temporal/polyfill";
 import type { Env } from "../../../env.js";
 import type { Post, User } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
@@ -144,7 +149,9 @@ export class PostActivityServiceFedify {
     const published = post.published || post.createdAt;
 
     // Convert Date to Temporal.Instant for Fedify
-    const publishedInstant = Temporal.Instant.from(published.toISOString());
+    const publishedInstant = TemporalPolyfill.Instant.from(
+      published.toISOString(),
+    ) as unknown as Temporal.Instant;
 
     // Create Fedify Note object
     const note = new Note({
@@ -203,7 +210,9 @@ export class PostActivityServiceFedify {
     );
 
     // Convert Date to Temporal.Instant for Fedify
-    const publishedInstant = Temporal.Instant.from(published.toISOString());
+    const publishedInstant = TemporalPolyfill.Instant.from(
+      published.toISOString(),
+    ) as unknown as Temporal.Instant;
 
     // Create Fedify Create activity
     const activity = new Create({
@@ -350,7 +359,9 @@ export class PostActivityServiceFedify {
     const note = await this.createNote(post, author, env, requestUrl);
 
     // Convert Date to Temporal.Instant for Fedify
-    const updatedInstant = Temporal.Instant.from(updated.toISOString());
+    const updatedInstant = TemporalPolyfill.Instant.from(
+      updated.toISOString(),
+    ) as unknown as Temporal.Instant;
 
     // Create Fedify Update activity
     const activity = new Update({
