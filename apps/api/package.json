@@ -60,7 +60,7 @@
     "@de-otio/saas-foundation": "^0.2.5",
     "@de-otio/trellis-extension-api": "^0.2.0",
     "@de-otio/vestibulum": "^0.2.0",
-    "@fedify/fedify": "^1.0.0",
+    "@fedify/fedify": "^2.2.3",
     "@prisma/adapter-pg": "^6.0.0",
     "@prisma/client": "^6.0.0",
     "@prisma/extension-accelerate": "^1.0.0",
