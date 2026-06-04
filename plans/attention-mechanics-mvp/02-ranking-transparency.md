@@ -20,7 +20,7 @@ Cheap, because the data already exists.
     (`:361-386`).
 - Tier thresholds live in `scoring-engine.ts` (`:78-83`: t0≥0.7, t1≥0.4,
   t2≥0.15, t3≥0.0).
-- `neo4j-graph-service.ts` `getRelationship()` (`:331-352`) returns
+- `graph/postgres/relationships.ts` `getRelationship()` returns
   `score`/`computedScore`/`manualScore`/`interactionCount`/`tier` — **no
   per-component breakdown.**
 
@@ -74,7 +74,7 @@ same explanation builder.
 | File | Change |
 |---|---|
 | `apps/api/src/lib/graph/scoring-engine.ts` | extract named weights; add `computeScoreBreakdown`; `computeScore` reads `.score` |
-| `apps/api/src/lib/graph/neo4j-graph-service.ts` | `getRelationship(..., {explain})` attaches breakdown |
+| `apps/api/src/lib/graph/postgres/relationships.ts` | `getRelationship(..., {explain})` attaches breakdown |
 | `apps/api/src/lib/graph/types.ts` | add `ScoreBreakdown` |
 | `apps/api/src/lib/relationship-explanation-handler.ts` | **new** — narrative builder + handler |
 | `apps/api/src/lib/routes/...` | register the explanation route |

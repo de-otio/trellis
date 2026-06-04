@@ -48,6 +48,11 @@ export default defineConfig({
     environment: "node",
     // Only graph integration tests
     include: ["test/integration/graph/**/*.test.ts"],
+    // The D3 failover suite (*.failover.test.ts) forces a real Neptune writer
+    // failover and runs only in the D2/D3 CodeBuild runner — never in the
+    // default Docker-Neo4j lane. It has its own config
+    // (vitest.graph.failover.config.ts).
+    exclude: ["test/integration/graph/**/*.failover.test.ts"],
     // No shared setupFiles — graph tests manage their own Neo4j connection
     // (the global test/setup.ts sets DATABASE_URL and other Postgres env vars
     //  which are irrelevant here and would pollute the env)

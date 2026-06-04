@@ -1,9 +1,10 @@
 /**
  * Graph Service
  *
- * Abstraction layer between API handlers and the graph database
- * (Neo4j AuraDB in dev/prod, Neo4j Community via Docker in local dev
- * and integration tests).
+ * Abstraction layer between API handlers and the graph backend. The graph
+ * runs in Postgres (PostgresGraphService — joins + recursive CTEs on the
+ * existing RDS); there is no separate graph database. (Graph-db revisit
+ * 2026-06.)
  *
  * @example
  * ```typescript
@@ -30,31 +31,15 @@
 // Interface & connection
 export type { GraphService, GraphConnection } from "./graph-service.js";
 
-// Implementations
-export { Neo4jGraphService } from "./neo4j-graph-service.js";
+// Implementation (Postgres — the only backend; the Neo4j/Neptune service and
+// the dual-write/reconciliation machinery were removed with the 2026-06
+// revisit: handlers call the sync* methods directly and there is no second
+// store to mirror or reconcile).
+export { PostgresGraphService } from "./postgres/postgres-graph-service.js";
 export {
-  createGraphService,
   createGraphServiceFromEnv,
   closeSharedGraphService,
-  type GraphServiceEnvConfig,
 } from "./graph-factory.js";
-export { initGraphSchema, verifyGraphSchema } from "./graph-schema-init.js";
-
-// Dual-write
-export type {
-  DualWriteService,
-  DualWriteConfig,
-  DualWriteFailure,
-  DualWriteOperation,
-  DualWritePayload,
-  DualWriteSyncResult,
-  ReconciliationProgress,
-  ReconciliationResult,
-  ConsistencyCheckResult,
-} from "./dual-write.js";
-export { GraphSyncError } from "./dual-write.js";
-export { DualWriteServiceImpl } from "./dual-write-service.js";
-export { ReconciliationService } from "./reconciliation-service.js";
 
 // Types
 export type {

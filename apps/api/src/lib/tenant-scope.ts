@@ -67,6 +67,12 @@ export const TENANT_SCOPED_MODELS: ReadonlySet<string> = new Set([
   // bypass this middleware (scoped manually + RLS backstop), but classifying it
   // here keeps the model honest and auto-scopes any future Prisma-Client op.
   "EntityLocation",
+  // Graph edge tables (graph-db revisit 2026-06: the social graph runs in
+  // Postgres). Both carry tenantId; PostgresGraphService additionally scopes
+  // its queries manually (and its recursive-CTE $queryRaw paths, which bypass
+  // this middleware, always filter tenant_id explicitly).
+  "Relationship",
+  "EntityRelationship",
 ]);
 
 /**

@@ -11,7 +11,7 @@ exercise rather than a code move — see [`04-skybber-to-trellis.md`](04-skybber
 
 | Capability | Path(s) | Notes |
 |---|---|---|
-| **Concentric circles** (tiers, dual-gated visibility, glance, depth, mark-read) | `apps/api/src/lib/circle-handler.ts`, `routes/circles.ts`, `graph/neo4j-graph-service.ts`, `graph/circle-queries.md`; schema `CircleConfig` / `CircleReadState` / `PostRadius` | Fully generic. The only vertical piece is the *relationship type names* (see below). |
+| **Concentric circles** (tiers, dual-gated visibility, glance, depth, mark-read) | `apps/api/src/lib/circle-handler.ts`, `routes/circles.ts`, `graph/postgres/circles.ts`, `graph/circle-queries.md`; schema `CircleConfig` / `CircleReadState` / `PostRadius` | Fully generic. The only vertical piece is the *relationship type names* (see below). |
 | **Proximity discovery** | `apps/api/src/lib/discovery-handler.ts` (rate-limited, hop-capped), `graph` `discoverNearby` | Generic for any entity type. Geo currently in the graph; [`../entity-location-subsystem.md`](../entity-location-subsystem.md) moves it to Postgres/PostGIS. |
 | **Relationship scoring + decay** | `apps/api/src/lib/graph/scoring-engine.ts` | Blends manual/connection/interaction/extension signals + decay. Extensions inject signals via `RelationshipSignalProvider`. |
 | **Entity-relationship CRUD + confirm/reject** | `apps/api/src/lib/entity-relationship-handler.ts` | Generic; relationship *types* are extension-supplied. |

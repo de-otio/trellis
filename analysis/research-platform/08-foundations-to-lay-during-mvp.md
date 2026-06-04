@@ -4,6 +4,15 @@
 > MVP and should not be built now. This document identifies the small set of
 > decisions that are *cheap to make now and pervasive to retrofit later* — the
 > one-way doors. Everything else is deliberately deferred (see the bottom).
+>
+> **Update (2026-06-03) — foundations 1–8 now implemented.** All eight one-way
+> doors were laid (no deferred research subsystem was built). Landed on `main`
+> via the parallel plan in
+> [`plans/research-foundations-mvp/`](../../plans/research-foundations-mvp/00-parallel-execution-plan.md),
+> following a security review whose 10 findings were folded in (some changes
+> below diverge from the original sketch as a result). Each section is annotated
+> with a ✅ callout describing exactly what shipped; verified by `prisma validate`,
+> a clean `tsc` on `apps/api` + `extension-api`, and 150 changed-area tests.
 
 ## The test for "do it now"
 
@@ -31,6 +40,16 @@ arrives. (See [`enshittification-resistance/07`](../enshittification-resistance/
 ## The one-way doors
 
 ### 1. Make consent a purpose-tagged record, not a residency-specific one
+
+> **✅ Implemented (2026-06-03).** `CrossRegionConsent` generalised to an
+> **append-only** `Consent` model (`ConsentPurpose` enum, `purpose`/`studyId`,
+> nullable region cols). Uniqueness preserved via a **partial unique index** on
+> active `CROSS_REGION` rows — a plain `@@unique([userId, purpose, studyId])`
+> would *not* prevent duplicate cross-region consents because Postgres treats the
+> NULL `studyId` as distinct (security-review catch). Withdrawal now **preserves
+> `consentedAt`** (was being nulled, destroying the grant trail) and emits a
+> `consent.changed` audit event. Migration `20260602162901_research_foundations`;
+> call sites updated incl. the easily-missed `user-data-deletion.ts`.
 
 **Highest-value change.** `CrossRegionConsent` (`prisma/schema.prisma:394`)
 already models the exact shape research needs — a person granting a specific
@@ -64,6 +83,17 @@ residency detail moving into `metadata` or kept as columns). Nothing about MVP
 behaviour changes; the door stays open.
 
 ### 2. Audit sensitive *reads* via the open `action` union (no frozen-shape change)
+
+> **✅ Implemented (2026-06-03).** Added open `AuditAction` constants
+> `research.query`, `research.extract`, `experiment.assign`,
+> `feature_toggle.changed`, `consent.changed` — no foundation change, `user`
+> actor reused (no `researcher` kind). `setToggle` now emits
+> `feature_toggle.changed` centrally with `{ key, oldEnabled, newEnabled,
+> changedBy }` where **`changedBy` is the userId, not the email** (PII), and the
+> toggle key/booleans are on the PII allowlist. Audit-emit failures are now
+> **observable** (stderr + metric) instead of silently swallowed; durable SQS
+> delivery is deferred. The sensitive-read convention is documented with a worked
+> example (full read-path retrofit deferred).
 
 The audit vocabulary is **owned and frozen by saas-foundation**
 (`packages/foundation/src/types/frozen/audit.ts`), not by trellis. The trellis
@@ -104,6 +134,14 @@ trail.
 
 ### 3. Fix the fail-open age default
 
+> **✅ Implemented (2026-06-03).** Added `User.ageVerified Boolean
+> @default(false)`; chose the **separate flag** over an `UNKNOWN` tier so the 17
+> feature-access call sites and `ageTier @default(ADULT)` stay untouched.
+> Convention recorded: research/cohort queries gate on `ageVerified = true`;
+> `ageTier` is never an includability signal. The product-side `ageTier`
+> fail-open (a DOB-less user reads as adult) is documented as a **known, accepted
+> minor-safety risk** rather than silently left.
+
 `User.ageTier` is `AgeTier @default(ADULT)` (`:299`). For research this is a
 fail-**open** default: a user whose age is unknown is treated as an adult, and a
 future cohort query that filters `ageTier != ADULT` would *include* unverified
@@ -123,6 +161,18 @@ safety win independent of research. (If product reasons require defaulting the
 includability* signal must fail closed, so keep the two concepts separate.)
 
 ### 4. Settle the pseudonymisation base and keep PII cleanly separable
+
+> **✅ Implemented (2026-06-03).** `anonymousId` is now populated at account
+> creation as a **KMS-keyed HMAC** (`GenerateMac`, `HMAC_SHA_256`) over
+> `"trellis.user.pseudonym:" + id` — domain-separated, keyed hash of the
+> immutable PK, **fail-safe** (no unkeyed fallback). KMS over an app-held salt
+> per the AWS-docs consult: the key lives in a FIPS HSM and never leaves KMS.
+> Documented in `apps/api/src/lib/PSEUDONYM.md` incl. a rotation-protocol stub
+> (KMS HMAC keys don't auto-rotate) and the *separation-only* limitation
+> (pseudonym sits beside PII in `users`; it protects exported datasets, not the
+> row). No backfill (acceptable pre-launch). The pre-existing **unkeyed
+> `emailHash`** (SHA-256 of email, dictionary-reversible) is flagged as a tracked
+> re-identification risk to re-key or drop.
 
 De-identification (docs 03, 05) depends on a **stable, opaque, non-PII**
 per-person identifier that can be consistently salted-and-hashed. The primary
@@ -145,6 +195,12 @@ deciding the pseudonym base after launch risks ad-hoc code hashing PII directly.
   across content (it currently doesn't — preserve that as new models are added).
 
 ### 5. Make behaviour-altering toggles distinguishable — by convention first
+
+> **✅ Implemented (2026-06-03), with one adjustment.** Adopted **underscore**
+> prefixes `ux_*` / `infra_*` / `ops_*` instead of the doc's dotted `ux.*` — the
+> trellis toggle-key validator is `^[a-z0-9_]+$` and rejects dots, so dotted keys
+> were infeasible without a regex change. Convention documented; existing keys
+> classified, **not renamed** (that's a data migration). No foundation change.
 
 The experiment registry (doc 07) rides on the toggle system, and the
 "allowed-treatment catalogue" invariant (doc 04) depends on
@@ -174,6 +230,13 @@ make the future catalogue *expressible*, ideally without touching foundation.
 
 ### 6. Protect the reproducibility assets you already have
 
+> **✅ Implemented (2026-06-03).** `ALLOWED_SORT_FIELDS` annotated as a
+> reproducibility invariant + exported `FEED_RANKING_VERSION = 1`; a new
+> invariant test pins "only `createdAt` is allowed". The append-only-timestamp
+> and `createdAt`-vs-`editedAt` rules are written up in
+> `apps/api/src/lib/REPRODUCIBILITY.md`. Documentation/guardrail only — no
+> behaviour change.
+
 Two existing properties are worth more to research than anything you'd add, and
 the only "work" now is *not breaking them*:
 
@@ -189,6 +252,10 @@ the only "work" now is *not breaking them*:
 
 ### 7. Treat the extension hooks as a stable contract
 
+> **✅ Implemented (2026-06-03).** `ExtensionHooks` documented as a **versioned
+> contract** (signature change ⇒ semver bump); exported `EXTENSION_API_VERSION`
+> (`0.2.0`) to keep runtime/`package.json` in sync. No hook signatures changed.
+
 A future research extension instruments via the existing
 `onPostCreated` / `onRelationshipCreated` / `onScoreRecompute` /
 `onEntityDeleted` hooks (`packages/extension-api/src/extension.ts`). These are
@@ -200,6 +267,13 @@ adding or changing these hooks during MVP, do it deliberately and version it —
 don't let the instrumentation surface drift by accident.
 
 ### 8. Write the codebook as you build, not after
+
+> **✅ Implemented (2026-06-03).** Added
+> `apps/api/src/lib/graph/SCORING-CODEBOOK.md` documenting every scoring constant
+> (user/entity weights, decay half-lives, engagement & connection scores,
+> `TIER_THRESHOLDS`) with value + meaning + rationale and the end-to-end
+> edge-weight formula; the `scoring-engine.ts` header links to it and notes the
+> two must be versioned together.
 
 Edge semantics live in `scoring-engine.ts` (reciprocity / frequency / decay
 weights, `TIER_THRESHOLDS`). A research codebook (doc 05/07) must state exactly
@@ -245,16 +319,16 @@ trellis-local edit.
 
 ## Cost-to-retrofit summary
 
-| # | Foundation | Change type | Retrofit cost if skipped |
-|---|------------|-------------|--------------------------|
-| 1 | Purpose-tagged consent | Schema (enum + key) | **Severe** — migration + can't re-consent departed users |
-| 2 | Audit research reads (open `action` + `metadata`) | Convention | **Severe** — no historical trail can be backfilled |
-| 3 | Age default fails closed | Schema (tier/flag) | **High** — mis-defaulted cohort is indistinguishable later |
-| 4 | Pseudonym base + PII separation | Decision + small schema | **Medium** — backfill + risk of PII-derived IDs |
-| 5 | Toggle distinguishability | Convention (key prefix) | **Medium** — re-classifying flat toggles is error-prone |
-| 6 | Don't break stationary feed / timestamps | Invariant | **Low effort now, high value** |
-| 7 | Stable hook contract | Discipline | **Low–medium** — becomes breaking changes post-1.0 |
-| 8 | Codebook-as-you-build | Docs | **Low effort now, archaeology later** |
+| # | Foundation | Change type | Retrofit cost if skipped | Status |
+|---|------------|-------------|--------------------------|--------|
+| 1 | Purpose-tagged consent | Schema (enum + key) | **Severe** — migration + can't re-consent departed users | ✅ done (2026-06-03) |
+| 2 | Audit research reads (open `action` + `metadata`) | Convention | **Severe** — no historical trail can be backfilled | ✅ done |
+| 3 | Age default fails closed | Schema (tier/flag) | **High** — mis-defaulted cohort is indistinguishable later | ✅ done (`ageVerified`) |
+| 4 | Pseudonym base + PII separation | Decision + small schema | **Medium** — backfill + risk of PII-derived IDs | ✅ done (KMS HMAC) |
+| 5 | Toggle distinguishability | Convention (key prefix) | **Medium** — re-classifying flat toggles is error-prone | ✅ done (`ux_/infra_/ops_`) |
+| 6 | Don't break stationary feed / timestamps | Invariant | **Low effort now, high value** | ✅ done |
+| 7 | Stable hook contract | Discipline | **Low–medium** — becomes breaking changes post-1.0 | ✅ done |
+| 8 | Codebook-as-you-build | Docs | **Low effort now, archaeology later** | ✅ done |
 
 ---
 

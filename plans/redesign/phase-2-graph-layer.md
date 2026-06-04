@@ -1,5 +1,12 @@
 # Phase 2 — Graph Layer
 
+> **COMPLETED — backend note (2026-06):** this plan was executed against the
+> original Neo4j backend; the graph layer now runs on **Postgres**
+> (`apps/api/src/lib/graph/postgres/`, graph-db revisit 2026-06). The task
+> breakdown below remains the generic specification of the `GraphService`
+> surface — read the `neo4j-graph-service.ts` output pointers as their
+> `postgres/` per-group equivalents.
+
 Implement the core graph operations. All tasks can run in parallel once Phase 1 is complete.
 
 ---

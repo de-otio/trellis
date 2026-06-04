@@ -78,8 +78,10 @@ which:
 - **feeds recommendations** ("strengthen ties you've met" beats "add strangers"),
 - **becomes the engagement signal the feed rewards** (see below).
 
-- **Store:** graph (Neptune) — it is a relationship fact, no geo, consistent
-  with the Neptune decision.
+- **Store:** the graph edge tables in Postgres (`relationships` /
+  `entity_relationships`) — it is a relationship fact, no geo, consistent
+  with the Postgres graph decision (2026-06; the earlier Neptune direction
+  was abandoned).
 - **Verification, deliberately lightweight (open question in [`05`](05-open-questions-and-sizing.md)):**
   1. **mutual confirmation** (both tap "we met") — simplest, consent-native;
   2. **co-attendance** (both RSVP'd + the gathering's time passed) — automatic,

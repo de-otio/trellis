@@ -9,8 +9,10 @@
   and the recommendations `nearby` signal now use the PostGIS repo
   (`findNearby` / `findNearAnchors`, the `MIN`-over-anchors query replacing the
   `reduce()`/`point.distance()` Cypher) merged with graph facts (discoverable,
-  exclude-already-related). Geo is injected into `Neo4jGraphService` via an
+  exclude-already-related). Geo is injected into the graph service via an
   `EntityGeoLookup` (graph tests use a fake; prod wires `EntityGeoRepository`).
+  Since the 2026-06 Postgres cutover the consumer is `PostgresGraphService`
+  (Discovery + Sync ops); originally `Neo4jGraphService`.
 - **Verification:** opencypher linter `no-spatial` + `no-reduce` → 0;
   discovery unit (42) + sync-methods unit + discovery-scoring integration (27)
   + a new `entity-geo-repository.integration` (8, real PostGIS) all green; tsc
@@ -40,9 +42,11 @@
   repo, not GraphService itself). Plus the test cascade (graph discovery tests →
   Postgres+graph). **Deploy note:** skybber's RDS needs PostGIS enabled
   (`CREATE EXTENSION postgis` as the master user) before this migration deploys.
-**Trigger:** The Neptune Serverless migration ([`graph-db-neptune-serverless/`](graph-db-neptune-serverless/README.md))
-removes spatial from the graph layer ([audit F1](graph-db-neptune-serverless/10-opencypher-audit.md));
-geo-proximity must move to Postgres. Rather than a minimal port, this is the
+**Trigger:** The graph backend contract excludes spatial as a graph
+capability ([`graph-backend-contract.md`](graph-backend-contract.md) — spatial
+proximity ranks via Postgres/PostGIS, and the graph supplies only entity
+fields + the not-already-related filter). Geo-proximity must therefore live
+in Postgres. Rather than a minimal port, this is the
 design for a **generic, multi-vertical entity-location capability** in trellis
 core — geo is a Postgres/PostGIS concern; the graph does relationships only.
 
@@ -182,6 +186,12 @@ loop) from the graph entirely.
   wiping without schema churn.
 
 ## Relationship to the Neptune decision
+
+> **Update (2026-06):** Neptune was subsequently abandoned — the whole graph
+> now runs in Postgres (graph-db revisit 2026-06). This subsystem is
+> unaffected: geo stays a first-class Postgres/PostGIS concern, consumed by
+> `PostgresGraphService` through the same `EntityGeoLookup` seam. The
+> paragraph below is the historical rationale from the Neptune era.
 
 This *resolves* audit F1 and **preserves the Neptune choice intact** — geo was
 never the graph's job (`Entity` model comment, `schema.prisma:47`:
