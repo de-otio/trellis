@@ -22,7 +22,7 @@ import {
   createUser,
   withCleanDb,
 } from "./harness.js";
-import { getTestDatabase, getTestDriver } from "./setup.js";
+import { getTestDatabase, getTestDriver, getTestGraphServiceConfig } from "./setup.js";
 
 // ---------------------------------------------------------------------------
 // Helpers to query edges directly via Cypher
@@ -107,11 +107,7 @@ async function edgeExists(
 let svc: GraphService & GraphConnection;
 
 beforeAll(async () => {
-  svc = await createGraphService({
-    uri: process.env.NEO4J_TEST_URI ?? "bolt://localhost:7687",
-    user: process.env.NEO4J_TEST_USER,
-    password: process.env.NEO4J_TEST_PASSWORD,
-  });
+  svc = await createGraphService(getTestGraphServiceConfig());
 });
 
 afterAll(async () => {

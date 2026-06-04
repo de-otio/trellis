@@ -20,7 +20,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createGraphService } from "../../../src/lib/graph/graph-factory.js";
 import { Neo4jGraphService } from "../../../src/lib/graph/neo4j-graph-service.js";
 import { closeTestDriver, deleteTestNodes } from "./harness.js";
-import { getTestDatabase, getTestDriver } from "./setup.js";
+import { getTestDatabase, getTestDriver, getTestGraphServiceConfig } from "./setup.js";
 
 // ---------------------------------------------------------------------------
 // Unique run prefix — all node IDs share this prefix for prod-safe cleanup
@@ -90,11 +90,7 @@ beforeAll(async () => {
   // runtime. We need the concrete
   // type here to access the extended getCircleStatus(userId, lastReadTimestamps)
   // overload that is not exposed on the GraphService interface.
-  svc = (await createGraphService({
-    uri: process.env.NEO4J_TEST_URI ?? "bolt://localhost:7687",
-    user: process.env.NEO4J_TEST_USER,
-    password: process.env.NEO4J_TEST_PASSWORD,
-  })) as Neo4jGraphService;
+  svc = (await createGraphService(getTestGraphServiceConfig())) as Neo4jGraphService;
 });
 
 afterAll(async () => {

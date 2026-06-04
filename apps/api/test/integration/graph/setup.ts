@@ -9,16 +9,40 @@
  * - No hardcoded credentials — all config from env vars
  * - Localhost URIs are always safe; non-local URIs are allowed for CI/dev pipelines
  *
- * Required environment variables:
+ * Required environment variables (default Neo4j basic-auth mode):
  *   NEO4J_TEST_URI       e.g. bolt://localhost:7687
  *   NEO4J_TEST_USER      e.g. neo4j
  *   NEO4J_TEST_PASSWORD  e.g. testpassword
  *
  * Optional environment variables:
  *   NEO4J_TEST_DATABASE  defaults to "test" (never "neo4j")
+ *
+ * Amazon Neptune IAM mode (the Track-D D2/D3 CodeBuild runner only):
+ *   GRAPH_TEST_AUTH_MODE=iam   opt in to SigV4 auth via the ambient AWS role
+ *   GRAPH_DB_URI               Neptune Bolt endpoint (bolt://host:8182)
+ *   AWS_REGION                 cluster region (defaults to eu-central-1)
+ * In this mode the driver authenticates the same way the runtime does
+ * (createNeptuneAuthTokenManager in src/lib/graph/neptune-auth.ts) — no stored
+ * credential — and the localhost guard is relaxed because the remote Neptune
+ * host is the explicit, intended target. The default Docker-Neo4j path is
+ * untouched. See doc/02-technical/development/testing/neptune-d2-d3-codebuild.md
+ * (in skybber).
  */
 
 import neo4j, { type Driver } from "neo4j-driver";
+import {
+  createNeptuneAuthTokenManager,
+  parseBoltEndpoint,
+} from "../../../src/lib/graph/neptune-auth.js";
+import type { GraphServiceEnvConfig } from "../../../src/lib/graph/graph-factory.js";
+
+/**
+ * True when the suite is opted into Amazon Neptune SigV4 auth. Only the
+ * D2/D3 CodeBuild runner sets this; local/CI default to Docker-Neo4j basic auth.
+ */
+export function isIamTestMode(): boolean {
+  return process.env.GRAPH_TEST_AUTH_MODE === "iam";
+}
 
 // ---------------------------------------------------------------------------
 // Singleton driver (one per test process)
@@ -44,19 +68,50 @@ export function getTestDriver(): Driver {
     return _driver;
   }
 
+  // SAFETY: never run against prod (applies to both auth modes)
+  if (process.env.STAGE === "prod") {
+    throw new Error(
+      "Refusing to run graph integration tests with STAGE=prod. " +
+        "These tests wipe the database — they must never run against production.",
+    );
+  }
+
+  // Amazon Neptune IAM mode — the D2/D3 CodeBuild runner. Build the raw harness
+  // driver the same way the runtime does: a SigV4 AuthTokenManager that re-signs
+  // before the ~5-minute signature expiry, TLS on with system-CA trust. The
+  // remote Neptune host is the explicit, intended target, so the localhost guard
+  // does not apply here.
+  if (isIamTestMode()) {
+    const iamUri = process.env.GRAPH_DB_URI ?? process.env.NEO4J_TEST_URI;
+    if (!iamUri) {
+      throw new Error(
+        "GRAPH_TEST_AUTH_MODE=iam requires GRAPH_DB_URI (the Neptune Bolt endpoint).",
+      );
+    }
+    const region = process.env.AWS_REGION ?? "eu-central-1";
+    const { host, port } = parseBoltEndpoint(iamUri);
+    _driver = neo4j.driver(
+      iamUri,
+      createNeptuneAuthTokenManager({ host, port, region }),
+      {
+        disableLosslessIntegers: true, // Return native JS numbers
+        maxConnectionPoolSize: 5, // Tests don't need a large pool
+        connectionAcquisitionTimeout: 10_000,
+        // Neptune speaks bolt:// (no +s scheme); TLS is enabled via config and
+        // trusts the Amazon-issued system CA — mirrors Neo4jGraphService.connect.
+        encrypted: "ENCRYPTION_ON",
+        trust: "TRUST_SYSTEM_CA_SIGNED_CERTIFICATES",
+      },
+    );
+    return _driver;
+  }
+
+  // Default path — Docker Neo4j / AuraDB basic auth.
   const uri = process.env.NEO4J_TEST_URI;
   if (!uri) {
     throw new Error(
       "NEO4J_TEST_URI is not set. " +
         "Copy test/integration/graph/.env.test.example and set the required variables.",
-    );
-  }
-
-  // SAFETY: never run against prod
-  if (process.env.STAGE === "prod") {
-    throw new Error(
-      "Refusing to run graph integration tests with STAGE=prod. " +
-        "These tests wipe the database — they must never run against production.",
     );
   }
 
@@ -93,6 +148,37 @@ export function getTestDriver(): Driver {
   });
 
   return _driver;
+}
+
+/**
+ * The {@link GraphServiceEnvConfig} the suite should hand to `createGraphService`
+ * for the service-under-test. Centralizes the per-test config so the Neptune IAM
+ * seam lives in one place instead of being duplicated across every integration
+ * file.
+ *
+ * - Default (Docker Neo4j): basic auth from NEO4J_TEST_URI/USER/PASSWORD.
+ * - IAM mode (Neptune runner): SigV4 via the ambient role; no stored credential.
+ */
+export function getTestGraphServiceConfig(): GraphServiceEnvConfig {
+  if (isIamTestMode()) {
+    const uri = process.env.GRAPH_DB_URI ?? process.env.NEO4J_TEST_URI;
+    if (!uri) {
+      throw new Error(
+        "GRAPH_TEST_AUTH_MODE=iam requires GRAPH_DB_URI (the Neptune Bolt endpoint).",
+      );
+    }
+    return {
+      uri,
+      authMode: "iam",
+      region: process.env.AWS_REGION ?? "eu-central-1",
+    };
+  }
+
+  return {
+    uri: process.env.NEO4J_TEST_URI ?? "bolt://localhost:7687",
+    user: process.env.NEO4J_TEST_USER,
+    password: process.env.NEO4J_TEST_PASSWORD,
+  };
 }
 
 /**

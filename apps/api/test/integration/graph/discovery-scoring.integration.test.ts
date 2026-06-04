@@ -22,7 +22,7 @@ import type { GraphConnection, GraphService } from "../../../src/lib/graph/graph
 import type { EntityGeoLookup, NearbyEntity } from "../../../src/lib/geo/entity-geo-repository.js";
 import { runWithTenantContext, tenantId } from "@de-otio/saas-foundation/tenant";
 import { closeTestDriver, createEntity, createOwnership, createUser, deleteTestNodes } from "./harness.js";
-import { getTestDatabase, getTestDriver } from "./setup.js";
+import { getTestDatabase, getTestDriver, getTestGraphServiceConfig } from "./setup.js";
 
 // ---------------------------------------------------------------------------
 // Prod-safe run isolation
@@ -158,14 +158,7 @@ async function recommendWith(nearAnchors: NearbyEntity[], userId: string, limit 
 }
 
 beforeAll(async () => {
-  svc = await createGraphService(
-    {
-      uri: process.env.NEO4J_TEST_URI ?? "bolt://localhost:7687",
-      user: process.env.NEO4J_TEST_USER,
-      password: process.env.NEO4J_TEST_PASSWORD,
-    },
-    fakeGeo,
-  );
+  svc = await createGraphService(getTestGraphServiceConfig(), fakeGeo);
 });
 
 afterAll(async () => {
