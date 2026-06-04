@@ -18,7 +18,7 @@ const PHASE0_INTEGRATION = [
   // P2 — interaction event capture
   "test/integration/interaction-events.integration.test.ts",
   // P4 — report model adoption
-  //   "test/integration/report-migration.integration.test.ts",
+  "test/integration/report-migration.integration.test.ts",
 ];
 
 export default defineConfig({

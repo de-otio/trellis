@@ -28,6 +28,7 @@ export default defineConfig({
       // Surveillance-hardening Phase 0 integration tests — live Postgres only.
       // Run separately: npm run test:integration:ci (CI lane added in P1).
       "test/integration/interaction-events.integration.test.ts",
+      "test/integration/report-migration.integration.test.ts",
     ],
     setupFiles: ["test/setup.ts"],
     globalTeardown: "test/teardown.ts",

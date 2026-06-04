@@ -310,9 +310,10 @@ export class DomainReputationService {
     const db = DataRouter.getDatabaseForRegion(region, env);
 
     try {
-      // Count pending/reviewed reports for this domain
-      const reportCount = await db.linkReport.count({
+      // Count pending/reviewed LINK reports for this domain (P4: Report model).
+      const reportCount = await db.report.count({
         where: {
+          reportType: "LINK",
           domain: normalizedDomain,
           status: {
             in: ["pending", "reviewed"],

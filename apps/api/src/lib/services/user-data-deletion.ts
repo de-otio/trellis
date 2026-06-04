@@ -1,4 +1,16 @@
+import { createHash } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
+
+/**
+ * Deterministic tombstone for a deleted user's ID in retained aggregate
+ * records (Surveillance-hardening Phase 0, P4). Replaces the plaintext user ID
+ * in ACCOUNT-report `resourceId` so aggregate pattern analysis survives while
+ * the identifier does not — "pattern analysis" is NOT an Art. 17(3) exemption.
+ * Same input → same tombstone, so per-target report counts stay coherent.
+ */
+export function pseudonymizeUserId(userId: string): string {
+  return `deleted:${createHash("sha256").update(userId).digest("hex").slice(0, 32)}`;
+}
 
 export interface DeletionResult {
   commentSentiments: number;
@@ -16,6 +28,10 @@ export interface DeletionResult {
   /** Target-side InteractionEvent rows (Surveillance-hardening Phase 0, P2).
    *  Actor-side rows cascade via the FK on user.delete(). */
   interactionEventsAsTarget: number;
+  /** ACCOUNT-report rows whose resourceId (the reported user) was pseudonymized
+   *  (Surveillance-hardening Phase 0, P4 / GDPR Art. 17). Reports filed BY the
+   *  user cascade via the reporter FK. */
+  accountReportsPseudonymized: number;
 }
 
 /**
@@ -28,8 +44,9 @@ export interface DeletionResult {
  *
  * Does NOT check authorization — caller must verify permissions.
  *
- * Models with onDelete: Cascade on the User relation (MfaEnrollment, LinkReport,
- * UserEncryptionKey) are automatically deleted by the final user.delete().
+ * Models with onDelete: Cascade on the User relation (MfaEnrollment,
+ * UserEncryptionKey, and Report via the reporter FK) are automatically deleted
+ * by the final user.delete().
  */
 export async function deleteUserData(
   db: PrismaClient,
@@ -143,8 +160,20 @@ export async function deleteUserData(
     where: { targetType: "user", targetId: userId },
   });
 
-  // 16. Delete the user (cascades to MfaEnrollment, LinkReport, UserEncryptionKey,
-  //     Report (reporter), and actor-side InteractionEvent rows)
+  // 15c. Pseudonymize ACCOUNT reports ABOUT the deleted user (Surveillance-
+  //      hardening Phase 0, P4 / GDPR Art. 17). resourceId has no FK; replace
+  //      the plaintext user ID with a deterministic tombstone so aggregate
+  //      pattern analysis survives but the identifier does not. (No ACCOUNT
+  //      reports exist until Phase 1, but the erasure path ships with the model
+  //      so Phase 1 cannot forget it.) Reports filed BY the user cascade via the
+  //      reporter FK on user.delete().
+  const accountReports = await db.report.updateMany({
+    where: { reportType: "ACCOUNT", resourceType: "user", resourceId: userId },
+    data: { resourceId: pseudonymizeUserId(userId) },
+  });
+
+  // 16. Delete the user (cascades to MfaEnrollment, UserEncryptionKey, Report
+  //     (reporter side), and actor-side InteractionEvent rows)
   await db.user.delete({ where: { id: userId } });
 
   return {
@@ -161,5 +190,6 @@ export async function deleteUserData(
     crossRegionConsents: crossRegionConsents.count,
     invitations: invitations.count,
     interactionEventsAsTarget: interactionEventsAsTarget.count,
+    accountReportsPseudonymized: accountReports.count,
   };
 }

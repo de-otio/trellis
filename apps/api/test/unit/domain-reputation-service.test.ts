@@ -17,7 +17,7 @@ vi.mock("../../src/lib/data-router", () => {
       update: vi.fn(),
       findMany: vi.fn(),
     },
-    linkReport: {
+    report: {
       count: vi.fn(),
     },
   };
@@ -427,7 +427,7 @@ describe("DomainReputationService", () => {
   describe("shouldAutoBlock", () => {
     it("should return true when report threshold exceeded", async () => {
       // Arrange
-      mockDb.linkReport.count.mockResolvedValue(5); // Threshold is 5
+      mockDb.report.count.mockResolvedValue(5); // Threshold is 5
       mockDb.domainReputation.findUnique.mockResolvedValue({
         id: "1",
         domain: "example.com",
@@ -451,7 +451,7 @@ describe("DomainReputationService", () => {
 
     it("should return false when report threshold not exceeded", async () => {
       // Arrange
-      mockDb.linkReport.count.mockResolvedValue(3); // Below threshold
+      mockDb.report.count.mockResolvedValue(3); // Below threshold
 
       // Act
       const result = await service.shouldAutoBlock(
@@ -466,7 +466,7 @@ describe("DomainReputationService", () => {
 
     it("should return false when domain already blocked", async () => {
       // Arrange
-      mockDb.linkReport.count.mockResolvedValue(10);
+      mockDb.report.count.mockResolvedValue(10);
       mockDb.domainReputation.findUnique.mockResolvedValue({
         id: "1",
         domain: "example.com",

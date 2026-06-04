@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { deleteUserData } from "../../../src/lib/services/user-data-deletion.js";
+import {
+  deleteUserData,
+  pseudonymizeUserId,
+} from "../../../src/lib/services/user-data-deletion.js";
 
 describe("deleteUserData", () => {
   let mockDb: any;
@@ -35,6 +38,8 @@ describe("deleteUserData", () => {
       invitation: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
       // Surveillance-hardening Phase 0 (P2): target-side InteractionEvent erasure.
       interactionEvent: { deleteMany: vi.fn().mockResolvedValue({ count: 5 }) },
+      // Surveillance-hardening Phase 0 (P4): ACCOUNT-report pseudonymization.
+      report: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
       user: { delete: vi.fn().mockResolvedValue({ id: "user-123" }) },
     };
   });
@@ -56,6 +61,7 @@ describe("deleteUserData", () => {
       crossRegionConsents: 1,
       invitations: 0,
       interactionEventsAsTarget: 5,
+      accountReportsPseudonymized: 0,
     });
 
     // Verify deletion order: sentiments before comments, comments before posts, posts before entities
@@ -135,9 +141,32 @@ describe("deleteUserData", () => {
     });
   });
 
+  it("pseudonymizes ACCOUNT reports about the deleted user (GDPR Art. 17, P4)", async () => {
+    await deleteUserData(mockDb, "user-123");
+
+    expect(mockDb.report.updateMany).toHaveBeenCalledWith({
+      where: { reportType: "ACCOUNT", resourceType: "user", resourceId: "user-123" },
+      data: { resourceId: pseudonymizeUserId("user-123") },
+    });
+  });
+
   it("should propagate database errors", async () => {
     mockDb.commentSentiment.deleteMany.mockRejectedValue(new Error("DB connection lost"));
 
     await expect(deleteUserData(mockDb, "user-123")).rejects.toThrow("DB connection lost");
+  });
+});
+
+describe("pseudonymizeUserId", () => {
+  it("is deterministic and does not leak the plaintext id", () => {
+    const a = pseudonymizeUserId("user-123");
+    const b = pseudonymizeUserId("user-123");
+    expect(a).toBe(b);
+    expect(a).not.toContain("user-123");
+    expect(a.startsWith("deleted:")).toBe(true);
+  });
+
+  it("maps different ids to different tombstones", () => {
+    expect(pseudonymizeUserId("a")).not.toBe(pseudonymizeUserId("b"));
   });
 });

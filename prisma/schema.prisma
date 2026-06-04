@@ -280,9 +280,6 @@ model User {
   createdAudiences    CustomAudience[]       @relation("AudienceCreator")
   audienceMemberships CustomAudienceMember[] @relation("AudienceMembers")
 
-  // Link reports
-  linkReports LinkReport[]
-
   // Surveillance-hardening Phase 0: behavioral-event actor side (E1, P2) and
   // generalized reports filed BY this user (E3, P4). Both cascade on delete.
   interactionEvents InteractionEvent[] @relation("InteractionActor")
@@ -1434,23 +1431,10 @@ model LinkCheck {
   @@map("link_checks")
 }
 
-// Link reports from users
-model LinkReport {
-  id        String   @id @default(cuid())
-  userId    String   @map("user_id")
-  linkUrl   String   @map("link_url")
-  domain    String
-  reason    String?
-  status    String   @default("pending") // pending, reviewed, resolved
-  createdAt DateTime @default(now()) @map("created_at")
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([domain])
-  @@index([status])
-  @@index([userId])
-  @@map("link_reports")
-}
+// LinkReport was folded into the generalized `Report` model (Surveillance-
+// hardening Phase 0, P4): reportType=LINK, resourceType="url", resourceId=url,
+// reporterUserId=userId, plus the indexed `domain` column. The link_reports
+// table is dropped in the P4 migration.
 
 // ============================================================================
 // Surveillance-hardening Phase 0 (doc/02-technical/surveillance-threat-model/)
@@ -1519,6 +1503,10 @@ model Report {
   reporterUserId String     @map("reporter_user_id")
   reason         String? // free-text; P4 enforces a 1000-char Zod bound at the boundary
   status         String     @default("pending") // pending | reviewed | resolved
+  // LINK-report registrable domain (P4 fold-in of LinkReport). Indexed +
+  // queried hot by DomainReputationService (auto-block threshold counts by
+  // domain). Nullable: ACCOUNT reports have no domain.
+  domain         String?
   assigneeUserId String?    @map("assignee_user_id") // Phase 1 moderator queue
   resolvedAt     DateTime?  @map("resolved_at")
   resolution     String? // Phase 1 moderator queue
@@ -1529,6 +1517,7 @@ model Report {
   @@index([reportType, status])
   @@index([resourceType, resourceId])
   @@index([reporterUserId])
+  @@index([domain])
   @@map("reports")
 }
 

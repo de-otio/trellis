@@ -1731,8 +1731,9 @@ export const adminRoutes: Route[] = [
         const sortBy = queryParams.get("sortBy") || "createdAt";
         const sortOrder = queryParams.get("sortOrder") || "desc";
 
-        // Build query
-        const where: any = {};
+        // Build query (P4: link reports now live in the generalized Report
+        // model — scope to reportType LINK so account reports never leak here).
+        const where: any = { reportType: "LINK" };
         if (cursor) {
           where.id = { gt: cursor };
         }
@@ -1756,12 +1757,12 @@ export const adminRoutes: Route[] = [
         }
 
         // Get reports with pagination
-        const reports = await db.linkReport.findMany({
+        const reports = await db.report.findMany({
           where,
           take: limit + 1,
           orderBy,
           include: {
-            user: {
+            reporter: {
               select: {
                 id: true,
                 email: true,
@@ -1776,11 +1777,12 @@ export const adminRoutes: Route[] = [
 
         const response = securityHeaders.createSecureResponse(
           JSON.stringify({
+            // Response shape preserved (P4): resourceId is the reported url.
             reports: result.map((r) => ({
               id: r.id,
-              userId: r.userId,
-              userEmail: r.user.email,
-              linkUrl: r.linkUrl,
+              userId: r.reporterUserId,
+              userEmail: r.reporter.email,
+              linkUrl: r.resourceId,
               domain: r.domain,
               reason: r.reason,
               status: r.status,
@@ -1878,9 +1880,10 @@ export const adminRoutes: Route[] = [
           return addCorsHeaders(errorResponse, request, env);
         }
 
-        // Get report
-        const report = await db.linkReport.findUnique({
-          where: { id: reportId },
+        // Get report (P4: Report model, scoped to LINK so only link reports
+        // are reviewable via this moderator route).
+        const report = await db.report.findFirst({
+          where: { id: reportId, reportType: "LINK" },
         });
 
         if (!report) {
@@ -1895,21 +1898,24 @@ export const adminRoutes: Route[] = [
         let newStatus: string;
         if (body.action === "approve") {
           newStatus = "approved";
-          // If approved, update domain reputation (negative signal)
-          const reputationService = new DomainReputationService(env);
-          await reputationService.updateReputation(
-            report.domain,
-            "user_report",
-            region,
-            env,
-          );
+          // If approved, update domain reputation (negative signal). domain is
+          // nullable on Report; LINK reports always carry it, but guard anyway.
+          if (report.domain) {
+            const reputationService = new DomainReputationService(env);
+            await reputationService.updateReputation(
+              report.domain,
+              "user_report",
+              region,
+              env,
+            );
+          }
         } else if (body.action === "reject") {
           newStatus = "rejected";
         } else {
           newStatus = "dismissed";
         }
 
-        const updatedReport = await db.linkReport.update({
+        const updatedReport = await db.report.update({
           where: { id: reportId },
           data: {
             status: newStatus,

@@ -250,6 +250,11 @@ describe("Admin Routes", () => {
       interactionEvent: {
         deleteMany: vi.fn(),
       },
+      // Surveillance-hardening Phase 0 (P4): deleteUserData pseudonymizes
+      // ACCOUNT reports about the deleted user.
+      report: {
+        updateMany: vi.fn(),
+      },
     };
 
     mockRequest = new Request("https://example.com/api/admin/test/users", {
@@ -377,6 +382,7 @@ describe("Admin Routes", () => {
       for (const model of [mockDb.commentSentiment, mockDb.postSentiment, mockDb.postComment, mockDb.post, mockDb.entity, mockDb.entityOwnership, mockDb.postSubject, mockDb.directMessage, mockDb.customAudienceMember, mockDb.customAudience, mockDb.securityEvent, mockDb.consent, mockDb.invitation, mockDb.interactionEvent]) {
         model.deleteMany.mockResolvedValue({ count: 0 });
       }
+      mockDb.report.updateMany.mockResolvedValue({ count: 0 });
       mockWithQueryTimeoutAndRetry.mockImplementation(
         async (db, region, env, fn) => {
           return await fn(mockDb);
@@ -1257,12 +1263,14 @@ describe("Admin Routes", () => {
       };
       mockGetSession.mockResolvedValue(mockSession);
 
+      // P4: link reports are now Report rows (reportType LINK); the route
+      // includes `reporter` and maps resourceId -> linkUrl in the response.
       const mockReports = [
         {
           id: "report-1",
-          userId: "user-123",
-          user: { id: "user-123", email: "user@example.com" },
-          linkUrl: "https://malicious.com",
+          reporterUserId: "user-123",
+          reporter: { id: "user-123", email: "user@example.com" },
+          resourceId: "https://malicious.com",
           domain: "malicious.com",
           reason: "phishing",
           status: "pending",
@@ -1274,7 +1282,7 @@ describe("Admin Routes", () => {
         user: {
           findUnique: vi.fn().mockResolvedValue({ role: "SUPER_ADMIN" }),
         },
-        linkReport: {
+        report: {
           findMany: vi.fn().mockResolvedValue(mockReports),
         },
       };
@@ -1312,7 +1320,7 @@ describe("Admin Routes", () => {
         user: {
           findUnique: vi.fn().mockResolvedValue({ role: "SUPER_ADMIN" }),
         },
-        linkReport: {
+        report: {
           findMany: vi.fn().mockRejectedValue(new Error("Database error")),
         },
       };
@@ -1351,8 +1359,8 @@ describe("Admin Routes", () => {
         user: {
           findUnique: vi.fn().mockResolvedValue({ role: "SUPER_ADMIN" }),
         },
-        linkReport: {
-          findUnique: vi.fn().mockResolvedValue({
+        report: {
+          findFirst: vi.fn().mockResolvedValue({
             id: "report-1",
             status: "pending",
             domain: "malicious.com",

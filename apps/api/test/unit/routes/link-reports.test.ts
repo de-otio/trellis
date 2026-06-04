@@ -46,12 +46,13 @@ vi.mock("../../../src/lib/validation", () => ({
 
 // Mock DataRouter
 const mockLinkCheckFindUnique = vi.fn();
+// P4: link reports now write the generalized Report model.
 const mockLinkReportCreate = vi.fn();
 const mockDb = {
   linkCheck: {
     findUnique: mockLinkCheckFindUnique,
   },
-  linkReport: {
+  report: {
     create: mockLinkReportCreate,
   },
 };
@@ -71,10 +72,12 @@ vi.mock("../../../src/lib/domain-reputation-service", () => ({
   },
 }));
 
-// Mock email provider
+// Mock email provider (stable spy so the auto-block notification's HTML can be
+// asserted — P4 escaping exception).
+const mockSendEmail = vi.fn();
 vi.mock("../../../src/lib/email-provider", () => ({
   createEmailProvider: vi.fn(() => ({
-    sendEmail: vi.fn(),
+    sendEmail: mockSendEmail,
   })),
 }));
 
@@ -334,8 +337,10 @@ describe("Link Report Routes", () => {
 
       expect(mockLinkReportCreate).toHaveBeenCalledWith({
         data: {
-          userId: "user-123",
-          linkUrl: "https://malicious.com/phishing",
+          reportType: "LINK",
+          resourceType: "url",
+          resourceId: "https://malicious.com/phishing",
+          reporterUserId: "user-123",
           domain: "malicious.com",
           reason: "Phishing site",
           status: "pending",
@@ -385,6 +390,69 @@ describe("Link Report Routes", () => {
           createdAt: now.toISOString(),
         },
       });
+    });
+
+    // P4 security exception 1: reason length bounded at the Zod boundary.
+    it("should reject a reason over 1000 chars with a 400", async () => {
+      const request = new Request(
+        "https://example.com/api/posts/post-1/links/link-1/report",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reason: "x".repeat(1001) }),
+        },
+      );
+
+      const response = await route!.handler(request, mockEnv, {
+        url: new URL("https://example.com/api/posts/post-1/links/link-1/report"),
+        pathname: "/api/posts/post-1/links/link-1/report",
+        params: {},
+        requestContext: mockRequestContext,
+      });
+
+      expect(response.status).toBe(400);
+      // No report is written when validation fails.
+      expect(mockLinkReportCreate).not.toHaveBeenCalled();
+    });
+
+    // P4 security exception 2: moderator email HTML-escapes interpolated values
+    // (here the reportId; domain too — defense-in-depth for Phase 1 report text).
+    it("HTML-escapes interpolated values in the auto-block notification email", async () => {
+      mockLinkCheckFindUnique.mockResolvedValue({
+        id: "link-1",
+        postId: "post-1",
+        normalizedUrl: "https://xss.example/<script>",
+        originalUrl: "https://xss.example/<script>",
+      });
+      mockLinkReportCreate.mockResolvedValue({
+        id: "report-<script>",
+        status: "pending",
+        createdAt: new Date(),
+      });
+      mockShouldAutoBlock.mockResolvedValue(true);
+      const emailEnv = { ...mockEnv, MODERATOR_EMAILS: "mod@example.com" };
+
+      const request = new Request(
+        "https://example.com/api/posts/post-1/links/link-1/report",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        },
+      );
+
+      await route!.handler(request, emailEnv, {
+        url: new URL("https://example.com/api/posts/post-1/links/link-1/report"),
+        pathname: "/api/posts/post-1/links/link-1/report",
+        params: {},
+        requestContext: mockRequestContext,
+      });
+
+      expect(mockSendEmail).toHaveBeenCalledTimes(1);
+      const html = mockSendEmail.mock.calls[0]![0].html as string;
+      // The raw <script> from domain + reportId must be neutralized in the HTML.
+      expect(html).not.toContain("<script>");
+      expect(html).toContain("&lt;script&gt;");
     });
 
     it("should update domain reputation after report", async () => {

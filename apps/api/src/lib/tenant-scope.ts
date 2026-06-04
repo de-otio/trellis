@@ -110,10 +110,9 @@ export const UNSCOPED_MODELS: ReadonlyMap<string, string> = new Map([
   ["UserEncryptionKey", "user"],
   ["Consent", "user"],
   ["NotificationPreference", "user"],
-  ["LinkReport", "user"],
-  // Generalized report model (Surveillance-hardening Phase 0, E3). No own
-  // tenantId column; boundary is reporterUserId (like LinkReport). ACCOUNT
-  // reports key on an opaque resourceId, not a tenant.
+  // Generalized report model (Surveillance-hardening Phase 0, E3; folds in the
+  // former LinkReport in P4). No own tenantId column; boundary is
+  // reporterUserId. ACCOUNT reports key on an opaque resourceId, not a tenant.
   ["Report", "user"],
   ["ParentalLink", "user"],
   ["DeletionAuditLog", "user"],

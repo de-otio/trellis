@@ -14,9 +14,29 @@ import { SecurityHeaders } from "../security-headers.js";
 import { SessionManager } from "../session-cookie.js";
 import { Validator } from "../validation.js";
 import type { Route } from "./types.js";
+import { z } from "zod";
 
 export interface Env extends DataRouterEnv {
   // No additional env vars needed
+}
+
+// P4 security fix: bound the free-text reason at the Zod boundary (it was
+// previously stored unvalidated from request.json()). Phase 1's ACCOUNT-report
+// reason widens this into the primary report-content path, so cap it now.
+const linkReportBodySchema = z.object({
+  reason: z.string().max(1000).optional(),
+});
+
+// P4 security fix: HTML-escape every value interpolated into the moderator
+// email template (notifyModeratorsOfAutoBlock) — a stored-XSS vector now,
+// widened by attacker-authored ACCOUNT-report text in Phase 1.
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 export const linkReportRoutes: Route[] = [
@@ -79,10 +99,20 @@ export const linkReportRoutes: Route[] = [
         const postId = match[1];
         const linkId = match[2];
 
-        // Parse request body
-        const body = (await request.json().catch(() => ({}))) as {
-          reason?: string;
-        };
+        // Parse + validate request body (P4: bound reason length at the boundary)
+        const parsedBody = linkReportBodySchema.safeParse(
+          await request.json().catch(() => ({})),
+        );
+        if (!parsedBody.success) {
+          return securityHeaders.createSecureResponse(
+            JSON.stringify({
+              error: "Invalid request",
+              message: "reason must be at most 1000 characters",
+            }),
+            { status: 400, headers: { "content-type": "application/json" } },
+          );
+        }
+        const body = parsedBody.data;
 
         // Get region from request context
         const region = requestContext.region || env.DEFAULT_REGION || "EU";
@@ -124,11 +154,13 @@ export const linkReportRoutes: Route[] = [
           );
         }
 
-        // Create link report
-        const report = await db.linkReport.create({
+        // Create the report (P4: generalized Report model, reportType=LINK).
+        const report = await db.report.create({
           data: {
-            userId: session.userId,
-            linkUrl: linkCheck.normalizedUrl || linkCheck.originalUrl,
+            reportType: "LINK",
+            resourceType: "url",
+            resourceId: linkCheck.normalizedUrl || linkCheck.originalUrl,
+            reporterUserId: session.userId,
             domain,
             reason: body.reason || null,
             status: "pending",
@@ -252,10 +284,20 @@ export const linkReportRoutes: Route[] = [
         const commentId = match[1];
         const linkId = match[2];
 
-        // Parse request body
-        const body = (await request.json().catch(() => ({}))) as {
-          reason?: string;
-        };
+        // Parse + validate request body (P4: bound reason length at the boundary)
+        const parsedBody = linkReportBodySchema.safeParse(
+          await request.json().catch(() => ({})),
+        );
+        if (!parsedBody.success) {
+          return securityHeaders.createSecureResponse(
+            JSON.stringify({
+              error: "Invalid request",
+              message: "reason must be at most 1000 characters",
+            }),
+            { status: 400, headers: { "content-type": "application/json" } },
+          );
+        }
+        const body = parsedBody.data;
 
         // Get region from request context
         const region = requestContext.region || env.DEFAULT_REGION || "EU";
@@ -297,11 +339,13 @@ export const linkReportRoutes: Route[] = [
           );
         }
 
-        // Create link report
-        const report = await db.linkReport.create({
+        // Create the report (P4: generalized Report model, reportType=LINK).
+        const report = await db.report.create({
           data: {
-            userId: session.userId,
-            linkUrl: linkCheck.normalizedUrl || linkCheck.originalUrl,
+            reportType: "LINK",
+            resourceType: "url",
+            resourceId: linkCheck.normalizedUrl || linkCheck.originalUrl,
+            reporterUserId: session.userId,
             domain,
             reason: body.reason || null,
             status: "pending",
@@ -415,14 +459,18 @@ async function notifyModeratorsOfAutoBlock(
         ? env.MODERATOR_EMAILS
         : env.MODERATOR_EMAILS.split(",").map((e: string) => e.trim());
 
+      // P4 security fix: HTML-escape every interpolated value (domain, reportId)
+      // — these flow into an HTML email; an unescaped value is stored XSS.
+      const safeDomain = escapeHtml(domain);
+      const safeReportId = escapeHtml(reportId);
       await emailProvider.sendEmail({
         from: env.FROM_EMAIL || "noreply@example.com",
         to: moderatorEmails,
         subject: `Domain Auto-Blocked: ${domain}`,
         html: `
           <h2>Domain Auto-Blocked</h2>
-          <p>The domain <strong>${domain}</strong> has been automatically blocked due to reaching the report threshold.</p>
-          <p><strong>Report ID:</strong> ${reportId}</p>
+          <p>The domain <strong>${safeDomain}</strong> has been automatically blocked due to reaching the report threshold.</p>
+          <p><strong>Report ID:</strong> ${safeReportId}</p>
           <p><strong>Timestamp:</strong> ${new Date().toISOString()}</p>
           <p>Please review the report and take appropriate action.</p>
         `,
