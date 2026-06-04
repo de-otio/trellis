@@ -38,6 +38,9 @@ describe("createGraphServiceFromEnv memoization", () => {
     instances.length = 0;
     connectMock.mockClear();
     closeMock.mockClear();
+    // Postgres is the default backend (graph-db revisit 2026-06); this suite
+    // exercises the legacy Neo4j memoization path, so pin GRAPH_BACKEND=neo4j.
+    process.env.GRAPH_BACKEND = "neo4j";
     process.env.GRAPH_DB_URI = "bolt://localhost:7687";
     process.env.GRAPH_DB_USER = "neo4j";
     process.env.GRAPH_DB_PASSWORD = "pw";
@@ -46,6 +49,7 @@ describe("createGraphServiceFromEnv memoization", () => {
   afterEach(async () => {
     await closeSharedGraphService();
     delete process.env.GRAPH_DB_URI;
+    delete process.env.GRAPH_BACKEND;
   });
 
   it("returns the same instance across calls (one driver per process)", async () => {

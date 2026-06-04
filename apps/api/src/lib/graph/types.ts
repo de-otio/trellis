@@ -480,6 +480,12 @@ export interface SyncOwnershipInput {
   entityId: string;
   userId: string;
   role: OwnershipRole;
+  /**
+   * Who granted this ownership. Defaults to `userId` (self-added) when omitted.
+   * Set it when an owner is added by someone else (e.g. a CO_OWNER/CARETAKER
+   * invited by a PRIMARY_OWNER) so the audit actor is recorded correctly.
+   */
+  addedByUserId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -552,7 +558,7 @@ export interface GraphHealthStatus {
   /** Error message if unhealthy */
   error?: string;
   /** Backend type detected */
-  backend: "neo4j" | "unknown";
+  backend: "neo4j" | "postgres" | "unknown";
 }
 
 // ---------------------------------------------------------------------------

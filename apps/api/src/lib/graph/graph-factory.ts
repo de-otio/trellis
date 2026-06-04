@@ -247,6 +247,28 @@ async function buildGraphServiceFromEnv(_env?: unknown): Promise<
   const poolMax = isLambda ? 1 : intEnv("GRAPH_DB_POOL_MAX_SIZE");
   const geoLookup = await buildGeoLookup(_env);
 
+  // Postgres serving path (graph-DB revisit 2026-06) — now the DEFAULT. The
+  // graph runs in the existing Postgres (joins + recursive CTEs); no separate
+  // graph DB, no dual-write. The legacy Neo4j/Neptune backend below is retained
+  // as an instant rollback via GRAPH_BACKEND=neo4j (reversibility discipline #3).
+  // See skybber/plans/redesign/graph-db/graph-db-postgres-migration-plan.md.
+  if (process.env.GRAPH_BACKEND !== "neo4j") {
+    const e = _env as EnvWithDb | undefined;
+    if (!e?.DATABASE_URL) {
+      throw new Error(
+        "Postgres graph backend requires a DATABASE_URL. " +
+          "(Set GRAPH_BACKEND=neo4j to use the legacy Neo4j/Neptune backend.)",
+      );
+    }
+    const { createPrisma } = await import("../../db.js");
+    const { PostgresGraphService } = await import(
+      "./postgres/postgres-graph-service.js"
+    );
+    const service = new PostgresGraphService(createPrisma(e), geoLookup);
+    await service.connect({ endpoint: "postgres", auth: { type: "none" } });
+    return service;
+  }
+
   // IAM path — Amazon Neptune. The Bolt endpoint comes from GRAPH_DB_URI (the
   // construct-published SSM value, injected by the deploy) and auth is SigV4
   // via the task role — no stored credential, no SSM credential fetch.

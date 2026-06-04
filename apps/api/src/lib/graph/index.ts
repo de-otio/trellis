@@ -32,6 +32,7 @@ export type { GraphService, GraphConnection } from "./graph-service.js";
 
 // Implementations
 export { Neo4jGraphService } from "./neo4j-graph-service.js";
+export { PostgresGraphService } from "./postgres/postgres-graph-service.js";
 export {
   createGraphService,
   createGraphServiceFromEnv,

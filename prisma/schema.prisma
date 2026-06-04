@@ -1801,3 +1801,88 @@ model TenantInvitation {
   @@index([expiresAt])
   @@map("tenant_invitations")
 }
+
+// ============================================================================
+// Graph edges in Postgres (graph-db revisit 2026-06: see
+// skybber plans/redesign/graph-db/graph-db-revisit-2026-06.md)
+//
+// These two tables hold the edges that previously lived only in the graph DB
+// (RELATES_TO and typed entity-to-entity edges). OWNS (entity_ownerships) and
+// ABOUT (post_subjects) already existed in Postgres. Modeled as standalone
+// tables (no Prisma @relation) so the migration is self-contained and
+// non-breaking; targetId is polymorphic (user|entity) so it cannot carry a
+// single FK. Cascade-on-delete is enforced in app code by the GraphService
+// remove* methods, exactly as the graph layer did. Read by the Postgres
+// GraphService adapter (apps/api/src/lib/graph/postgres/).
+// ============================================================================
+
+// RELATES_TO — a scored relationship from a user to a target (user or entity).
+model Relationship {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id") // denormalized scope, like entity_ownerships
+  userId   String @map("user_id")
+
+  // Polymorphic target: "user" | "entity" (matches GraphNodeType). No FK.
+  targetType String @map("target_type")
+  targetId   String @map("target_id")
+
+  computedScore     Float          @default(0) @map("computed_score")
+  manualScore       Float?         @map("manual_score") // null = no override
+  tier              Int            @default(3) // CircleTier 0..3
+  interactionCount  Int            @default(0) @map("interaction_count")
+  lastInteractionAt DateTime?      @map("last_interaction_at")
+  connectionMethod  String         @map("connection_method") // code|import|suggestion|discovery
+  reciprocated      Boolean        @default(false)
+  // Per-interaction-type signal breakdown used by scoring-engine.ts.
+  // Shape finalized in Phase 1 (B5) against the scoring engine; JSON keeps the
+  // migration stable while that lands.
+  signals           Json?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([userId, targetType, targetId])
+  @@index([userId]) // forward: a user's relationships
+  @@index([targetType, targetId]) // reverse: who relates to X (FoF, recompute)
+  @@index([targetId])
+  @@index([userId, tier]) // circle-tier membership
+  @@index([tenantId])
+  @@map("relationships")
+}
+
+// Typed, unscored entity-to-entity edge (PACK_MATE, SIBLING, …), confirmable.
+model EntityRelationship {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
+
+  entityId        String                   @map("entity_id")
+  relatedEntityId String                   @map("related_entity_id")
+  type            EntityRelationshipType
+  status          EntityRelationshipStatus @default(PENDING)
+  proposedByUserId String                  @map("proposed_by_user_id")
+
+  since     DateTime @default(now())
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([entityId, relatedEntityId, type])
+  @@index([entityId, type, status]) // discovery / list-by-entity
+  @@index([relatedEntityId, type, status]) // reverse / pending-by-owner
+  @@index([tenantId])
+  @@map("entity_relationships")
+}
+
+enum EntityRelationshipType {
+  PACK_MATE
+  SIBLING
+  PLAYMATE
+  PARENT
+  OFFSPRING
+  WALK_BUDDY
+}
+
+enum EntityRelationshipStatus {
+  PENDING
+  CONFIRMED
+  REJECTED
+}
