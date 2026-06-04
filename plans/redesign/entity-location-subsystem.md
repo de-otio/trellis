@@ -9,8 +9,10 @@
   and the recommendations `nearby` signal now use the PostGIS repo
   (`findNearby` / `findNearAnchors`, the `MIN`-over-anchors query replacing the
   `reduce()`/`point.distance()` Cypher) merged with graph facts (discoverable,
-  exclude-already-related). Geo is injected into `Neo4jGraphService` via an
+  exclude-already-related). Geo is injected into the graph service via an
   `EntityGeoLookup` (graph tests use a fake; prod wires `EntityGeoRepository`).
+  Since the 2026-06 Postgres cutover the consumer is `PostgresGraphService`
+  (Discovery + Sync ops); originally `Neo4jGraphService`.
 - **Verification:** opencypher linter `no-spatial` + `no-reduce` → 0;
   discovery unit (42) + sync-methods unit + discovery-scoring integration (27)
   + a new `entity-geo-repository.integration` (8, real PostGIS) all green; tsc
@@ -184,6 +186,12 @@ loop) from the graph entirely.
   wiping without schema churn.
 
 ## Relationship to the Neptune decision
+
+> **Update (2026-06):** Neptune was subsequently abandoned — the whole graph
+> now runs in Postgres (graph-db revisit 2026-06). This subsystem is
+> unaffected: geo stays a first-class Postgres/PostGIS concern, consumed by
+> `PostgresGraphService` through the same `EntityGeoLookup` seam. The
+> paragraph below is the historical rationale from the Neptune era.
 
 This *resolves* audit F1 and **preserves the Neptune choice intact** — geo was
 never the graph's job (`Entity` model comment, `schema.prisma:47`:

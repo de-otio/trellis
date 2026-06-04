@@ -116,11 +116,17 @@ in that deployment's own repo.
 
 ## What changes this contract
 
-A deployment that runs the graph in its primary relational store (Postgres
-joins + recursive CTEs) drops the **Sync group** from the serving path (no
-second store to mirror) and has `GraphConnection` wrap the existing Postgres
-pool rather than a separate driver. Whole-graph **analytics** (centrality,
-community detection, network analysis) are out of scope for this OLTP
-contract — they belong to a separate, offline analytics capability fed from
-the edge tables, not to the request-path `GraphService`. Update the surface
-table above if/when a deployment lands the Postgres serving path.
+**Landed (2026-06):** the core now ships `PostgresGraphService`
+(`apps/api/src/lib/graph/postgres/`) as the only implementation — the graph
+runs in the primary relational store (joins + recursive CTEs), and
+`GraphConnection` wraps the existing Postgres client rather than a separate
+driver. The dual-write/reconciliation machinery was removed (no second store
+to mirror). The **Sync group remains on the interface** with reduced duties:
+node syncs are no-ops (the rows already live in their own tables) except
+`syncEntity`'s geo side-effect; the removes implement the explicit edge
+cascades; `syncPostSubjects`/`syncOwnership` are the edge writers.
+
+Whole-graph **analytics** (centrality, community detection, network
+analysis) remain out of scope for this OLTP contract — they belong to a
+separate, offline analytics capability fed from the edge tables, not to the
+request-path `GraphService`.
