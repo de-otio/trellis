@@ -38,7 +38,7 @@ enforce.
 Recap of the machine-checked guarantees proposed across this folder, so they
 land as one CI surface rather than scattered intentions:
 
-- Ranking guard test — fails the build on any engagement signal (doc 03).
+- Ranking guard test — fails the build on any engagement signal (doc 03); also covers the discovery surface: `DISCOVERY_RANKING_VERSION` is pinned by a dedicated invariant test (ensuring accidental version drift surfaces as a CI failure), and the diversity cap (`MAX_RECOMMENDATIONS_PER_OWNER`) is pinned by Agent A's boundary and degenerate-case invariant tests (one-owner-all-candidates, multi-owner entity, cross-signal cap).
 - Export round-trip test — fails the build if the graph stops being
   re-importable (doc 02).
 - Tenant-floor property test — fails the build if a tenant policy can loosen a
