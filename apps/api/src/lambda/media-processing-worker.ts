@@ -1,5 +1,8 @@
 import type { SQSHandler } from "aws-lambda";
 import { S3Client, GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
+import { Logger } from "@aws-lambda-powertools/logger";
+
+const logger = new Logger({ serviceName: "media-processing-worker" });
 
 const s3 = new S3Client({ region: process.env.AWS_REGION });
 
@@ -54,10 +57,10 @@ export const handler: SQSHandler = async (event) => {
           })),
         ]);
 
-        console.log(JSON.stringify({ level: "info", msg: "Media processed", key, hash }));
+        logger.info("Media processed", { key, hash });
       }
     } catch (err) {
-      console.error(JSON.stringify({ level: "error", msg: "Media processing failed", err, messageId: record.messageId }));
+      logger.error("Media processing failed", { error: err, messageId: record.messageId });
       failedIds.push(record.messageId);
     }
   }

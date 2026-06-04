@@ -1,8 +1,11 @@
 import type { SQSHandler } from "aws-lambda";
+import { Logger } from "@aws-lambda-powertools/logger";
+
+const logger = new Logger({ serviceName: "link-check-worker" });
 
 export const handler: SQSHandler = async (event) => {
   for (const record of event.Records) {
-    console.log(JSON.stringify({ level: "info", msg: "Processing record", messageId: record.messageId }));
+    logger.info("Processing record", { messageId: record.messageId });
     // TODO: implement
   }
 };
