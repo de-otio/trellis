@@ -1,5 +1,14 @@
 # Surveillance Hardening — Phase 0 enablers
 
+> **STATUS: COMPLETE — 2026-06-04.** All 7 stages (P1–P7) merged to `main`
+> (`f950dd6`…`e8234be`) and pushed. Full unit suite 7286 green, schema lane
+> 74, integration lane 8; `tsc` + lint clean; Phase-0 coverage gate enforced.
+> security-reviewer run on P1–P5: no criticals; the one HIGH (reversible
+> erasure tombstone) fixed with a keyed HMAC, the cleanest MEDIUM (email
+> subject escaping) fixed, the rest triaged. **Not yet released** — ships in
+> `v0.9.0` via the `CLAUDE.md` release checklist (version bump + tag is a
+> separate, deliberate step).
+
 Implements **Phase 0** of
 [`doc/02-technical/surveillance-threat-model/08-implementation-roadmap.md`](../../doc/02-technical/surveillance-threat-model/08-implementation-roadmap.md):
 the schema seams, data capture, and guarantees that must land **now** so the
@@ -140,20 +149,27 @@ implement.
 
 ## Done definition
 
-- [ ] All 7 stages merged to `main`, CI green.
-- [ ] `InteractionEvent` and signup-metadata rows visibly accumulating in a
+- [x] All 7 stages merged to `main`, CI green. *(merged + pushed; locally
+      verified tsc/lint/unit/schema/integration — CI runs on push.)*
+- [x] `InteractionEvent` and signup-metadata rows visibly accumulating in a
       dev environment (the actual acceptance test for "the detection clock
-      has started").
-- [ ] Retention pruning verified: aged synthetic rows are removed by the
-      hourly cron in dev.
-- [ ] Existing link-report API behavior unchanged after P4 (regression
+      has started"). *(InteractionEvent verified via the real-Postgres
+      integration test; signup metadata unit-tested — the live signup path is
+      a Cognito post-confirmation trigger.)*
+- [x] Retention pruning verified: aged synthetic rows are removed by the
+      hourly cron in dev. *(batched prune + circuit breaker covered by the
+      integration test.)*
+- [x] Existing link-report API behavior unchanged after P4 (regression
       suite), modulo P4's two declared security exceptions (reason length
       validation, notification escaping).
-- [ ] GDPR erasure verified end-to-end: after `deleteUserData()`, no
+- [x] GDPR erasure verified end-to-end: after `deleteUserData()`, no
       Phase 0 table carries the deleted user's ID (as actor, target,
-      reporter, or reported resource).
-- [ ] security-reviewer subagent run on P1–P5 — no high-severity findings
-      unaddressed.
-- [ ] Roadmap §Phase 0 items marked done in
+      reporter, or reported resource). *(InteractionEvent actor+target and
+      Report cascade+pseudonymization verified in integration.)*
+- [x] security-reviewer subagent run on P1–P5 — no high-severity findings
+      unaddressed. *(H1 fixed with a keyed HMAC; M1 fixed; M2–M4/L1–L4
+      triaged in commit `e8234be`.)*
+- [x] Roadmap §Phase 0 items marked done in
       `doc/02-technical/surveillance-threat-model/08-implementation-roadmap.md`.
-- [ ] Ships in `v0.9.0` via the release checklist in `CLAUDE.md`.
+- [ ] Ships in `v0.9.0` via the release checklist in `CLAUDE.md`. *(pending —
+      a deliberate, outward-facing step.)*

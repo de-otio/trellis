@@ -121,9 +121,27 @@ All transactional models carry over unchanged:
 - DirectMessage, CustomAudience, CustomAudienceMember
 - TaxonomyDimension, TaxonomyCategory, TaxonomyTaxon
 - FeatureToggle, SecurityEvent, Activity
-- PostGeoIndex, DomainReputation, LinkCheck, LinkReport
+- PostGeoIndex, DomainReputation, LinkCheck
 - Invitation, CrossRegionConsent, IngestState
 - MfaEnrollment, UserEncryptionKey, Partner, RoleMetadata
+
+### Surveillance-hardening Phase 0 (2026-06, → v0.9.0)
+
+See [`../surveillance-threat-model/08-implementation-roadmap.md`](../surveillance-threat-model/08-implementation-roadmap.md).
+
+- **`InteractionEvent`** (new) — append-only behavioral event log (actor,
+  target, type, `expiresAt`), retention-bounded; no content column, no read
+  paths. Written alongside graph aggregation.
+- **`Report`** (new, generalized) — **replaces `LinkReport`**, which was folded
+  in and **dropped**. `reportType` (LINK | ACCOUNT) discriminator; LINK reports
+  carry the indexed `domain`.
+- **`FeatureToggle`** — gains a nullable `tenantId`; uniqueness is now
+  `[key, tenantId]` plus a partial global-unique index. Resolution is
+  tenant → global → default.
+- **`SecurityEvent.retentionUntil`** tightened to **NOT NULL** (no row escapes
+  the hourly-cron pruning).
+- **`User`** — gains `signupMethod` + `invitationId`; **`UserRole`** gains
+  `MODERATOR`.
 
 ## Migrations
 
