@@ -67,7 +67,7 @@
     "@de-otio/vestibulum": "^0.2.0",
     "@fedify/fedify": "^1.0.0",
     "@prisma/adapter-pg": "^6.0.0",
-    "@prisma/client": "^6.0.0",
+    "@prisma/client": "^7.8.0",
     "@prisma/extension-accelerate": "^1.0.0",
     "cockatiel": "^3.2.1",
     "exifr": "^7.1.3",
