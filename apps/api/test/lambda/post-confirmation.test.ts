@@ -10,6 +10,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   mockSecretsSend,
+  mockGetSecret,
   mockTransaction,
   mockUserFindFirst,
   mockUserFindUnique,
@@ -23,6 +24,7 @@ const {
   mockDdbSend,
 } = vi.hoisted(() => ({
   mockSecretsSend: vi.fn(),
+  mockGetSecret: vi.fn(),
   mockTransaction: vi.fn(),
   mockUserFindFirst: vi.fn(),
   mockUserFindUnique: vi.fn(),
@@ -46,6 +48,12 @@ vi.mock("@aws-sdk/client-secrets-manager", () => {
     }),
   };
 });
+
+// The DB secret is now fetched via AWS Lambda Powertools getSecret (with
+// transform:"json"), which returns the PARSED secret object directly.
+vi.mock("@aws-lambda-powertools/parameters/secrets", () => ({
+  getSecret: mockGetSecret,
+}));
 
 vi.mock("@aws-sdk/client-dynamodb", () => {
   const DynamoDBClient = vi.fn();
@@ -157,6 +165,14 @@ beforeEach(() => {
       port: 5432,
       dbname: "d",
     }),
+  });
+  // getSecret(arn, { transform: "json" }) returns the parsed credentials.
+  mockGetSecret.mockResolvedValue({
+    username: "u",
+    password: "p",
+    host: "h",
+    port: 5432,
+    dbname: "d",
   });
   mockTransaction.mockImplementation(async (cb: any) => cb(makeTx()));
   mockUserFindFirst.mockResolvedValue(null);
