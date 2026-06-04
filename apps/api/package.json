@@ -46,6 +46,9 @@
     "seed:feature-toggles": "tsx scripts/seed-feature-toggles.ts"
   },
   "dependencies": {
+    "@aws-lambda-powertools/logger": "^2.32.0",
+    "@aws-lambda-powertools/metrics": "^2.32.0",
+    "@aws-lambda-powertools/parameters": "^2.32.0",
     "@aws-sdk/client-cloudwatch": "^3.1014.0",
     "@aws-sdk/client-cloudwatch-logs": "^3.0.0",
     "@aws-sdk/client-cognito-identity-provider": "^3.1009.0",
@@ -79,7 +82,6 @@
     "schema": "../../prisma/schema.prisma"
   },
   "devDependencies": {
-    "@aws-lambda-powertools/parameters": "^2.32.0",
     "@aws-sdk/client-bedrock-agent-runtime": "^3.0.0",
     "@aws-sdk/client-cost-explorer": "^3.0.0",
     "@aws-sdk/client-ecs": "^3.0.0",

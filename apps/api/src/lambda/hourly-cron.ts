@@ -1,6 +1,7 @@
-import { CloudWatchClient, PutMetricDataCommand } from "@aws-sdk/client-cloudwatch";
+import { Logger } from "@aws-lambda-powertools/logger";
+import { Metrics, MetricUnit } from "@aws-lambda-powertools/metrics";
+import { getSecret } from "@aws-lambda-powertools/parameters/secrets";
 import { DynamoDBClient, PutItemCommand } from "@aws-sdk/client-dynamodb";
-import { SecretsManagerClient, GetSecretValueCommand } from "@aws-sdk/client-secrets-manager";
 import { marshall } from "@aws-sdk/util-dynamodb";
 import { PrismaClient } from "@prisma/client";
 import {
@@ -8,17 +9,36 @@ import {
   resolveInteractionEventConfig,
 } from "../lib/graph/postgres/interaction-events.js";
 
+// AWS Lambda Powertools: structured logging (auto request-id/cold-start
+// context), EMF metrics (no PutMetricData API call), and cached + KMS-decrypted
+// Secrets Manager access. ECS uses the parallel toolchain (pino getLogger +
+// foundation secret resolver); Powertools is Lambda-only.
+const logger = new Logger({ serviceName: "hourly-cron" });
+const metrics = new Metrics({
+  namespace: "Trellis/Retention",
+  serviceName: "hourly-cron",
+});
+
 const dynamo = new DynamoDBClient({ region: process.env.AWS_REGION });
-const secretsClient = new SecretsManagerClient({ region: process.env.AWS_REGION });
-const cloudwatch = new CloudWatchClient({ region: process.env.AWS_REGION });
 const TABLE = process.env.DYNAMODB_TABLE!;
 
 let prisma: PrismaClient | null = null;
 
+interface DbSecret {
+  username: string;
+  password: string;
+  host: string;
+  port: string | number;
+  dbname: string;
+}
+
 async function getPrisma(): Promise<PrismaClient> {
   if (prisma) return prisma;
-  const secret = await secretsClient.send(new GetSecretValueCommand({ SecretId: process.env.DB_SECRET_ARN! }));
-  const { username, password, host, port, dbname } = JSON.parse(secret.SecretString!);
+  // getSecret caches + KMS-decrypts; transform:"json" parses the secret value.
+  const { username, password, host, port, dbname } = (await getSecret(
+    process.env.DB_SECRET_ARN!,
+    { transform: "json" },
+  )) as unknown as DbSecret;
   prisma = new PrismaClient({
     datasources: { db: { url: `postgresql://${username}:${encodeURIComponent(password)}@${host}:${port}/${dbname}?connection_limit=1` } },
   });
@@ -43,11 +63,11 @@ export const handler = async (): Promise<void> => {
       ExpressionAttributeValues: marshall({ ":now": now }),
     }));
   } catch {
-    console.log(JSON.stringify({ level: "info", msg: "Hourly cron already running, skipping" }));
+    logger.info("Hourly cron already running, skipping");
     return;
   }
 
-  console.log(JSON.stringify({ level: "info", msg: "Hourly cron started" }));
+  logger.info("Hourly cron started");
 
   const db = await getPrisma();
 
@@ -67,10 +87,10 @@ export const handler = async (): Promise<void> => {
       const result = await db.mediaFile.deleteMany({
         where: { id: { in: staleMedia.map((m) => m.id) } },
       });
-      console.log(JSON.stringify({ level: "info", msg: "Stale media cleaned", deleted: result.count }));
+      logger.info("Stale media cleaned", { deleted: result.count });
     }
   } catch (err) {
-    console.error(JSON.stringify({ level: "error", msg: "Stale media cleanup failed", error: String(err) }));
+    logger.error("Stale media cleanup failed", { error: err });
   }
 
   // 2. Soft-delete orphaned media past 24h grace period
@@ -85,10 +105,10 @@ export const handler = async (): Promise<void> => {
       data: { deletedAt: new Date() },
     });
     if (result.count > 0) {
-      console.log(JSON.stringify({ level: "info", msg: "Orphaned media soft-deleted", count: result.count }));
+      logger.info("Orphaned media soft-deleted", { count: result.count });
     }
   } catch (err) {
-    console.error(JSON.stringify({ level: "error", msg: "Orphaned media cleanup failed", error: String(err) }));
+    logger.error("Orphaned media cleanup failed", { error: err });
   }
 
   const eventConfig = resolveInteractionEventConfig();
@@ -98,11 +118,11 @@ export const handler = async (): Promise<void> => {
   //    deleteMany to the SAME batched helper as InteractionEvent — a mass-expiry
   //    backlog on one deleteMany would lock the table.
   try {
-    const now = new Date();
+    const cutoff = new Date();
     const result = await batchedPruneExpired({
       findExpiredIds: async (take) => {
         const rows = await db.securityEvent.findMany({
-          where: { retentionUntil: { lt: now } },
+          where: { retentionUntil: { lt: cutoff } },
           select: { id: true },
           take,
         });
@@ -116,12 +136,12 @@ export const handler = async (): Promise<void> => {
       maxIterations: eventConfig.pruneMaxIterations,
     });
     if (result.deleted > 0 || result.circuitBreakerTripped) {
-      console.log(JSON.stringify({ level: "info", msg: "Expired security events cleaned", deleted: result.deleted, circuitBreakerTripped: result.circuitBreakerTripped }));
+      logger.info("Expired security events cleaned", { deleted: result.deleted, circuitBreakerTripped: result.circuitBreakerTripped });
     }
-    await emitPruneMetrics("SecurityEvent", result, false);
+    emitPruneMetrics("SecurityEvent", result, false);
   } catch (err) {
-    console.error(JSON.stringify({ level: "error", msg: "Security event cleanup failed", error: String(err) }));
-    await emitPruneMetrics("SecurityEvent", { deleted: 0, circuitBreakerTripped: false }, true);
+    logger.error("Security event cleanup failed", { error: err });
+    emitPruneMetrics("SecurityEvent", { deleted: 0, circuitBreakerTripped: false }, true);
   }
 
   // 4. Prune expired InteractionEvent rows (expiresAt < now), batched with a
@@ -134,41 +154,38 @@ export const handler = async (): Promise<void> => {
     const ops = new InteractionEventOps(db, eventConfig);
     const result = await ops.prune(new Date());
     if (result.deleted > 0 || result.circuitBreakerTripped) {
-      console.log(JSON.stringify({ level: "info", msg: "Expired interaction events pruned", deleted: result.deleted, circuitBreakerTripped: result.circuitBreakerTripped }));
+      logger.info("Expired interaction events pruned", { deleted: result.deleted, circuitBreakerTripped: result.circuitBreakerTripped });
     }
-    await emitPruneMetrics("InteractionEvent", result, false);
+    emitPruneMetrics("InteractionEvent", result, false);
   } catch (err) {
-    console.error(JSON.stringify({ level: "error", msg: "Interaction event pruning failed", error: String(err) }));
-    await emitPruneMetrics("InteractionEvent", { deleted: 0, circuitBreakerTripped: false }, true);
+    logger.error("Interaction event pruning failed", { error: err });
+    emitPruneMetrics("InteractionEvent", { deleted: 0, circuitBreakerTripped: false }, true);
   }
 
-  console.log(JSON.stringify({ level: "info", msg: "Hourly cron complete" }));
+  // All retention metrics are emitted per-table via singleMetric() (immediate
+  // EMF), so there's nothing buffered on `metrics` to publish here.
+  logger.info("Hourly cron complete");
 };
 
 /**
- * Emit retention-pruning metrics to CloudWatch (Trellis/Retention namespace),
- * fail-open. `Pruned` counts deleted rows; `PruneFailed` flags an exception;
+ * Emit retention-pruning metrics as EMF (Trellis/Retention namespace), fail-
+ * open. `Pruned` counts deleted rows; `PruneFailed` flags an exception;
  * `PruneCircuitBreakerTripped` flags a drained-iteration-cap backlog — alarm on
- * the latter two so retention never silently stops.
+ * the latter two so retention never silently stops. A per-table `singleMetric`
+ * isolates the `Table` dimension so the two tables don't cross-contaminate.
  */
-async function emitPruneMetrics(
+function emitPruneMetrics(
   table: "SecurityEvent" | "InteractionEvent",
   result: { deleted: number; circuitBreakerTripped: boolean },
   failed: boolean,
-): Promise<void> {
+): void {
   try {
-    const timestamp = new Date();
-    await cloudwatch.send(
-      new PutMetricDataCommand({
-        Namespace: "Trellis/Retention",
-        MetricData: [
-          { MetricName: "Pruned", Value: result.deleted, Unit: "Count", Timestamp: timestamp, Dimensions: [{ Name: "Table", Value: table }] },
-          { MetricName: "PruneFailed", Value: failed ? 1 : 0, Unit: "Count", Timestamp: timestamp, Dimensions: [{ Name: "Table", Value: table }] },
-          { MetricName: "PruneCircuitBreakerTripped", Value: result.circuitBreakerTripped ? 1 : 0, Unit: "Count", Timestamp: timestamp, Dimensions: [{ Name: "Table", Value: table }] },
-        ],
-      }),
-    );
-  } catch (cwErr) {
-    console.error(JSON.stringify({ level: "error", msg: "Retention metrics emit failed", table, error: String(cwErr) }));
+    const m = metrics.singleMetric();
+    m.addDimension("Table", table);
+    m.addMetric("Pruned", MetricUnit.Count, result.deleted);
+    m.addMetric("PruneFailed", MetricUnit.Count, failed ? 1 : 0);
+    m.addMetric("PruneCircuitBreakerTripped", MetricUnit.Count, result.circuitBreakerTripped ? 1 : 0);
+  } catch (err) {
+    logger.error("Retention metrics emit failed", { table, error: err });
   }
 }
