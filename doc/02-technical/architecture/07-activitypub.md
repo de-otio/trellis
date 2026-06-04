@@ -4,6 +4,57 @@
 
 ActivityPub federation (via Fedify) is **disabled by default** and enabled per environment via `config.features.activityPub`. When enabled, Fedify is compatible with any environment that supports `fetch()` — it runs natively in the Fargate API container alongside all other routes.
 
+## Enablement preconditions (blocking)
+
+Federation is, by design, data sharing with servers trellis does not control.
+Public ActivityPub collections (followers/following) are free OSINT for graph
+fusion — exactly the harvesting threat described in the surveillance threat
+model ([`05-activitypub-exposure.md`](../surveillance-threat-model/05-activitypub-exposure.md)).
+Because no vertical has enabled federation yet, these controls cost nothing to
+require now and become a breaking retrofit the day after someone flips the flag.
+
+**This is a hard gate.** The `features.activityPub` flag **MUST NOT** be enabled
+in any deployment (dev, staging, prod, or a vertical's own environment) until
+**all four** of the following controls exist and are active. This mirrors the
+go-public gate pattern: enablement is blocked, not merely discouraged.
+
+1. **Authorized fetch (secure mode).** The server **MUST** require a valid HTTP
+   signature on `GET` requests to actor documents and collection endpoints
+   (followers, following, outbox), not only on inbox `POST`s. Unsigned or
+   invalidly-signed GETs **MUST** receive a reduced response (e.g. `401`, or an
+   actor stub without `publicKey`/endpoints and collections returning only
+   `totalItems`). Rationale: this forces scraping to come from a real,
+   identifiable, revocable federated actor instead of anonymous HTTP — see
+   [`05-activitypub-exposure.md` §"Proposed enablement preconditions" item 1](../surveillance-threat-model/05-activitypub-exposure.md#proposed-enablement-preconditions).
+
+2. **Follower/following-list visibility setting.** Per-user control over whether
+   the followers/following collections enumerate their members or return only
+   `totalItems` **MUST** exist, and the privacy-preserving mode (count only)
+   **MUST** be the default. Rationale: this is the single highest-value control
+   against graph harvesting — see
+   [`05-activitypub-exposure.md` §"Proposed enablement preconditions" item 2](../surveillance-threat-model/05-activitypub-exposure.md#proposed-enablement-preconditions).
+
+3. **Instance deny/allow-list (defederation).** A per-environment (and
+   eventually per-tenant) deny/allow-list **MUST** be in place so hostile or
+   abusive instances can be defederated. Inbound activities and outbound
+   delivery to denied instances **MUST** be refused. Rationale: federation
+   without a defederation lever cannot respond to a hostile peer — see
+   [`05-activitypub-exposure.md` §"Proposed enablement preconditions" item 3](../surveillance-threat-model/05-activitypub-exposure.md#proposed-enablement-preconditions).
+
+4. **Distributed federation rate limiting.** Federation rate limits **MUST** be
+   enforced through the shared distributed token-bucket infrastructure
+   (`apps/api/src/lib/rate-limit.ts`), **NOT** an in-process / in-memory window.
+   Limits **MUST** hold across all Fargate tasks, not per-process. Rationale: an
+   in-memory limit is trivially bypassed by spreading requests across tasks —
+   see [`05-activitypub-exposure.md` §"Proposed enablement preconditions" item 4](../surveillance-threat-model/05-activitypub-exposure.md#proposed-enablement-preconditions).
+
+**Residual exposure (acknowledged, not waivable).** Even with all four controls,
+a hostile federated server can retain whatever it legitimately receives.
+Authorized fetch and visibility settings reduce bulk harvesting; they cannot
+prevent retention by a peer that has been granted access. That residual risk
+belongs in each vertical's explicit decision to enable federation at all — which
+is precisely why federation is a per-deployment flag, not a default.
+
 ## Architecture
 
 ActivityPub endpoints run in the **same Fargate container** as the main API. HTTP Signature verification runs as route-specific middleware, not a separate service. This simplifies the architecture (one process, one DB pool) while keeping federation logic isolated in its own route module.
