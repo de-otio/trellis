@@ -13,6 +13,8 @@
     "test": "npm test -w @de-otio/trellis",
     "test:watch": "npm run test:watch -w @de-otio/trellis",
     "test:coverage": "npm run test:coverage -w @de-otio/trellis",
+    "test:graph": "npm run test:graph -w @de-otio/trellis",
+    "test:graph:failover": "npm run test:graph:failover -w @de-otio/trellis",
     "lint": "npm run lint -w @de-otio/trellis",
     "format": "prettier --write \"**/*.{ts,tsx,dart,json,md}\" --ignore-path .gitignore",
     "prisma:generate": "npm run -w @de-otio/trellis prisma:generate",

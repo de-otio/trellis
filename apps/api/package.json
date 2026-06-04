@@ -23,6 +23,7 @@
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:standalone": "vitest run --config vitest.standalone.config.ts",
     "test:graph": "vitest run --config vitest.graph.config.ts",
+    "test:graph:failover": "vitest run --config vitest.graph.failover.config.ts",
     "test:schema": "vitest run --config vitest.schema.config.ts",
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "test:e2e:smoke": "E2E_SHARD=smoke vitest run --config vitest.e2e.smoke.config.ts",
