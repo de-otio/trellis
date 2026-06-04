@@ -2,16 +2,22 @@
  * Unit tests for FeatureToggleService (foundation adapter)
  *
  * Strategy:
- *  - Happy-path tests use MemoryFeatureToggleStore (no mocking needed).
- *  - Error/fail-soft tests use a minimal structural PrismaFeatureToggleClient
- *    mock because MemoryFeatureToggleStore cannot simulate DB errors.
+ *  - Error/fail-soft tests use a minimal structural Prisma mock.
+ *
+ * Note on the P1 global-scoped client (feature-toggle-global-client.ts):
+ *   Surveillance-hardening Phase 0 made `FeatureToggle.key` non-unique on its
+ *   own (now `[key, tenantId]`), so the service wraps the raw Prisma client in
+ *   `globalScopedFeatureToggleClient`, which scopes every op to global rows
+ *   (tenant_id IS NULL). That changes the underlying call surface foundation's
+ *   store sees: reads go through `findFirst` (not `findUnique`), and the
+ *   store's `upsert` becomes `findFirst`+`update`/`create`. The mocks below
+ *   target that surface. See feature-toggle-global-client.test.ts for the
+ *   translation's own coverage.
  *
  * Note on getAllToggles error behavior:
  *   Foundation's PrismaFeatureToggleStore.list() is fully fail-soft — it
  *   returns [] for ALL errors (including non-table errors like timeouts).
- *   The old hand-rolled implementation re-threw non-table errors.
- *   The new adapter inherits the foundation behavior: getAllToggles always
- *   resolves (never throws).
+ *   getAllToggles always resolves (never throws).
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -27,8 +33,10 @@ function makeRow(overrides: {
   changedAt?: Date;
   changedBy?: string | null;
   description?: string | null;
+  id?: string;
 }) {
   return {
+    id: overrides.id ?? `ft_${overrides.key}`,
     key: overrides.key,
     enabled: overrides.enabled,
     changedAt: overrides.changedAt ?? new Date("2024-01-01"),
@@ -37,13 +45,17 @@ function makeRow(overrides: {
   };
 }
 
+// Mirrors the surface `globalScopedFeatureToggleClient` calls on the raw
+// Prisma client: reads via findFirst, writes via update/create, removals via
+// deleteMany. findMany passes through unchanged.
 function makeMockPrisma() {
   return {
     featureToggle: {
-      findUnique: vi.fn(),
+      findFirst: vi.fn(),
       findMany: vi.fn(),
-      upsert: vi.fn(),
-      delete: vi.fn(),
+      update: vi.fn(),
+      create: vi.fn(),
+      deleteMany: vi.fn(),
     },
   };
 }
@@ -55,7 +67,7 @@ function makeMockPrisma() {
 describe("FeatureToggleService.isEnabled", () => {
   it("returns true when toggle is enabled (via Prisma mock)", async () => {
     const prisma = makeMockPrisma();
-    prisma.featureToggle.findUnique.mockResolvedValue(
+    prisma.featureToggle.findFirst.mockResolvedValue(
       makeRow({ key: "feat", enabled: true }),
     );
     const svc = new FeatureToggleService(prisma as any);
@@ -64,7 +76,7 @@ describe("FeatureToggleService.isEnabled", () => {
 
   it("returns false when toggle is disabled (via Prisma mock)", async () => {
     const prisma = makeMockPrisma();
-    prisma.featureToggle.findUnique.mockResolvedValue(
+    prisma.featureToggle.findFirst.mockResolvedValue(
       makeRow({ key: "feat", enabled: false }),
     );
     const svc = new FeatureToggleService(prisma as any);
@@ -73,14 +85,14 @@ describe("FeatureToggleService.isEnabled", () => {
 
   it("returns false when toggle does not exist (null row)", async () => {
     const prisma = makeMockPrisma();
-    prisma.featureToggle.findUnique.mockResolvedValue(null);
+    prisma.featureToggle.findFirst.mockResolvedValue(null);
     const svc = new FeatureToggleService(prisma as any);
     expect(await svc.isEnabled("missing")).toBe(false);
   });
 
   it("returns false (fail-soft) when DB throws", async () => {
     const prisma = makeMockPrisma();
-    prisma.featureToggle.findUnique.mockRejectedValue(
+    prisma.featureToggle.findFirst.mockRejectedValue(
       new Error("DB connection failed"),
     );
     const svc = new FeatureToggleService(prisma as any);
@@ -93,7 +105,7 @@ describe("FeatureToggleService.isEnabled", () => {
     const err = Object.assign(new Error("table does not exist"), {
       code: "P2021",
     });
-    prisma.featureToggle.findUnique.mockRejectedValue(err);
+    prisma.featureToggle.findFirst.mockRejectedValue(err);
     const svc = new FeatureToggleService(prisma as any);
     expect(await svc.isEnabled("feat")).toBe(false);
   });
@@ -107,7 +119,7 @@ describe("FeatureToggleService.getToggle", () => {
   it("returns toggle with lastChanged mapped from changedAt", async () => {
     const prisma = makeMockPrisma();
     const changedAt = new Date("2024-06-15T12:00:00Z");
-    prisma.featureToggle.findUnique.mockResolvedValue(
+    prisma.featureToggle.findFirst.mockResolvedValue(
       makeRow({
         key: "my-flag",
         enabled: true,
@@ -130,7 +142,7 @@ describe("FeatureToggleService.getToggle", () => {
   it("omits optional fields when changedBy and description are null/undefined", async () => {
     const prisma = makeMockPrisma();
     const changedAt = new Date("2024-01-01");
-    prisma.featureToggle.findUnique.mockResolvedValue(
+    prisma.featureToggle.findFirst.mockResolvedValue(
       makeRow({ key: "bare-flag", enabled: false, changedAt }),
     );
     const svc = new FeatureToggleService(prisma as any);
@@ -146,14 +158,14 @@ describe("FeatureToggleService.getToggle", () => {
 
   it("returns null when toggle does not exist", async () => {
     const prisma = makeMockPrisma();
-    prisma.featureToggle.findUnique.mockResolvedValue(null);
+    prisma.featureToggle.findFirst.mockResolvedValue(null);
     const svc = new FeatureToggleService(prisma as any);
     expect(await svc.getToggle("no-such-key")).toBeNull();
   });
 
   it("returns null (fail-soft) when DB throws", async () => {
     const prisma = makeMockPrisma();
-    prisma.featureToggle.findUnique.mockRejectedValue(
+    prisma.featureToggle.findFirst.mockRejectedValue(
       new Error("network error"),
     );
     const svc = new FeatureToggleService(prisma as any);
@@ -176,9 +188,10 @@ describe("FeatureToggleService.setToggle", () => {
       changedBy: "bob@example.com",
       description: "New flag",
     });
-    // foundation calls findUnique first (for previous), then upsert
-    prisma.featureToggle.findUnique.mockResolvedValue(null);
-    prisma.featureToggle.upsert.mockResolvedValue(row);
+    // get(previous) findFirst → null, then upsert's existence findFirst → null,
+    // so the adapter takes the create path.
+    prisma.featureToggle.findFirst.mockResolvedValue(null);
+    prisma.featureToggle.create.mockResolvedValue(row);
 
     const svc = new FeatureToggleService(prisma as any);
     const result = await svc.setToggle(
@@ -200,10 +213,12 @@ describe("FeatureToggleService.setToggle", () => {
     const prisma = makeMockPrisma();
     const originalAt = new Date("2024-01-01");
     const updatedAt = new Date("2024-07-02T10:00:00Z");
-    prisma.featureToggle.findUnique.mockResolvedValue(
+    // Both findFirst calls (get-previous + upsert existence-check) see the
+    // existing row, so the adapter takes the update path.
+    prisma.featureToggle.findFirst.mockResolvedValue(
       makeRow({ key: "flag", enabled: true, changedAt: originalAt }),
     );
-    prisma.featureToggle.upsert.mockResolvedValue(
+    prisma.featureToggle.update.mockResolvedValue(
       makeRow({
         key: "flag",
         enabled: false,
@@ -227,8 +242,9 @@ describe("FeatureToggleService.setToggle", () => {
     const prisma = makeMockPrisma();
     const changedAt = new Date();
     // Simulate row where changedBy is null
-    prisma.featureToggle.findUnique.mockResolvedValue(null);
-    prisma.featureToggle.upsert.mockResolvedValue({
+    prisma.featureToggle.findFirst.mockResolvedValue(null);
+    prisma.featureToggle.create.mockResolvedValue({
+      id: "ft_flag",
       key: "flag",
       enabled: true,
       changedAt,
@@ -241,10 +257,10 @@ describe("FeatureToggleService.setToggle", () => {
     expect(result.changedBy).toBe("provided@example.com");
   });
 
-  it("throws when DB upsert fails", async () => {
+  it("throws when the DB write fails", async () => {
     const prisma = makeMockPrisma();
-    prisma.featureToggle.findUnique.mockResolvedValue(null);
-    prisma.featureToggle.upsert.mockRejectedValue(
+    prisma.featureToggle.findFirst.mockResolvedValue(null);
+    prisma.featureToggle.create.mockRejectedValue(
       new Error("constraint violation"),
     );
 
@@ -372,9 +388,10 @@ describe("FeatureToggleService field-mapping integration (MemoryStore)", () => {
     const prisma = makeMockPrisma();
     const changedAt = new Date("2024-08-01T00:00:00Z");
 
-    // set path: get(previous=null) + upsert
-    prisma.featureToggle.findUnique.mockResolvedValueOnce(null); // get for previous
-    prisma.featureToggle.upsert.mockResolvedValue(
+    // set path: get(previous=null) findFirst + upsert existence findFirst, then create
+    prisma.featureToggle.findFirst.mockResolvedValueOnce(null); // get for previous
+    prisma.featureToggle.findFirst.mockResolvedValueOnce(null); // upsert existence-check
+    prisma.featureToggle.create.mockResolvedValue(
       makeRow({
         key: "round-trip",
         enabled: true,
@@ -397,7 +414,7 @@ describe("FeatureToggleService field-mapping integration (MemoryStore)", () => {
     expect(setResult.changedBy).toBe("dan@example.com");
 
     // getToggle path
-    prisma.featureToggle.findUnique.mockResolvedValueOnce(
+    prisma.featureToggle.findFirst.mockResolvedValueOnce(
       makeRow({
         key: "round-trip",
         enabled: true,
@@ -411,7 +428,7 @@ describe("FeatureToggleService field-mapping integration (MemoryStore)", () => {
     expect(getResult!.lastChanged).toEqual(changedAt);
 
     // isEnabled path (fresh call, cache may be warm from set-invalidation)
-    prisma.featureToggle.findUnique.mockResolvedValueOnce(
+    prisma.featureToggle.findFirst.mockResolvedValueOnce(
       makeRow({ key: "round-trip", enabled: true, changedAt }),
     );
     expect(await svc.isEnabled("round-trip")).toBe(true);

@@ -300,15 +300,18 @@ async function seedFeatureToggles() {
 
   for (const flag of allFlags) {
     try {
-      const existing = await prisma.featureToggle.findUnique({
-        where: { key: flag.key },
+      // P1: key is no longer standalone-unique (now [key, tenantId]). Seed
+      // operates on GLOBAL rows (tenant_id IS NULL); P5 adds per-tenant seeding.
+      const existing = await prisma.featureToggle.findFirst({
+        where: { key: flag.key, tenantId: null },
+        select: { id: true },
       });
 
       if (existing) {
         // Always update to match config file values (config file is source of truth)
         // This ensures deployments overwrite database values with config values
         await prisma.featureToggle.update({
-          where: { key: flag.key },
+          where: { id: existing.id },
           data: {
             enabled: flag.enabled,
             description: flag.description,

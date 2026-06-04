@@ -100,15 +100,15 @@ model PostGeoIndex {
 /// dual-write (syncEntity). Location is sensitive → own tenant_id for direct RLS
 /// (mirrors post_geo_index). See plans/redesign/entity-location-subsystem.md.
 model EntityLocation {
-  entityId  String @id @map("entity_id")
-  tenantId  String @map("tenant_id")
+  entityId  String                                @id @map("entity_id")
+  tenantId  String                                @map("tenant_id")
   // PostGIS geography(Point,4326). Prisma Client cannot filter/order on it —
   // spatial reads/writes go through $queryRaw. The geography column type, GiST
   // index, and RLS are added in the migration SQL (not derivable from Prisma).
   location  Unsupported("geography(Point, 4326)")
   lat       Float
   lng       Float
-  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+  updatedAt DateTime                              @default(now()) @updatedAt @map("updated_at")
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
@@ -132,7 +132,25 @@ enum UserRole {
   PARTNER_ADMIN
   INTERNAL
   CONTENT_CREATOR
+  MODERATOR // Surveillance-hardening Phase 0 (E5): moderation-queue access; routes are Phase 1
   SUPER_ADMIN
+}
+
+// Surveillance-hardening Phase 0 (E2): how an account was created. Nullable on
+// User — existing accounts predate capture and stay NULL (unknown), never
+// backfilled. See doc/02-technical/surveillance-threat-model/03-signup-...
+enum SignupMethod {
+  COGNITO
+  INVITE
+  MAGIC_LINK
+}
+
+// Surveillance-hardening Phase 0 (E3): discriminator for the generalized Report
+// model. LINK reports exist today (folded in from LinkReport, P4); ACCOUNT
+// reports are Phase 1 (just a new reportType, not a new subsystem).
+enum ReportType {
+  LINK
+  ACCOUNT
 }
 
 // Role metadata for UI display and documentation
@@ -207,6 +225,14 @@ model User {
   // FUTURE USE: Respect user preference when sending analytics events
   analyticsOptOut Boolean @default(false) @map("analytics_opt_out")
 
+  // Surveillance-hardening Phase 0 (E2): signup-metadata capture (P3 wires it).
+  // signupMethod records how the account was created; invitationId links the
+  // redeemed invitation. Client signals (IP/UA) go to SecurityEvent (retention-
+  // bound), NEVER as columns here — see 07-data-minimization.md. Both nullable:
+  // existing accounts stay NULL (unknown), no fabricated backfill.
+  signupMethod SignupMethod? @map("signup_method")
+  invitationId String?       @map("invitation_id")
+
   // Verification Status (synced from Cognito)
   emailVerified   Boolean   @default(false) @map("email_verified")
   emailVerifiedAt DateTime? @map("email_verified_at")
@@ -230,11 +256,11 @@ model User {
   region     String  @default("EU") @map("region") // User's region (US, EU, CN)
   dataRegion String? @map("data_region") // Where data is stored (for compliance)
 
-  posts               Post[]
-  securityEvents      SecurityEvent[]
-  createdInvitations  Invitation[]         @relation("CreatedInvitations")
-  usedInvitations     Invitation[]         @relation("UsedInvitations")
-  consents            Consent[]
+  posts              Post[]
+  securityEvents     SecurityEvent[]
+  createdInvitations Invitation[]    @relation("CreatedInvitations")
+  usedInvitations    Invitation[]    @relation("UsedInvitations")
+  consents           Consent[]
 
   // Circle configuration and read state
   circleConfig     CircleConfig?
@@ -256,6 +282,15 @@ model User {
 
   // Link reports
   linkReports LinkReport[]
+
+  // Surveillance-hardening Phase 0: behavioral-event actor side (E1, P2) and
+  // generalized reports filed BY this user (E3, P4). Both cascade on delete.
+  interactionEvents InteractionEvent[] @relation("InteractionActor")
+  filedReports      Report[]           @relation("ReportReporter")
+
+  // Surveillance-hardening Phase 0 (E2): the invitation this user redeemed at
+  // signup, if any. Distinct from createdInvitations / usedInvitations.
+  signupInvitation Invitation? @relation("SignupInvitation", fields: [invitationId], references: [id])
 
   // ActivityPub protocol fields
   inboxUrl     String? @map("inbox_url") // ActivityPub inbox endpoint
@@ -304,7 +339,7 @@ model User {
   // future research or cohort query MUST gate on `ageVerified = true`. `ageTier`
   // is NEVER an includability signal: an unverified user defaults to ADULT and
   // would otherwise leak into adult cohorts.
-  ageVerified Boolean   @default(false) @map("age_verified")
+  ageVerified Boolean @default(false) @map("age_verified")
 
   // Parental links
   parentalLinks ParentalLink[] @relation("ChildParentalLinks")
@@ -349,6 +384,7 @@ model User {
   @@index([anonymousId]) // Index for anonymous ID lookups
   @@index([cognitoSub]) // Index for Cognito sub lookups
   @@index([personalTenantId])
+  @@index([invitationId]) // Phase 0 (E2): invitation-chain traversal, Phase 2 detection only
   @@map("users")
 }
 
@@ -833,11 +869,13 @@ model SecurityEvent {
   details   String // JSON string
   timestamp DateTime @default(now())
 
-  // PREPARATORY CHANGE: Retention tracking for future log retention policy
-  // This field stores when the log entry should be automatically deleted
-  // FUTURE USE: A scheduled cleanup job will delete events where retentionUntil < NOW()
-  // Retention periods: critical=365 days, high=90 days, medium=30 days, low=7 days
-  retentionUntil DateTime? @map("retention_until")
+  // Retention bound — NON-NULLABLE (Surveillance-hardening Phase 0, P1). A NULL
+  // row escapes the hourly-cron pruning forever: exactly the unbounded client-
+  // metadata log the threat model forbids (07-data-minimization.md), and P3
+  // writes IP/UA `signup` rows into this table. The hourly cron deletes events
+  // where retention_until < NOW(). Retention by severity: critical=365d,
+  // high=90d, medium=30d, low=7d (see security-monitor.calculateRetentionUntil).
+  retentionUntil DateTime @map("retention_until")
 
   user User? @relation(fields: [userId], references: [id])
 
@@ -889,18 +927,30 @@ model AuditEvent {
   @@map("audit_event")
 }
 
-// Feature Toggle model for global feature flags
+// Feature Toggle model — global or per-tenant (Surveillance-hardening Phase 0,
+// E4). tenantId NULL = global row; a non-NULL row overrides the global for that
+// tenant. Resolution (tenant → global → coded default) is P5.
+//
+// Uniqueness: `@@unique([key, tenantId])` lets each tenant hold one row per key.
+// Postgres treats NULLs as DISTINCT, so that constraint alone would permit
+// DUPLICATE global rows for the same key — the migration adds a PARTIAL unique
+// index `feature_toggles_key_global ON (key) WHERE tenant_id IS NULL` to forbid
+// it. That partial index is NOT expressible in schema.prisma; it lives only in
+// the migration SQL. Do not let a later `prisma migrate dev` treat it as drift.
 model FeatureToggle {
   id          String   @id @default(cuid())
-  key         String   @unique // e.g., "global_public_posting_enabled"
+  key         String // e.g., "global_public_posting_enabled"
   enabled     Boolean  @default(false)
   description String? // Human-readable description
+  tenantId    String?  @map("tenant_id") // NULL = global; non-NULL = per-tenant override
   changedBy   String?  @map("changed_by") // Email of user who last changed it
   changedAt   DateTime @default(now()) @updatedAt @map("last_changed")
   createdAt   DateTime @default(now()) @map("created_at")
 
+  @@unique([key, tenantId])
   @@index([key])
   @@index([enabled])
+  @@index([tenantId])
   @@map("feature_toggles")
 }
 
@@ -920,6 +970,9 @@ model Invitation {
 
   creator User? @relation("CreatedInvitations", fields: [createdBy], references: [id])
   user    User? @relation("UsedInvitations", fields: [usedBy], references: [id])
+
+  // Phase 0 (E2): accounts that recorded this invitation as their signup origin.
+  signupUsers User[] @relation("SignupInvitation")
 
   @@index([code])
   @@index([createdBy])
@@ -1400,6 +1453,86 @@ model LinkReport {
 }
 
 // ============================================================================
+// Surveillance-hardening Phase 0 (doc/02-technical/surveillance-threat-model/)
+// ============================================================================
+
+// E1 — Append-only behavioral event log. Preserves the TEMPORAL signal that
+// `Relationship.signals` aggregate counters destroy, bounded to a rolling
+// retention window. P2 writes the rows (dual-write alongside aggregation);
+// Phase 0 ships ZERO read paths — any future read is restricted to the Phase 2
+// detection path + moderator surfaces (MODERATOR/SUPER_ADMIN, audited).
+//
+// Data-minimization invariants (security review blocks on these):
+//   - NO free-text/content column — event type + references only. The table
+//     must be useless as a content archive.
+//   - `expiresAt` is NON-NULLABLE: no schema path to an unbounded behavioral
+//     log. P2 sets it to createdAt + retentionDays (config).
+//   - `targetId` has no FK (polymorphic; the target may be a deleted user) —
+//     so cascade can't reach rows ABOUT a deleted user. P2 adds the explicit
+//     deleteMany to user-data-deletion.ts (GDPR Art. 17).
+model InteractionEvent {
+  id          String @id @default(cuid())
+  actorUserId String @map("actor_user_id")
+
+  // Polymorphic target, no FK (matches Relationship's convention). Vocabulary:
+  // "user" | "entity" | "post" — the GraphNodeType strings P2 dual-writes from.
+  targetType String @map("target_type")
+  targetId   String @map("target_id")
+
+  // Interaction vocabulary — exactly InteractionCounts in graph/postgres/
+  // scoring.ts: view | react | comment | share | depth_mode | profile_visit |
+  // content_creation. A string, not an enum, to track that vocabulary cheaply.
+  interactionType String @map("interaction_type")
+
+  tenantId  String?  @map("tenant_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // Retention bound — NON-NULLABLE. Append-only: no updatedAt, no update path.
+  expiresAt DateTime @map("expires_at")
+
+  actor User @relation("InteractionActor", fields: [actorUserId], references: [id], onDelete: Cascade)
+
+  @@index([actorUserId, createdAt])
+  @@index([targetType, targetId, createdAt])
+  @@index([expiresAt]) // pruning: DELETE WHERE expires_at < now()
+  @@map("interaction_events")
+}
+
+// E3 — Generalized report model. Folds in LinkReport (P4) and makes Phase 1
+// account reporting "add a reportType", not a new subsystem. Queue fields
+// (assignee/resolution) exist now but are unused until Phase 1.
+//
+// Erasure:
+//   - `reporterUserId` cascades (a deleted reporter's reports go with them —
+//     matches the old LinkReport behavior).
+//   - `resourceId` is an OPAQUE string, no FK: an ACCOUNT report's reported
+//     user may be deleted. P4 pseudonymizes resourceId on erasure of the
+//     reported user (aggregate pattern analysis survives; plaintext ID does
+//     not — "pattern analysis" is not an Art. 17(3) exemption).
+//   - `assigneeUserId` is a plain string (no FK): a deleted moderator must not
+//     cascade-delete the reports they were assigned.
+model Report {
+  id             String     @id @default(cuid())
+  reportType     ReportType @map("report_type")
+  resourceType   String     @map("resource_type") // "url" (LINK) | "user" (ACCOUNT)
+  resourceId     String     @map("resource_id") // opaque; no FK by design
+  reporterUserId String     @map("reporter_user_id")
+  reason         String? // free-text; P4 enforces a 1000-char Zod bound at the boundary
+  status         String     @default("pending") // pending | reviewed | resolved
+  assigneeUserId String?    @map("assignee_user_id") // Phase 1 moderator queue
+  resolvedAt     DateTime?  @map("resolved_at")
+  resolution     String? // Phase 1 moderator queue
+  createdAt      DateTime   @default(now()) @map("created_at")
+
+  reporter User @relation("ReportReporter", fields: [reporterUserId], references: [id], onDelete: Cascade)
+
+  @@index([reportType, status])
+  @@index([resourceType, resourceId])
+  @@index([reporterUserId])
+  @@map("reports")
+}
+
+// ============================================================================
 // Email Suppression (AWS SES bounce/complaint handling)
 // ============================================================================
 
@@ -1826,13 +1959,13 @@ model Relationship {
   targetType String @map("target_type")
   targetId   String @map("target_id")
 
-  computedScore     Float          @default(0) @map("computed_score")
-  manualScore       Float?         @map("manual_score") // null = no override
-  tier              Int            @default(3) // CircleTier 0..3
-  interactionCount  Int            @default(0) @map("interaction_count")
-  lastInteractionAt DateTime?      @map("last_interaction_at")
-  connectionMethod  String         @map("connection_method") // code|import|suggestion|discovery
-  reciprocated      Boolean        @default(false)
+  computedScore     Float     @default(0) @map("computed_score")
+  manualScore       Float?    @map("manual_score") // null = no override
+  tier              Int       @default(3) // CircleTier 0..3
+  interactionCount  Int       @default(0) @map("interaction_count")
+  lastInteractionAt DateTime? @map("last_interaction_at")
+  connectionMethod  String    @map("connection_method") // code|import|suggestion|discovery
+  reciprocated      Boolean   @default(false)
   // Per-interaction-type signal breakdown used by scoring-engine.ts.
   // Shape finalized in Phase 1 (B5) against the scoring engine; JSON keeps the
   // migration stable while that lands.
@@ -1855,11 +1988,11 @@ model EntityRelationship {
   id       String @id @default(cuid())
   tenantId String @map("tenant_id")
 
-  entityId        String                   @map("entity_id")
-  relatedEntityId String                   @map("related_entity_id")
-  type            EntityRelationshipType
-  status          EntityRelationshipStatus @default(PENDING)
-  proposedByUserId String                  @map("proposed_by_user_id")
+  entityId         String                   @map("entity_id")
+  relatedEntityId  String                   @map("related_entity_id")
+  type             EntityRelationshipType
+  status           EntityRelationshipStatus @default(PENDING)
+  proposedByUserId String                   @map("proposed_by_user_id")
 
   since     DateTime @default(now())
   createdAt DateTime @default(now()) @map("created_at")

@@ -90,11 +90,11 @@ export class SecurityMonitor {
    * - low: 7 days
    *
    * @param severity - Event severity level
-   * @returns Date when the event should be deleted, or null if retention is disabled
+   * @returns Date when the event should be deleted (always set — the column is
+   *   NON-NULLABLE as of Surveillance-hardening Phase 0; a NULL would escape
+   *   the hourly-cron pruning forever).
    */
-  private calculateRetentionUntil(
-    severity: SecurityEventSeverity,
-  ): Date | null {
+  private calculateRetentionUntil(severity: SecurityEventSeverity): Date {
     const retentionDays: Record<SecurityEventSeverity, number> = {
       critical: 365, // Keep critical events for 1 year
       high: 90, // Keep high severity for 90 days

@@ -83,6 +83,25 @@ jobs:
           AWS_ACCESS_KEY_ID: test
           AWS_SECRET_ACCESS_KEY: test
 
+      # Coverage gate — Surveillance-hardening Phase 0. Enforces 80%
+      # lines/branches/functions/statements on the NEW source files this plan
+      # adds (vitest.coverage-ci.config.ts). The repo-wide 80% gate is NOT
+      # wired here: the `main` baseline already sits at ~78% branches (a legacy
+      # gap, not this plan's), so a global gate would fail for unrelated
+      # reasons. `all: true` makes an untested new file fail the gate.
+      - name: Coverage gate (Phase 0 new files)
+        run: npm run test:coverage:ci -w @de-otio/trellis
+        env:
+          DATABASE_URL: postgresql://trellis:test-ci-password@localhost:5432/trellis_test
+          DYNAMODB_ENDPOINT: http://localhost:8000
+          DYNAMODB_TABLE: test-trellis
+          STAGE: test
+          NODE_ENV: test
+          SESSION_SECRET: test-session-secret-must-be-32chars!!
+          AWS_REGION: us-east-1
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test
+
       # Consumer-install smoke: pack, install with --omit=dev into a fresh
       # project, require every published entry point. Catches runtime
       # imports of devDeps and unshipped relative imports — gaps the
@@ -206,3 +225,120 @@ jobs:
           DATABASE_URL: postgresql://trellis:trellis_test_password@localhost:5432/trellis_test
           DIRECT_DATABASE_URL: postgresql://trellis:trellis_test_password@localhost:5432/trellis_test
           STAGE: test
+
+  schema:
+    name: Schema-shape lane (Postgres)
+    # Surveillance-hardening Phase 0 (P1): the schema-shape integration tests
+    # in test/integration/schema/ assert column nullability, indexes, the
+    # FeatureToggle partial-unique index, and FK cascades against a real
+    # Postgres. `npm test` excludes test/integration/**, so without this lane
+    # these tests would never gate a merge.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_DB: trellis_test
+          POSTGRES_USER: trellis
+          POSTGRES_PASSWORD: trellis_test_password
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U trellis -d trellis_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npm run prisma:generate
+        env:
+          DATABASE_URL: postgresql://trellis:trellis_test_password@localhost:5432/trellis_test
+
+      - name: Run migrations
+        run: npm run prisma:migrate:deploy
+        env:
+          DATABASE_URL: postgresql://trellis:trellis_test_password@localhost:5432/trellis_test
+          DIRECT_DATABASE_URL: postgresql://trellis:trellis_test_password@localhost:5432/trellis_test
+
+      - name: Run schema-shape lane
+        run: npm run test:schema -w @de-otio/trellis
+        env:
+          DATABASE_URL: postgresql://trellis:trellis_test_password@localhost:5432/trellis_test
+          DIRECT_DATABASE_URL: postgresql://trellis:trellis_test_password@localhost:5432/trellis_test
+          STAGE: test
+
+  integration:
+    name: Integration lane (Postgres, Phase 0 scope)
+    # Surveillance-hardening Phase 0 (P1): a CURATED integration lane. The
+    # broad test:integration suite needs live infra beyond Postgres (media,
+    # a running API, Entra), so this lane runs only the Postgres-only Phase 0
+    # integration tests listed in vitest.integration-ci.config.ts. It passes
+    # with no tests until P2/P4 populate that list.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_DB: trellis_test
+          POSTGRES_USER: trellis
+          POSTGRES_PASSWORD: trellis_test_password
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U trellis -d trellis_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      dynamodb:
+        image: amazon/dynamodb-local:latest
+        ports: ["8000:8000"]
+        options: --health-cmd "curl -s http://localhost:8000" --health-interval 5s
+
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npm run prisma:generate
+        env:
+          DATABASE_URL: postgresql://trellis:trellis_test_password@localhost:5432/trellis_test
+
+      - name: Run migrations
+        run: npm run prisma:migrate:deploy
+        env:
+          DATABASE_URL: postgresql://trellis:trellis_test_password@localhost:5432/trellis_test
+          DIRECT_DATABASE_URL: postgresql://trellis:trellis_test_password@localhost:5432/trellis_test
+
+      - name: Run integration lane (Phase 0 scope)
+        run: npm run test:integration:ci -w @de-otio/trellis
+        env:
+          DATABASE_URL: postgresql://trellis:trellis_test_password@localhost:5432/trellis_test
+          DIRECT_DATABASE_URL: postgresql://trellis:trellis_test_password@localhost:5432/trellis_test
+          DYNAMODB_ENDPOINT: http://localhost:8000
+          DYNAMODB_TABLE: test-trellis
+          STAGE: test
+          NODE_ENV: test
+          SESSION_SECRET: test-session-secret-must-be-32chars!!
+          AWS_REGION: us-east-1
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test

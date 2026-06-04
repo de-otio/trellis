@@ -111,6 +111,10 @@ export const UNSCOPED_MODELS: ReadonlyMap<string, string> = new Map([
   ["Consent", "user"],
   ["NotificationPreference", "user"],
   ["LinkReport", "user"],
+  // Generalized report model (Surveillance-hardening Phase 0, E3). No own
+  // tenantId column; boundary is reporterUserId (like LinkReport). ACCOUNT
+  // reports key on an opaque resourceId, not a tenant.
+  ["Report", "user"],
   ["ParentalLink", "user"],
   ["DeletionAuditLog", "user"],
   ["Invitation", "user"],
@@ -131,6 +135,11 @@ export const UNSCOPED_MODELS: ReadonlyMap<string, string> = new Map([
   // not the auto-scope filter.
   ["SecurityEvent", "audit-nullable"],
   ["AuditEvent", "audit-nullable"],
+  // Append-only behavioral event log (Surveillance-hardening Phase 0, E1).
+  // Nullable tenantId (single-tenant deployments write NULL); P2 stamps it
+  // explicitly from the graph context. Not auto-scoped — same posture as the
+  // other audit-nullable event tables (RLS backstop, retention-bound).
+  ["InteractionEvent", "audit-nullable"],
 ]);
 
 // Operations whose `where` can safely have `{ tenantId }` AND-merged in.

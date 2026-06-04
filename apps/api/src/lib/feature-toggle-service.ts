@@ -1,6 +1,7 @@
 import { PrismaFeatureToggleStore } from "@de-otio/saas-foundation/feature-toggles/prisma";
 import type { LoggerEnv } from "./logger.js";
 import type { PrismaClient } from "@prisma/client";
+import { globalScopedFeatureToggleClient } from "./feature-toggle-global-client.js";
 import type { TrellisAuditLoggerEnv } from "./audit-composer.js";
 import type { Region } from "./region-detection.js";
 import { getLogger } from "./logger.js";
@@ -46,7 +47,13 @@ export class FeatureToggleService {
     // acquires its logger via getLogger() internally.
     _env?: LoggerEnv,
   ) {
-    this.store = new PrismaFeatureToggleStore(prisma);
+    // P1: `key` is no longer a standalone unique column (now [key, tenantId]),
+    // so foundation's store can't query `where: { key }` directly. Scope every
+    // operation to global rows (tenant_id IS NULL) — identical to pre-P1
+    // behavior. P5 replaces this with tenant-aware resolution.
+    this.store = new PrismaFeatureToggleStore(
+      globalScopedFeatureToggleClient(prisma),
+    );
   }
 
   /**
