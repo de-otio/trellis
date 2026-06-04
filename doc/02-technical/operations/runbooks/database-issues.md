@@ -1,19 +1,22 @@
 # Runbook: Database Issues
 
+> **Status — target model, not runnable from this repo.** Trellis is not deployed
+> standalone; the `scripts/ops/*` helpers referenced here are **not part of this
+> repository** — they belong to the consuming application. The raw AWS CLI
+> commands below are the target operational shape (`{app}-{stage}` is the
+> consuming application's resource prefix).
+
 ## Check status
 
-```bash
-STAGE=dev ./scripts/ops/db.sh status        # RDS instance status
-STAGE=dev ./scripts/ops/db.sh slow-queries  # Performance Insights top queries
-STAGE=dev ./scripts/ops/db.sh connections   # current connection count
-```
+The consuming application's `scripts/ops/db.sh` wraps RDS instance status,
+Performance Insights top queries, and current connection count. No such script
+ships in this repo; use the AWS console / CLI (RDS + Performance Insights)
+directly.
 
 ## High CPU
 
-Query Performance Insights for slow queries:
-```bash
-STAGE=dev ./scripts/ops/db.sh slow-queries
-```
+Query Performance Insights for slow queries (the consuming app's `db.sh`
+wraps this).
 
 Common causes: missing index, N+1 queries, unvacuumed table bloat.
 

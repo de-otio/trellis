@@ -1,42 +1,38 @@
 # Runbook: High Error Rate
 
+> **Status — target model, not runnable from this repo.** Trellis is not deployed
+> standalone; the `scripts/ops/*` helpers referenced here are **not part of this
+> repository** — they belong to the consuming application. The raw AWS CLI
+> commands are the target operational shape (`{app}-{stage}` is the consuming
+> application's resource prefix).
+
 ## Symptoms
 
-- CloudWatch alarm `trellis-{stage}-api-error-rate` firing
+- CloudWatch alarm `{app}-{stage}-api-error-rate` firing
 - ALB 5xx rate > 5% in the last 5 minutes
 - Users reporting failures
 
 ## Investigation
 
-```bash
-# 1. Get a quick picture
-STAGE=dev ./scripts/ops/status.sh
-
-# 2. Find which routes are failing
-STAGE=dev ./scripts/ops/incident/high-error-rate.sh 30
-
-# 3. Tail live logs
-STAGE=dev ./scripts/ops/logs.sh api 10
-```
+The consuming application's ops helpers cover this — a status overview
+(`scripts/ops/status.sh`), a failing-route breakdown
+(`scripts/ops/incident/high-error-rate.sh`), and live log tailing
+(`scripts/ops/logs.sh`). None ship in this repo; use CloudWatch Logs Insights
+and the ECS/ALB consoles directly.
 
 ## Common causes
 
-**Bad deploy** — new code introduced a bug:
-```bash
-STAGE=dev ./scripts/ops/incident/rollback.sh
-```
+**Bad deploy** — new code introduced a bug: roll back to the previous image
+(see [rollback.md](./rollback.md)).
 
 **Database connection pool exhausted** — check RDS connections alarm, restart Fargate:
 ```bash
-aws ecs update-service --cluster trellis-dev --service trellis-dev-api --force-new-deployment
-aws ecs wait services-stable --cluster trellis-dev --services trellis-dev-api
+aws ecs update-service --cluster {app}-{stage} --service {app}-{stage}-api --force-new-deployment
+aws ecs wait services-stable --cluster {app}-{stage} --services {app}-{stage}-api
 ```
 
-**DLQ growing** — a Lambda worker is failing. Check which queue:
-```bash
-STAGE=dev ./scripts/ops/status.sh   # shows DLQ depths
-STAGE=dev ./scripts/ops/logs.sh workers 30
-```
+**DLQ growing** — a Lambda worker is failing. Check DLQ depths (CloudWatch /
+`scripts/ops/status.sh` in the consuming app) and the worker logs.
 
 **External API down** (OpenAI, Google Safe Browsing) — OpenAI budget and circuit breaker handle this gracefully (fail-open). Check logs for the specific error.
 

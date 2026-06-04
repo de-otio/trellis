@@ -38,3 +38,6 @@ amplify_outputs.json
 temp/
 tmp/
 .claude/
+# Internal-only doc trees — kept private (see de-otio/trellis-internal)
+plans/
+analysis/

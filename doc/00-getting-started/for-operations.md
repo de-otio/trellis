@@ -1,59 +1,54 @@
 # Operations Guide
 
-## Quick commands
+> **Status — target operational model, not runnable from this repo.**
+> Trellis ships as an npm library and is **not deployed standalone** (see
+> `README.md` / `CLAUDE.md`, "Deployment Status"). The standalone deployment
+> and operations tooling this guide refers to — an `infra/` CDK app,
+> `scripts/deploy.sh`, and `scripts/ops/*` helpers — is **not part of this
+> repository**; deployment and live operations are owned by the consuming
+> application that embeds Trellis. The conventions below describe the **target**
+> model so a consuming application can implement them consistently.
+
+## Deploying (target model)
+
+This repo has no `infra/` workspace. A consuming application deploys its own CDK
+app — conventionally stateful stacks first, then stateless:
 
 ```bash
-STAGE=dev ./scripts/ops/status.sh                        # service health + DLQ depths
-STAGE=dev ./scripts/ops/logs.sh api 30                   # API logs (last 30 min)
-STAGE=dev ./scripts/ops/errors.sh 2                      # errors in last 2 hours
-STAGE=dev ./scripts/ops/db.sh status                     # RDS status
-STAGE=dev ./scripts/ops/feature-flags.sh dev list        # list feature flags
+# In the consuming application's infrastructure project:
+npx cdk deploy "<app>-<stage>-Network" "<app>-<stage>-Data" "<app>-<stage>-Storage" "<app>-<stage>-Auth"
+npx cdk deploy "<app>-<stage>-Api" "<app>-<stage>-Workers" "<app>-<stage>-Cdn" "<app>-<stage>-Monitoring"
 ```
 
-## Deploying
+## Monitoring (target conventions)
 
-```bash
-# Recommended: full automated deploy
-./scripts/deploy.sh dev
-
-# Manual CDK deploy — stateful stacks first, then stateless
-cd infra
-npx cdk deploy "Trellis-dev-Network" "Trellis-dev-Data" "Trellis-dev-Storage" "Trellis-dev-Auth"
-npx cdk deploy "Trellis-dev-Api" "Trellis-dev-Workers" "Trellis-dev-Cdn" "Trellis-dev-Monitoring"
-```
-
-## Rolling back
-
-```bash
-STAGE=dev ./scripts/ops/incident/rollback.sh             # interactive (lists recent tags)
-STAGE=dev ./scripts/ops/incident/rollback.sh <git-sha>   # non-interactive
-```
-
-## Monitoring
-
-- **CloudWatch dashboard**: AWS Console → CloudWatch → Dashboards → `trellis-{stage}`
-- **Alarms**: CloudWatch → Alarms → filter `trellis-{stage}`
+- **CloudWatch dashboard**: `{app}-{stage}`
+- **Alarms**: filter `{app}-{stage}`
 - **Traces**: CloudWatch → X-Ray → Service Map
-- **DLQ alerts**: SNS topic `trellis-{stage}-alerts` sends email on DLQ activity
+- **DLQ alerts**: SNS topic `{app}-{stage}-alerts` sends email on DLQ activity
 
-## SSM parameters
+## SSM parameters (target layout)
 
-All infrastructure IDs live in SSM under `/trellis/{stage}/`:
+Trellis resolves infrastructure IDs from SSM under `/{app}/{stage}/` (see
+`apps/api/src/env.ts`):
 
 ```bash
 aws ssm get-parameters-by-path \
-  --path /trellis/dev/ \
+  --path /{app}/{stage}/ \
   --query "Parameters[*].{Name:Name,Value:Value}" \
   --output table
 ```
 
 Key parameters:
-- `/trellis/{stage}/alb-dns-name` — ALB endpoint
-- `/trellis/{stage}/cloudfront-domain` — public CDN domain
-- `/trellis/{stage}/db-secret-arn` — RDS password in Secrets Manager
-- `/trellis/{stage}/dynamodb-table-name` — DynamoDB table name
+- `/{app}/{stage}/alb-dns-name` — ALB endpoint
+- `/{app}/{stage}/cloudfront-domain` — public CDN domain
+- `/{app}/{stage}/db-secret-arn` — RDS password in Secrets Manager
+- `/{app}/{stage}/dynamodb-table-name` — DynamoDB table name
 
 ## Incident runbooks
+
+Target-model troubleshooting references (same not-runnable-from-this-repo caveat
+applies):
 
 - [High error rate](../02-technical/operations/runbooks/high-error-rate.md)
 - [Rollback](../02-technical/operations/runbooks/rollback.md)

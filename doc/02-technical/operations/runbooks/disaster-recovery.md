@@ -1,5 +1,11 @@
 # Runbook: Disaster Recovery
 
+> **Status — target model, not runnable from this repo.** Trellis is not deployed
+> standalone; the `infra/` CDK app referenced here is **not part of this
+> repository** — it belongs to the consuming application. Treat the procedures
+> below as the target operational shape (`{app}` is the consuming application's
+> stack prefix).
+
 ## Overview
 
 Trellis uses two categories of CDK stacks:
@@ -151,10 +157,11 @@ Cognito user pools cannot be restored from backup. Protection strategy:
 If a stateless stack is destroyed, redeploy from the current code:
 
 ```bash
+# In the consuming application's infrastructure project:
 cd infra
-npx cdk deploy "Trellis-$STAGE-Api" --context stage=$STAGE
-npx cdk deploy "Trellis-$STAGE-Workers" --context stage=$STAGE
-npx cdk deploy "Trellis-$STAGE-Cdn" --context stage=$STAGE
+npx cdk deploy "{app}-$STAGE-Api" --context stage=$STAGE
+npx cdk deploy "{app}-$STAGE-Workers" --context stage=$STAGE
+npx cdk deploy "{app}-$STAGE-Cdn" --context stage=$STAGE
 ```
 
 Stateless stacks read all dependencies from SSM, so they rebuild cleanly as long as stateful stacks are intact.

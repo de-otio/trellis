@@ -1,5 +1,12 @@
 # Deployment Guide
 
+> **Status — target model, not runnable from this repo.** Trellis ships as an
+> npm library and is **not deployed standalone**. The `infra/` CDK app,
+> `scripts/deploy.sh`, and a `deploy.yml` workflow referenced below are **not
+> part of this repository** — they belong to the consuming application that
+> embeds Trellis. This describes the **target** deployment shape; stack names
+> use `{app}` as the consuming application's prefix.
+
 ## Stack deploy order (first time)
 
 When bootstrapping a new environment:
@@ -19,15 +26,15 @@ Subsequent deploys of stateless stacks (Api, Workers, Cdn) can run independently
 
 ## Automated full deploy
 
-```bash
-./scripts/deploy.sh dev    # build image → CDK → migrate → smoke test
-./scripts/deploy.sh prod   # same, requires prod AWS credentials
-```
+The consuming application owns the end-to-end deploy pipeline (conventionally a
+`deploy.sh`: build image → CDK → migrate → smoke test). No such script ships in
+this repo.
 
 ## CI/CD (GitHub Actions)
 
-- **Push to `dev`**: runs `ci.yml` (test + build image), then `deploy.yml` (deploy to dev)
-- **Manual `prod` deploy**: trigger `deploy.yml` with `stage: prod` (requires environment approval)
+This repo's CI (`ci.yml`) tests and builds; publishing to npm is handled by
+`publish.yml`. There is **no** `deploy.yml` here — deploying the built artifact
+to AWS is the consuming application's pipeline.
 
 ## CDK constraints
 

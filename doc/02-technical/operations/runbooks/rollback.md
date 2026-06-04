@@ -1,25 +1,26 @@
 # Runbook: Rolling Back a Deploy
 
+> **Status — target model, not runnable from this repo.** Trellis is not deployed
+> standalone; the `infra/` CDK app and `scripts/ops/*` helpers referenced here are
+> **not part of this repository** — they belong to the consuming application.
+> Treat the commands below as the target operational shape.
+
 ## API rollback
 
-```bash
-# Interactive — lists recent ECR image tags and prompts
-STAGE=dev ./scripts/ops/incident/rollback.sh
-
-# Non-interactive — specify the git SHA to roll back to
-STAGE=dev ./scripts/ops/incident/rollback.sh abc1234
-```
-
-The script registers a new ECS task definition pointing to the previous image and waits for service stability.
+The consuming application's rollback tooling registers a new ECS task definition
+pointing to the previous image and waits for service stability — conventionally a
+`scripts/ops/incident/rollback.sh` (interactive, lists recent ECR image tags, or
+non-interactive with a target git SHA). No such script ships in this repo.
 
 ## CDK infrastructure rollback
 
-CDK doesn't have a built-in rollback. Revert the infra code and redeploy:
+CDK has no built-in rollback. In the consuming application's infrastructure
+project, revert the infra code and redeploy the stateless stack:
 
 ```bash
 git checkout <previous-commit> -- infra/lib/stacks/api-stack.ts
-cd infra && npx cdk deploy "Trellis-dev-Api" \
-  --context stage=dev \
+cd infra && npx cdk deploy "{app}-{stage}-Api" \
+  --context stage=<stage> \
   --context imageTag=<previous-sha>
 ```
 
