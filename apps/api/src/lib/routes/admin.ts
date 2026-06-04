@@ -162,11 +162,20 @@ export const adminRoutes: Route[] = [
         const TEST_USER_CREATION_TIMEOUT_MS =
           maxExpectedDbTime + safetyBufferMs;
 
+        // Signup-metadata (P3): this dev/test-only seam creates users with no
+        // real request context. It gets a `signupMethod` (COGNITO) via the
+        // choke-point helper but NO fabricated IP/UA and no SecurityEvent —
+        // synthetic test accounts must not pollute the signup-cohort signal.
+        const { signupUserData } = await import("../signup-metadata.js");
+        const signupFields = signupUserData({ method: "COGNITO" });
+
         const userCreationPromise = DataRouter.createUser(
           {
             id: userId,
             email,
             role,
+            signupMethod: signupFields.signupMethod,
+            invitationId: signupFields.invitationId,
           },
           region,
           env,
