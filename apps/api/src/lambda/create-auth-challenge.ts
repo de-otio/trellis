@@ -1,6 +1,9 @@
 import { randomBytes, createHash } from "node:crypto";
 import { DynamoDBClient, PutItemCommand, GetItemCommand, UpdateItemCommand } from "@aws-sdk/client-dynamodb";
 import { SESClient, SendEmailCommand } from "@aws-sdk/client-ses";
+import { Logger } from "@aws-lambda-powertools/logger";
+
+const logger = new Logger({ serviceName: "create-auth-challenge" });
 
 const dynamo = new DynamoDBClient({ region: process.env.AWS_REGION });
 const ses = new SESClient({ region: process.env.SES_REGION || process.env.AWS_REGION });
@@ -50,7 +53,7 @@ export const handler = async (event: any) => {
     if (err?.message?.startsWith("RATE_LIMIT_EXCEEDED")) {
       throw err;
     }
-    console.error("Rate limit check failed, proceeding with token generation", err);
+    logger.error("Rate limit check failed, proceeding with token generation", { error: err });
   }
 
   const token = randomBytes(32).toString("base64url");
@@ -71,7 +74,7 @@ export const handler = async (event: any) => {
       },
     }));
   } catch (err) {
-    console.error("Failed to store magic link token", err);
+    logger.error("Failed to store magic link token", { error: err });
     throw err;
   }
 
@@ -100,7 +103,7 @@ export const handler = async (event: any) => {
       },
     }));
   } catch (err) {
-    console.error("Failed to send magic link email", err);
+    logger.error("Failed to send magic link email", { error: err });
     throw err;
   }
 
