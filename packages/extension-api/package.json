@@ -25,5 +25,10 @@
     "@types/node": "^22.0.0",
     "prettier": "^3.3.3",
     "typescript": "^6.0.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/de-otio/trellis.git",
+    "directory": "packages/extension-api"
   }
 }
