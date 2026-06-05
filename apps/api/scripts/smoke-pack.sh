@@ -84,8 +84,8 @@ echo "==> installing tarballs with --omit=dev (mimics container build)"
 npm install "${EXTAPI_TARBALL}" "${TARBALL_PATH}" --omit=dev --no-fund --no-audit --silent
 
 # Prisma 7's bare @prisma/client exports nothing until a client is generated
-# from a schema. trellis ships its schema in the tarball, and every consumer
-# generates against it as a build step (e.g. Skybber's `prisma:generate`).
+# from a schema. trellis ships its schema in the tarball, and every consuming
+# application generates against it as a build step (its own `prisma:generate`).
 # Reproduce that here so the static `@prisma/client` imports in the shipped
 # lambdas can load — otherwise this would fail in a way a real consumer never
 # hits. `prisma generate` reads only the schema; it needs no datasource/DB.
