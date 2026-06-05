@@ -3,6 +3,7 @@ import { S3Client, DeleteObjectsCommand, ListObjectsV2Command } from "@aws-sdk/c
 import { CognitoIdentityProviderClient, AdminDeleteUserCommand } from "@aws-sdk/client-cognito-identity-provider";
 import { SESClient, SendEmailCommand } from "@aws-sdk/client-ses";
 import { marshall } from "@aws-sdk/util-dynamodb";
+import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
 import { Logger } from "@aws-lambda-powertools/logger";
 import { Metrics, MetricUnit } from "@aws-lambda-powertools/metrics";
@@ -27,9 +28,12 @@ async function getPrisma(): Promise<PrismaClient> {
     port: string | number;
     dbname: string;
   };
-  prisma = new PrismaClient({
-    datasources: { db: { url: `postgresql://${username}:${encodeURIComponent(password)}@${host}:${port}/${dbname}?connection_limit=1` } },
+  // Prisma 7 removed the `datasources` constructor option; the connection URL
+  // is now supplied via a driver adapter.
+  const adapter = new PrismaPg({
+    connectionString: `postgresql://${username}:${encodeURIComponent(password)}@${host}:${port}/${dbname}?connection_limit=1`,
   });
+  prisma = new PrismaClient({ adapter });
   return prisma;
 }
 

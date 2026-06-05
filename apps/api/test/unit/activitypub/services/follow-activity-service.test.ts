@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach } from "vitest";
-import { Follow } from "@fedify/fedify";
+import { Follow } from "@fedify/fedify/vocab";
 import { FollowActivityService } from "../../../../src/lib/activitypub/services/follow-activity-service.js";
 import {
   createFedifyTestEnv,

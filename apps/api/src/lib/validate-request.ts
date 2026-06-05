@@ -41,7 +41,7 @@ export async function validateRequest<T>(
         error: new Response(
           JSON.stringify({
             error: "Validation failed",
-            details: error.errors.map((e) => ({
+            details: error.issues.map((e) => ({
               path: e.path.join("."),
               message: e.message,
             })),
@@ -108,7 +108,7 @@ export function validateQueryParams<T>(
         error: new Response(
           JSON.stringify({
             error: "Invalid query parameters",
-            details: error.errors.map((e) => ({
+            details: error.issues.map((e) => ({
               path: e.path.join("."),
               message: e.message,
             })),

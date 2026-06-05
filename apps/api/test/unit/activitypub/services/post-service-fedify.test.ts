@@ -6,7 +6,7 @@
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { Temporal } from "@js-temporal/polyfill";
-import { Create, Note, PUBLIC_COLLECTION } from "@fedify/fedify";
+import { Create, Note, PUBLIC_COLLECTION } from "@fedify/fedify/vocab";
 import { PostActivityServiceFedify } from "../../../../src/lib/activitypub/services/post-service-fedify.js";
 import {
   createFedifyTestEnv,

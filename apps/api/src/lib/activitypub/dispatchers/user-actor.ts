@@ -5,7 +5,8 @@
  * Handles actor document retrieval, key pair management, and actor URI resolution.
  */
 
-import type { Actor, ActorKeyPair } from "@fedify/fedify";
+import type { ActorKeyPair } from "@fedify/fedify";
+import type { Actor } from "@fedify/fedify/vocab";
 import type { Env } from "../../../env.js";
 import type { User } from "@prisma/client";
 import { DatabaseConnectionManager } from "../../database-connection-manager.js";

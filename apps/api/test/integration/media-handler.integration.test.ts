@@ -27,6 +27,7 @@ import {
   getDatabaseUrlWithFallback,
 } from "../utils/test-auth.js";
 import { PrismaClient } from "@prisma/client";
+import { PrismaPg } from "@prisma/adapter-pg";
 
 describe("MediaHandler Integration Tests", () => {
   let handler: MediaHandler;
@@ -49,11 +50,7 @@ describe("MediaHandler Integration Tests", () => {
     }
 
     prisma = new PrismaClient({
-      datasources: {
-        db: {
-          url: databaseUrl,
-        },
-      },
+      adapter: new PrismaPg({ connectionString: databaseUrl }),
     });
   });
 

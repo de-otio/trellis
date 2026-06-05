@@ -1049,8 +1049,10 @@ export const adminRoutes: Route[] = [
 
           const UpdateToggleEnabledSchema = z.object({
             enabled: z.boolean({
-              required_error: "enabled is required",
-              invalid_type_error: "enabled must be a boolean",
+              error: (issue) =>
+                issue.input === undefined
+                  ? "enabled is required"
+                  : "enabled must be a boolean",
             }),
           });
 

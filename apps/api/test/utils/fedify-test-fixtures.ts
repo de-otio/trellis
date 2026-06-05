@@ -5,7 +5,7 @@
  * Uses @fedify/testing for mock actors and activities.
  */
 
-import type { Actor } from "@fedify/fedify";
+import type { Actor } from "@fedify/fedify/vocab";
 import { createMockEnv } from "./mock-env.js";
 import type { Env } from "../../src/env.js";
 

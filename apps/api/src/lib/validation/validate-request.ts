@@ -39,7 +39,6 @@ export function validateBody<T extends ZodSchema>(
       {
         code: "invalid_type",
         expected: "object",
-        received: data === null ? "null" : "undefined",
         path: [],
         message: "Request body is required",
       },
@@ -62,7 +61,6 @@ export function validateBody<T extends ZodSchema>(
         {
           code: "invalid_type",
           expected: "object",
-          received: typeof data,
           path: [],
           message: "Request body contains invalid data types",
         },
@@ -72,7 +70,7 @@ export function validateBody<T extends ZodSchema>(
     if (error instanceof ZodError) {
       const validationError = new ValidationError(
         "Validation failed",
-        error.errors,
+        error.issues,
       );
       throw validationError;
     }
@@ -105,7 +103,7 @@ export function validateQuery<T extends ZodSchema>(
     if (error instanceof ZodError) {
       const validationError = new ValidationError(
         "Query parameter validation failed",
-        error.errors,
+        error.issues,
       );
       throw validationError;
     }
@@ -131,7 +129,6 @@ export function validatePathParam<T extends ZodSchema>(
       {
         code: "invalid_type",
         expected: "string",
-        received: value === null ? "null" : typeof value,
         path: [],
         message: `Path parameter must be a string, received ${value === null ? "null" : typeof value}`,
       },
@@ -144,7 +141,7 @@ export function validatePathParam<T extends ZodSchema>(
     if (error instanceof ZodError) {
       const validationError = new ValidationError(
         "Path parameter validation failed",
-        error.errors,
+        error.issues,
       );
       throw validationError;
     }

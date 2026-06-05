@@ -17,6 +17,7 @@ import {
   type TestUser,
 } from "../utils/test-auth.js";
 import { PrismaClient } from "@prisma/client";
+import { PrismaPg } from "@prisma/adapter-pg";
 import { FeedHandler } from "../../src/lib/feed-handler.js";
 import type { Env } from "../../src/env.js";
 import type { TrellisRequestContext } from "../../src/lib/request-context.js";
@@ -45,11 +46,7 @@ describe("Feed Media E2E Integration Tests", () => {
 
     // Initialize Prisma client
     prisma = new PrismaClient({
-      datasources: {
-        db: {
-          url: databaseUrl,
-        },
-      },
+      adapter: new PrismaPg({ connectionString: databaseUrl }),
     });
 
     // Create test user

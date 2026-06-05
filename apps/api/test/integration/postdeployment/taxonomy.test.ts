@@ -18,6 +18,7 @@
  */
 
 import { PrismaClient } from "@prisma/client";
+import { PrismaPg } from "@prisma/adapter-pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { TaxonomyHandler } from "../../../src/lib/taxonomy-handler.js";
 // seedTaxonomyForTenant was provided by the vertical extension (the vertical extension).
@@ -118,11 +119,7 @@ describe.skip("Taxonomy Integration Tests", () => {
     processedUrl = ensureSslConnection(processedUrl);
 
     prisma = new PrismaClient({
-      datasources: {
-        db: {
-          url: processedUrl,
-        },
-      },
+      adapter: new PrismaPg({ connectionString: processedUrl }),
     });
 
     // Test connection with retry

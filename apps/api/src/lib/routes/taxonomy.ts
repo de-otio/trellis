@@ -224,11 +224,11 @@ export const taxonomyRoutes: Route[] = [
         try {
           validatedParams = searchQuerySchema.parse(params);
         } catch (error: any) {
-          if (error.errors) {
+          if (error.issues) {
             return new Response(
               JSON.stringify({
                 error: "Invalid query parameters",
-                details: error.errors.map((e: any) => ({
+                details: error.issues.map((e: any) => ({
                   path: e.path.join("."),
                   message: e.message,
                 })),

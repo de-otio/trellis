@@ -17,6 +17,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PrismaClient } from "@prisma/client";
+import { PrismaPg } from "@prisma/adapter-pg";
 import { EntityGeoRepository } from "../../src/lib/geo/entity-geo-repository.js";
 
 const TEST_DB_URL = process.env.GEO_TEST_DATABASE_URL;
@@ -51,7 +52,9 @@ suite("EntityGeoRepository (PostGIS)", () => {
   }
 
   beforeAll(async () => {
-    prisma = new PrismaClient({ datasources: { db: { url: TEST_DB_URL } } });
+    prisma = new PrismaClient({
+      adapter: new PrismaPg({ connectionString: TEST_DB_URL! }),
+    });
     repo = new EntityGeoRepository(prisma);
 
     // Clean slate (cascade clears any entity_location rows for these tenants).

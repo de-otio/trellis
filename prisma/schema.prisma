@@ -4,11 +4,10 @@ generator client {
 }
 
 datasource db {
-  provider  = "postgresql"
-  url       = env("DATABASE_URL")
-  directUrl = env("DIRECT_DATABASE_URL")
-  // Note: Prisma 7 will require moving url/directUrl to prisma.config.ts
-  // This schema is correct for Prisma 5.x
+  provider = "postgresql"
+  // Prisma 7: url/directUrl moved out of the datasource block. The migration
+  // connection lives in apps/api/prisma.config.ts; the runtime connection is
+  // supplied via the PrismaPg driver adapter (lib/database-connection-manager.ts).
 }
 
 // Generic Entity model (replaces Dog model)

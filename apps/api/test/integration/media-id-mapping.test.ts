@@ -13,6 +13,7 @@
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { PrismaClient } from "@prisma/client";
+import { PrismaPg } from "@prisma/adapter-pg";
 
 // Environment check - MUST be first
 const ENVIRONMENT = process.env.ENVIRONMENT || "dev";
@@ -31,11 +32,7 @@ describe("Media ID Mapping Integration", () => {
 
   beforeAll(async () => {
     prisma = new PrismaClient({
-      datasources: {
-        db: {
-          url: process.env.DATABASE_URL,
-        },
-      },
+      adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL! }),
     });
 
     // Create test user

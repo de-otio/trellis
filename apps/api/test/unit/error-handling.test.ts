@@ -93,7 +93,8 @@ describe("Error Handling", () => {
         schema.parse({ name: "", age: -1 });
       } catch (error) {
         if (error instanceof z.ZodError) {
-          expect(error.errors.length).toBeGreaterThan(0);
+          // zod 4 renamed `.errors` → `.issues`
+          expect(error.issues.length).toBeGreaterThan(0);
           // Errors should be specific but not expose internal details
         }
       }

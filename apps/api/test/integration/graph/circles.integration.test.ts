@@ -18,6 +18,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PrismaClient } from "@prisma/client";
+import { PrismaPg } from "@prisma/adapter-pg";
 import { runWithTenantContext, tenantId } from "@de-otio/saas-foundation/tenant";
 import { CircleOps } from "../../../src/lib/graph/postgres/circles.js";
 
@@ -106,12 +107,26 @@ suite("CircleOps dual-gated visibility (Postgres)", () => {
   }
 
   beforeAll(async () => {
-    prisma = new PrismaClient({ datasources: { db: { url: TEST_DB_URL } } });
+    prisma = new PrismaClient({
+      adapter: new PrismaPg({ connectionString: TEST_DB_URL! }),
+    });
     ops = new CircleOps(prisma);
 
     // Clean any leftover from a prior run (re-runnable without a manual reset).
+    // `relationships` has no FK to `users`, so deleting the users below does
+    // not cascade to relationship rows; clear them explicitly or the
+    // @@unique([userId, targetType, targetId]) trips on a rerun.
+    // Cross-tenant fixtures from the "no cross-tenant leakage" test have no
+    // cascade from the tenant deletes below, so clear them explicitly too
+    // (FK-safe order: post-subject → post → relationship → entity → user).
+    await prisma.postSubject.deleteMany({ where: { postId: "p-other-tenant" } });
+    await prisma.post.deleteMany({ where: { id: "p-other-tenant" } });
+    await prisma.entity.deleteMany({ where: { id: "circ-other-ent" } });
+    await prisma.relationship.deleteMany({
+      where: { userId: { in: [VIEWER, AUTHOR_CLOSE, STRANGER] } },
+    });
     await prisma.user.deleteMany({
-      where: { id: { in: [VIEWER, AUTHOR_CLOSE, STRANGER] } },
+      where: { id: { in: [VIEWER, AUTHOR_CLOSE, STRANGER, "circ-other-author"] } },
     });
     await prisma.tenant.deleteMany({
       where: {

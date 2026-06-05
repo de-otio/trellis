@@ -13,6 +13,7 @@
 
 import { execSync } from "node:child_process";
 import { PrismaClient } from "@prisma/client";
+import { PrismaPg } from "@prisma/adapter-pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const TEST_DB_URL =
@@ -22,7 +23,9 @@ const TEST_DB_URL =
 let prisma: PrismaClient;
 
 beforeAll(async () => {
-  prisma = new PrismaClient({ datasources: { db: { url: TEST_DB_URL } } });
+  prisma = new PrismaClient({
+    adapter: new PrismaPg({ connectionString: TEST_DB_URL }),
+  });
   await prisma.$connect();
 });
 
@@ -212,21 +215,26 @@ describe("Cascade delete from Tenant", () => {
 describe("Migration is idempotent", () => {
   it("re-running prisma migrate deploy is a no-op", async () => {
     const path = await import("node:path");
-    // Trellis monorepo root: from test file location, 5 levels up.
-    //   apps/api/test/integration/schema/<file>.ts → trellis/
-    const trellisRoot = path.resolve(import.meta.dirname, "..", "..", "..", "..", "..");
-    const out = execSync(
-      "npx prisma migrate deploy --schema prisma/schema.prisma",
-      {
-        env: {
-          ...process.env,
-          DATABASE_URL: TEST_DB_URL,
-          DIRECT_DATABASE_URL: TEST_DB_URL,
-        },
-        cwd: trellisRoot,
-        encoding: "utf-8",
+    // Prisma 7 moved datasource config into apps/api/prisma.config.ts (which
+    // declares the schema path), so the command must run from apps/api so the
+    // config is discovered — passing --schema is no longer enough.
+    //   apps/api/test/integration/schema/<file>.ts → apps/api/
+    const apiRoot = path.resolve(import.meta.dirname, "..", "..", "..");
+    // prisma.config.ts maps shadowDatabaseUrl ← DIRECT_DATABASE_URL, and Prisma 7
+    // rejects a shadow DB equal to the main DB. `migrate deploy` never uses the
+    // shadow DB, but the config is validated regardless, so point DIRECT at a
+    // distinct shadow database derived from the main URL.
+    const shadowUrl = new URL(TEST_DB_URL);
+    shadowUrl.pathname = `${shadowUrl.pathname.replace(/\/$/, "")}_shadow`;
+    const out = execSync("npx prisma migrate deploy", {
+      env: {
+        ...process.env,
+        DATABASE_URL: TEST_DB_URL,
+        DIRECT_DATABASE_URL: shadowUrl.toString(),
       },
-    );
+      cwd: apiRoot,
+      encoding: "utf-8",
+    });
     // "No pending migrations" or equivalent — Prisma's exact wording varies.
     expect(out).toMatch(
       /No pending migrations|All migrations have been successfully applied/,

@@ -67,8 +67,11 @@ export async function fkDeleteAction(
   table: string,
   column: string,
 ): Promise<string | null> {
+  // confdeltype is Postgres's internal single-byte "char" type. The Prisma 7
+  // PrismaPg (pg) driver adapter cannot deserialize that type, so cast it to
+  // text — the value is still a single character (a/r/c/n/d).
   const rows = await prisma.$queryRawUnsafe<{ confdeltype: string }[]>(
-    `SELECT c.confdeltype
+    `SELECT c.confdeltype::text AS confdeltype
        FROM pg_constraint c
        JOIN pg_class t   ON t.oid = c.conrelid
        JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY (c.conkey)

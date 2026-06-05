@@ -75,7 +75,7 @@ export const PercentageSchema = z.number().int().min(0).max(100);
  * - Must be one of: US, EU, CN
  */
 export const RegionSchema = z.enum(["US", "EU", "CN"], {
-  errorMap: () => ({ message: "Region must be one of: US, EU, CN" }),
+  error: "Region must be one of: US, EU, CN",
 });
 
 /**
@@ -94,10 +94,8 @@ export const FeatureToggleCategorySchema = z.enum(
     "EXPERIMENTAL",
   ],
   {
-    errorMap: () => ({
-      message:
-        "Category must be one of: AUTHENTICATION, FEATURES, PERFORMANCE, SECURITY, SERVICE_PROVIDER, EXPERIMENTAL",
-    }),
+    error:
+      "Category must be one of: AUTHENTICATION, FEATURES, PERFORMANCE, SECURITY, SERVICE_PROVIDER, EXPERIMENTAL",
   },
 );
 
@@ -110,9 +108,7 @@ export const FeatureToggleCategorySchema = z.enum(
 export const FeatureToggleStateSchema = z.enum(
   ["ENABLED", "DISABLED", "GRADUAL"],
   {
-    errorMap: () => ({
-      message: "State must be one of: ENABLED, DISABLED, GRADUAL",
-    }),
+    error: "State must be one of: ENABLED, DISABLED, GRADUAL",
   },
 );
 
@@ -125,10 +121,8 @@ export const FeatureToggleStateSchema = z.enum(
 export const TargetingTypeSchema = z.enum(
   ["PERCENTAGE", "USER_LIST", "USER_SEGMENT", "REGION", "ALL"],
   {
-    errorMap: () => ({
-      message:
-        "Targeting type must be one of: PERCENTAGE, USER_LIST, USER_SEGMENT, REGION, ALL",
-    }),
+    error:
+      "Targeting type must be one of: PERCENTAGE, USER_LIST, USER_SEGMENT, REGION, ALL",
   },
 );
 

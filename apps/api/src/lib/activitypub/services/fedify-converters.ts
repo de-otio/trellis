@@ -6,7 +6,7 @@
  * but all ActivityPub serialization and creation uses Fedify types.
  */
 
-import { Create, Note } from "@fedify/fedify";
+import { Create, Note } from "@fedify/fedify/vocab";
 import type { ActivityStreamsActivity } from "../activity-service.js";
 
 /**

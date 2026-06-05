@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { OrderedCollection } from "@fedify/fedify";
+import { OrderedCollection } from "@fedify/fedify/vocab";
 import { CustomAudienceService } from "../../../../src/lib/activitypub/audience-service.js";
 import {
   createFedifyTestEnv,

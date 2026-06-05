@@ -13,13 +13,16 @@
  */
 
 import { PrismaClient } from "@prisma/client";
+import { PrismaPg } from "@prisma/adapter-pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { describeColumn, fkDeleteAction, TEST_DB_URL } from "./_schema-helpers";
 
 let prisma: PrismaClient;
 
 beforeAll(async () => {
-  prisma = new PrismaClient({ datasources: { db: { url: TEST_DB_URL } } });
+  prisma = new PrismaClient({
+    adapter: new PrismaPg({ connectionString: TEST_DB_URL }),
+  });
   await prisma.$connect();
 });
 

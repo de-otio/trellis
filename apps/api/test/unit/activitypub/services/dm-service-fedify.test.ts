@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { Create, Note } from "@fedify/fedify";
+import { Create, Note } from "@fedify/fedify/vocab";
 import { Temporal } from "@js-temporal/polyfill";
 import { DmServiceFedify } from "../../../../src/lib/activitypub/services/dm-service-fedify.js";
 import {
