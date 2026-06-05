@@ -22,9 +22,15 @@ export default defineConfig({
   },
   datasource: {
     url: process.env.DATABASE_URL ?? "",
-    // Prisma 7 removed datasource.directUrl. The shadow database used by
-    // `migrate dev` is the direct (non-pooled) connection; map the previous
-    // DIRECT_DATABASE_URL onto it.
-    shadowDatabaseUrl: process.env.DIRECT_DATABASE_URL,
+    // The shadow database is only used by `migrate dev` to diff migrations, and
+    // Prisma 7 rejects a shadow that equals the main database. Only set it when
+    // DIRECT_DATABASE_URL points at a DIFFERENT database (local `migrate dev`
+    // against a dedicated shadow DB). In CI/prod, `migrate deploy` runs with
+    // DIRECT_DATABASE_URL == DATABASE_URL and needs no shadow — leaving it unset
+    // avoids the "shadow appears to be the same as the main database" error.
+    ...(process.env.DIRECT_DATABASE_URL &&
+    process.env.DIRECT_DATABASE_URL !== process.env.DATABASE_URL
+      ? { shadowDatabaseUrl: process.env.DIRECT_DATABASE_URL }
+      : {}),
   },
 });
