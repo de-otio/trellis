@@ -214,6 +214,10 @@ jobs:
       # `db push` also generates the Prisma client, which the Postgres graph
       # adapter needs at runtime (PostgresGraphService instantiates it).
       - name: Push schema
+        # Run from apps/api so Prisma 7 discovers prisma.config.ts (which holds
+        # the datasource url since the Prisma 6→7 move); from the repo root, db
+        # push loads the bare schema and errors "datasource.url is required".
+        working-directory: apps/api
         run: npx prisma db push
         env:
           DATABASE_URL: postgresql://trellis:trellis_test_password@localhost:5432/trellis_test

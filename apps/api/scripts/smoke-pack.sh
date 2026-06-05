@@ -45,6 +45,20 @@ fi
 
 echo "==> packed: ${TARBALL_PATH}"
 
+# @de-otio/trellis depends on @de-otio/trellis-extension-api. In a coupled
+# release the two are bumped together, so the new extension-api version is not
+# on npm yet when this PR runs. Pack it locally and install it alongside the
+# trellis tarball so the smoke test is self-contained (saas-foundation /
+# vestibulum still resolve from the registry — they publish first).
+echo "==> packing @de-otio/trellis-extension-api from ${REPO_ROOT}/packages/extension-api"
+( cd "${REPO_ROOT}/packages/extension-api" && npm pack --silent --pack-destination "${PACK_DIR}" >/dev/null )
+EXTAPI_TARBALL="$(find "${PACK_DIR}" -name 'de-otio-trellis-extension-api-*.tgz' -type f | head -n1)"
+if [ -z "${EXTAPI_TARBALL}" ] || [ ! -f "${EXTAPI_TARBALL}" ]; then
+  echo "::error::Could not locate packed extension-api tarball under ${PACK_DIR}"
+  exit 1
+fi
+echo "==> packed extension-api: ${EXTAPI_TARBALL}"
+
 # Test fixtures (the dummy-target example-extension and the whole test/ tree)
 # must never ship. The published `files` list is dist/prisma/src/lambda, so
 # this asserts the boundary holds even if `files` is edited later.
@@ -64,9 +78,19 @@ trap 'rm -rf "${CONSUMER_DIR}" "${PACK_DIR}"' EXIT
 cd "${CONSUMER_DIR}"
 npm init -y >/dev/null
 
-echo "==> installing tarball with --omit=dev (mimics container build)"
-# --no-fund / --no-audit keep output tight in CI logs.
-npm install "${TARBALL_PATH}" --omit=dev --no-fund --no-audit --silent
+echo "==> installing tarballs with --omit=dev (mimics container build)"
+# --no-fund / --no-audit keep output tight in CI logs. Install the local
+# extension-api tarball first so it satisfies trellis's dependency on it.
+npm install "${EXTAPI_TARBALL}" "${TARBALL_PATH}" --omit=dev --no-fund --no-audit --silent
+
+# Prisma 7's bare @prisma/client exports nothing until a client is generated
+# from a schema. trellis ships its schema in the tarball, and every consumer
+# generates against it as a build step (e.g. Skybber's `prisma:generate`).
+# Reproduce that here so the static `@prisma/client` imports in the shipped
+# lambdas can load — otherwise this would fail in a way a real consumer never
+# hits. `prisma generate` reads only the schema; it needs no datasource/DB.
+echo "==> generating Prisma client from the shipped schema (mimics consumer build)"
+npx -y prisma@7 generate --schema node_modules/@de-otio/trellis/prisma/schema.prisma >/dev/null
 
 echo "==> requiring every published runtime entry point"
 # We require:
