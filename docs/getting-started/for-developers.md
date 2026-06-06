@@ -33,6 +33,7 @@ Create `.env` in the repo root (gitignored):
 
 ```env
 DATABASE_URL=postgresql://trellis:trellis_dev_password@localhost:5432/trellis_dev
+DIRECT_DATABASE_URL=postgresql://trellis:trellis_dev_password@localhost:5432/trellis_dev
 DYNAMODB_ENDPOINT=http://localhost:8000
 DYNAMODB_TABLE=dev-trellis
 SQS_ENDPOINT=http://localhost:4566
@@ -63,4 +64,4 @@ npm run prisma:migrate:dev -- --name describe-your-change
 npm run prisma:generate
 ```
 
-For zero-downtime schema changes, use expand-contract. See [migrations guide](local-setup.md).
+For zero-downtime schema changes, use expand-contract. See the [migrations guide](../guides/migrations.md).

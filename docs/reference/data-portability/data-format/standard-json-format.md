@@ -36,8 +36,8 @@ format is human-readable and suitable for general-purpose use.
 {
   "id": "ckv8x2p9b0000qz8h3f2k1m4n",
   "email": "user@example.com",
-  "did": "actor-id",
-  "handle": "user@instance.example",
+  "did": null,
+  "handle": "alice",
   "createdAt": "2024-01-01T00:00:00.000Z"
 }
 ```
@@ -46,8 +46,10 @@ format is human-readable and suitable for general-purpose use.
 
 - `id` (string, required): user ID (CUID in the Trellis Prisma schema)
 - `email` (string, required): user's email address
-- `did` (string, optional): ActivityPub actor ID (present when the account is federated)
-- `handle` (string, optional): ActivityPub username/handle (present when the account is federated)
+- `did` (string \| null): reserved decentralized-identifier field. The current
+  `User` model has no `did` column, so this is **always `null`** in exports.
+- `handle` (string \| null): the user's canonical handle (the `User.handle`
+  field). In practice always present, since `handle` is non-null on the model.
 - `createdAt` (string, ISO 8601): account creation timestamp
 
 ---

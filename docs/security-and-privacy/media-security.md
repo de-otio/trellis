@@ -23,35 +23,42 @@ trusted.
 - **String fields are sanitized.** Text fields are sanitized, length-bounded, and
   validated as UTF-8, with HTML and script tags stripped, so metadata cannot
   carry an injection payload or be used to exhaust resources.
-- **GPS coordinates are range-checked.** Latitude must be within -90 to 90,
-  longitude within -180 to 180, and altitude within a plausible range; values
-  that are out of range, infinite, or not a number are rejected. This applies to
-  both image and video metadata.
-- **Dates are bounded.** Timestamps are validated as ISO 8601, rejected if they
-  fall outside a plausible window, and normalized to UTC for storage.
-- **Keyword lists are bounded and de-duplicated**, with per-keyword length limits
-  and non-string values rejected.
+- **GPS coordinates are range-checked.** Latitude must be within -90 to 90 and
+  longitude within -180 to 180; values that are out of range, infinite, or not a
+  number are dropped. (Altitude is not extracted.)
+- **Dates are bounded.** Timestamps are validated, rejected if they fall outside
+  a plausible window, and normalized to an ISO 8601 UTC string for storage.
+- **Keyword lists are bounded**, with a maximum count, per-keyword length
+  limits, and non-string values dropped.
 
 Metadata sizes are capped so that a single upload cannot store an unbounded
 amount of metadata.
 
 ## Location privacy by default
 
-Location is the most sensitive metadata, and Trellis hides it by default.
+Location is the most sensitive metadata, and the data model hides it by default.
 
-- **Hidden unless the user opts in.** Location data is not visible until the user
-  takes an explicit action to make it visible, for both image and video metadata.
-- **Clear indication.** The interface indicates clearly when location is visible.
-- **Access to location is logged**, so that exposure of location data leaves an
-  audit trail.
+- **Hidden unless the user opts in.** The `locationVisible` flag defaults to
+  `false`. A user must take an explicit action to set it `true`.
+- **Clear indication.** The consuming application's UI is expected to indicate
+  clearly when location is visible.
+- **Visibility changes are audited.** Updates to the visibility flags are
+  written to the audit log (`media_metadata_visibility_updated`), so changes to
+  location exposure leave an audit trail.
+
+> **Flag — the visibility flags are not yet enforced as response filters.** The
+> media-details endpoint is owner-only and returns the full metadata to the
+> owner along with both flags. It does not currently strip location or other
+> fields based on the flags; flag-driven filtering for shared/non-owner views is
+> a design intent that is not wired into the current endpoint.
 
 ## Access control
 
-- Only the media owner can view its metadata.
-- Only the media owner can change its privacy settings.
+- The metadata-details and visibility endpoints are owner-only.
+- Only the media owner can change the visibility flags.
 - Metadata is not exposed through public APIs.
-- Ownership is checked on every metadata endpoint, and metadata endpoints require
-  an authenticated session.
+- Ownership is verified on these endpoints, which require an authenticated
+  session.
 
 ## Data minimization
 
@@ -71,10 +78,9 @@ security checks.
 Metadata such as location is personal data, and Trellis handles it under the same
 rights as other personal data:
 
-- It is included in a user's data export, with privacy settings respected.
-- It can be deleted — either with the media or on its own — and deletion is
-  verified and logged.
-- When media is deleted, its metadata is deleted with it.
+- It is included in a user's data export.
+- When media is deleted, its metadata is deleted with it. Media deletions are
+  written to the audit log.
 
 See [Compliance](compliance.md) for how these rights map to regulatory
 obligations.

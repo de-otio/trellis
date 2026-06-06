@@ -39,10 +39,12 @@ A post has a `PostRadius` (`WHISPER` → tier 0 only, `NORMAL` → 0–1, `LOUD`
 ```
 Post p is visible to viewer v iff:
 
-  (∃ entity e:  p -[:ABOUT]-> e  AND  v -[:RELATES_TO {tier}]-> e  AND  tier ≤ radius(p))
+  (∃ entity e:  about(p, e)  AND  relates(v, e, tier)  AND  tier ≤ radius(p))
   OR
-  (v -[:RELATES_TO {tier}]-> author(p)  AND  tier ≤ radius(p))
+  (relates(v, author(p), tier)  AND  tier ≤ radius(p))
 ```
+
+where `about(p, e)` is a row in `post_subjects` and `relates(v, x, tier)` is a row in `relationships`. The visibility query is a SQL join across `relationships`, `post_subjects`, and `posts` (see `getVisiblePostIds` in `postgres/circles.ts`).
 
 On a multi-subject post the **closest relationship wins** — a post tagged with both a tier-0 entity and a tier-2 entity appears in the inner-circle view. The entity path is primary; the author path is the fallback for posts without an entity subject.
 
@@ -50,79 +52,65 @@ On a multi-subject post the **closest relationship wins** — a post tagged with
 
 - **Glance mode** — one most-recent item per entity in a tier, prioritized by recency. Built as a two-step query (entities in tier → latest post per entity).
 - **Depth mode** — per-entity drill-in (`/circles/depth/:entityId`), returns all that entity's recent posts for marking caught-up.
-- **Circle status** — unseen counts per entity within a tier, computed by parallel graph queries and stored in `CircleReadState` on mark-as-read.
+- **Circle status** — unseen counts per entity within a tier, computed from the relationship/post tables and stored in `circle_read_states` on mark-as-read.
 
-## Hybrid Data Layer
+## One Database: the Graph Lives in Postgres
 
-Neither database is a strict subset of the other. Each stores what it's best at.
+The social graph is **not** a separate graph database. It is served from the same PostgreSQL instance that holds everything else, through a `GraphService` interface implemented by `PostgresGraphService`. The "edges" are ordinary relational tables; traversals are SQL joins and recursive CTEs.
 
-| Data | Postgres | Graph DB (Neo4j AuraDB) |
-|------|----------|--------------|
-| User accounts, auth, profiles | source of truth | — |
-| Entity profiles, metadata, media | source of truth | `:Entity` node (id, entityType, category, lifeStage, lat, lng) |
-| Posts, comments, sentiments | source of truth | `:Post` reference node (id, authorId, radius, createdAt) |
-| Taxonomy, DMs, notifications, groups, B2B | source of truth | — |
-| `EntityOwnership` | source of truth | dual-written as `:User-[:OWNS {role}]->:Entity` |
-| `PostSubject` | source of truth | dual-written as `:Post-[:ABOUT {isPrimary}]->:Entity` |
-| User→User / User→Entity relationships (scored) | relationship mirror (scoring history) | **primary** — all tier / visibility queries |
-| Entity→Entity relationships (typed) | relationship mirror | **primary** — discovery traversals |
-| Circle membership, scoring signals | — | **derived** (computed from edge score) |
+| Concept | Postgres table | Notes |
+|---------|----------------|-------|
+| User accounts, auth, profiles | `users` | source of truth |
+| Entity profiles, metadata, media | `entities` | source of truth |
+| Posts, comments, sentiments | `posts`, … | source of truth |
+| Owns edge | `entity_ownerships` | `userId` / `entityId` / `role` |
+| About edge (post→entity) | `post_subjects` | `postId` / `entityId` / `isPrimary` |
+| Scored relationship (user→user / user→entity) | `relationships` | `computedScore`, `manualScore`, `tier`, `connectionMethod`, `interactionCount`, `lastInteractionAt`, `reciprocated`, `signals` |
+| Typed entity→entity relationship | `entity_relationships` | `type`, `status` (`PENDING`/`CONFIRMED`/`REJECTED`) |
+| Circle config / read state | `circle_configs`, `circle_read_states` | per-user tier thresholds + mark-read |
+| Behavioral signals (retention-bound) | `interaction_events` | append-only, `expiresAt`-pruned |
 
-### Dual-Write Contract
+There is **no** dual-write, no second store to mirror, and no reconciliation between stores — there is one transactional database. (A dedicated graph backend was prototyped and removed; `GRAPH_BACKEND=neo4j` now throws `"no longer supported"`. The `GraphService` interface is retained so a dedicated backend could be reintroduced behind it, but the only shipped implementation is Postgres.)
 
-Postgres is always written first. The graph is updated immediately after, best-effort.
+The geo side is handled by **PostGIS** in the same database: entity locations live in `entity_location`, written through `syncEntity`, and proximity discovery uses spatial SQL.
+
+### Write Path
+
+Handlers write the relational rows directly through `PostgresGraphService`. There is one transaction boundary, so there is no eventual-consistency window between a "primary" graph store and a Postgres mirror:
 
 ```
-1. Write Postgres row (source of truth, transactional)
-2. Call GraphService to sync the edge(s)
-3. On graph-write failure: enqueue a retry message to SQS (graph-sync-retry)
-4. Reconciliation service rebuilds the graph from Postgres if needed
+1. Handler writes the domain row (user / entity / post) via Prisma.
+2. Handler calls the GraphService edge method (e.g. syncOwnership,
+   syncPostSubjects, createRelationship), which writes the edge table
+   in the same Postgres database.
 ```
 
-Consistency is **eventually consistent** with seconds of acceptable staleness for circle views. Critical ownership changes block on both writes succeeding. The graph is derivable from Postgres — a wipe is recoverable.
+The `sync*` method names survive from the earlier two-store design, but they now write Postgres edge tables directly. Node syncs (`syncUser` / `syncEntity` / `syncPost`) are largely no-ops because those rows already exist in their own tables; `syncEntity` additionally maintains the PostGIS `entity_location` row. Node removals (`removeUser` / `removeEntity` / `removePost`) delete the non-cascading edge rows (`relationships`, `entity_relationships`) in application code to reproduce the old detach-delete scope.
 
-## Graph Schema (Cypher)
+## Relational Schema
 
-### Nodes
+### Edge tables
 
-```cypher
-(:User   {id, role})                    // no PII
-(:Entity {id, entityType, name, category, lifeStage, lat, lng})
-(:Post   {id, authorId, radius, createdAt})
-```
+The graph "edges" are these Postgres tables (see `prisma/schema.prisma`):
 
-### Edges
+- **`relationships`** — a scored user→target edge. `targetType` is polymorphic (`"user"` | `"entity"`); columns: `computedScore`, `manualScore` (nullable override), `tier` (0–3), `interactionCount`, `lastInteractionAt`, `connectionMethod`, `reciprocated`, and a JSON `signals` breakdown. Unique on `(userId, targetType, targetId)`.
+- **`entity_relationships`** — a typed, unscored entity→entity edge with `type` (`EntityRelationshipType`, e.g. `PACK_MATE`, `SIBLING`) and `status` (`PENDING` | `CONFIRMED` | `REJECTED`). Unique on `(entityId, relatedEntityId, type)`.
+- **`entity_ownerships`** — the owns edge: `userId` / `entityId` / `role` / `status`.
+- **`post_subjects`** — the about edge: `postId` / `entityId` / `isPrimary`.
 
-```cypher
-(:User)-[:RELATES_TO   {score, computedScore, manualScore, tier,
-                        interactionCount, lastInteractionAt,
-                        connectionMethod}]->(:User|:Entity)
-(:User)-[:OWNS         {role, since}]->(:Entity)
-(:Post)-[:ABOUT        {isPrimary}]->(:Entity)
-
-// Entity↔entity (typed, unscored — types shown are illustrative; a domain
-// extension registers the set appropriate to its vertical)
-(:Entity)-[:RELATED]->(:Entity)
-(:Entity)-[:SIBLING]->(:Entity)
-(:Entity)-[:PEER      {since}]->(:Entity)
-(:Entity)-[:COMPANION {since}]->(:Entity)
-(:Entity)-[:PARENT]->(:Entity)
-(:Entity)-[:OFFSPRING]->(:Entity)
-```
-
-Extensions can register additional entity-relationship types via `entityRelationshipTypes` (see Extension Hooks below).
+Node data (users, entities, posts) lives in its own tables; the graph layer references these by id rather than duplicating them.
 
 ### Indexes
 
-```cypher
-CREATE INDEX user_id   FOR (u:User)   ON (u.id);
-CREATE INDEX entity_id FOR (e:Entity) ON (e.id);
-CREATE INDEX post_id   FOR (p:Post)   ON (p.id);
-CREATE INDEX entity_type_category  FOR (e:Entity) ON (e.entityType, e.category);
-CREATE INDEX entity_type_lifestage FOR (e:Entity) ON (e.entityType, e.lifeStage);
-CREATE POINT INDEX entity_location FOR (e:Entity) ON (e.location);
-CREATE INDEX post_created FOR (p:Post) ON (p.createdAt);
-```
+The edge tables are indexed for both forward and reverse traversal, for example on `relationships`:
+
+- `(userId)` — a user's relationships (forward)
+- `(targetType, targetId)` and `(targetId)` — who relates to X (reverse: friends-of-friends, recompute)
+- `(userId, tier)` — circle-tier membership
+
+`entity_relationships` is indexed on `(entityId, type, status)` and `(relatedEntityId, type, status)` for list-by-entity and pending-by-owner queries. All edge tables carry a `tenantId` index for tenant scoping.
+
+Extensions can register additional entity-relationship type names via `entityRelationshipTypes` (see Extension Hooks below).
 
 ## Scoring Engine
 
@@ -136,12 +124,12 @@ computedScore = base(connectionMethod)
               − decay(age_since_last_interaction)
 ```
 
-- **Connection method** — seeded score based on how the edge was created (`code`, `discovery`, `imported`, `inferred`).
-- **Interaction signals** — posts viewed, comments, reactions, DMs. Accumulated on the edge.
+- **Connection method** — seeded score based on how the edge was created. The four methods and their base contributions are `code` (0.7), `import` (0.5), `suggestion` (0.3), and `discovery` (0.3).
+- **Interaction signals** — posts viewed, comments, reactions, shares, DMs. Accumulated on the `relationships` row (counts plus a JSON `signals` breakdown).
 - **Extension signals** — extensions register `RelationshipSignalProvider`s (e.g. category match, shared activities). Capped per provider to bound influence.
-- **Decay** — linear decay over inactivity window; owned-entity edges don't decay.
+- **Decay** — exponential decay by half-life: 60 days for user→user edges, 120 days for user→entity edges. Owned-entity edges are exempt — they stay pinned at score 1.0 in tier 0.
 
-The scoring engine runs as a background job (recompute on signal, batched), not inline per request. Tier is derived from score at query time using `CircleConfig` thresholds.
+Tier is derived from score using fixed thresholds (tier 0 ≥ 0.7, tier 1 ≥ 0.4, tier 2 ≥ 0.15, tier 3 ≥ 0.0). The scoring engine is pure (`scoring-engine.ts`); recompute and decay run as background passes over a user's relationships (`recomputeScores` / `applyDecay`), not inline per request.
 
 ## Extension Hooks
 
@@ -165,19 +153,17 @@ Extensions access the graph through `ExtensionGraphService` — a **read-only** 
 | `entity-relationship-handler` | `POST/PUT/DELETE/GET /api/entity-relationships` (includes confirm/reject) |
 | `connection-code-handler` | `POST/GET/DELETE /api/connection-codes` |
 
-**Dual-write sync points:**
-- `POST /api/posts` → write Postgres row, sync `PostSubject` edges to the graph.
-- `POST/DELETE /api/entity-ownerships` → write Postgres, sync `:User-[:OWNS]->:Entity` edges.
-- `PUT /api/entity-relationships/:id/confirm` → update Postgres status, create the typed entity-entity edge.
+**Edge write points** (each writes the relevant Postgres edge table through `PostgresGraphService`, in the same database as the domain row):
+- `POST /api/posts` → write the post row, then write `post_subjects` rows (`syncPostSubjects`).
+- `POST/DELETE /api/entity-ownerships` → write the ownership, then `entity_ownerships` (`syncOwnership` / `removeOwnership`); `syncOwnership` also auto-pins the owner→entity relationship at score 1.0.
+- `PUT /api/entity-relationships/:id/confirm` → update the `entity_relationships` status to `CONFIRMED`.
 
-## Infrastructure Notes
+## Implementation Notes
 
-Trellis is consumed as an npm dependency; the consuming deployment provisions the graph database. Trellis provides:
+The graph layer is one component of the Trellis API package; the consuming deployment provisions only PostgreSQL (no separate graph database). Trellis provides:
 
 - `GraphService` — the interface over which all graph reads and writes flow
-- `Neo4jGraphService` — the default implementation using the official `neo4j-driver` over Bolt
-- `createGraphServiceFromEnv()` — fetches credentials from SSM at startup and constructs the driver
+- `PostgresGraphService` — the only shipped implementation, serving the graph over the existing PostgreSQL via SQL joins and recursive CTEs; method groups live under `apps/api/src/lib/graph/postgres/` (`relationships`, `circles`, `entity-relationships`, `discovery`, `scoring`, `sync`)
+- `createGraphServiceFromEnv()` — builds and memoizes the service from the same `DATABASE_URL`/Prisma client used by the rest of the API
 
-The same driver and Cypher dialect are used in all environments (local Docker, CI, and production AuraDB), so there is no dialect gap between environments.
-
-If the graph database instance were wiped, reconciliation rebuilds the graph from Postgres (ownership, post-subject) plus replayed scoring signals. Relationship scores would be lost but are recomputable from interaction history.
+Because the graph IS the relational data, there is no separate store to back up or reconcile. Relationship scores are derived data: if dropped, they are recomputable from interaction history (`recomputeScores`), while the structural edges (ownership, post-subject, typed entity relationships) are durable Postgres rows like any other.

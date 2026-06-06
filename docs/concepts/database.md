@@ -1,13 +1,13 @@
 ---
 title: Database
-description: How Trellis uses RDS PostgreSQL as its transactional source of truth alongside a graph database for social-graph queries.
+description: How Trellis uses RDS PostgreSQL as its single transactional source of truth, including the social graph.
 sidebar: Database
 order: 12
 ---
 
-# Database: RDS PostgreSQL + Graph Database
+# Database: RDS PostgreSQL
 
-Trellis runs a hybrid data layer. **PostgreSQL** is the source of truth for content, auth, media, and transactional data. The **graph database** (Neo4j AuraDB) holds the social graph: scored relationships, circle tiers, typed entity edges, and post-subject visibility. See [graph-and-circles.md](graph-and-circles.md) for the graph side, including the dual-write contract that keeps Postgres and the graph in sync.
+**PostgreSQL** is Trellis's single source of truth — for content, auth, media, and the social graph alike. There is no separate graph database: scored relationships, circle tiers, typed entity edges, and post-subject visibility are all relational tables served over SQL (joins + recursive CTEs) by `PostgresGraphService`. See [graph-and-circles.md](graph-and-circles.md) for how the graph layer maps onto these tables.
 
 ## RDS PostgreSQL
 
@@ -46,25 +46,26 @@ The Prisma schema (`prisma/schema.prisma`) connects directly to RDS. The `User` 
 
 ### Entity-Centric Data Model
 
-The social graph moved to the graph database; the Prisma schema covers the transactional half.
+The classic follow/friend model was replaced by an entity-centric graph — but that graph lives in Postgres too. The relationship and entity-relationship edges are dedicated tables (`relationships`, `entity_relationships`), alongside the ownership and post-subject edges that already lived in Postgres.
 
-**Removed from Postgres:** `Follow`, `Friendship`, `PostVisibilityLevel` (these are now served by the graph layer).
+**Removed from Postgres:** `Follow`, `Friendship`, `PostVisibilityLevel` — replaced by the `relationships` edge table and the `PostRadius` enum.
 
 **Added:**
 
-- `EntityOwnership` — `userId`/`entityId`/`role` (`PRIMARY_OWNER` | `CO_OWNER` | `CARETAKER`) / `status` (`ACTIVE` | `SUSPENDED` | `FORMER`). Dual-written to the graph as `:User-[:OWNS]->:Entity`.
-- `EntityRelationship` — typed entity-to-entity edges with `status` (`PENDING` | `CONFIRMED` | `DECLINED`) and initiator/confirmer bookkeeping. Dual-written to the graph once `CONFIRMED`.
+- `EntityOwnership` (`entity_ownerships`) — `userId`/`entityId`/`role` (`PRIMARY_OWNER` | `CO_OWNER` | `CARETAKER`) / `status` (`ACTIVE` | `REMOVED` | `LEFT`). The owns edge.
+- `Relationship` (`relationships`) — the scored user→target edge (`targetType` is `"user"` | `"entity"`): `computedScore`, `manualScore`, `tier`, `connectionMethod`, `interactionCount`, `lastInteractionAt`, `reciprocated`, JSON `signals`.
+- `EntityRelationship` (`entity_relationships`) — typed entity-to-entity edges with `type` and `status` (`PENDING` | `CONFIRMED` | `REJECTED`) plus initiator bookkeeping. The edge becomes visible to traversals once `CONFIRMED`.
 - `CircleConfig` — per-user tier thresholds.
 - `CircleReadState` — per-`(userId, entityId, tier)` mark-read state feeding the "caught up" signal.
 - `ConnectionCode` + `ConnectionCodeRedemption` — redeemable invite codes replacing ad-hoc follow intents.
-- Enums: `PostRadius` (`WHISPER` | `NORMAL` | `LOUD` | `SHOUT`), `EntityStatus` (`ACTIVE` | `MEMORIAL` | `INACTIVE`), `OwnershipRole`, `OwnershipStatus`.
+- Enums: `PostRadius` (`WHISPER` | `NORMAL` | `LOUD` | `SHOUT`), `EntityStatus` (`ACTIVE` | `MEMORIAL` | `TRANSFERRED`), `OwnershipRole`, `OwnershipStatus` (`ACTIVE` | `REMOVED` | `LEFT`), `EntityRelationshipType`, `EntityRelationshipStatus`.
 
 **Modified:**
 
-- `Entity` — drops `ownerId` (ownership is now a relation), adds `status`, `inactiveAt`, `memorialSettings`.
+- `Entity` — drops `ownerId` (ownership is now the `entity_ownerships` edge), adds `status` and related lifecycle fields.
 - `User` — drops follow counts, gains `circleConfig` and `circleReadStates` relations.
 - `Post` — adds `radius: PostRadius` and `primaryEntityId`.
-- `PostEntity` → `PostSubject` with an `isPrimary` flag. Dual-written to the graph as `:Post-[:ABOUT {isPrimary}]->:Entity`.
+- `PostEntity` → `PostSubject` (`post_subjects`) with an `isPrimary` flag. The about edge.
 
 **Retained unchanged:**
 Post, PostComment, PostSentiment, CommentSentiment, Entity, Group, GroupMember, MediaFile, UploadSession, PostMedia, PostCommentMedia, DirectMessage, CustomAudience, CustomAudienceMember, TaxonomyDimension, TaxonomyCategory, TaxonomyTaxon, FeatureToggle, SecurityEvent, Activity, PostGeoIndex, DomainReputation, LinkCheck, Invitation, CrossRegionConsent, IngestState, MfaEnrollment, UserEncryptionKey, Partner, RoleMetadata.
@@ -124,8 +125,10 @@ Always take a manual database snapshot before production migrations and verify i
 - `PostSubject.(postId, entityId)` — post→entity fan-out, primary-subject filtering
 - `EntityOwnership.(userId, entityId)` — ownership lookups
 - `MediaFile.sha256Hash` — content-addressed dedup
+- `Relationship.(userId)`, `(targetType, targetId)`, `(userId, tier)` — forward/reverse graph traversal and circle-tier membership
+- `EntityRelationship.(entityId, type, status)`, `(relatedEntityId, type, status)` — entity-relationship traversal and pending-by-owner
 
-Relationship-graph lookups (who does user X see in tier N?) are served by the graph database, not Postgres — see [graph-and-circles.md](graph-and-circles.md).
+Relationship-graph lookups (who does user X see in tier N?) are SQL joins over these edge tables in the same database — see [graph-and-circles.md](graph-and-circles.md).
 
 ## Backup Strategy
 

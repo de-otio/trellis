@@ -1,209 +1,129 @@
 ---
 title: Media metadata API
-description: Endpoints and response formats for image and video metadata (EXIF, IPTC, video) and per-media visibility controls.
+description: Endpoints and response formats for image and video metadata (EXIF, IPTC, video) and per-media visibility flags.
 sidebar: Media API
 order: 30
 ---
 
 # Media metadata API
 
-Media items carry optional metadata extracted from the uploaded file: EXIF and
-IPTC data for images, and technical/device metadata for videos. The API exposes
-this metadata on the media-details response and gives the owner controls over
-what is visible.
+Media items carry optional metadata extracted from the uploaded file: a small
+EXIF/IPTC subset for images, and basic technical metadata for videos. The media
+details endpoint exposes this metadata to the **owner**, along with two
+visibility flags the owner controls.
 
-Metadata is filtered before it leaves the API according to the owner's
-visibility settings. See
-[Media privacy considerations](./media-privacy-considerations.md) for the
+See [Media privacy considerations](./media-privacy-considerations.md) for the
 privacy model and [Media metadata data model](./media-data-model.md) for the
 stored fields.
 
+> **Flag — metadata is not populated on upload as shipped.** The upload path
+> persists only `width`, `height`, and `duration`. The `exifData`, `iptcData`,
+> `videoMetadata`, and `dateTaken` fields described below are returned by the
+> endpoint contract but are `null` in practice until the metadata-persistence
+> wiring lands. See the data-model doc for details.
+
 ## GET `/api/media/:mediaId`
 
-Returns the media details. When metadata is available and visible, the response
-includes `exifData`, `iptcData`, and/or `videoMetadata`.
+Owner-only. Returns the media details. When metadata has been populated, the
+response includes `exifData`, `iptcData`, and/or `videoMetadata`.
+
+This endpoint is owner-only: ownership is verified (media must appear in one of
+the caller's posts or be used as one of their entity avatars), and the **full**
+metadata is returned to the owner. The `metadataVisible` / `locationVisible`
+flags are returned so the client can render toggle state; the endpoint does not
+itself strip fields based on them.
+
+> **Note on path overloading.** This route also serves the raw binary when the
+> path segment is a 64-character hex content hash (e.g.
+> `GET /api/media/<hash>?variant=thumbnail|optimized|original`). The JSON
+> details response described here applies when the segment is a media id (a
+> CUID), not a content hash.
 
 ```typescript
 {
-  // ... base media fields ...
+  id: string;
+  contentHash: string;
+  cid: string | null;
+  mimeType: string;
+  size: number;
+  thumbnailUrl: string;
+  optimizedUrl: string;
+  originalUrl: string;
+  width?: number;
+  height?: number;
+  duration?: number;
 
-  // EXIF data (images only); null when absent or hidden
+  // Metadata (null until populated — see flag above)
   exifData?: {
-    // Camera / device
     make?: string;
     model?: string;
-    software?: string;
-    orientation?: number;
-
-    // Camera settings
-    iso?: number;
-    aperture?: number;
-    shutterSpeed?: string;
-    focalLength?: number;
-    flash?: boolean;
-    whiteBalance?: string;
-
-    // Date / time
-    dateTimeOriginal?: string;   // ISO 8601
-    dateTimeDigitized?: string;  // ISO 8601
-
-    // Location (only when location visibility is enabled)
-    gps?: {
-      latitude?: number;
-      longitude?: number;
-      altitude?: number;
-      location?: string;  // human-readable
-    } | null;
-
-    // Image properties
-    colorSpace?: string;
-    resolution?: { width: number; height: number };
-    xResolution?: number;
-    yResolution?: number;
-
-    // Optional
-    exposureMode?: string;
-    meteringMode?: string;
     lensModel?: string;
-    artist?: string;
-    copyright?: string;
+    software?: string;
+    iso?: number;
+    fNumber?: number;       // aperture
+    exposureTime?: number;  // seconds
+    focalLength?: number;   // mm
+    dateTimeOriginal?: string; // ISO 8601
+    gps?: { latitude: number; longitude: number };
   } | null;
 
-  // IPTC data (images only); null when absent or hidden
   iptcData?: {
     keywords?: string[];
-
-    copyright?: string;
-    copyrightOwner?: string;
-    rightsUsageTerms?: string;
-
-    caption?: string;
-    headline?: string;
-    description?: string;
-
+    copyrightNotice?: string;
     creator?: string;
-    creatorContact?: string;
-    credit?: string;
+    caption?: string;
   } | null;
 
-  // Video metadata (videos only); null when absent or hidden
   videoMetadata?: {
-    dateTimeOriginal?: string;   // ISO 8601
-    dateTimeDigitized?: string;  // ISO 8601
-
-    // Location (only when location visibility is enabled)
-    gps?: {
-      latitude?: number;
-      longitude?: number;
-      altitude?: number;
-      location?: string;
-    } | null;
-
-    codec?: string;
-    frameRate?: number;
-    bitrate?: number;
+    width?: number;
+    height?: number;
     duration?: number;
-
-    make?: string;
-    model?: string;
   } | null;
 
-  // Unified capture time, from EXIF or video metadata
-  dateTaken?: string;  // ISO 8601
+  dateTaken?: string;  // ISO 8601, from the date_taken column
 
-  // Visibility flags
-  metadataVisible: boolean;  // owner preference for all metadata
-  locationVisible: boolean;  // location visibility (EXIF and video)
+  // Visibility flags (owner preference; do not filter this response)
+  metadataVisible: boolean;
+  locationVisible: boolean;
 
-  // Optional field-level visibility settings
-  metadataVisibilitySettings?: {
-    exif?: {
-      cameraInfo?: boolean;
-      cameraSettings?: boolean;
-      dateTime?: boolean;
-      location?: boolean;
-      imageProperties?: boolean;
-      advanced?: boolean;
-    };
-    iptc?: {
-      keywords?: boolean;
-      copyright?: boolean;
-      descriptive?: boolean;
-      creator?: boolean;
-    };
-    video?: {
-      dateTime?: boolean;
-      location?: boolean;
-      technical?: boolean;
-      device?: boolean;
-    };
-  } | null;
+  createdAt: string;
+  updatedAt: string;
+  hidden: boolean;
+  hiddenAt: string | null;
+  deletedAt: string | null;
+
+  posts: Array<{
+    id: string;
+    text: string;
+    createdAt: string;
+    visibility: "PUBLIC" | "PRIVATE" | "FRIENDS";
+    url: string;
+  }>;
+
+  canDelete: boolean;
+  canHide: boolean;
 }
 ```
 
-### Query parameters
-
-```
-GET /api/media/:mediaId?includeMetadata=true
-```
-
-- `includeMetadata` — defaults to `true`. When `false`, all metadata is omitted
-  from the response (useful when the caller does not need it).
-- `includeExif` — accepted as an alias for `includeMetadata` for backward
-  compatibility.
+The endpoint takes no metadata-related query parameters. (There is no
+`includeMetadata` or `includeExif` parameter; the only query parameter the
+route reads is `variant`, used for the content-hash binary-serving path.)
 
 ## PATCH `/api/media/:mediaId/metadata-visibility`
 
-Updates the owner's metadata visibility preferences. All fields are optional;
-send only what you want to change.
+Owner-only. Updates the two per-media visibility flags. At least one of the two
+fields must be present; both are optional individually.
 
 ```typescript
 {
-  "metadataVisible": boolean,   // quick toggle for all metadata
-  "locationVisible": boolean,   // quick toggle for location
-  "metadataVisibilitySettings": {  // field-level control
-    "exif": {
-      "cameraInfo": boolean,
-      "cameraSettings": boolean,
-      "dateTime": boolean,
-      "location": boolean,
-      "imageProperties": boolean,
-      "advanced": boolean
-    },
-    "iptc": {
-      "keywords": boolean,
-      "copyright": boolean,
-      "descriptive": boolean,
-      "creator": boolean
-    },
-    "video": {
-      "dateTime": boolean,
-      "location": boolean,
-      "technical": boolean,
-      "device": boolean
-    }
-  }
+  "metadataVisible"?: boolean,
+  "locationVisible"?: boolean
 }
 ```
 
-Precedence rules:
-
-- When `metadataVisible` is `false`, all metadata is hidden regardless of the
-  granular settings.
-- When `locationVisible` is `false`, location is hidden regardless of the
-  granular settings.
-- Granular settings apply only when `metadataVisible` is `true`.
-- A granular `location` setting overrides `locationVisible` for that media type.
-
-### Backward-compatible endpoint
-
-```typescript
-PATCH /api/media/:mediaId/exif-visibility
-{
-  "exifDataVisible": boolean,     // maps to metadataVisible
-  "exifLocationVisible": boolean  // maps to locationVisible
-}
-```
+There are no granular / field-level visibility settings. The request body is
+validated to exactly these two boolean keys; sending neither returns
+`400`.
 
 ### Response
 
@@ -211,152 +131,68 @@ PATCH /api/media/:mediaId/exif-visibility
 {
   "success": true,
   "media": {
-    "id": "string",
-    "exifDataVisible": true,
-    "exifLocationVisible": false
+    "id": "clx123abc",
+    "metadataVisible": true,
+    "locationVisible": false
   }
 }
 ```
 
 ### Errors
 
-- `400 Bad Request` — invalid request body.
-- `403 Forbidden` — caller lacks permission.
+- `400 Bad Request` — invalid JSON, failed validation, or neither flag
+  provided.
+- `401 Unauthorized` — no valid session.
 - `404 Not Found` — media not found, or the caller does not own it.
 
-## Response examples
+## Other media endpoints
 
-### Image with EXIF and IPTC data
+For completeness, the media routes also include:
 
-```json
-{
-  "id": "clx123abc",
-  "contentHash": "a3f5b2c1...",
-  "mimeType": "image/jpeg",
-  "size": 2456789,
-  "width": 1920,
-  "height": 1080,
-  "thumbnailUrl": "https://example.com/api/media/a3f5b2c1...?variant=thumbnail",
-  "optimizedUrl": "https://example.com/api/media/a3f5b2c1...?variant=optimized",
-  "originalUrl": "https://example.com/api/media/a3f5b2c1...?variant=original",
-  "createdAt": "2025-01-15T15:30:00Z",
-  "updatedAt": "2025-01-15T15:30:00Z",
-  "hidden": false,
-  "metadataVisible": true,
-  "locationVisible": false,
-  "dateTaken": "2025-01-15T14:30:00Z",
-  "exifData": {
-    "make": "Canon",
-    "model": "Canon EOS 5D Mark IV",
-    "iso": 400,
-    "aperture": 2.8,
-    "shutterSpeed": "1/125",
-    "focalLength": 50,
-    "flash": false,
-    "whiteBalance": "Auto",
-    "dateTimeOriginal": "2025-01-15T14:30:00Z",
-    "colorSpace": "sRGB",
-    "lensModel": "EF 50mm f/1.2L USM"
-  },
-  "iptcData": {
-    "keywords": ["landscape", "outdoor", "park"],
-    "copyright": "© 2025 Jane Doe",
-    "caption": "Afternoon at the park"
-  },
-  "canDelete": true,
-  "canHide": true
-}
-```
+- `POST /api/media/upload` — single upload (multipart `file` field).
+- `POST /api/media/upload/batch` — up to 20 files.
+- `GET /api/media` — list the caller's media (paginated, filterable).
+- `GET /api/media/grouped` — list grouped by month or year.
+- `GET /api/media/stats` — collection statistics.
+- `POST /api/media/:mediaId/hide` / `POST /api/media/:mediaId/unhide`.
+- `DELETE /api/media/:mediaId` — soft delete (hides instead if shared).
+- `GET /api/media/:hash` — serve the binary by content hash.
 
-### Video with metadata
-
-```json
-{
-  "id": "clx456def",
-  "contentHash": "b4g6c3d2...",
-  "mimeType": "video/mp4",
-  "size": 12345678,
-  "width": 1920,
-  "height": 1080,
-  "duration": 120,
-  "createdAt": "2025-01-15T15:30:00Z",
-  "updatedAt": "2025-01-15T15:30:00Z",
-  "hidden": false,
-  "metadataVisible": true,
-  "locationVisible": false,
-  "dateTaken": "2025-01-15T14:30:00Z",
-  "videoMetadata": {
-    "dateTimeOriginal": "2025-01-15T14:30:00Z",
-    "codec": "H.264",
-    "frameRate": 30,
-    "bitrate": 5000000,
-    "make": "Apple",
-    "model": "iPhone 14 Pro"
-  },
-  "canDelete": true,
-  "canHide": true
-}
-```
-
-### Image with location visible
-
-```json
-{
-  "id": "clx123abc",
-  "metadataVisible": true,
-  "locationVisible": true,
-  "dateTaken": "2025-01-15T14:30:00Z",
-  "exifData": {
-    "make": "Apple",
-    "model": "iPhone 14 Pro",
-    "dateTimeOriginal": "2025-01-15T14:30:00Z",
-    "gps": {
-      "latitude": 37.7749,
-      "longitude": -122.4194,
-      "altitude": 52.5,
-      "location": "San Francisco, CA, USA"
-    }
-  }
-}
-```
-
-### Media without metadata (`includeMetadata=false`)
+## Response example (image details)
 
 ```json
 {
   "id": "clx123abc",
   "contentHash": "a3f5b2c1...",
+  "cid": null,
   "mimeType": "image/jpeg",
   "size": 2456789,
+  "thumbnailUrl": "https://api.example.com/api/media/a3f5b2c1...?variant=thumbnail",
+  "optimizedUrl": "https://api.example.com/api/media/a3f5b2c1...?variant=optimized",
+  "originalUrl": "https://api.example.com/api/media/a3f5b2c1...?variant=original",
   "width": 1920,
   "height": 1080,
+  "metadataVisible": true,
+  "locationVisible": false,
   "createdAt": "2025-01-15T15:30:00Z",
+  "updatedAt": "2025-01-15T15:30:00Z",
+  "hidden": false,
+  "hiddenAt": null,
+  "deletedAt": null,
+  "exifData": null,
+  "iptcData": null,
+  "videoMetadata": null,
+  "posts": [],
   "canDelete": true,
   "canHide": true
 }
 ```
-
-## Privacy filtering
-
-Metadata is filtered server-side before it is returned, in this order:
-
-1. The `includeMetadata` query parameter — when `false`, all metadata is
-   omitted.
-2. The `metadataVisible` flag — when `false`, all metadata is hidden.
-3. The `locationVisible` flag — when `false`, GPS fields are removed from EXIF
-   and video metadata.
-4. The granular `metadataVisibilitySettings` — when present, each disabled
-   field group is removed from the response, overriding the binary toggles for
-   the affected fields.
 
 ## Behaviour notes
 
+- **Owner-only.** The details and visibility endpoints require an authenticated
+  session and verify ownership. Metadata is not exposed through public APIs.
 - **Missing metadata is not an error.** `exifData`, `iptcData`, and
-  `videoMetadata` are `null` when the media has none. Each type is independent —
-  an image may have EXIF but no IPTC.
+  `videoMetadata` are `null` when absent. Each type is independent.
 - **Extraction failures do not fail uploads.** If metadata cannot be extracted,
-  the upload still succeeds and the media is stored and accessible; the relevant
-  metadata field is simply `null`. Each metadata type is extracted
-  independently.
-- **EXIF data is additive.** Clients that do not read metadata fields can ignore
-  them; the base media response shape is unchanged.
+  the upload still succeeds; the relevant field is simply absent.

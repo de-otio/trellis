@@ -127,7 +127,7 @@ A personal tenant follows tighter rules than an organization tenant:
 | Property | Personal | Organization |
 |---|---|---|
 | Members | exactly 1 (the owner) | 1 or more |
-| `slug` | derived from username/handle | user-chosen, globally unique |
+| `slug` | system-assigned (`personal-<userId>`) | user-chosen, globally unique |
 | Federated IdP | not allowed | optional |
 | Verified domains | not allowed | 0 or more |
 | Renamable | yes (slug change) | yes |

@@ -14,8 +14,8 @@ order: 10
 | API compute | ECS Fargate (ARM64) | Long-lived Node.js process, native DB pooling |
 | Load balancer | Application Load Balancer | HTTPS termination, health-checked routing |
 | CDN | CloudFront + Origin Access Control | Routes `/api/*`, `/media/*`, and static assets to different origins |
-| Database | RDS PostgreSQL (Prisma ORM) | Source of truth for content, auth, media, and transactional data |
-| Graph database | Neo4j AuraDB (Cypher over Bolt) | Social graph: scored relationships, circle tiers, typed entity edges, post-subject visibility |
+| Database | RDS PostgreSQL (Prisma ORM) | Single source of truth for content, auth, media, transactional data — and the social graph |
+| Social graph | PostgreSQL (`PostgresGraphService`, SQL joins + recursive CTEs) | Scored relationships, circle tiers, typed entity edges, post-subject visibility — relational tables in the same database, not a separate graph store |
 | KV / cache / rate-limiting | DynamoDB (single table, on-demand) | 15+ namespaces, TTL-based expiry |
 | Auth | Amazon Cognito (user pools) | Pre-token Lambda trigger caches claims in DynamoDB |
 | Object storage | S3 (media + web app) | Direct client uploads via presigned URLs |
@@ -43,15 +43,17 @@ Application Load Balancer (HTTPS)
     ▼
 ECS Fargate — API Container (Node.js)
     │
-    ├── Prisma → RDS PostgreSQL  (content, auth, media — source of truth)
-    ├── GraphService → Neo4j AuraDB  (circles, relationships, discovery)
+    ├── Prisma → RDS PostgreSQL  (content, auth, media, social graph — source of truth)
+    ├── GraphService → RDS PostgreSQL  (circles, relationships, discovery — SQL joins/CTEs)
     ├── DynamoDB                 (cache, rate limits, feature flags)
     └── SQS                      (enqueue async work)
 ```
 
+`GraphService` is not a separate datastore — `PostgresGraphService` runs SQL against the same RDS PostgreSQL, using the same Prisma client.
+
 ### Circle View (Dual-Gated Visibility)
 
-Circle reads and writes are split across Postgres and Neo4j AuraDB:
+A circle read is a SQL join across the relationship, post-subject, and post tables in Postgres:
 
 ```
 Client: GET /api/circles/0  (inner circle)
@@ -59,19 +61,16 @@ Client: GET /api/circles/0  (inner circle)
     ▼
 Fargate API — circle-handler
     │
-    ├── GraphService → Neo4j AuraDB
-    │     Cypher: viewer -[RELATES_TO]-> target
-    │             filtered by tier & post radius
-    │     returns: post IDs ordered by createdAt
-    │
-    └── Prisma → RDS
-          fetches post content, author, media for those IDs
+    └── GraphService (PostgresGraphService) → RDS PostgreSQL
+          one query joins relationships ⋈ post_subjects ⋈ posts
+          filtered by tier & post radius,
+          then loads post content, author, media
     │
     ▼
-merge + return JSON
+return JSON
 ```
 
-Writes fan out in the opposite direction: Postgres first (source of truth), then a best-effort GraphService sync. Failed graph writes enqueue to an SQS retry queue; a reconciliation worker can rebuild the graph from Postgres if needed. See [graph-and-circles.md](graph-and-circles.md#dual-write-contract).
+Writes go straight to the relevant Postgres edge tables (`relationships`, `entity_relationships`, `entity_ownerships`, `post_subjects`) through `PostgresGraphService`, in the same transactional database as the domain rows — there is no second store to mirror or reconcile. See [graph-and-circles.md](graph-and-circles.md#one-database-the-graph-lives-in-postgres).
 
 ### Media Upload
 

@@ -24,8 +24,7 @@ anything that doesn't need to block a response are the load-bearing ideas.
 ```mermaid
 flowchart TD
     Client[Client app] --> API[HTTP API]
-    API --> DB[(PostgreSQL)]
-    API --> Graph[(Graph store)]
+    API --> DB[(PostgreSQL — content + social graph)]
     API --> KV[(DynamoDB single-table)]
     API --> Storage[Object storage + CDN]
     API --> Queue[Async queues]
@@ -36,11 +35,12 @@ flowchart TD
 
 - **API** — a stateless HTTP service that owns request validation, auth, and
   business logic. See [Compute](compute.md).
-- **PostgreSQL** — the source of truth for content, auth, media metadata, and
-  transactional data, accessed through Prisma. See [Database](database.md).
-- **Graph store** — scored relationships, circle membership, typed entity
-  edges, and post-subject edges for visibility queries. See
-  [Graph and circles](graph-and-circles.md).
+- **PostgreSQL** — the single source of truth for content, auth, media
+  metadata, transactional data, *and* the social graph, accessed through
+  Prisma. The graph (scored relationships, circle membership, typed entity
+  edges, post-subject edges) is served from relational tables in this same
+  database via `PostgresGraphService` — there is no separate graph store. See
+  [Database](database.md) and [Graph and circles](graph-and-circles.md).
 - **DynamoDB single-table** — key/value and cache access patterns with TTL. See
   [DynamoDB single-table](dynamodb-single-table.md).
 - **Object storage and CDN** — media originals and derivatives, served through
@@ -73,11 +73,13 @@ relationships with entities; entities have typed relationships with other
 entities; posts are *about* entities. Human-to-human relationships still exist,
 but they are secondary.
 
-The relational database stays the source of truth for content, auth, media, and
-transactional data. The graph store holds the scored relationships, circle
-membership, typed entity edges, and the post-subject edges needed for
-dual-gated visibility queries. See [Graph and circles](graph-and-circles.md)
-for the full model, schema, and write contract.
+The relational database is the source of truth for content, auth, media, and
+transactional data — and for the social graph itself. The scored relationships,
+circle membership, typed entity edges, and the post-subject edges needed for
+dual-gated visibility queries are relational tables served over SQL (joins +
+recursive CTEs) by `PostgresGraphService`; they are not a separate graph store.
+See [Graph and circles](graph-and-circles.md) for the full model, schema, and
+write path.
 
 ## Extension architecture
 

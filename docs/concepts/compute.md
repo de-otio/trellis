@@ -43,21 +43,22 @@ Client → CloudFront → ALB (HTTPS) → Fargate (port 3000) → RDS PostgreSQL
 
 ### Route Handling
 
-All routes are handled by the same Fargate container. The TypeScript route registry works as a standard Node.js HTTP server — no Lambda adapter needed:
+All routes are handled by the same Fargate container. `server.ts` runs a standard Node.js `http` server that converts Node's `IncomingMessage`/`ServerResponse` to and from the Web Fetch `Request`/`Response` types, then dispatches into a [Hono](https://hono.dev/) app — no Lambda adapter needed:
 
 ```typescript
-// server.ts
-import { createServer } from 'node:http';
-import { handleRequest } from './router';
+// server.ts (simplified)
+import http from 'node:http';
+import { buildHonoApp } from './lib/app';
 
-const server = createServer(async (req, res) => {
-  const response = await handleRequest(toWebRequest(req));
+const honoApp = buildHonoApp();
+
+const server = http.createServer(async (req, res) => {
+  const webRequest = toWebRequest(req);
+  const response = await honoApp.fetch(webRequest, { trellisEnv: env, requestContext });
   writeResponse(res, response);
 });
 
-server.listen(3000, () => {
-  console.log('API listening on port 3000');
-});
+server.listen(parseInt(process.env.PORT || '3000', 10));
 ```
 
 Routes for API, ActivityPub, and redirects are all handled by one process. HTTP Signature verification for ActivityPub runs as middleware.
@@ -66,13 +67,18 @@ Routes for API, ActivityPub, and redirects are all handled by one process. HTTP 
 
 One Lambda per SQS queue for isolation and independent scaling. Workers that only interact with DynamoDB, S3, SQS, or external APIs run outside VPC — faster cold starts, no NAT dependency for external calls.
 
-| Function | Queue | VPC | Purpose |
-|----------|-------|-----|---------|
-| `deleteAccountWorker` | `delete-account` | Yes (RDS) | Account deletion pipeline |
-| `mediaProcessingWorker` | `media-processing` | No | Image resize/optimize with Sharp |
-| `mediaReconciliationWorker` | `media-reconciliation` | Yes (RDS) | Orphaned media cleanup |
-| `linkCheckWorker` | `link-check` | No | Link security verification → DynamoDB |
-| `federationOutboxWorker` | `federation-outbox` | No | Outgoing ActivityPub delivery |
+The queues bound by the API process (`apps/api/src/env.ts`) are `user-export`, `delete-account`, `followers-events`, `link-check`, and `media-processing`.
+
+| Function | Queue | VPC | Purpose | Status |
+|----------|-------|-----|---------|--------|
+| `delete-account-worker` | `delete-account` | Yes (RDS) | Account deletion pipeline | Implemented |
+| `media-processing-worker` | `media-processing` | No | Image resize/optimize with Sharp | Implemented |
+| `link-check-worker` | `link-check` | No | Link security verification → DynamoDB | Stub (`TODO: implement`) |
+| `followers-events-worker` | `followers-events` | Yes (RDS) | Follower fan-out events | Stub (`TODO: implement`) |
+| `media-reconciliation-worker` | (not bound in env) | Yes (RDS) | Orphaned media cleanup | Stub (`TODO: implement`) |
+| `federation-outbox-worker` | (not bound in env) | No | Outgoing ActivityPub delivery | Stub (`TODO: implement`) |
+
+> **Note on outbound federation.** There is no `federation-outbox` queue wired into the API process. Outgoing ActivityPub activities are delivered through Fedify directly (`deliverActivityWithFedify` in `apps/api/src/lib/activitypub/services/fedify-delivery.ts`); `federation-outbox-worker.ts` is a placeholder. See [ActivityPub federation](activitypub.md).
 
 ### SQS Event Source Mapping
 

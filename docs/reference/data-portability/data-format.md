@@ -1,6 +1,6 @@
 ---
 title: Data Export Format Specification
-description: Overview and navigation for the user data export format, covering JSON and ActivityPub variants.
+description: Overview and navigation for the user data export format, covering the JSON and AT Protocol variants.
 sidebar: Data Format
 order: 30
 ---

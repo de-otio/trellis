@@ -9,15 +9,17 @@ order: 14
 
 ## SQS Queues
 
-Each queue has a corresponding dead-letter queue (DLQ) for failed messages.
+The API process binds five SQS queues (`apps/api/src/env.ts`): `user-export`, `delete-account`, `followers-events`, `link-check`, and `media-processing`. Each has a corresponding dead-letter queue (DLQ) for failed messages. Concrete per-queue tuning (visibility timeout, retention) is owned by the deploying application's infrastructure, not by Trellis.
 
-| Queue | Visibility Timeout | Max Receive Count | Retention | Purpose |
-|-------|-------------------|-------------------|-----------|---------|
-| `delete-account` | 120s | 3 | 7 days | Account deletion pipeline |
-| `media-processing` | 120s | 3 | 3 days | Image resize/optimize |
-| `media-reconciliation` | 60s | 3 | 3 days | Orphaned media cleanup |
-| `link-check` | 30s | 3 | 1 day | Link security verification |
-| `federation-outbox` | 30s | 3 | 3 days | Outgoing ActivityPub delivery |
+| Queue | Worker | Purpose | Status |
+|-------|--------|---------|--------|
+| `user-export` | (export handler) | GDPR/data-portability exports | Implemented |
+| `delete-account` | `delete-account-worker` | Account deletion pipeline | Implemented |
+| `media-processing` | `media-processing-worker` | Image resize/optimize with Sharp | Implemented |
+| `link-check` | `link-check-worker` | Link security verification | Stub (`TODO: implement`) |
+| `followers-events` | `followers-events-worker` | Follower fan-out events | Stub (`TODO: implement`) |
+
+> Outbound ActivityPub delivery does **not** use an SQS queue. Activities are delivered through Fedify directly; see [ActivityPub federation](activitypub.md).
 
 ### DLQ Alarm
 
@@ -94,17 +96,22 @@ mediaBucket.addEventNotification(
 );
 ```
 
-The `mediaProcessingWorker` Lambda picks up the event, processes the image with Sharp, and writes derivatives back to S3.
+The `media-processing-worker` Lambda picks up the event, processes the image with Sharp, and writes derivatives back to S3.
+
+> **Wiring gap.** The worker triggers on the `originals/` prefix, but the API
+> upload service writes originals under `media/{hash}.{ext}`. In the shipped
+> code an API upload therefore does not fire this pipeline. See
+> [Storage & CDN](storage-and-cdn.md) for details.
 
 ## Summary
 
 | Queue / Schedule | Service | Purpose |
 |------------------|---------|---------|
+| `user-export` | SQS | GDPR/data-portability exports |
 | `delete-account` | SQS | Account deletion pipeline |
 | `link-check` | SQS | Safe Browsing validation |
-| `media-reconciliation` | SQS | Storage consistency checks |
 | `media-processing` | SQS | Async image processing |
-| `federation-outbox` | SQS | Outgoing ActivityPub delivery (feature-gated) |
+| `followers-events` | SQS | Follower fan-out events |
 | Every 5 minutes | EventBridge | Expired sessions, temp tokens |
 | Hourly | EventBridge | Metrics aggregation, feed cache |
 | Nightly | EventBridge | Media reconciliation, exports |

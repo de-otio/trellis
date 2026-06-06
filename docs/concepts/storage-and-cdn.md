@@ -23,10 +23,18 @@ CORS:               Allowed origins for presigned URL uploads
 **Key structure:**
 
 ```
-originals/{sha256hash}              # Original upload
-thumbnails/{sha256hash}.webp        # Small thumbnail
-optimized/{sha256hash}.webp         # Full-resolution optimized
+media/{sha256hash}.{ext}            # Original upload (written by the API upload service)
+thumbnails/{sha256hash}.webp        # Small thumbnail (written by the Lambda worker)
+optimized/{sha256hash}.webp         # Full-resolution optimized (written by the Lambda worker)
 ```
+
+> The API upload path (`MediaUploadService`) writes the original to
+> `media/{hash}.{ext}` and serves it via `/api/media/{hash}`. The
+> `media-processing-worker` Lambda, however, triggers on an `originals/` prefix
+> — a prefix the current upload path does not write. So in the shipped code the
+> Sharp derivative pipeline is **not actually triggered by API uploads**. This
+> is a wiring gap to reconcile (align the upload key prefix and the S3-event
+> trigger) before relying on async thumbnails.
 
 **Lifecycle rules:**
 - Incomplete multipart uploads: abort after 1 day
@@ -55,72 +63,62 @@ Public access:      Blocked (served via CloudFront OAC)
 
 ## Media Upload Flow
 
-Uploads use **presigned URLs** for direct-to-S3 delivery, avoiding payload limits and reducing API overhead:
+Clients upload through the API: a `multipart/form-data` POST to
+`/api/media/upload` (or `/api/media/upload/batch`), authenticated by session.
+The handler validates the file (signature/MIME, rate limits — 10 uploads / 60s
+per user), then stores the object to the media bucket through the storage
+adapter (`MediaUploadService` → `MEDIA_BUCKET_R2`, an S3-backed,
+Cloudflare-R2-compatible interface from `@de-otio/saas-foundation/storage`).
 
 ```
-1. Client app  →  POST /api/media/upload-url    →  Fargate API
-2. Fargate     →  generates presigned S3 PUT URL (short expiry, scoped to key)
-3. Client app  →  PUT (binary)                   →  S3 (direct)
-4. S3          →  Event notification             →  SQS (media-processing)
-5. SQS         →  triggers mediaProcessingWorker Lambda
+1. Client app  →  POST /api/media/upload (multipart)  →  Fargate API
+2. Fargate     →  validate (signature, MIME, rate limit)
+3. Fargate     →  store object to media bucket (S3 via the storage adapter)
+4. S3          →  Event notification (originals/ prefix)  →  SQS (media-processing)
+5. SQS         →  triggers media-processing-worker Lambda
 6. Lambda      →  downloads from S3, processes with Sharp
                    → uploads thumbnail + optimized to S3
-                   → updates MediaFile record in RDS
 ```
 
-### Presigned URL Security
+> **Wiring gap.** Steps 4–6 are real code, but the upload service writes the
+> original under `media/{hash}.{ext}` while the worker triggers on the
+> `originals/` prefix — so today an API upload does not actually fire the Sharp
+> pipeline. See the key-structure note above.
 
-```typescript
-const command = new PutObjectCommand({
-  Bucket: MEDIA_BUCKET,
-  Key: `originals/${mediaId}`,
-  ContentType: contentType,
-});
+> **Note.** The codebase uploads **through the API**, not via presigned
+> direct-to-S3 PUT URLs. There is no `/api/media/upload-url` endpoint and no
+> `getSignedUrl`/presigned-POST path in the shipped code. The 10 MB request body
+> cap in `server.ts` (`MAX_BODY_SIZE`) therefore applies to uploads. Async
+> Sharp processing via the S3-event → `media-processing` SQS → Lambda pipeline
+> (`apps/api/src/lambda/media-processing-worker.ts`) is real and runs after the
+> object lands in the bucket.
 
-const url = await getSignedUrl(s3Client, command, {
-  expiresIn: 60,  // short expiry — minimizes abuse window
-});
-```
-
-- **Short expiry** — minimizes the window if a URL is leaked
-- **Scoped to specific key** — URL can only write to the intended S3 key
-- **Content-Type enforced** — prevents uploading unexpected file types
-- **CloudTrail logging** — all S3 PutObject calls are logged for audit
-
-The direct-to-S3 approach also means:
-- No API payload size limit for uploads
-- Upload goes directly to S3 (faster, cheaper)
-- Processing is fully async
+Properties of this flow:
+- File is validated at the API boundary before it is stored
+- Processing is async — a slow Sharp run never blocks the upload response
 - Failed processing doesn't lose the original
 
 ## Image Processing (Sharp)
 
 Sharp runs in Lambda with these operations:
 
-| Operation | Output | Max Dimension | Format |
-|-----------|--------|---------------|--------|
-| Thumbnail | `thumbnails/{hash}.webp` | 300px | WebP |
-| Optimized | `optimized/{hash}.webp` | 1200px | WebP |
-| EXIF extract | Stored in MediaFile record | — | JSON metadata |
+| Operation | Output | Resize | Format |
+|-----------|--------|--------|--------|
+| Thumbnail | `thumbnails/{hash}.webp` | 300×300, `fit: cover` | WebP q80 |
+| Optimized | `optimized/{hash}.webp` | 1200×1200, `fit: inside`, no enlargement | WebP q85 |
+
+As implemented in `media-processing-worker.ts`:
 
 ```typescript
-import sharp from 'sharp';
+const thumbnail = await sharp(buffer)
+  .resize(300, 300, { fit: 'cover' })
+  .webp({ quality: 80 })
+  .toBuffer();
 
-export async function processImage(buffer: Buffer) {
-  const metadata = await sharp(buffer).metadata();
-
-  const thumbnail = await sharp(buffer)
-    .resize(300, 300, { fit: 'inside', withoutEnlargement: true })
-    .webp({ quality: 80 })
-    .toBuffer();
-
-  const optimized = await sharp(buffer)
-    .resize(1200, 1200, { fit: 'inside', withoutEnlargement: true })
-    .webp({ quality: 85 })
-    .toBuffer();
-
-  return { metadata, thumbnail, optimized };
-}
+const optimized = await sharp(buffer)
+  .resize(1200, 1200, { fit: 'inside', withoutEnlargement: true })
+  .webp({ quality: 85 })
+  .toBuffer();
 ```
 
 ## CloudFront Distribution
@@ -157,7 +155,7 @@ const mediaOac = new cloudfront.S3OriginAccessControl(this, 'MediaOac', {
 });
 ```
 
-The S3 bucket policy restricts `s3:GetObject` to only the specific CloudFront distribution. Presigned PUT URLs for uploads bypass CloudFront entirely (direct to S3).
+The S3 bucket policy restricts `s3:GetObject` to only the specific CloudFront distribution. Uploads do not bypass CloudFront via presigned URLs — they go through the API, which writes to the bucket server-side (see Media Upload Flow).
 
 ### Media Serving
 

@@ -9,8 +9,13 @@ order: 20
 
 This guide walks a tenant **owner or admin** through connecting a corporate
 identity provider (IdP) so members of the organization can sign in with their
-existing accounts. Trellis supports both **OIDC** and **SAML** providers, and
-provisions members **just-in-time** on first login.
+existing accounts. Trellis provisions members **just-in-time** on first login.
+
+> **Status:** **OIDC is the shipped path.** The data model and this guide
+> describe **SAML** as well, but the connect-IdP endpoint currently returns
+> `501 SAML_NOT_AVAILABLE_IN_MVP` for `kind: "SAML"` — only `kind: "OIDC"` is
+> accepted. Treat the SAML steps below as the planned design, not a working
+> flow.
 
 The flow has three stages:
 
@@ -162,6 +167,10 @@ securely, and activates the provider. If the issuer is unreachable you get
 
 ### Option B — SAML
 
+> **Not yet available.** Connecting a SAML IdP returns
+> `501 SAML_NOT_AVAILABLE_IN_MVP` today; use OIDC. The flow below is the
+> intended design.
+
 ```mermaid
 sequenceDiagram
     actor Admin
@@ -210,19 +219,22 @@ mapping to remap them — no code change is required.
 
 ## Step 4 — Test before you enforce
 
-Use the **Settings → Identity Provider → Test Sign-in** button to run a full
-federation flow with your own account before enabling it for everyone. The test
-surfaces:
+Run a full federation sign-in with your own account before relying on it for the
+whole organization. Trellis tracks whether a successful test sign-in has
+happened as a tenant **setup milestone** (`TEST_SIGN_IN`), so the admin UI can
+confirm the round-trip worked. A test sign-in lets you confirm:
 
-- the raw claims received from your IdP,
-- the resolved tenant role (so you can confirm your group-to-role mapping is
-  correct), and
-- the group identifiers extracted (so you can tell whether your IdP emits group
-  object IDs or display names).
+- that the IdP redirect and callback complete,
+- the resolved tenant role (so you can check your group-to-role mapping), and
+- which group identifiers your IdP emits (object IDs vs display names).
 
-This is the diagnostic to run *before* turning federation on for the
-organization — it catches misconfiguration while it affects only you, not all
+Doing this first catches misconfiguration while it affects only you, not all
 your members.
+
+> **Status:** A dedicated "test sign-in" *endpoint* that replays and surfaces
+> the raw IdP claims is part of the planned admin surface but is not shipped as
+> a standalone API today; the milestone above is detected from a real
+> federated sign-in.
 
 ## How member sign-in works (just-in-time)
 
@@ -309,7 +321,13 @@ these require involving the Trellis team.
 
 ## Invite members without an IdP
 
-Organization tenants that don't federate can add members by email invitation
-instead. An admin sends an invitation (`POST /api/tenants/{id}/invitations`
-with an email and role); the invitee follows a signed link, signs up if needed,
-and is added to the tenant on accept.
+Organization tenants that don't federate add members by email invitation
+instead: an admin sends an invitation with an email and role, the invitee
+follows a signed link, signs up if needed, and is added to the tenant on accept.
+
+> **Status:** The `TenantInvitation` data model backs this flow, but the
+> tenant-scoped invitation **endpoint** (`POST /api/tenants/{id}/invitations`)
+> is not yet shipped. The currently available invitation surface is the
+> platform-level `/api/invitations` (a separate `Invitation` system used at
+> sign-up). Treat the tenant-scoped invitation flow as design-only until the
+> route lands.

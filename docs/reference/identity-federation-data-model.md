@@ -187,6 +187,8 @@ model TenantDomain {
   tenantId          String    @map("tenant_id")
   domain            String    @unique // lowercased, no protocol
   verificationToken String    @map("verification_token") // random hex token
+  // The token expires 7 days after creation; an admin must re-claim if it lapses.
+  tokenExpiresAt    DateTime  @map("token_expires_at")
   verifiedAt        DateTime? @map("verified_at")
   verifyAttemptedAt DateTime? @map("verify_attempted_at")
   verifyAttempts    Int       @default(0) @map("verify_attempts")
@@ -196,6 +198,7 @@ model TenantDomain {
 
   @@index([tenantId])
   @@index([verifiedAt])
+  @@index([tokenExpiresAt])
   @@map("tenant_domains")
 }
 ```
@@ -212,7 +215,8 @@ model TenantIdentityProvider {
 
   kind           IdpKind
   // The provider record name in the identity service. Max 32 chars, unique
-  // within the pool. Convention: "tenant-{first-12-chars-of-tenant-id}".
+  // within the pool. Convention: "tenant-{tenant-id}", the cuid truncated to
+  // 25 chars so "tenant-" + id stays within the 32-char quota.
   cognitoIdpName String  @unique @map("cognito_idp_name")
 
   // SAML configuration
@@ -326,7 +330,7 @@ model TenantInvitation {
   createdAt       DateTime @default(now()) @map("created_at")
 
   tenant     Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  invitedBy  User   @relation("TenantInvitedBy", fields: [invitedByUserId], references: [id])
+  invitedBy  User   @relation("TenantInvitationInviter", fields: [invitedByUserId], references: [id])
   acceptedBy User?  @relation("TenantInvitationAcceptedBy", fields: [acceptedByUserId], references: [id])
 
   @@unique([tenantId, email])
@@ -350,15 +354,15 @@ personalTenant Tenant? @relation("PersonalTenantOwner", fields: [personalTenantI
 
 tenantMemberships    TenantMember[]      @relation("TenantMemberships")
 invitedTenantMembers TenantMember[]      @relation("TenantInvitedBy")
-sentInvitations      TenantInvitation[]  @relation("TenantInvitedBy")
+sentInvitations      TenantInvitation[]  @relation("TenantInvitationInviter")
 acceptedInvitations  TenantInvitation[]  @relation("TenantInvitationAcceptedBy")
 ```
 
-The global `User.role` enum is the platform-wide role
-(`END_USER`, `B2B_PARTNER`, `INTERNAL`, `SUPER_ADMIN`) and is independent of
-tenant membership. It is retained so platform-level checks
-(`SUPER_ADMIN` / `INTERNAL`) do not require a join through `TenantMember` on
-every request.
+The global `User.role` enum is the platform-wide role (`END_USER`,
+`B2B_PARTNER`, `PARTNER_ADMIN`, `INTERNAL`, `CONTENT_CREATOR`, `MODERATOR`,
+`SUPER_ADMIN`) and is independent of tenant membership. It is retained so
+platform-level checks (`SUPER_ADMIN` / `INTERNAL`) do not require a join through
+`TenantMember` on every request.
 
 ### Entity, Post, Group, ConnectionCode, Notification
 

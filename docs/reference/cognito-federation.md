@@ -30,11 +30,13 @@ The custom attributes carried per user:
 
 | Attribute | Purpose |
 |---|---|
+| `custom:userId` | The Trellis `User.id` (cuid) |
 | `custom:handle` | The user's handle |
-| `custom:role` | Platform-wide role (`UserRole`) |
+| `custom:globalRole` | Platform-wide role (`UserRole`) |
 | `custom:activeTenantId` | The user's active tenant |
 | `custom:tenantRole` | The user's role within the active tenant |
 | `custom:tenantSlug` | The active tenant's slug |
+| `custom:idpGroups` | IdP-emitted group identifiers (federated users); resolved to a tenant role |
 
 Four Lambda triggers are wired to the pool:
 
@@ -71,7 +73,7 @@ import {
 const cognito = new CognitoIdentityProviderClient({});
 
 async function createOidcIdp(tenant: Tenant, config: OidcConfig) {
-  const providerName = cognitoIdpName(tenant.id); // "tenant-{first-12-chars}"
+  const providerName = cognitoIdpName(tenant.id); // "tenant-{cuid}", id truncated to 25 chars
 
   await cognito.send(new CreateIdentityProviderCommand({
     UserPoolId: env.COGNITO_USER_POOL_ID,
@@ -116,6 +118,10 @@ async function createOidcIdp(tenant: Tenant, config: OidcConfig) {
 ```
 
 ### Create (SAML)
+
+> **Status: not shipped.** The connect-IdP API rejects `kind: "SAML"` with
+> `501 SAML_NOT_AVAILABLE_IN_MVP`; only OIDC is wired today. The shape below is
+> the intended design.
 
 The same shape with `ProviderType: 'SAML'` and
 `ProviderDetails: { MetadataURL: '...' }` or a `MetadataFile`. Cognito fetches
@@ -239,41 +245,56 @@ On each run it:
 
 1. Reads the Cognito subject from the event.
 2. Looks up cached claims in DynamoDB.
-3. On a cache miss, loads the user, active membership, and role mapping from the
-   database — or, for a federated user with no existing row, runs JIT
-   provisioning (see
-   [just-in-time provisioning](./just-in-time-provisioning.md)).
-4. Re-resolves `custom:tenantRole` from `custom:idpGroups` via
-   `TenantRoleMapping`, so a role change at the IdP takes effect on the next
-   refresh.
+3. On a cache miss, loads the user and active membership (with the tenant slug)
+   from the database. It does **not** create users or memberships — JIT
+   provisioning happens earlier, in the PostConfirmation trigger (see
+   [just-in-time provisioning](./just-in-time-provisioning.md)). If no user row
+   exists (drift, e.g. after a restore) or the user is suspended, it emits
+   minimal/empty claims so tenant-scoped endpoints return 403 — never a 500 at
+   sign-in.
+4. For a federated user, re-resolves the tenant role from `custom:idpGroups`
+   via `TenantRoleMapping`, persists it to `tenant_members.role` if it changed,
+   and emits the refreshed role — so a role change at the IdP takes effect on
+   the next refresh.
 5. Writes the claims to the token and refreshes the cache.
 
+The trigger uses the **V2 access-token override** response shape
+(`claimsAndScopeOverrideDetails.accessTokenGeneration`):
+
 ```typescript
-export const handler = async (event: PreTokenGenerationTriggerEvent) => {
+export const handler: PreTokenGenerationV2TriggerHandler = async (event) => {
   const sub = event.userName;
-  const cognitoUserAttrs = event.request.userAttributes;
-  const idpGroupsRaw = cognitoUserAttrs['custom:idpGroups'] ?? '';
+  const idpGroups = parseGroups(event.request.userAttributes['custom:idpGroups']);
   const isFederated = !!event.request.userAttributes['identities'];
 
   let claims = await dynamoCache.get(sub);
   if (!claims) {
-    claims = isFederated
-      ? await jitProvision(sub, cognitoUserAttrs, idpGroupsRaw.split(','))
-      : await loadFromRds(sub);
-    await dynamoCache.put(sub, claims, /* ttlSeconds */ 3600);
+    // Cache miss: load from RDS. No JIT here — provisioning is done in
+    // PostConfirmation. A missing user row yields minimal "drift" claims.
+    claims = await loadFromRds(sub);
   }
 
+  // Federated: re-resolve the tenant role from current group claims and
+  // persist it before emitting (catches admin-side group changes within TTL).
+  if (isFederated && claims.activeTenantId && idpGroups.length > 0) {
+    const refreshed = await maybeRefreshFederatedRole(claims, idpGroups);
+    if (refreshed) claims = { ...claims, tenantRole: refreshed };
+  }
+
+  await dynamoCache.put(sub, claims, /* ttlSeconds */ 3600);
+
   event.response = {
-    claimsOverrideDetails: {
-      claimsToAddOrOverride: {
-        'custom:userId':         claims.userId,
-        'custom:globalRole':     claims.globalRole,
-        'custom:activeTenantId': claims.activeTenantId,
-        'custom:tenantSlug':     claims.tenantSlug,
-        'custom:tenantRole':     claims.tenantRole,
-        'custom:handle':         claims.handle,
+    claimsAndScopeOverrideDetails: {
+      accessTokenGeneration: {
+        claimsToAddOrOverride: {
+          'custom:userId':         claims.userId,
+          'custom:globalRole':     claims.globalRole,
+          'custom:activeTenantId': claims.activeTenantId,
+          'custom:tenantSlug':     claims.tenantSlug,
+          'custom:tenantRole':     claims.tenantRole,
+          'custom:handle':         claims.handle,
+        },
       },
-      groupOverrideDetails: { groupsToOverride: [] },
     },
   };
   return event;
@@ -288,10 +309,11 @@ issued. The TTL is the backstop.
 
 Cognito routes a user to their tenant's IdP in one of three ways.
 
-### Identifier-based (preferred)
+### Provider-name-based (shipped)
 
-The hosted UI accepts an `idp_identifier` query parameter set to the user's
-email domain:
+The `/api/auth/discover` endpoint resolves the email domain to a verified
+tenant domain with an `ACTIVE` IdP, then returns a Hosted UI authorization URL
+that names the provider record explicitly:
 
 ```
 GET https://<auth-domain>/oauth2/authorize
@@ -299,20 +321,18 @@ GET https://<auth-domain>/oauth2/authorize
   &client_id=<clientId>
   &redirect_uri=<redirect>
   &scope=openid+email+profile
-  &idp_identifier=example.com        ← email domain
+  &identity_provider=tenant-<tenantId>   ← the resolved provider record
 ```
 
-Cognito matches the domain against each IdP's `IdpIdentifiers` array and
-redirects accordingly. This requires `IdpIdentifiers` to be set to the tenant's
-verified domains on IdP create and kept in sync as domains change.
+This is the path the shipped discovery flow uses (server-derived provider name;
+no caller-supplied IdP name or scope, to prevent injection).
 
-### Provider-name-based (fallback)
+### Identifier-based (alternative)
 
-```
-&identity_provider=tenant-abc12345xxx
-```
-
-Used when the discovery endpoint returns the explicit provider record name.
+The Hosted UI also accepts an `idp_identifier` query parameter set to the
+user's email domain; Cognito matches it against each IdP's `IdpIdentifiers`
+array. This requires `IdpIdentifiers` to be set to the tenant's verified
+domains on IdP create and kept in sync as domains change.
 
 ### IdP-initiated
 
@@ -321,9 +341,8 @@ to the Cognito endpoint without an `idp_identifier`. Cognito identifies the IdP
 from the response signature and proceeds. No extra configuration is needed
 beyond the IdP record itself.
 
-The discovery endpoint defaults to the identifier-based flow (cleanest URL,
-does not expose internal provider names) and also accepts the IdP-initiated
-flow.
+The shipped discovery endpoint builds the provider-name-based URL above; the
+IdP-initiated flow works without any discovery call.
 
 ## Connecting an OIDC IdP
 

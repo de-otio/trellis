@@ -9,7 +9,9 @@ order: 70
 
 ## Overview
 
-The Trellis API is a long-lived Node.js process. A database connection is expensive to establish (~10–50 ms for TCP + TLS + PostgreSQL handshake). The goal is to reuse connections across requests without exhausting the RDS connection limit.
+The Trellis API is a long-lived Node.js process. A database connection is expensive to establish (~10–50 ms for TCP + TLS + PostgreSQL handshake). The goal is to reuse connections across requests without exhausting the database's connection limit.
+
+Trellis ships the **in-process pool** approach: `apps/api/src/lib/database-connection-manager.ts` constructs a `pg.Pool` and hands it to Prisma via `@prisma/adapter-pg` (`PrismaPg`), with pool size from `DATABASE_POOL_MAX` (default `10`), a fixed idle timeout, `allowExitOnIdle: false`, and `pool.end()` on shutdown. The other pooling options and all instance-sizing, alarm, and cost guidance below are sizing decisions for the consuming application that operates the database — Trellis does not provision or own it.
 
 ## Connection pooling options
 
