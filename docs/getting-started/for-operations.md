@@ -44,7 +44,7 @@ from its own parameter or secret store — before starting the process.
 The values Trellis expects include a database connection string, the
 DynamoDB table name, queue endpoints, the identity provider settings used to
 validate sessions, and the media/CDN origin. See
-[`apps/api/src/env.ts`](../../apps/api/src/env.ts) for the full environment
+[`apps/api/src/env.ts`](https://github.com/de-otio/trellis/blob/main/apps/api/src/env.ts) for the full environment
 schema and which variables are required.
 
 Secrets (database credentials, session secret, third-party API keys) are never
