@@ -91,7 +91,7 @@ describe("reports erasure", () => {
 
   it("deleting the reporter removes their reports (cascade)", async () => {
     const user = await prisma.user.create({
-      data: { email: `rep-cascade-${Date.now()}@test.example.com`, role: "END_USER" },
+      data: { email: `rep-cascade-${Date.now()}@test.example.com`, handle: `rep-cascade-${Date.now()}`, role: "END_USER" },
     });
     await prisma.report.create({
       data: {

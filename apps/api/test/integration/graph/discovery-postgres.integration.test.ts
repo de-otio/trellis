@@ -111,7 +111,7 @@ suite("PostgresGraphService.DiscoveryOps (live CTE)", () => {
     await seedTenant(TENANT);
     await seedTenant(OTHER_TENANT);
     await prisma.user.create({
-      data: { id: U, email: `${U}@example.com`, role: "END_USER", personalTenantId: TENANT },
+      data: { id: U, email: `${U}@example.com`, handle: U, role: "END_USER", personalTenantId: TENANT },
     });
 
     await seedEntity(A, TENANT, { breed: "Labrador" });
@@ -222,10 +222,10 @@ suite("PostgresGraphService.DiscoveryOps (live CTE)", () => {
         data: { id: HUB_TENANT, slug: HUB_TENANT, displayName: HUB_TENANT, type: "ORGANIZATION" },
       });
       await prisma.user.create({
-        data: { id: VIEWER, email: `${VIEWER}@example.com`, role: "END_USER", personalTenantId: CAP_TENANT },
+        data: { id: VIEWER, email: `${VIEWER}@example.com`, handle: VIEWER, role: "END_USER", personalTenantId: CAP_TENANT },
       });
       await prisma.user.create({
-        data: { id: HUB, email: `${HUB}@example.com`, role: "END_USER", personalTenantId: HUB_TENANT },
+        data: { id: HUB, email: `${HUB}@example.com`, handle: HUB, role: "END_USER", personalTenantId: HUB_TENANT },
       });
 
       // Viewer owns the anchor entity.

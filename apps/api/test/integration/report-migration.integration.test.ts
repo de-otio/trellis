@@ -22,7 +22,7 @@ let prisma: PrismaClient;
 
 async function makeUser(tag: string): Promise<string> {
   const u = await prisma.user.create({
-    data: { email: `report-itest-${tag}-${Date.now()}-${Math.random()}@test.example.com`, role: "END_USER" },
+    data: { email: `report-itest-${tag}-${Date.now()}-${Math.random()}@test.example.com`, handle: `report-itest-${tag}-${Date.now()}-${Math.random()}`, role: "END_USER" },
   });
   return u.id;
 }

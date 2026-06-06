@@ -146,6 +146,7 @@ describe("Cascade delete from Tenant", () => {
     const user = await prisma.user.create({
       data: {
         email: `cascade-${Date.now()}@test.example.com`,
+        handle: `cascade-${Date.now()}`,
         role: "END_USER",
       },
     });

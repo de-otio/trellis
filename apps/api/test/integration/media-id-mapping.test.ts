@@ -161,6 +161,7 @@ describe("Media ID Mapping Integration", () => {
       data: {
         email: `test-other-${timestamp}@example.com`,
         username: `otheruser${timestamp}`,
+        handle: `test-other-${timestamp}`,
       },
     });
 

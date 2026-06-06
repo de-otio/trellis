@@ -197,7 +197,7 @@ describe("getWrappedDatabase", () => {
     it("passes operation label as 'user.create' for a different method", async () => {
       const db = getWrappedDatabase(TEST_REGION, env, request) as any;
 
-      await db.user.create({ data: { name: "Bob" } });
+      await db.user.create({ data: { name: "Bob", handle: "Bob" } });
 
       expect(executeCalls[0].ctx.operation).toBe("user.create");
     });
