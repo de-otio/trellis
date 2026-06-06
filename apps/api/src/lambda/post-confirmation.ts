@@ -34,8 +34,7 @@ import type {
   PostConfirmationTriggerHandler,
 } from "aws-lambda";
 import { Logger } from "@aws-lambda-powertools/logger";
-import { getSecret } from "@aws-lambda-powertools/parameters/secrets";
-import { PrismaPg } from "@prisma/adapter-pg";
+import { getLambdaPrisma as getPrisma } from "../lib/lambda-prisma.js";
 import {
   PrismaClient,
   Prisma,
@@ -55,29 +54,7 @@ import {
 import type { SignupMethod } from "@prisma/client";
 
 const logger = new Logger({ serviceName: "post-confirmation" });
-let prisma: PrismaClient | null = null;
 let cache: ClaimsCache | null = null;
-
-async function getPrisma(): Promise<PrismaClient> {
-  if (prisma) return prisma;
-  const { username, password, host, port, dbname } = (await getSecret(
-    process.env.DB_SECRET_ARN!,
-    { transform: "json" },
-  )) as unknown as {
-    username: string;
-    password: string;
-    host: string;
-    port: string | number;
-    dbname: string;
-  };
-  // Prisma 7 removed the `datasources` constructor option; the connection URL
-  // is now supplied via a driver adapter.
-  const adapter = new PrismaPg({
-    connectionString: `postgresql://${username}:${encodeURIComponent(password)}@${host}:${port}/${dbname}?connection_limit=1`,
-  });
-  prisma = new PrismaClient({ adapter });
-  return prisma;
-}
 
 function getCache(): ClaimsCache {
   if (!cache) cache = createClaimsCacheFromEnv();

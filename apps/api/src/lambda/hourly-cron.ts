@@ -1,10 +1,9 @@
 import { Logger } from "@aws-lambda-powertools/logger";
 import { Metrics, MetricUnit } from "@aws-lambda-powertools/metrics";
-import { getSecret } from "@aws-lambda-powertools/parameters/secrets";
 import { DynamoDBClient, PutItemCommand } from "@aws-sdk/client-dynamodb";
 import { marshall } from "@aws-sdk/util-dynamodb";
-import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
+import { getLambdaPrisma as getPrisma } from "../lib/lambda-prisma.js";
 import {
   batchedPruneExpired,
   resolveInteractionEventConfig,
@@ -22,32 +21,6 @@ const metrics = new Metrics({
 
 const dynamo = new DynamoDBClient({ region: process.env.AWS_REGION });
 const TABLE = process.env.DYNAMODB_TABLE!;
-
-let prisma: PrismaClient | null = null;
-
-interface DbSecret {
-  username: string;
-  password: string;
-  host: string;
-  port: string | number;
-  dbname: string;
-}
-
-async function getPrisma(): Promise<PrismaClient> {
-  if (prisma) return prisma;
-  // getSecret caches + KMS-decrypts; transform:"json" parses the secret value.
-  const { username, password, host, port, dbname } = (await getSecret(
-    process.env.DB_SECRET_ARN!,
-    { transform: "json" },
-  )) as unknown as DbSecret;
-  // Prisma 7 removed the `datasources` constructor option; the connection URL
-  // is now supplied via a driver adapter.
-  const adapter = new PrismaPg({
-    connectionString: `postgresql://${username}:${encodeURIComponent(password)}@${host}:${port}/${dbname}?connection_limit=1`,
-  });
-  prisma = new PrismaClient({ adapter });
-  return prisma;
-}
 
 export const handler = async (): Promise<void> => {
   const now = Math.floor(Date.now() / 1000);

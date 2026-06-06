@@ -24,9 +24,8 @@ import type {
   PreTokenGenerationV2TriggerHandler,
 } from "aws-lambda";
 import { Logger } from "@aws-lambda-powertools/logger";
-import { getSecret } from "@aws-lambda-powertools/parameters/secrets";
-import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient, type TenantRole } from "@prisma/client";
+import { getLambdaPrisma as getPrisma } from "../lib/lambda-prisma.js";
 import {
   ClaimsCache,
   createClaimsCacheFromEnv,
@@ -36,29 +35,7 @@ import {
 import { resolveTenantRole, type RoleMappingInput } from "../lib/tenant/resolve-role.js";
 
 const logger = new Logger({ serviceName: "pre-token-generation" });
-let prisma: PrismaClient | null = null;
 let cache: ClaimsCache | null = null;
-
-async function getPrisma(): Promise<PrismaClient> {
-  if (prisma) return prisma;
-  const { username, password, host, port, dbname } = (await getSecret(
-    process.env.DB_SECRET_ARN!,
-    { transform: "json" },
-  )) as unknown as {
-    username: string;
-    password: string;
-    host: string;
-    port: string | number;
-    dbname: string;
-  };
-  // Prisma 7 removed the `datasources` constructor option; the connection URL
-  // is now supplied via a driver adapter.
-  const adapter = new PrismaPg({
-    connectionString: `postgresql://${username}:${encodeURIComponent(password)}@${host}:${port}/${dbname}?connection_limit=1`,
-  });
-  prisma = new PrismaClient({ adapter });
-  return prisma;
-}
 
 function getCache(): ClaimsCache {
   if (!cache) cache = createClaimsCacheFromEnv();

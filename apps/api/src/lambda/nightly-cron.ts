@@ -3,11 +3,10 @@ import { S3Client, DeleteObjectsCommand, ListObjectsV2Command } from "@aws-sdk/c
 import { CognitoIdentityProviderClient, AdminDeleteUserCommand } from "@aws-sdk/client-cognito-identity-provider";
 import { SESClient, SendEmailCommand } from "@aws-sdk/client-ses";
 import { marshall } from "@aws-sdk/util-dynamodb";
-import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
 import { Logger } from "@aws-lambda-powertools/logger";
 import { Metrics, MetricUnit } from "@aws-lambda-powertools/metrics";
-import { getSecret } from "@aws-lambda-powertools/parameters/secrets";
+import { getLambdaPrisma as getPrisma } from "../lib/lambda-prisma.js";
 
 const logger = new Logger({ serviceName: "nightly-cron" });
 const metrics = new Metrics({ namespace: "Trellis/Deletion", serviceName: "nightly-cron" });
@@ -16,26 +15,6 @@ const dynamo = new DynamoDBClient({ region: process.env.AWS_REGION });
 const s3 = new S3Client({ region: process.env.AWS_REGION });
 const TABLE = process.env.DYNAMODB_TABLE!;
 const MEDIA_BUCKET = process.env.MEDIA_BUCKET_NAME!;
-
-let prisma: PrismaClient | null = null;
-
-async function getPrisma(): Promise<PrismaClient> {
-  if (prisma) return prisma;
-  const { username, password, host, port, dbname } = (await getSecret(process.env.DB_SECRET_ARN!, { transform: "json" })) as unknown as {
-    username: string;
-    password: string;
-    host: string;
-    port: string | number;
-    dbname: string;
-  };
-  // Prisma 7 removed the `datasources` constructor option; the connection URL
-  // is now supplied via a driver adapter.
-  const adapter = new PrismaPg({
-    connectionString: `postgresql://${username}:${encodeURIComponent(password)}@${host}:${port}/${dbname}?connection_limit=1`,
-  });
-  prisma = new PrismaClient({ adapter });
-  return prisma;
-}
 
 export const handler = async (): Promise<void> => {
   const now = Math.floor(Date.now() / 1000);
