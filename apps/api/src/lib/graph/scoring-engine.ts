@@ -11,9 +11,6 @@
  *   w_frequency=0.25, w_owner=0.15, w_creation=0.10, w_connection=0.10,
  *   w_decay=0.05). Owned entities auto-pin at 1.0.
  *
- * @see /analysis/redesign/06-entities-over-people/09-scoring-without-reciprocity.md
- * @see /analysis/redesign/02-new-core-primitives.md
- *
  * CODEBOOK: Every constant in this file (weights, decay half-lives, engagement
  * scores, connection bonuses, tier thresholds) is documented with rationale in
  * the sibling file SCORING-CODEBOOK.md.  The codebook and this file are

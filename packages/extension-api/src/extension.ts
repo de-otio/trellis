@@ -196,7 +196,7 @@ export interface ExtensionHooks {
  *   - Bump alongside every `package.json` version change.
  *   - Never change one without changing the other.
  */
-export const EXTENSION_API_VERSION = "0.2.0" as const;
+export const EXTENSION_API_VERSION = "0.3.0" as const;
 
 // ---------------------------------------------------------------------------
 // Strategy Interfaces — pluggable domain-specific behavior
