@@ -1,34 +1,14 @@
 import { DynamoDBClient, PutItemCommand } from "@aws-sdk/client-dynamodb";
 import { marshall } from "@aws-sdk/util-dynamodb";
-import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
 import { Logger } from "@aws-lambda-powertools/logger";
-import { getSecret } from "@aws-lambda-powertools/parameters/secrets";
+import { getLambdaPrisma as getPrisma } from "../lib/lambda-prisma.js";
 
 const logger = new Logger({ serviceName: "maintenance-cron" });
 
 const dynamo = new DynamoDBClient({ region: process.env.AWS_REGION });
 const TABLE = process.env.DYNAMODB_TABLE!;
 
-let prisma: PrismaClient | null = null;
-
-async function getPrisma(): Promise<PrismaClient> {
-  if (prisma) return prisma;
-  const { username, password, host, port, dbname } = (await getSecret(process.env.DB_SECRET_ARN!, { transform: "json" })) as unknown as {
-    username: string;
-    password: string;
-    host: string;
-    port: string | number;
-    dbname: string;
-  };
-  // Prisma 7 removed the `datasources` constructor option; the connection URL
-  // is now supplied via a driver adapter.
-  const adapter = new PrismaPg({
-    connectionString: `postgresql://${username}:${encodeURIComponent(password)}@${host}:${port}/${dbname}?connection_limit=1`,
-  });
-  prisma = new PrismaClient({ adapter });
-  return prisma;
-}
 
 export const handler = async (): Promise<void> => {
   const now = Math.floor(Date.now() / 1000);
