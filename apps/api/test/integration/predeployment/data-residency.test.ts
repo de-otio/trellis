@@ -25,6 +25,7 @@ vi.mock("../../../src/db", () => ({
           dataRegion: region,
         }),
         findUnique: vi.fn().mockResolvedValue(null),
+        findFirst: vi.fn().mockResolvedValue(null),
         update: vi.fn(),
         upsert: vi.fn().mockResolvedValue({
           id: "user123",

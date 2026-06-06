@@ -156,6 +156,7 @@ describe("EntityHandler", () => {
       },
       user: {
         findUnique: vi.fn(),
+        findFirst: vi.fn().mockResolvedValue(null),
         upsert: vi.fn(),
       },
       featureToggle: {

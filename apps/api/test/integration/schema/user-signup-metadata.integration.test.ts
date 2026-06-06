@@ -59,7 +59,7 @@ describe("users signup-metadata columns", () => {
 describe("users.invitation_id FK integrity", () => {
   it("links a user to the invitation they redeemed", async () => {
     const inviter = await prisma.user.create({
-      data: { email: `inviter-${Date.now()}@test.example.com`, role: "END_USER" },
+      data: { email: `inviter-${Date.now()}@test.example.com`, handle: `inviter-${Date.now()}`, role: "END_USER" },
     });
     const invitation = await prisma.invitation.create({
       data: { code: `code-${Date.now()}`, createdBy: inviter.id },
@@ -67,6 +67,7 @@ describe("users.invitation_id FK integrity", () => {
     const invitee = await prisma.user.create({
       data: {
         email: `invitee-${Date.now()}@test.example.com`,
+        handle: `invitee-${Date.now()}`,
         role: "END_USER",
         signupMethod: "INVITE",
         invitationId: invitation.id,
@@ -90,6 +91,7 @@ describe("users.invitation_id FK integrity", () => {
       prisma.user.create({
         data: {
           email: `bad-inv-${Date.now()}@test.example.com`,
+          handle: `bad-inv-${Date.now()}`,
           role: "END_USER",
           invitationId: "definitely-not-a-real-invitation",
         },

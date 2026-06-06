@@ -356,6 +356,7 @@ describe.skip("Post-Deployment: Database Schema Validation", () => {
           data: {
             id: testUserId,
             email: testEmail,
+            handle: testUserId,
             role: "END_USER",
             region: "US",
             dataRegion: "US",

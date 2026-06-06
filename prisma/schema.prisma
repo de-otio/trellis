@@ -173,8 +173,15 @@ model User {
   id        String   @id @default(cuid())
   email     String   @unique
   role      UserRole @default(END_USER)
-  actorUri  String?  @unique @map("actor_uri") // ActivityPub actor URI (e.g., "https://example.com/users/{username}")
-  handle    String? // ActivityPub handle (e.g., "@user@example.com")
+  actorUri  String?  @unique @map("actor_uri") // ActivityPub actor URI (e.g., "https://example.com/users/{handle}")
+  // Canonical, portable, AP-actor-shaped identifier (S-CP2). The bare local
+  // label (e.g. "alice"); the addressable handle is `@{handle}@{domain}` and
+  // the actor URI is `{baseUrl}/users/{handle}`. Derived + collision-checked at
+  // provisioning; non-null + globally unique so federation is additive, never a
+  // migration. (WebFinger/AP still resolve on `username` until the federation
+  // repoint — that change is code-only, no data migration, since `handle` is the
+  // stable key.)
+  handle    String  @unique
   createdAt DateTime @default(now()) @map("created_at")
 
   // Cognito Auth integration

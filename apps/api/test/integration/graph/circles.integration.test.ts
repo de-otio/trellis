@@ -60,7 +60,7 @@ suite("CircleOps dual-gated visibility (Postgres)", () => {
       create: { id: pt, slug: pt, displayName: pt, type: "ORGANIZATION" },
     });
     await prisma.user.create({
-      data: { id, email: `${id}@example.com`, personalTenantId: pt },
+      data: { id, email: `${id}@example.com`, handle: id, personalTenantId: pt },
     });
   }
 
@@ -246,6 +246,7 @@ suite("CircleOps dual-gated visibility (Postgres)", () => {
       data: {
         id: "circ-other-author",
         email: "circ-other-author@example.com",
+        handle: "circ-other-author",
         personalTenantId: OTHER_TENANT,
       },
     });

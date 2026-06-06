@@ -106,7 +106,7 @@ describe("interaction_events erasure", () => {
 
   it("deleting the actor user removes their events", async () => {
     const user = await prisma.user.create({
-      data: { email: `ie-cascade-${Date.now()}@test.example.com`, role: "END_USER" },
+      data: { email: `ie-cascade-${Date.now()}@test.example.com`, handle: `ie-cascade-${Date.now()}`, role: "END_USER" },
     });
     await prisma.interactionEvent.create({
       data: {

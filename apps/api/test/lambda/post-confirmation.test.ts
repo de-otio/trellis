@@ -100,7 +100,18 @@ vi.mock("@prisma/client", () => {
     this.user = { findUnique: mockUserFindUnique };
     this.parentalLink = { upsert: mockParentalLinkUpsert };
   });
-  return { PrismaClient };
+  // S-CP2: post-confirmation now references Prisma.PrismaClientKnownRequestError
+  // (handle-collision retry). Provide a minimal class for the instanceof check.
+  class PrismaClientKnownRequestError extends Error {
+    code: string;
+    meta?: unknown;
+    constructor(message: string, opts?: { code?: string; meta?: unknown }) {
+      super(message);
+      this.code = opts?.code ?? "";
+      this.meta = opts?.meta;
+    }
+  }
+  return { PrismaClient, Prisma: { PrismaClientKnownRequestError } };
 });
 
 function makeTx() {
@@ -592,6 +603,52 @@ describe("PostConfirmation Lambda — idempotency and failure", () => {
       (c) => c[0].kind === "PUT",
     );
     expect(putCalls.length).toBe(0);
+  });
+
+  it("S-CP2: retries provisioning on a handle-collision (P2002) and succeeds", async () => {
+    const { Prisma } = (await import("@prisma/client")) as unknown as {
+      Prisma: {
+        PrismaClientKnownRequestError: new (
+          m: string,
+          o: { code: string; meta: unknown },
+        ) => Error;
+      };
+    };
+    // First attempt loses the race on the unique `handle`; the wrapper retries
+    // and the second attempt (default impl) succeeds.
+    mockTransaction.mockImplementationOnce(async () => {
+      throw new Prisma.PrismaClientKnownRequestError("Unique constraint", {
+        code: "P2002",
+        meta: { target: ["handle"] },
+      });
+    });
+    const handler = await loadHandler();
+    await expect(
+      handler(makeEvent(), {} as any, () => {}),
+    ).resolves.toBeDefined();
+    expect(mockTransaction).toHaveBeenCalledTimes(2);
+  });
+
+  it("S-CP2: does NOT retry on a non-handle unique violation", async () => {
+    const { Prisma } = (await import("@prisma/client")) as unknown as {
+      Prisma: {
+        PrismaClientKnownRequestError: new (
+          m: string,
+          o: { code: string; meta: unknown },
+        ) => Error;
+      };
+    };
+    mockTransaction.mockImplementationOnce(async () => {
+      throw new Prisma.PrismaClientKnownRequestError("Unique constraint", {
+        code: "P2002",
+        meta: { target: ["email"] },
+      });
+    });
+    const handler = await loadHandler();
+    await expect(
+      handler(makeEvent(), {} as any, () => {}),
+    ).rejects.toThrow();
+    expect(mockTransaction).toHaveBeenCalledTimes(1);
   });
 
   it("links cognitoSub to an existing email-only user", async () => {
