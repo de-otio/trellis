@@ -26,6 +26,7 @@ function createMockDatabase() {
         region: data.data.region,
         dataRegion: data.data.dataRegion,
       })),
+      findFirst: vi.fn().mockResolvedValue(null),
       findUnique: vi.fn(async (query: any) => {
         if (query.where.id === "user-123") {
           return {
@@ -352,6 +353,7 @@ describe("Data Router", () => {
       const { createPrismaForRegion } = await import("../../src/db.js");
       vi.mocked(createPrismaForRegion).mockReturnValueOnce({
         user: {
+          findFirst: vi.fn().mockResolvedValue(null),
           findUnique: vi.fn(async () => ({
             id: "user-123",
             email: "test@example.com",

@@ -38,8 +38,8 @@ import { getSecret } from "@aws-lambda-powertools/parameters/secrets";
 import { PrismaPg } from "@prisma/adapter-pg";
 import {
   PrismaClient,
+  Prisma,
   type AgeTier,
-  type Prisma,
   type TenantRole,
   type UserRole,
 } from "@prisma/client";
@@ -199,20 +199,22 @@ export const handler: PostConfirmationTriggerHandler = async (event) => {
 
   const db = await getPrisma();
 
-  const result = await db.$transaction(
-    async (tx) => provisionUserAndTenancy(tx, {
-      cognitoSub,
-      email,
-      emailVerified: attrs.email_verified,
-      federated,
-      idpGroups,
-      dateOfBirth,
-      ageTier,
-      providedHandle: attrs["custom:handle"],
-      invitationCode,
-      requestedMethod,
-    }),
-    { timeout: 8000 },
+  const result = await withHandleConflictRetry(() =>
+    db.$transaction(
+      async (tx) => provisionUserAndTenancy(tx, {
+        cognitoSub,
+        email,
+        emailVerified: attrs.email_verified,
+        federated,
+        idpGroups,
+        dateOfBirth,
+        ageTier,
+        providedHandle: attrs["custom:handle"],
+        invitationCode,
+        requestedMethod,
+      }),
+      { timeout: 8000 },
+    ),
   );
 
   if (ageTier === "CHILD") {
@@ -280,6 +282,58 @@ interface ProvisioningInput {
   requestedMethod: SignupMethod | undefined;
 }
 
+/**
+ * S-CP2: the canonical ActivityPub actor URI for a user, derived from the
+ * stable, unique `handle` — `{baseUrl}/users/{handle}`. Returns null when no
+ * base domain is configured for this lambda; the actorUri column then stays
+ * null and the AP dispatcher derives it on demand. No hard dependency on the
+ * env var, so this is safe whether or not the deploy plumbs APP_DOMAIN in.
+ */
+function canonicalActorUri(handle: string): string | null {
+  const raw = process.env.ACTIVITYPUB_BASE_URL || process.env.APP_DOMAIN;
+  if (!raw) return null;
+  try {
+    // Accept both a full URL ("https://host") and a bare hostname ("host").
+    const withProtocol = /^https?:\/\//.test(raw) ? raw : `https://${raw}`;
+    const url = new URL(withProtocol);
+    return `${url.protocol}//${url.hostname}/users/${encodeURIComponent(handle)}`;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * S-CP2: retry the provisioning transaction when two concurrent signups race to
+ * the same derived handle. `handle` is DB-unique, so the loser of the race gets
+ * a P2002; re-running the transaction re-derives the handle (now seeing the
+ * committed conflict) and picks the next suffix. The transaction rolls back
+ * fully on failure, so retries have no partial-write side effects.
+ */
+async function withHandleConflictRetry<T>(
+  fn: () => Promise<T>,
+  maxAttempts = 3,
+): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const isHandleConflict =
+        err instanceof Prisma.PrismaClientKnownRequestError &&
+        err.code === "P2002" &&
+        String(
+          (err.meta as { target?: unknown } | undefined)?.target ?? "",
+        ).includes("handle");
+      if (isHandleConflict && attempt < maxAttempts) {
+        logger.warn("Handle collision during provisioning; retrying", {
+          attempt,
+        });
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
 async function provisionUserAndTenancy(
   tx: Prisma.TransactionClient,
   input: ProvisioningInput,
@@ -334,6 +388,9 @@ async function provisionUserAndTenancy(
         cognitoSub,
         email,
         handle: initialHandle,
+        // S-CP2: lock in the AP-actor-shaped URI from the stable handle at
+        // creation (null when no base domain is configured for this lambda).
+        actorUri: canonicalActorUri(initialHandle),
         role: federated ? "B2B_PARTNER" : "END_USER",
         // Fail-CLOSED research age signal: a new account is NOT age-verified
         // until an explicit verification flow sets it. Distinct from `ageTier`
@@ -350,13 +407,16 @@ async function provisionUserAndTenancy(
     const updates: Prisma.UserUpdateInput = {};
     if (!user.cognitoSub) updates.cognitoSub = cognitoSub;
     if (!user.handle) {
-      updates.handle = await deriveHandle(email, async (h) => {
+      const backfilledHandle = await deriveHandle(email, async (h) => {
         const found = await tx.user.findFirst({
           where: { handle: h, NOT: { id: user!.id } },
           select: { id: true },
         });
         return !!found;
       });
+      updates.handle = backfilledHandle;
+      // S-CP2: derive the AP actor URI from the handle we just assigned.
+      if (!user.actorUri) updates.actorUri = canonicalActorUri(backfilledHandle);
     }
     if (Object.keys(updates).length > 0) {
       user = await tx.user.update({ where: { id: user.id }, data: updates });

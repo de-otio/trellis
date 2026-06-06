@@ -70,3 +70,34 @@ export async function deriveHandle(
     HANDLE_TOTAL_MAX,
   );
 }
+
+/** Minimal Prisma surface needed to collision-check a handle. */
+type HandleCollisionDb = {
+  user: {
+    findFirst: (args: {
+      where: Record<string, unknown>;
+      select: { id: true };
+    }) => Promise<{ id: string } | null>;
+  };
+};
+
+/**
+ * Convenience wrapper that wires {@link deriveHandle}'s collision check to a
+ * Prisma client, returning a globally-unique handle. Use this at every
+ * User-creation site so the non-null + unique `handle` invariant (S-CP2) holds
+ * regardless of which path provisions the user. Pass `excludeUserId` when
+ * back-filling a handle onto an existing row.
+ */
+export async function deriveUniqueHandle(
+  db: HandleCollisionDb,
+  email: string | null | undefined,
+  excludeUserId?: string,
+): Promise<string> {
+  return deriveHandle(email, async (h) => {
+    const where = excludeUserId
+      ? { handle: h, NOT: { id: excludeUserId } }
+      : { handle: h };
+    const found = await db.user.findFirst({ where, select: { id: true } });
+    return !!found;
+  });
+}

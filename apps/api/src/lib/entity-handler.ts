@@ -17,6 +17,7 @@
 import { DataRouter } from "./data-router.js";
 import { getLogger, Logger, type LoggerEnv } from "./logger.js";
 import { detectRegion } from "./region-detection.js";
+import { deriveUniqueHandle } from "./user/derive-handle.js";
 import type { TrellisRequestContext } from "./request-context.js";
 import type { Session } from "./session-cookie.js";
 import { SessionManager } from "./session-cookie.js";
@@ -157,11 +158,21 @@ export class EntityHandler {
           email: session.email,
           region: finalRegion,
         });
+        const fallbackEmail =
+          session.email || `user-${session.userId}@unknown.local`;
+        // S-CP2: handle is non-null + unique — derive one for this fallback
+        // provisioning path too (not just post-confirmation).
+        const handle = await deriveUniqueHandle(
+          db,
+          fallbackEmail,
+          session.userId,
+        );
         const user = await (db.user.upsert({
           where: { id: session.userId },
           create: {
             id: session.userId,
-            email: session.email || `user-${session.userId}@unknown.local`,
+            email: fallbackEmail,
+            handle,
             role: session.role || "END_USER",
             region: finalRegion,
             dataRegion: finalRegion, // dataRegion must match region for compliance

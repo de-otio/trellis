@@ -17,6 +17,7 @@ import type { DatabaseWrapperEnv } from "./database-wrapper.js";
 import { getWrappedDatabase } from "./database-wrapper-helper.js";
 import { getIPAddress } from "./ip-scrubber.js";
 import { getLogger, Logger } from "./logger.js";
+import { deriveUniqueHandle } from "./user/derive-handle.js";
 import { isValidRegion, type Region } from "./region-detection.js";
 
 /**
@@ -395,6 +396,11 @@ export class DataRouter {
       region,
       env,
       async (db) => {
+        // S-CP2: handle is non-null + unique. Derive one unless the caller
+        // supplied it, so this provisioning path upholds the invariant too.
+        const handle =
+          (typeof userData.handle === "string" && userData.handle) ||
+          (await deriveUniqueHandle(db, userData.email, userData.id));
         // OPTIMIZATION: For test users, try create first (faster than upsert)
         // If user already exists, fall back to upsert
         // This optimizes the common case where test users are new
@@ -403,6 +409,7 @@ export class DataRouter {
             return await (db.user.create({
               data: {
                 ...userData,
+                handle,
                 region,
                 dataRegion: region, // CRITICAL: Must match region
               } as any,
@@ -442,6 +449,7 @@ export class DataRouter {
           where: { id: userData.id },
           create: {
             ...userData,
+            handle,
             region,
             dataRegion: region, // CRITICAL: Must match region
           } as any,
