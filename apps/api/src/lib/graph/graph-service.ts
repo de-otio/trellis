@@ -1,20 +1,15 @@
 /**
  * GraphService Interface
  *
- * The abstraction layer between API handlers and the graph database.
- * Implementations exist for:
- * - Neo4j Community Edition (local development, bolt:// protocol)
- * - Neo4j AuraDB (bolt+s:// over the Bolt protocol with password auth)
- *
- * Both backends support the Cypher query language. This interface
- * exposes high-level operations — implementations translate them to
- * Cypher queries internally.
+ * The abstraction layer between API handlers and the social graph.
+ * The only shipped implementation is PostgresGraphService, which serves the
+ * graph from relational edge tables in the same PostgreSQL database using SQL
+ * joins and recursive CTEs. (An earlier dedicated graph backend was removed;
+ * GRAPH_BACKEND=neo4j now throws "no longer supported". The interface is kept
+ * so a dedicated backend could be reintroduced behind it.)
  *
  * Handlers never execute raw graph queries. They call GraphService methods
  * that return IDs, which are then used to fetch content from Postgres via Prisma.
- *
- * @see /analysis/redesign/07-graph-database/02-hybrid-architecture.md
- * @see /analysis/redesign/07-graph-database/04-graph-schema.md
  */
 
 import type {
@@ -94,7 +89,7 @@ export interface GraphConnection {
  * All methods throw GraphError subclasses on failure.
  *
  * Handlers consume this interface — they never know which backend
- * (local Neo4j or AuraDB) is being used.
+ * implementation (currently Postgres) is being used.
  */
 export interface GraphService {
   // =========================================================================
@@ -549,7 +544,7 @@ export interface GraphService {
   applyDecay(userId: string): Promise<ScoreUpdate[]>;
 
   // =========================================================================
-  // Sync (Dual-Write from Postgres)
+  // Sync (maintain graph-derived tables)
   // =========================================================================
 
   /**

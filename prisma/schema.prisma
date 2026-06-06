@@ -43,7 +43,7 @@ model Entity {
 
   // Co-ownership (replaces single ownerId)
   owners EntityOwnership[]
-  // Relationships and follower counts live in the graph DB (AuraDB), not Prisma
+  // Relationships and follower counts live in the graph edge tables (served via graph-service.ts), not on this model
 
   subjectPosts PostSubject[]
   primaryPosts Post[]              @relation("PrimaryEntityPosts")
@@ -93,10 +93,9 @@ model PostGeoIndex {
   @@map("post_geo_index")
 }
 
-/// Entity geo-location for proximity discovery (C7). Neptune (the graph DB) has
-/// no spatial type, so geo-proximity lives here and is queried with PostGIS
-/// (ST_DWithin / KNN over a GiST index) via $queryRaw. Populated from the
-/// dual-write (syncEntity). Location is sensitive → own tenant_id for direct RLS
+/// Entity geo-location for proximity discovery (C7). Geo-proximity is queried
+/// with PostGIS (ST_DWithin / KNN over a GiST index) via $queryRaw. Populated from
+/// syncEntity. Location is sensitive → own tenant_id for direct RLS
 /// (mirrors post_geo_index). See plans/redesign/entity-location-subsystem.md.
 model EntityLocation {
   entityId  String                                @id @map("entity_id")
@@ -276,7 +275,7 @@ model User {
   ownedEntities   EntityOwnership[] @relation("EntityOwners")
   addedOwnerships EntityOwnership[] @relation("OwnershipAddedBy")
 
-  // Relationships and follower counts live in the graph DB (AuraDB), not Prisma
+  // Relationships and follower counts live in the graph edge tables (served via graph-service.ts), not on this model
 
   // Direct messages
   sentMessages     DirectMessage[] @relation("SentMessages")
@@ -1133,8 +1132,8 @@ model ProductTaxonomyTag {
 }
 
 // ============================================================================
-// Relationships (scored edges live in the graph DB — see graph-service.ts)
-// Follow and Friendship models removed — replaced by :RELATES_TO edges in graph DB
+// Relationships (scored edges; served via graph-service.ts over these tables)
+// Follow and Friendship models removed — replaced by the relationship edge tables below
 // ============================================================================
 
 // ============================================================================
@@ -1666,7 +1665,7 @@ model NotificationPreference {
 }
 
 // Out-of-band invite codes — users share codes privately; redemption establishes
-// a relationship in the graph DB. Entity-scoped codes can be created by entity owners.
+// a relationship edge. Entity-scoped codes can be created by entity owners.
 model ConnectionCode {
   id        String   @id @default(cuid())
   // Multi-tenancy (v0.7) — code's owning tenant (creator's active tenant at create time).
@@ -1934,8 +1933,8 @@ model TenantInvitation {
 // Graph edges in Postgres (graph-db revisit 2026-06: see
 // plans/redesign/graph-backend-contract.md)
 //
-// These two tables hold the edges that previously lived only in the graph DB
-// (RELATES_TO and typed entity-to-entity edges). OWNS (entity_ownerships) and
+// These two tables hold the relationship edges (user↔user and typed
+// entity-to-entity). OWNS (entity_ownerships) and
 // ABOUT (post_subjects) already existed in Postgres. Modeled as standalone
 // tables (no Prisma @relation) so the migration is self-contained and
 // non-breaking; targetId is polymorphic (user|entity) so it cannot carry a

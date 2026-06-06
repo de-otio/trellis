@@ -107,7 +107,7 @@ export const BASELINE_COMPLIANCE: ComplianceDoc = {
       { code: "US", awsRegion: "us-east-1", default: false, status: "phase-2" },
     ],
     guarantee:
-      "A tenant pinned to a region has all of its data (Postgres rows, S3 objects, Cognito users, DynamoDB items, Neo4j data) stored in that region. Cross-region transfers occur only for AWS-internal replication (when enabled), governed by AWS SCCs.",
+      "A tenant pinned to a region has all of its data (Postgres rows, S3 objects, Cognito users, DynamoDB items) stored in that region. Cross-region transfers occur only for AWS-internal replication (when enabled), governed by AWS SCCs.",
     verification:
       "doc/02-technical/architecture/identity-federation/07-security-and-isolation.md#gdpr-alignment",
   },
@@ -123,7 +123,6 @@ export const BASELINE_COMPLIANCE: ComplianceDoc = {
         what: "Secrets Manager (IdP secrets)",
         method: "AES-256 (AWS-managed KMS key)",
       },
-      { what: "Neo4j AuraDB", method: "AES-256 (Neo4j-managed)" },
     ],
     inTransit: [
       {
@@ -135,7 +134,6 @@ export const BASELINE_COMPLIANCE: ComplianceDoc = {
         what: "Inter-service (ECS ↔ Cognito ↔ Lambda)",
         method: "TLS",
       },
-      { what: "AuraDB (Bolt protocol)", method: "TLS" },
     ],
     byok: {
       status: "not_supported_in_mvp",
@@ -149,12 +147,6 @@ export const BASELINE_COMPLIANCE: ComplianceDoc = {
         purpose: "Cloud infrastructure",
         regions: ["eu-central-1"],
         url: "https://aws.amazon.com",
-      },
-      {
-        name: "Neo4j Aura",
-        purpose: "Managed graph database",
-        regions: ["eu-central-1"],
-        url: "https://neo4j.com/cloud/aura/",
       },
       {
         name: "OpenAI",
