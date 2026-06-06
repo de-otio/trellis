@@ -35,10 +35,10 @@ and authored (single source of truth, frontmatter ordering, kebab-case).
 
 ## Project & legal
 
-These live at the repository root:
+These live at the repository root on GitHub:
 
-- [License](../LICENSE)
-- [Contributing](../CONTRIBUTING.md) · [Code of conduct](../CODE_OF_CONDUCT.md)
-- [Security policy](../SECURITY.md) — how to report a vulnerability
-- [Commercial terms](../COMMERCIAL.md) · [Contributor License Agreement](../CLA.md)
-- [Changelog](../CHANGELOG.md) — what changed per release
+- [License](https://github.com/de-otio/trellis/blob/main/LICENSE)
+- [Contributing](https://github.com/de-otio/trellis/blob/main/CONTRIBUTING.md) · [Code of conduct](https://github.com/de-otio/trellis/blob/main/CODE_OF_CONDUCT.md)
+- [Security policy](https://github.com/de-otio/trellis/blob/main/SECURITY.md) — how to report a vulnerability
+- [Commercial terms](https://github.com/de-otio/trellis/blob/main/COMMERCIAL.md) · [Contributor License Agreement](https://github.com/de-otio/trellis/blob/main/CLA.md)
+- [Changelog](https://github.com/de-otio/trellis/blob/main/CHANGELOG.md) — what changed per release
