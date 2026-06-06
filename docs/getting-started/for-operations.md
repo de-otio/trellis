@@ -20,7 +20,7 @@ them consistently.
 
 ## Where Trellis runs
 
-The API is a Node.js HTTP server (Express) that listens on port 3000 and is
+The API is a Node.js HTTP server (Hono, served over `node:http`) that listens on port 3000 and is
 designed to run as a long-lived service container. The consuming application is
 responsible for provisioning everything around it:
 

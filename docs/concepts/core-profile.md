@@ -13,7 +13,9 @@ region preference, and cross-region data-access consent.
 
 ## Profile settings
 
-Users can update their basic profile preferences via `PATCH /api/user/profile`.
+Users update their profile via `PATCH /api/user/profile`. The only field this
+endpoint accepts is `stealth_mode` (a boolean); see
+[Privacy settings](../guides/privacy-settings.md).
 
 The following fields are **read-only** — managed by the system, not
 user-editable:

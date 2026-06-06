@@ -25,7 +25,16 @@ accepted.
 
 Because federation exposes social-graph information to other servers, Trellis
 treats turning it on as a gated decision. The following controls are required to
-be present and active before federation may be enabled in any environment:
+be present and active before federation may be enabled in any environment.
+
+> **Status.** These four controls describe the *enablement bar* for federation,
+> not currently-shipped behaviour. In the present codebase the ActivityPub
+> surface (actor, WebFinger, inbox/outbox, collections) is wired through Fedify,
+> but the follower/following collections return a count via a `GraphService`
+> stub (`// TODO: redesign`) and the secure-fetch, defederation deny-list, and
+> distributed federation rate-limit controls are not yet implemented. Treat this
+> section as the gate that must close before federation is switched on, and
+> verify each control against the code before enabling it in any environment.
 
 1. **Authorized fetch (secure mode).** Server-to-server requests for actor
    documents and collections must carry a valid HTTP signature, not just inbox
@@ -69,14 +78,14 @@ flowchart LR
     Remote[Remote fediverse server] -->|signed request| API[Trellis API]
     API -->|verify HTTP signature| MW[Federation middleware]
     MW --> KV[(Key/value store)]
-    API -->|async delivery| Queue[Outbox queue]
-    Queue --> Worker[Delivery worker]
-    Worker -->|signed activity| Remote
+    API -->|signed delivery via Fedify| Remote
 ```
 
 Incoming activities are authenticated, then handled inline. Outgoing activities
-are delivered asynchronously through a queue and a background worker, so a slow
-or unreachable peer never blocks a user request.
+are delivered through Fedify's delivery path
+(`apps/api/src/lib/activitypub/services/fedify-delivery.ts`); Fedify owns the
+signing, fan-out, and retry mechanics. There is no separate Trellis-managed
+outbox SQS queue in the shipped code.
 
 ### HTTP Signatures
 
@@ -107,5 +116,5 @@ no outgoing activities are enqueued, and incoming activities are dropped.
 
 - [Architecture overview](architecture-overview.md) — where federation sits in the system
 - [Graph and circles](graph-and-circles.md) — the relationship model behind follower/following collections
-- [Async processing](async-processing.md) — how outbound delivery is queued
+- [Async processing](async-processing.md) — the SQS queues and cron jobs behind background work
 - [Security architecture](../security-and-privacy/security-architecture.md) — the broader security posture

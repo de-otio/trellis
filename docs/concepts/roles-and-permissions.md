@@ -17,7 +17,7 @@ Trellis separates a platform-wide role from a per-tenant role:
 
 | Axis | Where stored | Purpose | Examples |
 |---|---|---|---|
-| **Global role** (`UserRole`) | `users.role` | Platform-wide capability | `END_USER`, `B2B_PARTNER`, `INTERNAL`, `SUPER_ADMIN` |
+| **Global role** (`UserRole`) | `users.role` | Platform-wide capability | `END_USER`, `B2B_PARTNER`, `PARTNER_ADMIN`, `INTERNAL`, `CONTENT_CREATOR`, `MODERATOR`, `SUPER_ADMIN` |
 | **Tenant role** (`TenantRole`) | `tenant_members.role` per (user, tenant) | What the user can do within their active tenant | `OWNER`, `ADMIN`, `MEMBER`, `GUEST` |
 
 Both surface in the session token. Authorization in route handlers consults
@@ -79,6 +79,10 @@ export const Capability = {
 
   // Audit
   AuditView:        'audit.view',
+
+  // Agent sessions — approve, list, and revoke device-auth sessions on
+  // behalf of the tenant. Granted to ADMIN and OWNER.
+  ManageAgentSessions: 'manage:agent_sessions',
 } as const;
 
 export type CapabilityValue = typeof Capability[keyof typeof Capability];
@@ -87,6 +91,8 @@ export type CapabilityValue = typeof Capability[keyof typeof Capability];
 Conventions:
 
 - **Naming:** `<resource>.<verb>` — lowercase, dot-separated, no abbreviations.
+  (`manage:agent_sessions` predates the convention and uses a colon; it is the
+  one exception.)
 - **Scope:** capabilities are tenant-scoped unless prefixed `platform.`.
 - **Granularity:** "view" and "modify" split where it matters, collapsed where it
   does not.
@@ -120,6 +126,7 @@ Conventions:
 | `post.moderate` | ✅ | ✅ | | |
 | `post.view` | ✅ | ✅ | ✅ | ✅ |
 | `audit.view` | ✅ | ✅ | | |
+| `manage:agent_sessions` | ✅ | ✅ | | |
 
 ¹ ADMIN cannot promote anyone to OWNER. Only the current OWNER can transfer
 ownership.
@@ -203,6 +210,10 @@ async function resolveTenantRole(
   (OWNER > ADMIN > MEMBER > GUEST).
 - No match falls back to the IdP's configured default role (commonly `MEMBER`,
   or `null` to deny).
+- **OWNER is never granted by a mapping.** A mapping or default role that
+  resolves to `OWNER` is capped to `ADMIN` by the resolver as a
+  defense-in-depth backstop, because there is exactly one OWNER per tenant and
+  it is set only by tenant creation and explicit ownership transfer.
 
 This handles the common case of a flat "all employees" group that emits to
 everyone: map it to `MEMBER` at a high priority number, then add a
@@ -218,8 +229,10 @@ everyone: map it to `MEMBER` at a high priority number, then add a
 | Google Workspace | Group email | e.g. `group@example.com`. |
 | Generic SAML | The SAML group attribute value | Per-IdP. |
 
-A "test sign-in" feature lets a tenant admin capture the `groups` claim from a
-real federated login and map from the identifiers their IdP actually emits.
+A test federated sign-in lets a tenant admin observe the `groups` claim their
+IdP actually emits and build mappings from those identifiers. (A dedicated
+claim-capture endpoint is planned; today this is done via a real sign-in, which
+Trellis records as the tenant's `TEST_SIGN_IN` setup milestone.)
 
 ### Propagation timing
 
@@ -265,11 +278,14 @@ never modified.
   mutations are gated by the tenant role for that tenant.
 - ❌ **Don't expose the role-grants table to tenant admins for editing.** Surface
   the four roles, not the capability list.
-- ❌ **Don't allow password sign-in for users in a federated tenant's domain.** A
-  tenant with an active IdP disallows password sign-ins for its domain, so a
-  stolen password cannot bypass IdP-enforced MFA. A pre-authentication check
-  compares the user's email domain against the tenant's federated state and
-  blocks the password flow.
+- ❌ **Don't allow password sign-in to bypass a federated tenant's MFA.** The
+  intent is that a tenant with an active IdP should not let a member of its
+  federated domain fall back to password auth and sidestep IdP-enforced MFA.
+  **Status:** this is a design goal, not an enforced control yet — there is no
+  PreAuthentication trigger today that blocks the password flow by email
+  domain. JIT still links a federated identity to an existing password account
+  by email, so both paths can coexist until this lands (see
+  [just-in-time provisioning](../reference/just-in-time-provisioning.md#account-linking)).
 
 ## Related
 

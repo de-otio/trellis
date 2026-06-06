@@ -18,7 +18,7 @@ This document tracks changes and version history for the user data export format
 ### Features
 
 - Standard JSON format
-- ActivityPub format
+- AT Protocol format (`format: "atproto"`)
 - Basic data export
 - User profile information
 - Posts, comments, and reactions

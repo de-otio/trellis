@@ -1,6 +1,6 @@
 ---
 title: Migration Guide
-description: How to import and migrate Trellis user data exports to another system or ActivityPub server.
+description: How to import and migrate Trellis user data exports to another system or an AT Protocol-style service.
 sidebar: Migration Guide
 order: 60
 ---
@@ -61,51 +61,57 @@ for (const post of exportData.posts) {
 
 ---
 
-## Migrating to an ActivityPub Server
+## Migrating with the AT Protocol Format
+
+The `atproto` export is a transform of the standard data into AT Protocol
+lexicon records. Each post becomes a record with a `$type` (such as
+`com.trellis.dog.post`), comments become nested `com.trellis.dog.comment`
+records under a `thread` key, and media attachments become `$type: "blob"`
+references. It is **not** an ActivityPub activity stream — do not expect
+`type: "Note"` objects.
 
 ### Prerequisites
 
-- ActivityPub-format export file (`"format": "activitypub"`)
-- An ActivityPub client/library
-- Access to the target ActivityPub server
+- AT Protocol-format export file (`"format": "atproto"`)
+- A client/library for the target service
+- Access to the target service
 - Media files (if needed)
 
 ### Step-by-Step Process
 
-#### 1. Download the ActivityPub-Format Export
+#### 1. Download the AT Protocol-Format Export
 
-Download the export file in ActivityPub format:
+Download the export file in AT Protocol format:
 
-- File name: `export-activitypub-YYYY-MM-DD.json`
-- Format: `"activitypub"` in the root object
+- File name: `trellis-export-atproto-YYYY-MM-DD.json`
+- Format: `"atproto"` in the root object
 
 #### 2. Parse the JSON File
 
 ```javascript
 const exportData = JSON.parse(exportFile);
-// Validate format === "activitypub"
+// Validate format === "atproto"
 ```
 
 #### 3. Validate the Records
 
-- Ensure each object has the expected fields (see [Validation](./validation.md))
-- Validate that activity URIs are well-formed
+- Ensure each record has the expected `$type` and fields (see [Validation](./validation.md))
+- Validate that any URIs are well-formed
 - Confirm timestamps are ISO 8601
 
-#### 4. Create Activities on the Target Server
+#### 4. Map the Lexicon Records to the Target Service
 
-Use an ActivityPub client to create activities:
+Each post record has the shape below; map its fields onto the target
+service's record model:
 
 ```javascript
 for (const post of exportData.posts) {
-  await activitypubClient.postActivity({
-    actor: userActorId,
-    object: {
-      type: "Note",
-      content: post.text,
-      published: post.createdAt,
-      // ... other fields
-    },
+  // post.$type === "com.trellis.dog.post"
+  await targetClient.createRecord({
+    text: post.text,
+    createdAt: post.createdAt,
+    // post.thread holds nested comment records
+    // post.media holds { $type: "blob", ref, alt } entries
   });
 }
 ```
@@ -116,19 +122,19 @@ Media files must be uploaded separately:
 
 ```javascript
 for (const post of exportData.posts) {
-  for (const media of post.media) {
+  for (const media of post.media || []) {
     const blob = await uploadBlob(media.ref);
-    // Associate the blob with the post/activity
+    // Associate the blob with the migrated record
   }
 }
 ```
 
 ### Important Considerations
 
-- **URIs**: existing URIs may need to be updated for the new server
-- **Actor identity**: the user's actor ID and handle may change on a new server
+- **URIs**: existing URIs may need to be updated for the new service
+- **Actor identity**: the user's handle may change on a new service
 - **Media**: media files are not included in the export — they must be downloaded separately
-- **Threads**: comment threads are preserved via the `rootUri` / `replyToUri` references
+- **Threads**: comment threads are preserved as nested records under `thread`
 - **Timestamps**: original timestamps are preserved
 
 ---
@@ -152,15 +158,15 @@ for (const post of exportData.posts) {
 3. Import into the target platform
 4. Verify data integrity
 
-### Scenario 3: ActivityPub Server Migration
+### Scenario 3: AT Protocol Migration
 
-**Goal**: migrate to a new ActivityPub server
+**Goal**: migrate to an AT Protocol-style service
 
-1. Export data in ActivityPub format
-2. Set up the new ActivityPub server
-3. Create activities on the new server
+1. Export data in AT Protocol format
+2. Set up the target service
+3. Map the lexicon records onto the target service's record model
 4. Upload media blobs
-5. Update the user's actor ID and handle
+5. Update the user's handle as needed
 
 ---
 

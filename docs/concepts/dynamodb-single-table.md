@@ -9,30 +9,46 @@ order: 15
 
 ## Overview
 
-A single DynamoDB table backs all KV namespaces. On-demand billing means zero cost at zero traffic and automatic scaling without provisioning.
+A single DynamoDB table backs the KV namespaces. On-demand billing means zero cost at zero traffic and automatic scaling without provisioning. The table name defaults to `${stage}-trellis` and is overridable via the `DYNAMODB_TABLE` environment variable (`apps/api/src/env.ts`).
+
+> **How the API reaches the table.** Most application code does **not** talk to
+> the DynamoDB SDK directly. The API binds a set of named KV namespaces
+> (`RATE_LIMIT_KV`, `FEED_CACHE_KV`, `CSRF_TOKENS_KV`, …) built from
+> `DynamoKv` (`@de-otio/saas-foundation/kv`), which exposes a
+> Cloudflare-KV-compatible interface (`get`/`put`/`delete`) over the single
+> table. A handful of paths — notably the Cognito claims cache
+> (`apps/api/src/lib/auth/claims-cache.ts`) — use the raw DynamoDB SDK against
+> the same `{stage}-trellis` table with explicit `pk`/`sk` keys. The CDK table
+> definition itself lives in the deploying application's infrastructure
+> (`@de-otio/saas-foundation`), not in this repo.
 
 ## Table Structure
 
-The table uses a composite key (`pk` + `sk`), a global secondary index (`gsi1`) for reverse lookups, a `ttl` attribute for auto-expiry, and a `data` attribute holding the payload.
+The table uses a composite key (`pk` + `sk`), a `ttl` attribute for auto-expiry, and a `data`/value attribute holding the payload. The illustrative shape:
 
 ```typescript
+// Illustrative — the real definition lives in the deploying app's infra.
 const table = new dynamodb.Table(this, 'MainTable', {
   tableName: `${stage}-trellis`,
   partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
   sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
   billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
   timeToLiveAttribute: 'ttl',
-  encryption: dynamodb.TableEncryption.AWS_MANAGED,
-  pointInTimeRecovery: true,
-});
-
-table.addGlobalSecondaryIndex({
-  indexName: 'gsi1',
-  partitionKey: { name: 'gsi1pk', type: dynamodb.AttributeType.STRING },
-  sortKey: { name: 'gsi1sk', type: dynamodb.AttributeType.STRING },
-  projectionType: dynamodb.ProjectionType.ALL,
 });
 ```
+
+> **Status — access-pattern catalogue.** The tables below enumerate the KV
+> access patterns Trellis uses or plans to use. The namespaces actually bound in
+> `apps/api/src/env.ts` today are: `ratelimit`, `privacy`, `friends`,
+> `connections`, `feed`, `moderation`, `comments`, `threatintel`, `taxonomy`,
+> `followers`, `export`, `delete`, `csrf`, `session`, `invitations` (plus the
+> raw-SDK claims cache). Entries below for namespaces not in that list —
+> e.g. the `fedify:*` key store, `safebrowsing:*`, and `costbudget:*`/`costtrack:*` —
+> are design-stage and may not have shipped backing yet. Verify against the code
+> before relying on them. Some auxiliary stores (idempotency, the token-bucket
+> rate limiter, device-auth, agent-refresh) use their own dedicated tables, each
+> behind its own `*_TABLE` env var, rather than the shared `{stage}-trellis`
+> table.
 
 ## Access Patterns and Key Design
 
@@ -156,11 +172,16 @@ Used by the Fedify framework.
 
 ## GSI Usage
 
-The `gsi1` index enables reverse lookups:
+A `gsi1` (`gsi1pk` + `gsi1sk`) reverse-lookup index is used in the shipped code on
+the **agent-refresh** table (`apps/api/src/lib/oauth/refresh-detection.ts`) — for
+example listing all agent sessions for a user via `gsi1pk = u#{userId}`. The
+illustrative reverse-lookup patterns below describe how a GSI on the shared table
+*would* be used for job/rate-limit queries; they are design-stage and not all
+present in the current code, so verify before relying on them.
 
 | Use Case | gsi1pk | gsi1sk |
 |---|---|---|
-| Find all rate limits for a user | `user:{userId}` | `ratelimit:{timestamp}` |
+| Find all agent sessions for a user (shipped) | `u#{userId}` | `s#{sessionId}` |
 | Find all export jobs by status | `export-status:{status}` | `{createdAt}` |
 | Find all deletion jobs by status | `deletion-status:{status}` | `{createdAt}` |
 

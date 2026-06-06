@@ -28,7 +28,7 @@ The export format follows a structured JSON layout. For strict validation, consi
 The following fields are required at the root level of the export:
 
 - `exportedAt` (string, required): ISO 8601 timestamp of when the export was generated
-- `format` (string, required): export format identifier (`"json"` or `"activitypub"`)
+- `format` (string, required): export format identifier (`"json"` or `"atproto"`)
 - `version` (string, required): format version (e.g., `"1.0"`)
 - `user` (object, required): user information object
 
@@ -40,10 +40,12 @@ The following fields are required in the user object:
 - `email` (string, required): user's email address
 - `createdAt` (string, required): ISO 8601 account creation timestamp
 
-**Optional fields:**
+**Optional / nullable fields:**
 
-- `did` (string, optional): ActivityPub actor ID
-- `handle` (string, optional): ActivityPub handle
+- `did` (string \| null): reserved decentralized-identifier field; currently
+  always `null` (no `did` column exists on the `User` model)
+- `handle` (string \| null): the user's canonical handle (in practice always
+  present)
 
 ### Post Object
 

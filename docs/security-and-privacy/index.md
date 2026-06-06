@@ -142,6 +142,3 @@ not the settings of any particular deployment.
   transparency, and a machine-readable compliance surface.
 - [Media security](media-security.md) — how image and video metadata is
   validated and how location privacy is protected by default.
-
-Voting carries its own security model — see
-[Voting security](../concepts/voting-security.md).

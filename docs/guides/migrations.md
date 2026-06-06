@@ -11,8 +11,14 @@ order: 10
 
 1. Edit `prisma/schema.prisma`
 2. `npm run prisma:migrate:dev -- --name describe-your-change`
+   (requires both `DATABASE_URL` and `DIRECT_DATABASE_URL` in the environment —
+   `scripts/dev-setup.sh` sets these for local runs)
 3. `npm run prisma:generate` to regenerate the Prisma client
-4. Commit both the `prisma/migrations/` file and `schema.prisma`
+4. Commit both the `prisma/migrations/` directory and `schema.prisma`
+
+In a deployed environment, migrations are applied with
+`npm run prisma:migrate:deploy` as part of the consuming application's release
+process.
 
 ## Zero-downtime: expand-contract pattern
 

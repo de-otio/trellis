@@ -1,6 +1,6 @@
 ---
 title: Export Format Specification Overview
-description: Overview of the two export format variants — standard JSON and ActivityPub — and links to each sub-document.
+description: Overview of the two export format variants — standard JSON and AT Protocol — and links to each sub-document.
 sidebar: Overview
 order: 10
 ---
@@ -14,13 +14,18 @@ order: 10
 ## Overview
 
 This specification describes the exact format of exported user data. The export
-is provided in JSON with two variants:
+is provided in JSON with two variants, selected by the `format` request
+parameter:
 
-1. **Standard JSON format** — human-readable, general-purpose format
-2. **ActivityPub format** — ActivityPub-compatible format for server migration
+1. **Standard JSON format** (`format: "json"`) — human-readable,
+   general-purpose format
+2. **AT Protocol format** (`format: "atproto"`) — an AT Protocol-compatible
+   transform of the standard data, where posts and comments are re-keyed into
+   AT Protocol lexicon records (`$type` records such as `com.trellis.dog.post`
+   and `com.trellis.dog.comment`, with media as `$type: "blob"` references)
 
-The ActivityPub format reuses the standard JSON object shapes plus the
-ActivityPub identity fields described in
+The AT Protocol format reuses the standard JSON object shapes plus the
+identity fields described in
 [Standard JSON Format](./standard-json-format.md); there is no separate
 format document.
 
@@ -45,10 +50,10 @@ For most users, start with:
 2. [Data Completeness](./data-completeness.md) — what you'll receive in the export
 3. [Migration Guide](./migration-guide.md) — how to use the exported data
 
-For ActivityPub migration:
+For AT Protocol migration:
 
 1. [Standard JSON Format](./standard-json-format.md) — the object shapes and identity fields
-2. [Migration Guide](./migration-guide.md#scenario-3-activitypub-server-migration) — server migration steps
+2. [Migration Guide](./migration-guide.md#scenario-3-at-protocol-migration) — migration steps
 
 ---
 

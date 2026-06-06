@@ -7,31 +7,37 @@ order: 50
 
 # Observability
 
+Trellis ships as an npm library, not a deployed service. It provides
+**structured logging** and the hooks needed for tracing and metrics; the
+surrounding observability stack — log groups and their retention, dashboards,
+alarms, and notification wiring — is owned and provisioned by the consuming
+application, not by Trellis. The infrastructure-level material below
+(CloudWatch log groups, X-Ray topology, alarm thresholds, CDK snippets) is
+illustrative of how a consuming application typically wires this up; the
+concrete names, retentions, and thresholds are that application's policy.
+
 ## Logging
 
-### API process: structured logging with Pino
+### API process: the shared `getLogger()` logger
 
-The API is a long-lived Node.js process. Use `pino` for structured JSON logging:
+The API is a long-lived Node.js process. Logging goes through Trellis's logger
+adapter (`apps/api/src/lib/logger.ts`), which delegates to
+`@de-otio/saas-foundation`'s pino-backed, structured, request-context-aware
+logger. Call sites resolve the logger with `getLogger()` and use a positional
+`(message, data?)` shape — they do **not** construct `pino` directly:
 
 ```typescript
-import pino from 'pino';
+import { getLogger } from "../lib/logger";
 
-export const logger = pino({
-  level: process.env.LOG_LEVEL ?? 'info',
-  formatters: {
-    level: (label) => ({ level: label }),
-  },
-  base: {
-    service: 'trellis-api',
-    stage: process.env.STAGE,
-  },
-});
+const logger = getLogger();
 
-// Usage
-logger.info({ postId, authorId, visibility }, 'Post created');
-logger.warn({ userId, remaining: 5 }, 'Rate limit approaching');
-logger.error({ err, query: 'findPosts' }, 'Database query failed');
+logger.info("Post created", { postId, authorId, visibility });
+logger.warn("Rate limit approaching", { userId, remaining: 5 });
+logger.error("Database query failed", { err, query: "findPosts" });
 ```
+
+Inside a request scope the resolved logger automatically carries
+`requestId`/`tenantId` context. The log level is taken from `LOG_LEVEL`.
 
 ### Lambda workers: AWS Lambda Powertools
 
@@ -91,6 +97,11 @@ await sqs.send(new SendMessageCommand({
 ---
 
 ## Tracing (X-Ray)
+
+> The Trellis package does not bundle `aws-xray-sdk` or `aws-embedded-metrics`;
+> the patterns in this section are how a consuming application that runs on AWS
+> typically adds tracing and custom metrics around Trellis. Treat them as
+> integration guidance, not shipped Trellis code.
 
 ### API process: X-Ray sidecar
 

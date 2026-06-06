@@ -20,84 +20,68 @@ Metadata (EXIF, IPTC, video metadata) can be **lost** if it is extracted after a
 
 **Extract metadata from the original, unprocessed file before any transformations.**
 
-Trellis uses a **hybrid strategy**: the client extracts metadata from the original file and sends it alongside the upload; the server falls back to extracting from the received buffer if no client metadata is present.
+Compressing, resizing, or re-encoding on the client can strip embedded
+metadata. If preserving capture metadata matters, the client should extract it
+from the original bytes *before* it compresses for upload.
 
-## Architecture
+## Architecture (as shipped)
 
-### Client (primary)
-
-1. Extract metadata from the original, uncompressed file buffer.
-2. Compress or optimize the image for upload.
-3. Send the compressed file **and** the extracted metadata as a separate field in the upload request.
-
-**Client example (Dart):**
-
-```dart
-// 1. Extract metadata from the original bytes BEFORE compression
-final originalBytes = await image.readAsBytes();
-final metadata = await extractMetadata(originalBytes);
-
-// 2. Compress
-final compressedBytes = await compressImage(originalBytes);
-
-// 3. Upload both
-await uploadImage(
-  imageBytes: compressedBytes,
-  metadata: metadata,
-);
-```
-
-### Server (fallback)
-
-The upload handler checks for client-provided metadata first; if absent, it extracts from the received buffer before any server-side processing.
+Trellis extracts metadata **server-side, from the received upload buffer**. The
+upload handler reads only the `file` field, then runs extraction on that buffer
+before storing the file:
 
 ```typescript
-interface UploadRequest {
-  file: File;
-  metadata?: {
-    exif?: EXIFData;
-    iptc?: IPTCData;
-    video?: VideoMetadata;
-  };
-}
-
 async function handleMediaUpload(request: Request, env: Env) {
   const formData = await request.formData();
   const file = formData.get("file") as File;
-  const clientMetadataJson = formData.get("metadata");
 
-  // CRITICAL: extract BEFORE any server-side processing
-  let metadata;
-  if (clientMetadataJson) {
-    metadata = JSON.parse(clientMetadataJson as string);
-  } else {
-    const fileBuffer = await file.arrayBuffer();
+  const fileBuffer = await file.arrayBuffer();
+
+  // Extract from the received buffer (best effort, non-fatal)
+  let extracted: any = {};
+  try {
+    const { MetadataExtractor } = await import(
+      "../metadata/metadata-extractor.js"
+    );
     const extractor = new MetadataExtractor(env);
-    metadata = await extractor.extractAll(fileBuffer, file.type);
+    extracted = await extractor.extractAll(fileBuffer, mimeType);
+  } catch {
+    // Continue without metadata
   }
 
-  // Proceed to store the file and metadata ...
+  // Proceed to store the file ...
 }
 ```
 
-## Why the hybrid approach
+> **Flag — there is no client-supplied-metadata path.** The shipped upload
+> handler (`apps/api/src/lib/routes/media.ts`) does **not** read a `metadata`
+> form field; the "hybrid" client-primary / server-fallback design is not
+> implemented. Server-side extraction is the only path. Consequently, if a
+> client strips metadata before upload, that metadata is lost — the server has
+> only the received buffer to work from.
 
-| Property | Benefit |
-|----------|---------|
-| Best fidelity | Client extracts from the truly original, uncompressed file |
-| Backward compatible | Clients that do not yet send metadata still receive server-side extraction |
-| Robust | Server fallback ensures metadata is attempted even if client extraction fails |
-| Independently deployable | Client and server updates can be rolled out separately |
+> **Flag — extracted metadata is not currently persisted.** Even on the
+> server path, only `width`, `height`, and `duration` from the extraction
+> result are written to the `MediaFile` record. The EXIF/IPTC/video JSON is
+> computed and then discarded. See the
+> [Media metadata data model](../reference/media-data-model.md) for details.
+
+## Implications
+
+| Property | Note |
+|----------|------|
+| Fidelity | Bounded by whatever the client uploaded; the server cannot recover metadata the client already stripped |
+| Robustness | Extraction is best-effort and non-fatal — a failed or empty extraction never fails the upload |
+| Persistence | EXIF/IPTC/video payloads are not stored yet (see flag) |
 
 ## Testing requirements
 
 | Scenario | Expected result |
 |----------|----------------|
-| Original file with metadata → extract before compression | Metadata preserved |
-| Compressed file, no client metadata → server extracts | Metadata present (may be partial) |
-| Client sends metadata separately | Server uses client metadata |
+| Upload with embedded metadata → server extracts | Extraction runs (may be partial) |
+| Client stripped metadata before upload | No metadata available server-side; upload still succeeds |
 | Compression library strips metadata | Graceful handling, no crash |
-| Format conversion (e.g. JPEG → WebP) | Metadata handling correct for target format |
+| Corrupt or unsupported file | Extraction fails gracefully; upload still succeeds |
 
 ## Handling metadata loss gracefully
 

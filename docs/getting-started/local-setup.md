@@ -13,8 +13,8 @@ order: 20
 
 | Service | Port | Purpose |
 |---------|------|---------|
-| PostgreSQL 16 | 5432 | Primary database |
-| DynamoDB Local | 8000 | KV cache, rate limiting, feature flags |
+| PostgreSQL 16 + PostGIS | 5432 | Primary database (`postgis/postgis:16-3.4`; PostGIS backs geo queries) |
+| DynamoDB Local | 8000 | KV cache, rate limiting, idempotency, short-lived auth state |
 | LocalStack | 4566 | S3, SQS, SES emulation |
 
 ## API dev server
@@ -49,4 +49,8 @@ npm run test:coverage             # with coverage report
 
 ## Local DynamoDB table
 
-`./scripts/dev-setup.sh` creates the local DynamoDB table automatically. The table name matches the `DYNAMODB_TABLE` value in your `.env` file (see [Developer Guide](for-developers.md#local-environment-variables)).
+`./scripts/dev-setup.sh` creates the local DynamoDB table automatically (named
+`dev-trellis`, matching the default `DYNAMODB_TABLE` value used for local
+development — see [Developer Guide](for-developers.md#local-environment-variables)).
+The same script also creates the local SQS queues and runs migrations and the
+feature-toggle seed.

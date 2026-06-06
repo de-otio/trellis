@@ -146,7 +146,11 @@ export const handler: CognitoUserPoolTriggerHandler = async (event) => {
         return;
       }
 
-      const tenantRole = resolveRole(idpGroups, tenant.roleMappings, /* defaultRole */ 'MEMBER');
+      const tenantRole = resolveRole(
+        idpGroups,
+        tenant.roleMappings,
+        tenant.identityProvider.defaultRole, // null = deny when no group matches
+      );
       if (!tenantRole) {
         // No matching role and no default — don't insert a membership. The user
         // gets a "no active tenant" claim and tenant-scoped endpoints return 403.
@@ -183,38 +187,45 @@ user sees an error rather than a partially provisioned state.
 
 ## PreTokenGeneration trigger
 
-```typescript
-import { CognitoUserPoolTriggerHandler } from 'aws-lambda';
+Uses the V2 access-token override shape. It is read-only with respect to user
+and membership *creation* — it loads claims, optionally refreshes the federated
+role, and writes claims into the token. It never provisions a user or tenant.
 
-export const handler: CognitoUserPoolTriggerHandler = async (event) => {
+```typescript
+import { PreTokenGenerationV2TriggerHandler } from 'aws-lambda';
+
+export const handler: PreTokenGenerationV2TriggerHandler = async (event) => {
   const sub = event.userName;
 
   let claims = await dynamoCache.get(sub);
   if (!claims) {
+    // Load existing User + active TenantMember. No provisioning here; a missing
+    // row yields minimal "drift" claims (see Idempotency, below).
     claims = await loadClaimsFromRds(sub);
-    await dynamoCache.put(sub, claims, 3600);
   }
 
   // Re-resolve the role on each issuance — the group claim may have changed.
   const idpGroupsRaw = event.request.userAttributes['custom:idpGroups'];
-  if (idpGroupsRaw && claims.activeTenantId) {
-    const idpGroups = idpGroupsRaw.split(',').filter(Boolean);
+  const isFederated = !!event.request.userAttributes['identities'];
+  if (isFederated && idpGroupsRaw && claims.activeTenantId) {
+    const idpGroups = idpGroupsRaw.split(/[,;]+/).map(s => s.trim()).filter(Boolean);
     const refreshed = await maybeRefreshRole(claims.userId, claims.activeTenantId, idpGroups);
-    if (refreshed) {
-      claims.tenantRole = refreshed;
-      await dynamoCache.put(sub, claims, 3600);
-    }
+    if (refreshed) claims = { ...claims, tenantRole: refreshed };
   }
 
+  await dynamoCache.put(sub, claims, 3600);
+
   event.response = {
-    claimsOverrideDetails: {
-      claimsToAddOrOverride: {
-        'custom:userId':         claims.userId,
-        'custom:globalRole':     claims.globalRole,
-        'custom:activeTenantId': claims.activeTenantId ?? '',
-        'custom:tenantSlug':     claims.tenantSlug ?? '',
-        'custom:tenantRole':     claims.tenantRole ?? '',
-        'custom:handle':         claims.handle,
+    claimsAndScopeOverrideDetails: {
+      accessTokenGeneration: {
+        claimsToAddOrOverride: {
+          'custom:userId':         claims.userId,
+          'custom:globalRole':     claims.globalRole,
+          'custom:activeTenantId': claims.activeTenantId ?? '',
+          'custom:tenantSlug':     claims.tenantSlug ?? '',
+          'custom:tenantRole':     claims.tenantRole ?? '',
+          'custom:handle':         claims.handle,
+        },
       },
     },
   };
@@ -222,11 +233,13 @@ export const handler: CognitoUserPoolTriggerHandler = async (event) => {
 };
 ```
 
-`maybeRefreshRole` is a fast read-only path: it queries `TenantRoleMapping`,
-compares against the current `tenant_members.role`, and updates if changed. This
-catches the case where an admin changes a role mapping while a user holds a
-valid token — on the next refresh (within the cache TTL), the role updates
-without forcing a sign-out.
+`maybeRefreshRole` queries `TenantRoleMapping`, compares against the current
+`tenant_members.role`, and — only after the new role is persisted to the
+membership row — emits it into the token. This catches the case where an admin
+changes a role mapping while a user holds a valid token: on the next refresh
+(within the cache TTL), the role updates without forcing a sign-out. The persist
+ordering prevents the role from oscillating between the cached-old and
+token-new value if the database write fails transiently.
 
 ## Active tenant for a federated user
 
@@ -300,7 +313,7 @@ When a tenant disables its IdP (`status = DISABLED`):
 |---|---|
 | Federated user, email not on any verified domain | PostConfirmation logs a warning and creates the user and personal tenant only. They can use Trellis as a consumer but not as an org member. |
 | Multiple verified domains matching across tenants | Not possible: domains are unique across all tenants. If somehow seen, the JIT is refused and an error is logged. |
-| User changes email at the IdP | The new email surfaces on the next token; `users.email` is updated in PreTokenGeneration. Membership is not auto-moved to a different tenant — that requires admin action. |
+| User changes email at the IdP | The new email surfaces on the next token. `users.email` is not auto-rewritten by the token triggers, and membership is not auto-moved to a different tenant — both require an explicit reconciliation/admin action. |
 | Pool user exists but the database row is missing | PreTokenGeneration logs the drift and returns minimal claims (no userId, no tenantId); all API calls return 403 until reconciled. |
 | Unrecognized group-claim format | Best-effort split on comma, semicolon, or space. If still unparseable, fall back to the default role and write an audit-log entry. |
 | User REMOVED from a tenant but holding a valid token | On the next refresh, `tenant_members.status != ACTIVE` yields an empty `activeTenantId`; tenant-scoped endpoints return 403. |
@@ -315,9 +328,14 @@ The PostConfirmation trigger must be safely retriable:
   double-creation race.
 - Cache writes are last-write-wins.
 
-Cognito retries a failed trigger with backoff. Two things keep state consistent:
+Cognito retries a failed trigger with backoff, so the all-or-nothing
+PostConfirmation transaction is the mechanism that keeps state consistent: each
+retry either fully provisions or rolls back, and the upserts make a successful
+retry idempotent.
 
-1. The PostConfirmation transaction is all-or-nothing.
-2. PreTokenGeneration's database fallback runs the same provisioning logic on the
-   next token request if PostConfirmation never completed — a safety net, not
-   the primary path.
+> **Note:** PreTokenGeneration does **not** re-run provisioning. It is read-only
+> with respect to user and membership creation — if PostConfirmation never
+> completed and no `User` row exists, PreTokenGeneration emits minimal "drift"
+> claims (no `userId`, no `activeTenantId`) and every tenant-scoped endpoint
+> returns 403 until the row is reconciled. JIT provisioning happens **only** in
+> PostConfirmation.

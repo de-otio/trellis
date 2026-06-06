@@ -7,75 +7,86 @@ order: 20
 
 # Media privacy considerations
 
-When a user uploads an image, Trellis extracts and stores the EXIF metadata
-embedded in the file. EXIF data can contain sensitive information, so Trellis
-applies privacy-by-default rules and gives each user per-media visibility
-controls.
+When a user uploads an image, Trellis extracts a small subset of the embedded
+EXIF/IPTC metadata. This metadata can contain sensitive information, so the
+data model applies privacy-by-default flags and gives each user per-media
+visibility flags.
 
-## What EXIF data contains
+> **Flag — extracted metadata is not persisted on upload as shipped.** The
+> upload path runs extraction but writes only width/height/duration to the
+> media record; the EXIF/IPTC/video JSON and the unified GPS/date columns are
+> not stored. The privacy posture below describes the data-model design and the
+> visibility flags that do exist; the storage and per-field claims are accurate
+> for the model, not for current end-to-end behaviour.
 
-- **GPS coordinates** — the exact location where the photo was taken.
-- **Device information** — camera make, model, and serial number.
-- **Date and time** — when the photo was captured (may differ from the upload
-  timestamp).
-- **Personal information** — artist name and copyright strings embedded by the
-  camera or editing software.
+## What the extracted EXIF subset contains
+
+The shipped extractor (`metadata-extractor.ts`) extracts only:
+
+- **GPS coordinates** — latitude and longitude (no altitude, no reverse
+  geocoding).
+- **Device information** — camera make, model, lens model, software.
+- **Capture date** — `dateTimeOriginal`.
+- **Capture settings** — ISO, f-number, exposure time, focal length.
+
+IPTC extraction adds keywords, copyright notice, creator, and caption. It does
+not extract serial numbers or device fingerprints.
 
 ## Default visibility
 
-| Field category | Default |
-|---|---|
-| Camera settings (ISO, aperture, shutter speed, etc.) | Visible |
-| GPS / location data | Hidden |
+The `MediaFile` model carries two flags:
 
-Location data is hidden by default. A user must explicitly enable location
-visibility for a given piece of media; Trellis shows a clear warning before
-enabling it.
+| Flag | Default |
+|---|---|
+| `metadataVisible` | `true` |
+| `locationVisible` | `false` |
+
+Location is hidden by default (`locationVisible` defaults to `false`). A user
+must explicitly enable location visibility for a given piece of media.
 
 ## Per-media controls
 
-Each media item has two independent visibility toggles:
+Each media item has two independent boolean flags, updated via
+`PATCH /api/media/:mediaId/metadata-visibility`:
 
-- **EXIF visibility** — show or hide all EXIF data for this item.
-- **Location visibility** — show or hide GPS coordinates for this item.
+- **`metadataVisible`** — owner preference for showing metadata.
+- **`locationVisible`** — owner preference for showing location.
 
-Toggling location visibility off filters the GPS fields out of every API
-response for that media item:
+There are no granular / field-level visibility settings.
 
-```typescript
-if (!media.exifLocationVisible && exifData) {
-  delete exifData.GPSLatitude;
-  delete exifData.GPSLongitude;
-  delete exifData.GPSAltitude;
-  delete exifData.GPSLocation;
-}
-```
+> **Flag — the flags are stored but not yet enforced as response filters.** The
+> media-details endpoint (`GET /api/media/:mediaId`) is owner-only and returns
+> the full metadata to the owner together with both flags so the client can
+> render toggle state; it does not strip GPS or other fields based on the flags.
+> Filtering for non-owner / shared views is a design intent that is not wired
+> into the current endpoint.
 
 ## Storage and deletion
 
-- EXIF data is stored in the database alongside the media record.
-- When a media item is deleted, its EXIF data is deleted with it.
-- When a user requests account deletion, all EXIF data for their media is
-  included in the deletion.
-- There is no separate retention period for EXIF data.
+- Metadata columns live on the media record (see the storage flag above).
+- When a media item is deleted, its metadata is deleted with it.
+- Account deletion includes the user's media and any stored metadata.
+- There is no separate retention period for media metadata.
 
 ## Access control
 
-- Only the media owner can read EXIF data for their own items.
-- Only the media owner can update privacy settings for their own items.
-- EXIF data is not included in public API responses.
+- The media-details and visibility endpoints are owner-only and require an
+  authenticated session.
+- Only the media owner can update the visibility flags.
+- Metadata is not exposed through public APIs.
 
 ## Data validation
 
-Trellis validates EXIF fields on ingestion:
+Metadata is validated on ingestion (`metadata-schemas.ts` /
+`metadata-sanitizer.ts`):
 
-- GPS latitude must be in the range −90 to 90.
-- GPS longitude must be in the range −180 to 180.
-- String fields (make, model, etc.) are sanitized before storage.
-- Date strings are validated for format correctness.
+- GPS latitude must be in −90 to 90, longitude in −180 to 180; out-of-range,
+  infinite, or non-numeric values are dropped.
+- String fields (make, model, etc.) are sanitized and length-bounded.
+- Capture dates are validated and bounded to a plausible window.
 
 ## GDPR considerations
 
-EXIF data — particularly location coordinates — is personal data under GDPR.
-Users have the right to access, delete, and restrict processing of their EXIF
+Media metadata — particularly location coordinates — is personal data under
+GDPR. Users have the right to access, delete, and restrict processing of this
 data through the standard media and account-deletion flows.

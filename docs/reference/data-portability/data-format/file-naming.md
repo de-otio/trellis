@@ -1,6 +1,6 @@
 ---
 title: File Naming Convention
-description: Naming patterns for exported user data files across JSON and ActivityPub formats.
+description: Naming patterns for exported user data files across the JSON and AT Protocol formats.
 sidebar: File Naming
 order: 40
 ---
@@ -16,29 +16,26 @@ This document describes the naming conventions for exported user data files.
 Files exported in standard JSON format follow this pattern:
 
 ```
-export-json-YYYY-MM-DD.json
+trellis-export-json-YYYY-MM-DD.json
 ```
 
 **Example:**
 
-- `export-json-2025-01-15.json`
-
-A consuming application may prefix the filename with its own product name
-(for example `<app>-export-json-2025-01-15.json`).
+- `trellis-export-json-2025-01-15.json`
 
 ---
 
-## ActivityPub Format
+## AT Protocol Format
 
-Files exported in ActivityPub format follow this pattern:
+Files exported in AT Protocol format follow this pattern:
 
 ```
-export-activitypub-YYYY-MM-DD.json
+trellis-export-atproto-YYYY-MM-DD.json
 ```
 
 **Example:**
 
-- `export-activitypub-2025-01-15.json`
+- `trellis-export-atproto-2025-01-15.json`
 
 ---
 
@@ -46,12 +43,12 @@ export-activitypub-YYYY-MM-DD.json
 
 ### Prefix
 
-- `export-` — identifies the file as a data export (optionally preceded by the product name)
+- `trellis-export-` — identifies the file as a Trellis data export
 
 ### Format Identifier
 
 - `json` — standard JSON format
-- `activitypub` — ActivityPub format
+- `atproto` — AT Protocol format
 
 ### Date
 
@@ -68,10 +65,10 @@ export-activitypub-YYYY-MM-DD.json
 
 When users download their data export:
 
-1. The file is generated with the current date
-2. The format (json/activitypub) is determined by the user's selection
+1. The file is generated with the current date (the date the export is produced)
+2. The format (json/atproto) is determined by the user's selection
 3. The file is named according to the convention above
-4. The file is provided as a download or stored in cloud storage
+4. The file is stored in object storage and served as an attachment download
 
 ---
 
@@ -79,9 +76,13 @@ When users download their data export:
 
 If a user requests multiple exports on the same day:
 
-- Each export will have the same date in the filename
-- The system may append additional identifiers (e.g., timestamps) if needed
-- Users should rename files if they want to distinguish between multiple exports
+- Each export's **download filename** carries the same date, so downloaded
+  files share a name
+- Server-side these do **not** collide: each export is stored under a job-scoped
+  object key (`exports/{userId}/{jobId}/{filename}`), and the job ID embeds a
+  creation timestamp
+- Users should rename downloaded files locally if they want to distinguish
+  between multiple same-day exports
 
 ---
 

@@ -30,7 +30,7 @@ environment.
 
 | Layer | Technology |
 |-------|-----------|
-| API | Node.js HTTP server (Express) |
+| API | Node.js HTTP server (Hono on `node:http`) |
 | Database | PostgreSQL via Prisma ORM |
 | KV / cache | DynamoDB single-table |
 | Auth | AWS Cognito with custom Lambda triggers |

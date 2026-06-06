@@ -9,7 +9,13 @@ order: 40
 
 Privacy settings let users control their online presence, location data, and analytics participation. These controls *reduce* what a user exposes to others — distinct from account transparency settings, which *increase* the visibility of account metadata.
 
-## Available settings
+> **Implementation status.** Of the settings below, only **stealth mode** is
+> currently writable through the user API (`PATCH /api/user/profile`, field
+> `stealth_mode`). The presence, location, and analytics fields exist on the
+> `User` model with the documented defaults, but Trellis does not yet expose a
+> user-facing endpoint to change them individually, and the presence/location
+> behaviours they describe are not yet enforced. They are documented here
+> because they are part of the data model and govern future behaviour.
 
 ### Stealth mode
 
@@ -60,4 +66,4 @@ Controls location data collection for posts and content.
 
 ## Data model
 
-See [Core profile](../concepts/core-profile.md) for how profile fields fit together, and the [user-profile API](../reference/user-profile-api.md) for the endpoints that read and update these settings.
+See [Core profile](../concepts/core-profile.md) for how profile fields fit together, and the [user-profile API](../reference/user-profile-api.md) for the `PATCH /api/user/profile` endpoint that updates `stealth_mode`.
