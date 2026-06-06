@@ -117,8 +117,7 @@ export const handler = async (): Promise<void> => {
     logger.error("Invitation cleanup failed", { error: err });
   }
 
-  // 3. Follower counts removed — relationships now live in graph DB (AuraDB)
-  // TODO: Add graph-side consistency check when reconciliation service is wired up
+  // 3. Follower counts removed — relationships now live in graph edge tables (see graph-service.ts)
 
   // 4. Process scheduled account deletions (GDPR Article 17 compliance)
   try {

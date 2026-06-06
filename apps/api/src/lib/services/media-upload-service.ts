@@ -86,7 +86,7 @@ export class MediaUploadService {
       const fileBuffer = preReadBuffer ?? await file.arrayBuffer();
       const contentHash = await generateContentHash(fileBuffer);
       const ext = getExtensionFromMimeType(file.type);
-      const originalKey = `media/${contentHash}.${ext}`;
+      const originalKey = `originals/user-${userId}/${contentHash}.${ext}`;
 
       logger.info("[MediaUpload] Starting upload", {
         contentHash,
@@ -193,7 +193,7 @@ export class MediaUploadService {
         const fileBuffer = await file.arrayBuffer();
         const contentHash = await generateContentHash(fileBuffer);
         const ext = getExtensionFromMimeType(file.type);
-        const originalKey = `media/${contentHash}.${ext}`;
+        const originalKey = `originals/user-${userId}/${contentHash}.${ext}`;
         const metadata = metadataArray?.[index];
 
         const r2Metadata: R2MediaMetadata = {

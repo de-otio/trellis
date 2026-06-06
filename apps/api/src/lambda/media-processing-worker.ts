@@ -32,7 +32,7 @@ export const handler: SQSHandler = async (event) => {
         // Process with Sharp (must be installed as ARM64 binary)
         // dynamic import to avoid bundling issues
         const sharp = (await import("sharp")).default;
-        const hash = key.replace("originals/", "").replace(/\.[^.]+$/, "");
+        const hash = key.split("/").pop()!.replace(/\.[^.]+$/, "");
 
         // Thumbnail: 300px WebP
         const thumbnail = await sharp(buffer)
