@@ -166,17 +166,23 @@ describe("PreTokenGeneration — cache hit", () => {
     const event = makeEvent();
     const result = await handler(event, {} as any, () => {});
     expect(mockUserFindUnique).not.toHaveBeenCalled();
-    expect(
-      result!.response.claimsAndScopeOverrideDetails!.accessTokenGeneration!
-        .claimsToAddOrOverride,
-    ).toEqual({
+    const expectedClaims = {
       "custom:userId": "u_clxxx",
       "custom:globalRole": "B2B_PARTNER",
       "custom:activeTenantId": "t_org",
       "custom:tenantSlug": "acme",
       "custom:tenantRole": "MEMBER",
       "custom:handle": "alice",
-    });
+    };
+    const details = result!.response.claimsAndScopeOverrideDetails!;
+    // The API authenticates with the ID token, so the claims MUST be in it
+    // (not just the access token).
+    expect(details.idTokenGeneration!.claimsToAddOrOverride).toEqual(
+      expectedClaims,
+    );
+    expect(details.accessTokenGeneration!.claimsToAddOrOverride).toEqual(
+      expectedClaims,
+    );
   });
 
   it("does NOT write to cache on a hit (no refresh)", async () => {
