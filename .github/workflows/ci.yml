@@ -134,16 +134,6 @@ jobs:
         image: amazon/dynamodb-local:latest
         ports: ["8000:8000"]
         options: --health-cmd "curl -s http://localhost:8000" --health-interval 5s
-      neo4j:
-        image: neo4j:5-community
-        env:
-          NEO4J_AUTH: neo4j/trellis_dev_password
-        ports: ["7687:7687", "7474:7474"]
-        options: >-
-          --health-cmd "wget -qO- http://localhost:7474 || exit 1"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 15
 
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
