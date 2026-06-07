@@ -438,6 +438,23 @@ export function buildHonoApp(): Hono<AppEnv> {
     for (const route of wrapExtensionRoutes(ext)) mount(app, route);
   }
 
+  // CORS preflight (browser OPTIONS). `mount` above registers only each route's
+  // *declared* methods, so a cross-origin preflight to a GET/POST route would
+  // otherwise fall through to `notFound` (404, no Access-Control-Allow-Origin)
+  // and the browser would block the real request. The Flutter web client calls
+  // the API cross-origin (api.<domain> vs the app origin) with X-CSRF-Token /
+  // JSON bodies, which browsers preflight — so OPTIONS must be answered for
+  // every path. `corsMiddleware` validates the Origin against the allow-list and
+  // returns a 204 (with Access-Control-Allow-Origin only for an allowed origin);
+  // security headers are intentionally NOT applied to the preflight short-
+  // circuit, matching the per-route OPTIONS behavior. OPTIONS is a distinct
+  // method, so this never shadows a real route.
+  app.options("*", (c) =>
+    corsMiddleware()(legacyContext(c), async () => {
+      throw new Error("CORS preflight must not fall through to next()");
+    }),
+  );
+
   // Hono is the sole router (the legacy routeRequest fallback was removed in
   // H-final). Unmatched → the real 404, matching the legacy 404 handler
   // (security headers + { error: "Not found" }).
