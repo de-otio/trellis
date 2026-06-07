@@ -36,8 +36,10 @@ export interface Env {
   DATABASE_URL_CN?: string;
   DIRECT_URL?: string;
   DATABASE_POOL_MAX?: string;
+  DATABASE_POOL_MIN?: string;
   DATABASE_CONNECTION_TIMEOUT_MS?: string;
   DATABASE_STATEMENT_TIMEOUT_MS?: string;
+  DATABASE_IDLE_TIMEOUT_MS?: string;
 
   // Auth
   SESSION_SECRET: string;
@@ -457,8 +459,10 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     DATABASE_URL_CN: process.env.DATABASE_URL_CN,
     DIRECT_URL: process.env.DIRECT_URL,
     DATABASE_POOL_MAX: process.env.DATABASE_POOL_MAX,
+    DATABASE_POOL_MIN: process.env.DATABASE_POOL_MIN,
     DATABASE_CONNECTION_TIMEOUT_MS: process.env.DATABASE_CONNECTION_TIMEOUT_MS,
     DATABASE_STATEMENT_TIMEOUT_MS: process.env.DATABASE_STATEMENT_TIMEOUT_MS,
+    DATABASE_IDLE_TIMEOUT_MS: process.env.DATABASE_IDLE_TIMEOUT_MS,
 
     // Auth
     SESSION_SECRET: sessionSecret,

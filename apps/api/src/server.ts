@@ -229,6 +229,17 @@ export async function startServer(): Promise<http.Server> {
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
 
+  // Warm the primary DB connection pool BEFORE accepting traffic, so the first
+  // real request doesn't pay cold-start (pool-init + TLS-handshake) latency.
+  // Best-effort and non-fatal: warmup() never throws — if the DB is briefly
+  // unreachable at boot the pool warms on first use instead.
+  {
+    const { sharedDatabaseConnectionManager } = await import(
+      "./lib/database-connection-manager.js"
+    );
+    await sharedDatabaseConnectionManager.warmup("primary", env);
+  }
+
   server.listen(PORT, () => {
     logger.info(`Trellis API listening on port ${PORT}`);
   });

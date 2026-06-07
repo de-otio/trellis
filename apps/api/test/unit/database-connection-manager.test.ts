@@ -34,11 +34,18 @@ vi.mock("pg", () => {
       end: ReturnType<typeof vi.fn>;
       on: ReturnType<typeof vi.fn>;
 
+      connect: ReturnType<typeof vi.fn>;
+
       constructor(config: any) {
         this.config = config;
         this.query = vi.fn();
         this.end = vi.fn().mockResolvedValue(undefined);
         this.on = vi.fn();
+        // warmup() opens connections via connect() then validates with SELECT 1.
+        this.connect = vi.fn().mockResolvedValue({
+          query: vi.fn().mockResolvedValue({ rows: [{ "?column?": 1 }] }),
+          release: vi.fn(),
+        });
         mockPoolInstances.push({
           instance: this,
           config,
@@ -133,8 +140,46 @@ describe("DatabaseConnectionManager", () => {
       expect(client).toBeDefined();
       expect(mockPoolInstances.length).toBe(1);
       expect(mockPoolInstances[0].config.max).toBe(10); // DEFAULT_POOL_MAX
+      expect(mockPoolInstances[0].config.min).toBe(2); // DEFAULT_POOL_MIN — warm floor
       expect(mockPoolInstances[0].config.connectionTimeoutMillis).toBe(3000);
-      expect(mockPoolInstances[0].config.idleTimeoutMillis).toBe(30000); // DEFAULT_IDLE_TIMEOUT_MS
+      expect(mockPoolInstances[0].config.idleTimeoutMillis).toBe(600000); // DEFAULT_IDLE_TIMEOUT_MS — keep warm between bursts
+      expect(mockPoolInstances[0].config.keepAlive).toBe(true);
+    });
+
+    it("honors DATABASE_POOL_MIN and DATABASE_IDLE_TIMEOUT_MS overrides", () => {
+      manager.acquireClient("US", {
+        ...baseEnv,
+        DATABASE_POOL_MIN: "5",
+        DATABASE_IDLE_TIMEOUT_MS: "120000",
+      });
+      expect(mockPoolInstances[0].config.min).toBe(5);
+      expect(mockPoolInstances[0].config.idleTimeoutMillis).toBe(120000);
+    });
+
+    it("warmup() eagerly opens `min` connections so the first query is hot", async () => {
+      await manager.warmup("primary", baseEnv);
+
+      expect(mockPoolInstances.length).toBe(1);
+      // DEFAULT_POOL_MIN connections opened + validated, then released.
+      expect(mockPoolInstances[0].instance.connect).toHaveBeenCalledTimes(2);
+    });
+
+    it("warmup() is non-fatal when the DB is unreachable", async () => {
+      manager.clearPools();
+      // Next pool's connect() rejects (DB down at boot).
+      const failing = vi
+        .fn()
+        .mockRejectedValue(new Error("ECONNREFUSED"));
+      vi.spyOn(manager as any, "acquireClient");
+      await expect(
+        (async () => {
+          // Force the pool's connect to fail by acquiring then overriding.
+          manager.acquireClient("primary", baseEnv);
+          mockPoolInstances[mockPoolInstances.length - 1].instance.connect =
+            failing;
+          await manager.warmup("primary", baseEnv);
+        })(),
+      ).resolves.toBeUndefined(); // does not throw
     });
 
     it("should reuse the same pool for the same connection string", () => {
@@ -295,13 +340,24 @@ describe("DatabaseConnectionManager", () => {
         () => new Promise(() => {}), // Never resolves
       );
 
-      const executePromise = manager.executeWithRetry("US", baseEnv, queryFn, {
-        timeoutMs: 100,
-      });
+      // The per-attempt timeout is floored at connectionTimeout + statementTimeout
+      // (a caller's timeoutMs can no longer drop below it — that inversion was the
+      // cold-start bug). Shrink both so the floor stays ~100ms and the hang is
+      // still caught quickly.
+      const executePromise = manager.executeWithRetry(
+        "US",
+        {
+          ...baseEnv,
+          DATABASE_CONNECTION_TIMEOUT_MS: "50",
+          DATABASE_STATEMENT_TIMEOUT_MS: "50",
+        },
+        queryFn,
+        { timeoutMs: 100, maxRetries: 0 },
+      );
 
       await expect(executePromise).rejects.toThrow("timeout");
       vi.useFakeTimers();
-    });
+    }, 8000);
   });
 
   describe("Retry Logic", () => {

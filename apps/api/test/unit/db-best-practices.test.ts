@@ -238,8 +238,10 @@ describe("Database Connection Best Practices", () => {
 
       // Connection timeout: 3s
       expect(poolConfig.connectionTimeoutMillis).toBe(3000);
-      // Idle timeout: 30s (standard for long-lived ECS processes)
-      expect(poolConfig.idleTimeoutMillis).toBe(30000);
+      // Idle timeout: 10min — keep connections warm between bursts on the
+      // long-lived ECS process (raised from 30s, which drained the pool during
+      // quiet periods and forced cold-starts).
+      expect(poolConfig.idleTimeoutMillis).toBe(600000);
     });
 
     it("should allow custom connection timeout from env var", () => {

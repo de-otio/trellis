@@ -26,8 +26,10 @@ export interface EnvWithDb {
   DATABASE_URL_CN?: string;
   LOG_LEVEL?: string;
   DATABASE_POOL_MAX?: string;
+  DATABASE_POOL_MIN?: string;
   DATABASE_CONNECTION_TIMEOUT_MS?: string;
   DATABASE_STATEMENT_TIMEOUT_MS?: string;
+  DATABASE_IDLE_TIMEOUT_MS?: string;
 }
 
 type ManagedClient = {
@@ -57,7 +59,11 @@ export class DatabaseConnectionManager {
   private readonly DEFAULT_CONNECTION_TIMEOUT_MS = 3000;
   private readonly DEFAULT_STATEMENT_TIMEOUT_MS = 5000;
   private readonly DEFAULT_POOL_MAX = 10;
-  private readonly DEFAULT_IDLE_TIMEOUT_MS = 30000; // 30s — standard for long-lived processes
+  private readonly DEFAULT_POOL_MIN = 2; // keep ≥2 warm connections so the hot path never cold-starts
+  // 10 min. The previous 30s closed every connection during quiet periods, so the
+  // next request re-paid pool-init + TLS-handshake cost. For a small, long-lived
+  // ECS fleet we want connections to stay warm; override with DATABASE_IDLE_TIMEOUT_MS.
+  private readonly DEFAULT_IDLE_TIMEOUT_MS = 600000;
 
   constructor(env?: LoggerEnv) {
     this.logger = getLogger();
@@ -314,11 +320,18 @@ export class DatabaseConnectionManager {
     const poolMax = env.DATABASE_POOL_MAX
       ? parseInt(env.DATABASE_POOL_MAX, 10)
       : this.DEFAULT_POOL_MAX;
+    const poolMin = env.DATABASE_POOL_MIN
+      ? parseInt(env.DATABASE_POOL_MIN, 10)
+      : this.DEFAULT_POOL_MIN;
+    const idleTimeout = env.DATABASE_IDLE_TIMEOUT_MS
+      ? parseInt(env.DATABASE_IDLE_TIMEOUT_MS, 10)
+      : this.DEFAULT_IDLE_TIMEOUT_MS;
 
     this.logger.info("[DatabaseConnectionManager] Creating persistent connection pool", {
       region,
       maxConnections: poolMax,
-      idleTimeoutMs: this.DEFAULT_IDLE_TIMEOUT_MS,
+      minConnections: poolMin,
+      idleTimeoutMs: idleTimeout,
       connectionTimeoutMs: resolved.connectionTimeout,
       connectionStringPreview: resolved.connectionString
         ? `${resolved.connectionString.substring(0, 50)}...`
@@ -337,8 +350,15 @@ export class DatabaseConnectionManager {
     const pool = new Pool({
       connectionString: resolved.connectionString,
       max: poolMax,
+      // Keep a warm floor of connections so the request hot-path never pays
+      // cold-start (pool-init + TLS handshake) latency. Pair with warmup() at
+      // boot, which opens these eagerly rather than on first query.
+      min: poolMin,
       connectionTimeoutMillis: resolved.connectionTimeout,
-      idleTimeoutMillis: this.DEFAULT_IDLE_TIMEOUT_MS,
+      idleTimeoutMillis: idleTimeout,
+      // TCP keepalive so long-idle connections aren't silently dropped by the
+      // network/RDS between bursts (avoids handing out a half-dead connection).
+      keepAlive: true,
       allowExitOnIdle: false,
       ssl: isLocalDb ? false : { rejectUnauthorized: false },
     });
@@ -422,6 +442,52 @@ export class DatabaseConnectionManager {
   }
 
   /**
+   * Warm the primary connection pool at process startup so the first real
+   * request does not pay pool-init + TLS-handshake latency. Eagerly opens up to
+   * `min` connections and validates each with `SELECT 1`.
+   *
+   * Best-effort and non-fatal: a transient DB blip at boot must not stop the
+   * server from starting — the pool then warms on first use, protected by the
+   * connection-aware operation-timeout floor in executeWithRetry.
+   */
+  async warmup(region: string, env: EnvWithDb): Promise<void> {
+    try {
+      // Create + cache the pool (no query yet).
+      this.acquireClient(region, env);
+      const resolved = this.resolveConnectionStrings(region, env);
+      const cached = this.poolCache.get(resolved.connectionString);
+      if (!cached) return;
+
+      const poolMin = env.DATABASE_POOL_MIN
+        ? parseInt(env.DATABASE_POOL_MIN, 10)
+        : this.DEFAULT_POOL_MIN;
+
+      // Open `min` physical connections concurrently, validate, then release
+      // them back to the pool as idle (kept warm by min + idleTimeout).
+      const clients = await Promise.all(
+        Array.from({ length: Math.max(1, poolMin) }, () => cached.pool.connect()),
+      );
+      try {
+        await Promise.all(clients.map((c) => c.query("SELECT 1")));
+      } finally {
+        clients.forEach((c) => c.release());
+      }
+
+      this.logger.info("[DatabaseConnectionManager] Pool warmed at startup", {
+        region,
+        warmed: clients.length,
+        poolTotal: cached.pool.totalCount,
+        poolIdle: cached.pool.idleCount,
+      });
+    } catch (err: any) {
+      this.logger.warn(
+        "[DatabaseConnectionManager] Pool warmup failed (non-fatal; will warm on first use)",
+        { region, error: err?.message || String(err) },
+      );
+    }
+  }
+
+  /**
    * Execute a query with retry and timeout, owning the client lifecycle.
    */
   async executeWithRetry<T>(
@@ -449,9 +515,13 @@ export class DatabaseConnectionManager {
     // Acquire client once — shared pool, reused across retries
     let client: PrismaClient;
     let cacheKey: string;
+    let connectionTimeoutMs = this.DEFAULT_CONNECTION_TIMEOUT_MS;
+    let statementTimeoutMs = this.DEFAULT_STATEMENT_TIMEOUT_MS;
     try {
       const resolved = this.resolveConnectionStrings(region, env);
       cacheKey = resolved.connectionString;
+      connectionTimeoutMs = resolved.connectionTimeout;
+      statementTimeoutMs = resolved.statementTimeout;
       const result = this.acquireClient(region, env);
       client = result.client;
     } catch (error: any) {
@@ -559,10 +629,17 @@ export class DatabaseConnectionManager {
       );
     };
 
-    const attemptTimeouts = [timeoutMs, retryTimeoutMs, retryTimeoutMs].slice(
-      0,
-      maxRetries + 1,
-    );
+    // Floor every attempt's timeout so the operation budget always covers a
+    // worst-case cold path: establishing a connection (connectionTimeoutMs) AND
+    // running a full-length statement (statement_timeout, the inner server-side
+    // guard). The prior defaults inverted this — a 2000ms op timeout under a
+    // 3000ms connect timeout meant a cold connection was killed before it could
+    // even open. The app timeout must be the OUTER guard, statement_timeout the
+    // inner one. (Callers' shorter timeouts are intentionally raised, not lowered.)
+    const minAttemptTimeoutMs = connectionTimeoutMs + statementTimeoutMs;
+    const attemptTimeouts = [timeoutMs, retryTimeoutMs, retryTimeoutMs]
+      .slice(0, maxRetries + 1)
+      .map((t) => Math.max(t, minAttemptTimeoutMs));
 
     // The retry sequence. Non-retryable errors (config / permanent failures)
     // are returned as a `nonRetryable` outcome rather than thrown, so the
