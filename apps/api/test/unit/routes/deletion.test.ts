@@ -345,8 +345,11 @@ describe("Deletion Routes", () => {
       expect(mockCancelDeletion).not.toHaveBeenCalled();
     });
 
-    it("should handle errors from UserDeletionHandlerEnhanced", async () => {
-      const error = new Error("No deletion request found");
+    it("should return 400 when there is no deletion request to cancel", async () => {
+      // The handler throws this exact message when nothing is pending. It is a
+      // client-state condition, so it must map to 400 — not 500. (Regression:
+      // the old "not found" substring check missed "...request found to cancel".)
+      const error = new Error("No deletion request found to cancel");
       mockCancelDeletion.mockRejectedValue(error);
 
       const postRequest = new Request(
@@ -356,12 +359,47 @@ describe("Deletion Routes", () => {
         },
       );
 
-      await route!.handler(postRequest, mockEnv);
+      const response = await route!.handler(postRequest, mockEnv);
 
-            expect(mockCreateSecureResponse).toHaveBeenCalledWith(
-        JSON.stringify({ error: "No deletion request found" }),
+      expect(mockCreateSecureResponse).toHaveBeenCalledWith(
+        JSON.stringify({ error: "No deletion request found to cancel" }),
+        { status: 400, headers: { "content-type": "application/json" } },
+      );
+      expect(response.status).toBe(400);
+    });
+
+    it("should return 400 when the grace period has expired", async () => {
+      const error = new Error(
+        "Grace period has expired. Deletion cannot be cancelled.",
+      );
+      mockCancelDeletion.mockRejectedValue(error);
+
+      const postRequest = new Request(
+        "https://example.com/api/user/delete-account/cancel",
+        { method: "POST" },
+      );
+
+      const response = await route!.handler(postRequest, mockEnv);
+
+      expect(response.status).toBe(400);
+    });
+
+    it("should return 500 on an unexpected handler error", async () => {
+      const error = new Error("Database connection failed");
+      mockCancelDeletion.mockRejectedValue(error);
+
+      const postRequest = new Request(
+        "https://example.com/api/user/delete-account/cancel",
+        { method: "POST" },
+      );
+
+      const response = await route!.handler(postRequest, mockEnv);
+
+      expect(mockCreateSecureResponse).toHaveBeenCalledWith(
+        JSON.stringify({ error: "Database connection failed" }),
         { status: 500, headers: { "content-type": "application/json" } },
       );
+      expect(response.status).toBe(500);
     });
   });
 

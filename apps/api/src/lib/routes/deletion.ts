@@ -166,8 +166,15 @@ export const deletionRoutes: Route[] = [
         });
       } catch (error: any) {
         const msg = error.message || "Failed to cancel deletion";
+        // Client-state conditions cancelDeletion can throw ("No deletion
+        // request found to cancel", "Grace period has expired...") are 4xx,
+        // not server errors. Without these, cancelling with nothing pending
+        // returns 500 (the "not found" check misses "...request found to...").
         const isExpected =
-          msg.includes("not found") || msg.includes("rate limit");
+          msg.includes("not found") ||
+          msg.includes("No deletion request") ||
+          msg.includes("Grace period") ||
+          msg.includes("rate limit");
         if (!isExpected) {
           logger.error("Error cancelling account deletion:", error);
         }
