@@ -175,7 +175,11 @@ async function maybeRefreshFederatedRole(
 }
 
 export const handler: PreTokenGenerationV2TriggerHandler = async (event) => {
-  const cognitoSub = event.userName;
+  // Read the claims cache + RDS fallback by the immutable Cognito `sub` — the
+  // same key PostConfirmation writes and the value carried in the token's `sub`
+  // claim. `event.userName` is NOT stable across triggers (it can be the
+  // sign-up username here vs the sub there), which caused every lookup to miss.
+  const cognitoSub = event.request.userAttributes.sub;
   const claimsCache = getCache();
   const federated = isFederatedEvent(event);
   const idpGroups = parseIdpGroups(event.request.userAttributes["custom:idpGroups"]);

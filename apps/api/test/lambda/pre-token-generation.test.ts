@@ -112,7 +112,7 @@ function freshClaimsItem(overrides: Record<string, any> = {}) {
 }
 
 function makeEvent(opts: { idpGroups?: string; identities?: string } = {}) {
-  const attrs: Record<string, string> = {};
+  const attrs: Record<string, string> = { sub: "cognito-sub-abc123" };
   if (opts.idpGroups !== undefined) attrs["custom:idpGroups"] = opts.idpGroups;
   if (opts.identities !== undefined) attrs["identities"] = opts.identities;
   return {
