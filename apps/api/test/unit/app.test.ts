@@ -95,7 +95,11 @@ describe("Hono app seam (H0)", () => {
   });
 
   it("registers every ported path on the Hono router (H3 batch)", () => {
+    // The ported surface includes the (gated) ActivityPub federation routes;
+    // enable federation so this porting-completeness check sees them.
+    process.env.ACTIVITYPUB_ENABLED = "true";
     const app = buildHonoApp();
+    delete process.env.ACTIVITYPUB_ENABLED;
     const registered = new Set(app.routes.map((r) => r.path));
 
     // Every declared ported path must be registered by mount().

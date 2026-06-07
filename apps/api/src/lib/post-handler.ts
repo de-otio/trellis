@@ -27,6 +27,9 @@ export interface Env {
   TAXONOMY_CACHE_KV?: KVNamespace;
   LINK_CHECK_QUEUE?: any; // Cloudflare Queue binding for link checks
   DEFAULT_REGION?: string;
+  // Federation master switch — when falsy, outbound ActivityPub delivery is
+  // skipped. Mirrors `ACTIVITYPUB_ENABLED` on the canonical Env (see ../env.ts).
+  ACTIVITYPUB_ENABLED?: boolean;
 }
 
 export interface CreatePostRequest {
@@ -598,8 +601,14 @@ export class PostHandler {
         },
       );
 
-      // Create ActivityPub activity if author has ActivityPub fields
-      if (postWithAuthor?.author?.actorUri && postWithAuthor.author.publicKey) {
+      // Create ActivityPub activity if federation is enabled and the author has
+      // ActivityPub fields. The flag check keeps outbound delivery off even if a
+      // row happens to carry actorUri/publicKey while federation is disabled.
+      if (
+        env.ACTIVITYPUB_ENABLED &&
+        postWithAuthor?.author?.actorUri &&
+        postWithAuthor.author.publicKey
+      ) {
         // Run ActivityPub activity creation asynchronously (don't block response)
         // Use a separate async operation to avoid blocking the response
         (async () => {
@@ -1441,8 +1450,9 @@ export class PostHandler {
         },
       );
 
-      // ActivityPub sync for public posts only
+      // ActivityPub sync for public posts only (federation must be enabled)
       if (
+        env.ACTIVITYPUB_ENABLED &&
         updatedPost.radius === "SHOUT" &&
         updatedPost.author?.actorUri &&
         updatedPost.author?.publicKey
