@@ -34,7 +34,7 @@ import type {
   PostConfirmationTriggerHandler,
 } from "aws-lambda";
 import { Logger } from "@aws-lambda-powertools/logger";
-import { getLambdaPrisma as getPrisma } from "../lib/lambda-prisma.js";
+import { getLambdaPrisma as getPrisma, withLambdaDbBreaker } from "../lib/lambda-prisma.js";
 import {
   PrismaClient,
   Prisma,
@@ -182,22 +182,30 @@ export const handler: PostConfirmationTriggerHandler = async (event) => {
 
   const db = await getPrisma();
 
-  const result = await withHandleConflictRetry(() =>
-    db.$transaction(
-      async (tx) => provisionUserAndTenancy(tx, {
-        cognitoSub,
-        email,
-        emailVerified: attrs.email_verified,
-        federated,
-        idpGroups,
-        dateOfBirth,
-        ageTier,
-        providedHandle: attrs["custom:handle"],
-        invitationCode,
-        requestedMethod,
-      }),
-      { timeout: 8000 },
-    ),
+  // The provisioning transaction is the longest-held connection in a signup
+  // burst (multi-statement, up to the 8s timeout). Run it under the Lambda
+  // circuit breaker so a saturated DB trips fast-fail instead of being retried
+  // into an already-exhausted instance.
+  const result = await withLambdaDbBreaker(
+    () =>
+      withHandleConflictRetry(() =>
+        db.$transaction(
+          async (tx) => provisionUserAndTenancy(tx, {
+            cognitoSub,
+            email,
+            emailVerified: attrs.email_verified,
+            federated,
+            idpGroups,
+            dateOfBirth,
+            ageTier,
+            providedHandle: attrs["custom:handle"],
+            invitationCode,
+            requestedMethod,
+          }),
+          { timeout: 8000 },
+        ),
+      ),
+    "post_confirmation.provision",
   );
 
   if (ageTier === "CHILD") {
