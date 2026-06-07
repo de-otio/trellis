@@ -211,7 +211,7 @@ export const handler: PreTokenGenerationV2TriggerHandler = async (event) => {
     if (!loaded.user) {
       logger.warn("pretoken.drift", { cognitoSub });
       claims = { ...DRIFT_CLAIMS };
-      writeAccessTokenClaims(event, claims);
+      writeTokenClaims(event, claims);
       return event;
     }
 
@@ -222,7 +222,7 @@ export const handler: PreTokenGenerationV2TriggerHandler = async (event) => {
     if (loaded.user.suspended || loaded.user.suspendedAt !== null) {
       logger.warn("pretoken.suspended", { cognitoSub });
       claims = { ...DRIFT_CLAIMS };
-      writeAccessTokenClaims(event, claims);
+      writeTokenClaims(event, claims);
       return event;
     }
 
@@ -285,26 +285,32 @@ export const handler: PreTokenGenerationV2TriggerHandler = async (event) => {
     await claimsCache.put(cognitoSub, claims, DEFAULT_CACHE_TTL_SECONDS);
   }
 
-  writeAccessTokenClaims(event, claims);
+  writeTokenClaims(event, claims);
   return event;
 };
 
-function writeAccessTokenClaims(
+function writeTokenClaims(
   event: PreTokenGenerationV2TriggerEvent,
   claims: CachedClaims,
 ): void {
+  // Inject the tenant/identity claims into BOTH the ID and access tokens.
+  // The API authenticates requests with the ID token (`Authorization: Bearer
+  // <idToken>`), and `authMiddleware` reads `custom:activeTenantId` from it, so
+  // the claims MUST be in the ID token — writing only `accessTokenGeneration`
+  // left the ID token without them and 401'd every tenant-scoped request. The
+  // access-token copy is kept for API-authorization clients that use it.
+  const claimsToAddOrOverride = {
+    "custom:userId": claims.userId,
+    "custom:globalRole": claims.globalRole,
+    "custom:activeTenantId": claims.activeTenantId,
+    "custom:tenantSlug": claims.tenantSlug,
+    "custom:tenantRole": claims.tenantRole,
+    "custom:handle": claims.handle,
+  };
   event.response = {
     claimsAndScopeOverrideDetails: {
-      accessTokenGeneration: {
-        claimsToAddOrOverride: {
-          "custom:userId": claims.userId,
-          "custom:globalRole": claims.globalRole,
-          "custom:activeTenantId": claims.activeTenantId,
-          "custom:tenantSlug": claims.tenantSlug,
-          "custom:tenantRole": claims.tenantRole,
-          "custom:handle": claims.handle,
-        },
-      },
+      idTokenGeneration: { claimsToAddOrOverride },
+      accessTokenGeneration: { claimsToAddOrOverride },
     },
   };
 }
