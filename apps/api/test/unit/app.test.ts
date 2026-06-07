@@ -167,17 +167,28 @@ describe("Hono app seam (H0)", () => {
     expect((await res.json()) as { error: string }).toMatchObject({ error: "INVALID_JSON" });
   });
 
-  it("404s OPTIONS /api/config (GET-only route → no preflight handler)", async () => {
-    // /api/config is GET-only; legacy never matched a GET route to OPTIONS
-    // either, so both 404. Now the real 404 (no fallback).
+  it("answers OPTIONS preflight on a GET-only route (cross-origin web client)", async () => {
+    // The per-route mount registers only declared methods, but browsers send a
+    // CORS preflight (OPTIONS) before a cross-origin write. The global
+    // app.options("*") handler answers it with 204 + CORS headers, reflecting an
+    // allow-listed Origin — otherwise the Flutter web client (served from a
+    // different origin than api.<domain>) is blocked. /api/config is GET-only;
+    // the preflight is still served.
     const app = buildHonoApp();
 
     const res = await app.fetch(
-      new Request("http://localhost/api/config", { method: "OPTIONS" }),
+      new Request("http://localhost/api/config", {
+        method: "OPTIONS",
+        headers: { Origin: "https://example.com" },
+      }),
       { trellisEnv: env },
     );
 
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(204);
+    expect(res.headers.get("access-control-allow-origin")).toBe(
+      "https://example.com",
+    );
+    expect(res.headers.get("access-control-allow-methods")).toContain("POST");
   });
 });
 
