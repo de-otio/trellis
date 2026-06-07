@@ -141,8 +141,14 @@ const SUPPORTED_TRIGGERS = new Set([
 export const handler: PostConfirmationTriggerHandler = async (event) => {
   if (!SUPPORTED_TRIGGERS.has(event.triggerSource)) return event;
 
-  const cognitoSub = event.userName;
   const attrs = event.request.userAttributes;
+  // Identify the user by the immutable Cognito `sub` (the value carried in the
+  // issued ID/access tokens), NOT `event.userName`. `userName` is not stable
+  // across trigger contexts — PostConfirmation sees the sign-up username while
+  // PreTokenGeneration on alias (email) sign-in receives the `sub` — so keying
+  // the User row and the claims cache on it silently breaks the cache lookup
+  // (the claim is written under one key and read under another → 401s).
+  const cognitoSub = attrs.sub;
   const email = attrs.email?.toLowerCase();
   if (!email) {
     logger.warn("postconfirm.no_email", { cognitoSub });

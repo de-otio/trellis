@@ -145,6 +145,7 @@ function makeEvent(opts: {
   guardianEmail?: string;
 } = {}) {
   const attrs: Record<string, string> = {
+    sub: "cognito-sub-abc123",
     email: opts.email ?? "alice@example.com",
     email_verified: opts.emailVerified ?? "true",
   };
