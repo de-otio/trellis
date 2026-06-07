@@ -215,8 +215,9 @@ describe("Database Pool Caching", () => {
 
       const poolConfig = mockPoolInstances[0].config;
       expect(poolConfig.max).toBe(10); // DEFAULT_POOL_MAX for persistent pools
+      expect(poolConfig.min).toBe(2); // DEFAULT_POOL_MIN — warm floor
       expect(poolConfig.connectionTimeoutMillis).toBe(3000); // DEFAULT_CONNECTION_TIMEOUT_MS
-      expect(poolConfig.idleTimeoutMillis).toBe(30000); // DEFAULT_IDLE_TIMEOUT_MS (30s for long-lived processes)
+      expect(poolConfig.idleTimeoutMillis).toBe(600000); // DEFAULT_IDLE_TIMEOUT_MS (10min — keep warm between bursts)
       expect(poolConfig.connectionString).toContain("statement_timeout=5000");
     });
 
