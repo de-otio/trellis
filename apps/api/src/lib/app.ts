@@ -401,12 +401,48 @@ export const HONO_PORTED_PATHS: ReadonlyArray<string> = PORTED_ROUTE_SETS.flatMa
 );
 
 /**
+ * Federation-only route sets — mounted ONLY when ActivityPub federation is
+ * enabled. These are public, unauthenticated federation endpoints (the inbox is
+ * HTTP-signature-verified; the rest are public reads). Hono is the sole router,
+ * so leaving them mounted with federation off would expose the AP surface —
+ * including the unauthenticated inbox — to any request, e.g. one that bypasses
+ * CloudFront by hitting an internet-facing ALB directly. See ACTIVITYPUB_ENABLED
+ * in ../env.ts.
+ */
+const FEDERATION_ROUTE_SETS: ReadonlySet<ReadonlyArray<Route>> = new Set([
+  actorRoutes,
+  collectionRoutes,
+  entityProfileRoutes,
+  apFriendsRoutes,
+  groupRoutes,
+  inboxRoutes,
+  outboxRoutes,
+  apPostRoutes,
+  webfingerRoutes,
+]);
+
+/**
+ * Route sets that mix authenticated `/api/*` app endpoints (always mounted) with
+ * public, federation-facing AP-object endpoints (gated): the DM API + public
+ * `/messages/:id`, and the audiences API + public `/audiences/:id` collection.
+ */
+const MIXED_AP_ROUTE_SETS: ReadonlySet<ReadonlyArray<Route>> = new Set([
+  messageRoutes,
+  audienceRoutes,
+]);
+
+/**
  * Build the Hono app. Stateless: env + per-request context arrive via
  * `app.fetch(request, bindings)`, so a single instance is reused across
  * requests.
  */
 export function buildHonoApp(): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
+
+  // Master switch for ActivityPub federation, read at build time so a deploy
+  // with federation off mounts no federation routes. Fail closed: only the
+  // exact string "true" enables it.
+  const activityPubEnabled = process.env.ACTIVITYPUB_ENABLED === "true";
 
   // WS1 (multi-tenancy, doc/14): when tenant scoping is enabled, establish the
   // ambient tenant for the entire downstream via `runWithTenantContext`. `run()`
@@ -423,9 +459,22 @@ export function buildHonoApp(): Hono<AppEnv> {
   }
 
   // Mount every ported route file. `mount` reuses each legacy handler +
-  // middleware unchanged and composes security headers innermost.
+  // middleware unchanged and composes security headers innermost. Federation
+  // route sets are skipped entirely when federation is off; for the mixed AP
+  // sets (DMs, audiences) only the authenticated `/api/*` endpoints are mounted.
   for (const set of PORTED_ROUTE_SETS) {
-    for (const route of set) mount(app, route);
+    const skipFederationSet = !activityPubEnabled && FEDERATION_ROUTE_SETS.has(set);
+    if (skipFederationSet) continue;
+    const apiOnly = !activityPubEnabled && MIXED_AP_ROUTE_SETS.has(set);
+    for (const route of set) {
+      if (
+        apiOnly &&
+        !(typeof route.path === "string" && route.path.startsWith("/api/"))
+      ) {
+        continue;
+      }
+      mount(app, route);
+    }
   }
 
   // H-ext — extension routes (dynamic; extensions are registered before the

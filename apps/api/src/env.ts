@@ -111,6 +111,15 @@ export interface Env {
   APP_URL?: string;
   ALLOWED_ORIGINS?: string;
   ACTIVITYPUB_BASE_URL?: string;
+  /**
+   * Master switch for ActivityPub federation. Defaults to `false`. When false,
+   * the federation-facing routes (actor / inbox / outbox / webfinger / public
+   * AP-object endpoints) are NOT registered and outbound delivery is skipped, so
+   * a deploy with federation off exposes no AP surface — even via a direct
+   * (CloudFront-bypassing) request to an internet-facing ALB. Set by the
+   * infrastructure layer from `config.features.activityPub`.
+   */
+  ACTIVITYPUB_ENABLED: boolean;
 
   /**
    * Trusted-proxy mode for client-IP derivation. See
@@ -491,6 +500,9 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     APP_URL: process.env.APP_URL,
     ALLOWED_ORIGINS: process.env.ALLOWED_ORIGINS,
     ACTIVITYPUB_BASE_URL: process.env.ACTIVITYPUB_BASE_URL,
+    // Federation master switch — fail closed: anything other than the exact
+    // string "true" leaves federation disabled.
+    ACTIVITYPUB_ENABLED: process.env.ACTIVITYPUB_ENABLED === "true",
 
     // Trusted-proxy hint for client-IP derivation; defaults to "none".
     TRUSTED_PROXY: process.env.TRUSTED_PROXY,

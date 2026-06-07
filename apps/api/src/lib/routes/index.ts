@@ -92,6 +92,25 @@ function markPublicSpec(routes: Route[]): Route[] {
 }
 
 /**
+ * Master switch for ActivityPub federation, read once at module load (the value
+ * is a deploy-time constant). When false, the federation-facing routes below are
+ * never registered, so a federation-disabled deploy exposes no actor / inbox /
+ * outbox / public AP-object surface — even to a request that bypasses CloudFront
+ * by hitting an internet-facing ALB directly. Mirrors `env.ACTIVITYPUB_ENABLED`.
+ */
+const activityPubEnabled = process.env.ACTIVITYPUB_ENABLED === "true";
+
+/**
+ * Authenticated app endpoints (e.g. the `/api/messages` DM API and
+ * `/api/audiences` API) live in the same route modules as the public,
+ * federation-facing AP-object endpoints (`/messages/:id`, `/audiences/:id`).
+ * Keep the `/api/*` endpoints always on; gate only the federation-facing ones.
+ */
+const appOnly = (route: Route): boolean =>
+  activityPubEnabled ||
+  (typeof route.path === "string" && route.path.startsWith("/api/"));
+
+/**
  * Core routes — domain-agnostic functionality.
  * Extension routes are merged below.
  */
@@ -253,24 +272,32 @@ const coreRoutes: Route[] = [
   // Out Redirector (public endpoint, must be before 404 handler)
   ...outRoutes,
 
-  // ActivityPub routes (public endpoints, must be before 404 handler)
-  // Note: These routes use /users/:username and /posts/:postId patterns (no /api prefix)
-  // WebFinger must be early for actor discovery
-  ...webfingerRoutes,
-  ...actorRoutes,
-  ...inboxRoutes,
-  ...outboxRoutes,
-  ...friendsRoutes,
-  ...groupRoutes,
-  ...collectionRoutes,
-  ...entityProfileRoutes,
-  ...activitypubPostRoutes,
+  // ActivityPub routes (public endpoints, must be before 404 handler).
+  // Note: these use /users/:username and /posts/:postId patterns (no /api prefix)
+  // and are unauthenticated (inbox is signature-verified, the rest are public).
+  // Registered ONLY when federation is enabled — see `activityPubEnabled` above.
+  // WebFinger must be early for actor discovery.
+  ...(activityPubEnabled
+    ? [
+        ...webfingerRoutes,
+        ...actorRoutes,
+        ...inboxRoutes,
+        ...outboxRoutes,
+        ...friendsRoutes,
+        ...groupRoutes,
+        ...collectionRoutes,
+        ...entityProfileRoutes,
+        ...activitypubPostRoutes,
+      ]
+    : []),
 
-  // Direct messages (authenticated endpoints with /api prefix)
-  ...messageRoutes,
+  // Direct messages: authenticated `/api/messages*` endpoints are always on;
+  // the public AP-object form (`/messages/:messageId`, no auth) is gated.
+  ...messageRoutes.filter(appOnly),
 
-  // Custom audiences (authenticated endpoints with /api prefix, public collection endpoint)
-  ...audienceRoutes,
+  // Custom audiences: authenticated `/api/audiences*` always on; the public
+  // collection (`/audiences/:audienceId`) is gated.
+  ...audienceRoutes.filter(appOnly),
 ];
 
 // Merge extension routes (after core, before 404)
