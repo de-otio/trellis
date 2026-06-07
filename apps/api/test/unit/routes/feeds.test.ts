@@ -1,7 +1,7 @@
 /**
  * Unit Tests: Feeds Routes
  *
- * Tests for feed route handlers including dog feed, home feed, and ATProto feed endpoints.
+ * Tests for feed route handlers including entity feed, home feed, and ATProto feed endpoints.
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -104,7 +104,7 @@ describe("Feeds Routes", () => {
       region: "us-east-1",
     } as TrellisRequestContext;
 
-    mockRequest = new Request("https://example.com/api/feeds/dog/dog-123", {
+    mockRequest = new Request("https://example.com/api/feeds/entity/dog-123", {
       method: "GET",
     });
 
@@ -120,12 +120,12 @@ describe("Feeds Routes", () => {
     mockAddCorsHeaders.mockImplementation(async (response) => response);
   });
 
-  describe("GET /api/feeds/dog/* - Get dog feed", () => {
+  describe("GET /api/feeds/entity/* - Get entity feed", () => {
     const route = feedsRoutes.find(
       (r) => r.method === "GET" && r.path.toString().includes("dog"),
     );
 
-    it("should get dog feed successfully", async () => {
+    it("should get entity feed successfully", async () => {
       const mockResponse = new Response(
         JSON.stringify({ posts: [], cursor: null }),
         { status: 200 },
@@ -136,9 +136,9 @@ describe("Feeds Routes", () => {
         data: { limit: 20, cursor: null },
       });
 
-      const url = new URL("https://example.com/api/feeds/dog/dog-123?limit=20");
+      const url = new URL("https://example.com/api/feeds/entity/dog-123?limit=20");
       const response = await route!.handler(mockRequest, mockEnv, {
-        pathname: "/api/feeds/dog/dog-123",
+        pathname: "/api/feeds/entity/dog-123",
         url,
         requestContext: mockRequestContext,
       });
@@ -170,9 +170,9 @@ describe("Feeds Routes", () => {
       });
 
       const encodedDogRef = encodeURIComponent("dog@example.com");
-      const url = new URL(`https://example.com/api/feeds/dog/${encodedDogRef}`);
+      const url = new URL(`https://example.com/api/feeds/entity/${encodedDogRef}`);
       await route!.handler(mockRequest, mockEnv, {
-        pathname: `/api/feeds/dog/${encodedDogRef}`,
+        pathname: `/api/feeds/entity/${encodedDogRef}`,
         url,
         requestContext: mockRequestContext,
       });
@@ -190,9 +190,9 @@ describe("Feeds Routes", () => {
     it("should return 401 when session is missing", async () => {
       mockGetSession.mockResolvedValue(null);
 
-      const url = new URL("https://example.com/api/feeds/dog/dog-123");
+      const url = new URL("https://example.com/api/feeds/entity/dog-123");
       await route!.handler(mockRequest, mockEnv, {
-        pathname: "/api/feeds/dog/dog-123",
+        pathname: "/api/feeds/entity/dog-123",
         url,
         requestContext: mockRequestContext,
       });
@@ -205,9 +205,9 @@ describe("Feeds Routes", () => {
     });
 
     it("should return 500 when request context is missing", async () => {
-      const url = new URL("https://example.com/api/feeds/dog/dog-123");
+      const url = new URL("https://example.com/api/feeds/entity/dog-123");
       await route!.handler(mockRequest, mockEnv, {
-        pathname: "/api/feeds/dog/dog-123",
+        pathname: "/api/feeds/entity/dog-123",
         url,
         requestContext: null,
       });
@@ -230,10 +230,10 @@ describe("Feeds Routes", () => {
       });
 
       const url = new URL(
-        "https://example.com/api/feeds/dog/dog-123?limit=invalid",
+        "https://example.com/api/feeds/entity/dog-123?limit=invalid",
       );
       const response = await route!.handler(mockRequest, mockEnv, {
-        pathname: "/api/feeds/dog/dog-123",
+        pathname: "/api/feeds/entity/dog-123",
         url,
         requestContext: mockRequestContext,
       });
@@ -250,9 +250,9 @@ describe("Feeds Routes", () => {
         data: { limit: 20, cursor: null },
       });
 
-      const url = new URL("https://example.com/api/feeds/dog/dog-123");
+      const url = new URL("https://example.com/api/feeds/entity/dog-123");
       await route!.handler(mockRequest, mockEnv, {
-        pathname: "/api/feeds/dog/dog-123",
+        pathname: "/api/feeds/entity/dog-123",
         url,
         requestContext: mockRequestContext,
       });

@@ -18,7 +18,7 @@ import type { Route } from "./types.js";
 
 export const feedsRoutes: Route[] = [
   {
-    path: "/api/feeds/dog/*",
+    path: "/api/feeds/entity/*",
     method: "GET",
     handler: async (request, env, { pathname, url, requestContext }) => {
       const sessionManager = new SessionManager();
@@ -51,7 +51,7 @@ export const feedsRoutes: Route[] = [
       const rateLimiter = new RateLimiter();
       const rateLimitResponse = rateLimiter.applyRateLimit(
         request,
-        "/api/feeds/dog",
+        "/api/feeds/entity",
         30,
         60,
         undefined,
@@ -70,7 +70,7 @@ export const feedsRoutes: Route[] = [
           );
         }
 
-        const entityRef = decodeURIComponent(pathname.split("/api/feeds/dog/")[1]);
+        const entityRef = decodeURIComponent(pathname.split("/api/feeds/entity/")[1]);
         const queryValidation = validateQueryParams(url, paginationSchema);
         if (!queryValidation.success) {
           return securityHeaders.addSecurityHeaders(queryValidation.error);
@@ -95,7 +95,7 @@ export const feedsRoutes: Route[] = [
       }
     },
     middleware: [corsMiddleware(), ageGateMiddleware()],
-    description: "Get dog feed",
+    description: "Get entity feed",
   },
 
   {

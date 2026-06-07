@@ -1,7 +1,7 @@
 /**
  * Feed E2E Tests
  *
- * Tests the home feed and dog feed endpoints including
+ * Tests the home feed and entity feed endpoints including
  * post lifecycle (create, update, hide, unhide, delete) as seen through the feed.
  */
 
@@ -162,8 +162,8 @@ describe("Feed", () => {
     // Post is deleted, no need to track for cleanup
   });
 
-  it("dog feed returns valid structure or 404", async () => {
-    const res = await user.authFetch(`${API_URL}/api/feeds/dog/nonexistent-id`);
+  it("entity feed returns valid structure or 404", async () => {
+    const res = await user.authFetch(`${API_URL}/api/feeds/entity/nonexistent-id`);
     expect(res.status).not.toBe(401);
     expect([200, 404]).toContain(res.status);
   });

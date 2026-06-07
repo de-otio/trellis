@@ -2,7 +2,7 @@
  * Unit Tests: Feed Route Rate Limiting
  *
  * Tests that the RateLimiter class enforces per-user rate limits correctly
- * for the /api/feeds/home and /api/feeds/dog routes.
+ * for the /api/feeds/home and /api/feeds/entity routes.
  *
  * Rate limit configuration (matching feeds.ts):
  *   - 30 requests per 60 seconds
@@ -135,7 +135,7 @@ describe("Feed route rate limiting", () => {
     });
   });
 
-  describe("/api/feeds/dog", () => {
+  describe("/api/feeds/entity", () => {
     it("allows requests that are under the limit", () => {
       const rateLimiter = new RateLimiter();
       const request = makeRequest();
@@ -145,7 +145,7 @@ describe("Feed route rate limiting", () => {
         const result = applyFeedRateLimit(
           rateLimiter,
           request,
-          "/api/feeds/dog",
+          "/api/feeds/entity",
           userId,
         );
         expect(result).toBeNull();
@@ -158,13 +158,13 @@ describe("Feed route rate limiting", () => {
       const userId = "user-dog-over-limit";
 
       for (let i = 0; i < 30; i++) {
-        applyFeedRateLimit(rateLimiter, request, "/api/feeds/dog", userId);
+        applyFeedRateLimit(rateLimiter, request, "/api/feeds/entity", userId);
       }
 
       const result = applyFeedRateLimit(
         rateLimiter,
         request,
-        "/api/feeds/dog",
+        "/api/feeds/entity",
         userId,
       );
 
@@ -182,13 +182,13 @@ describe("Feed route rate limiting", () => {
 
       // Exhaust userA's allowance.
       for (let i = 0; i < 30; i++) {
-        applyFeedRateLimit(rateLimiter, request, "/api/feeds/dog", userA);
+        applyFeedRateLimit(rateLimiter, request, "/api/feeds/entity", userA);
       }
 
       const userAResult = applyFeedRateLimit(
         rateLimiter,
         request,
-        "/api/feeds/dog",
+        "/api/feeds/entity",
         userA,
       );
       expect(userAResult).not.toBeNull();
@@ -198,7 +198,7 @@ describe("Feed route rate limiting", () => {
       const userBResult = applyFeedRateLimit(
         rateLimiter,
         request,
-        "/api/feeds/dog",
+        "/api/feeds/entity",
         userB,
       );
       expect(userBResult).toBeNull();
@@ -477,21 +477,21 @@ describe("Feed route rate limiting", () => {
   });
 
   describe("rate limit isolation across endpoints", () => {
-    it("exhausting /api/feeds/dog does not affect /api/feeds/home for the same user", () => {
+    it("exhausting /api/feeds/entity does not affect /api/feeds/home for the same user", () => {
       const rateLimiter = new RateLimiter();
       const request = makeRequest();
       const userId = "user-cross-endpoint";
 
-      // Exhaust the dog feed limit.
+      // Exhaust the entity feed limit.
       for (let i = 0; i < 30; i++) {
-        applyFeedRateLimit(rateLimiter, request, "/api/feeds/dog", userId);
+        applyFeedRateLimit(rateLimiter, request, "/api/feeds/entity", userId);
       }
 
-      // dog feed must be rate limited.
+      // entity feed must be rate limited.
       const dogResult = applyFeedRateLimit(
         rateLimiter,
         request,
-        "/api/feeds/dog",
+        "/api/feeds/entity",
         userId,
       );
       expect(dogResult).not.toBeNull();

@@ -135,7 +135,7 @@ describe("Hono app seam (H0)", () => {
       "/api/auth/*",
       "/api/auth/discover",
       "/auth/*",
-      "/api/feeds/dog/*",
+      "/api/feeds/entity/*",
       "/api/internal/docs/*",
       "/api/admin/super-admin/*",
     ]) {
