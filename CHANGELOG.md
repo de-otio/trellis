@@ -15,8 +15,13 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ## [Unreleased]
 
+## [0.10.7] — 2026-06-07
+
 ### Changed
 
+- **BREAKING:** the entity feed route is renamed `/api/feeds/dog/*` →
+  `/api/feeds/entity/*` (the handler already used `entityRef` / `getEntityFeed`
+  internally; only the path was dog-named). Consumers update their feed client.
 - Restructured documentation into a published `docs/` folder (Diátaxis
   sections, frontmatter-driven ordering). The repository `README.md` is now a
   thin pointer into `docs/`.
