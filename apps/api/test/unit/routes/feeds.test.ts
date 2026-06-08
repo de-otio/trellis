@@ -122,7 +122,7 @@ describe("Feeds Routes", () => {
 
   describe("GET /api/feeds/entity/* - Get entity feed", () => {
     const route = feedsRoutes.find(
-      (r) => r.method === "GET" && r.path.toString().includes("dog"),
+      (r) => r.method === "GET" && r.path.toString().includes("entity"),
     );
 
     it("should get entity feed successfully", async () => {
