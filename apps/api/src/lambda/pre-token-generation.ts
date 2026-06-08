@@ -25,7 +25,7 @@ import type {
 } from "aws-lambda";
 import { Logger } from "@aws-lambda-powertools/logger";
 import { PrismaClient, type TenantRole } from "@prisma/client";
-import { getLambdaPrisma as getPrisma } from "../lib/lambda-prisma.js";
+import { getLambdaPrisma as getPrisma, withLambdaDbBreaker } from "../lib/lambda-prisma.js";
 import {
   ClaimsCache,
   createClaimsCacheFromEnv,
@@ -194,6 +194,11 @@ export const handler: PreTokenGenerationV2TriggerHandler = async (event) => {
   let cacheHit = !!claims;
 
   if (!claims) {
+    // RDS is consulted only on a genuine cache miss. Emit a filterable event so
+    // a miss-rate metric can be derived (a miss storm — post-deploy, correlated
+    // TTL expiry, or the first-login wave after a signup burst — is the path
+    // that can exhaust DB connections; the warm cache is the primary defence).
+    logger.info("pretoken.cache_miss", { cognitoSub, federated });
     const db = await getPrisma();
     // Read the user's last explicit tenant preference, even from an expired
     // cache row, so an admin-side switch-tenant call survives cache TTL.
@@ -206,7 +211,10 @@ export const handler: PreTokenGenerationV2TriggerHandler = async (event) => {
         error: (err as { code?: string })?.code ?? "unknown",
       });
     }
-    const loaded = await loadFromRds(db, cognitoSub, federated, preferredTenantId);
+    const loaded = await withLambdaDbBreaker(
+      () => loadFromRds(db, cognitoSub, federated, preferredTenantId),
+      "pretoken.load_from_rds",
+    );
 
     if (!loaded.user) {
       logger.warn("pretoken.drift", { cognitoSub });
