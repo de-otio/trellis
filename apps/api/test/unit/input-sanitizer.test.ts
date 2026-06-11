@@ -39,6 +39,29 @@ describe("InputSanitizer", () => {
       expect(result).toBe("Click me");
     });
 
+    it("should not leave a script tag after nested-tag collapse", () => {
+      // A single pass would collapse "<scr<script>ipt>" to "<script>".
+      // The fixed-point strip must remove it entirely.
+      const input = "<scr<script>ipt>alert(1)</scr</script>ipt>Hello";
+      const result = InputSanitizer.sanitizeText(input);
+      expect(result).not.toContain("<script");
+      expect(result).toContain("Hello");
+    });
+
+    it("should remove script end tags with internal whitespace", () => {
+      const input = '<script>alert("XSS")</script >After';
+      const result = InputSanitizer.sanitizeText(input);
+      expect(result).not.toContain("<script");
+      expect(result).toBe("After");
+    });
+
+    it("should remove style end tags with internal whitespace", () => {
+      const input = "<style>body{}</style >Visible";
+      const result = InputSanitizer.sanitizeText(input);
+      expect(result).not.toContain("<style");
+      expect(result).toBe("Visible");
+    });
+
     it("should preserve plain text", () => {
       const input = "This is plain text with no HTML";
       const result = InputSanitizer.sanitizeText(input);

@@ -111,5 +111,12 @@ export function isRemoteUri(uri: string, env: Env): boolean {
       // Invalid URL, use default
     }
   }
-  return !uri.startsWith(baseUrl);
+  // Compare parsed origins rather than a string prefix, so a host like
+  // "example.com.attacker.com" cannot masquerade as local.
+  try {
+    return new URL(uri).origin !== new URL(baseUrl).origin;
+  } catch {
+    // Unparseable URI — treat as remote (untrusted).
+    return true;
+  }
 }
