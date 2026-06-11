@@ -55,6 +55,14 @@ describe("InputSanitizer", () => {
       expect(result).toBe("After");
     });
 
+    it("should remove script end tags with trailing junk before '>'", () => {
+      // Browsers close the element on "</script foo>"; the filter must too.
+      const input = '<script>alert("XSS")</script\n foo>After';
+      const result = InputSanitizer.sanitizeText(input);
+      expect(result).not.toContain("alert");
+      expect(result).toContain("After");
+    });
+
     it("should remove style end tags with internal whitespace", () => {
       const input = "<style>body{}</style >Visible";
       const result = InputSanitizer.sanitizeText(input);

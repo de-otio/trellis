@@ -46,16 +46,17 @@ export class InputSanitizer {
     };
 
     // First, remove script tags and their content (most dangerous).
-    // End-tag matching tolerates whitespace (e.g. "</script >").
+    // The end tag uses [^>]* (not just \s*) because browsers close on any
+    // junk before the ">", e.g. "</script\n foo>" — so the filter must too.
     let sanitized = stripUntilStable(
       input,
-      /<script\b[^<]*(?:(?!<\/script\s*>)<[^<]*)*<\/script\s*>/gi,
+      /<script\b[^<]*(?:(?!<\/script[^>]*>)<[^<]*)*<\/script[^>]*>/gi,
     );
 
-    // Remove style tags and their content
+    // Remove style tags and their content (same end-tag tolerance)
     sanitized = stripUntilStable(
       sanitized,
-      /<style\b[^<]*(?:(?!<\/style\s*>)<[^<]*)*<\/style\s*>/gi,
+      /<style\b[^<]*(?:(?!<\/style[^>]*>)<[^<]*)*<\/style[^>]*>/gi,
     );
 
     // Remove all other HTML tags using regex (safe for Cloudflare Workers).
