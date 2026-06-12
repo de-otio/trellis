@@ -32,22 +32,36 @@ export class InputSanitizer {
       }
     }
 
-    // First, remove script tags and their content (most dangerous)
-    // This regex matches <script>...</script> including all content between tags
-    let sanitized = input.replace(
-      /<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi,
-      "",
+    // Strip a pattern repeatedly until the string stops changing. A single
+    // pass can be defeated by nesting (e.g. "<scr<script>ipt>" collapses to
+    // "<script>"), so we apply the replacement to a fixed point.
+    const stripUntilStable = (value: string, pattern: RegExp): string => {
+      let current = value;
+      let previous: string;
+      do {
+        previous = current;
+        current = current.replace(pattern, "");
+      } while (current !== previous);
+      return current;
+    };
+
+    // First, remove script tags and their content (most dangerous).
+    // The end tag uses [^>]* (not just \s*) because browsers close on any
+    // junk before the ">", e.g. "</script\n foo>" — so the filter must too.
+    let sanitized = stripUntilStable(
+      input,
+      /<script\b[^<]*(?:(?!<\/script[^>]*>)<[^<]*)*<\/script[^>]*>/gi,
     );
 
-    // Remove style tags and their content
-    sanitized = sanitized.replace(
-      /<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi,
-      "",
+    // Remove style tags and their content (same end-tag tolerance)
+    sanitized = stripUntilStable(
+      sanitized,
+      /<style\b[^<]*(?:(?!<\/style[^>]*>)<[^<]*)*<\/style[^>]*>/gi,
     );
 
-    // Remove all other HTML tags using regex (safe for Cloudflare Workers)
-    // This regex matches any HTML tag including attributes
-    sanitized = sanitized.replace(/<[^>]*>/g, "");
+    // Remove all other HTML tags using regex (safe for Cloudflare Workers).
+    // Looped to a fixed point so nested/partial tags cannot survive a pass.
+    sanitized = stripUntilStable(sanitized, /<[^>]*>/g);
 
     // Remove all HTML entities (numeric and named) for security
     // This prevents XSS attacks via encoded entities

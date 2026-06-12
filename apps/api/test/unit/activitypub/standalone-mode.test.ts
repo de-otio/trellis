@@ -110,6 +110,19 @@ describe("Standalone Mode", () => {
       const result = isRemoteUri(remoteUri, mockEnv as Env);
       expect(result).toBe(true); // Different protocol = different origin
     });
+
+    it("should treat a host that merely prefixes the base domain as remote", () => {
+      // "example.com.attacker.com" must not masquerade as local via a
+      // string prefix/substring check.
+      const spoofed = "https://example.com.attacker.com/users/alice";
+      const result = isRemoteUri(spoofed, mockEnv as Env);
+      expect(result).toBe(true);
+    });
+
+    it("should treat an unparseable URI as remote", () => {
+      const result = isRemoteUri("not a url", mockEnv as Env);
+      expect(result).toBe(true);
+    });
   });
 
   describe("isStandaloneModeEnabled", () => {
