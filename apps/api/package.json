@@ -90,7 +90,7 @@
     "@vitest/coverage-v8": "^4.1.8",
     "@vitest/ui": "^4.1.8",
     "aws-sdk-client-mock": "^4.1.0",
-    "esbuild": "^0.28.0",
+    "esbuild": "^0.28.1",
     "form-data": "^4.0.1",
     "mailparser": "^3.9.9",
     "prettier": "^3.8.4",
