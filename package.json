@@ -28,5 +28,8 @@
     "prettier": "^3.8.4",
     "typescript": "^6.0.3"
   },
-  "dependencies": {}
+  "dependencies": {},
+  "overrides": {
+    "@hono/node-server": "^1.19.13"
+  }
 }
