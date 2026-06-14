@@ -31,9 +31,17 @@ export const handler: PreSignUpTriggerHandler = async (event) => {
     throw new Error("This invitation code has expired.");
   }
 
-  // Auto-confirm and auto-verify for invited users
-  event.response.autoConfirmUser = false;
-  event.response.autoVerifyEmail = false;
+  // Auto-confirm and auto-verify invited users.
+  //
+  // Registration is passwordless (magic-link CUSTOM_AUTH). An UNCONFIRMED user
+  // cannot initiate that flow, so without auto-confirm an invited sign-up would
+  // create an account that can never sign in. This is safe because:
+  //   - entry is already gated by a single-use invitation code (checked above);
+  //   - access still requires answering the magic-link challenge, i.e. receiving
+  //     and clicking a link sent to this exact address — the link, not this
+  //     flag, is the real proof of email ownership and the access gate.
+  event.response.autoConfirmUser = true;
+  event.response.autoVerifyEmail = true;
 
   return event;
 };
