@@ -71,7 +71,7 @@ describe("PreSignup Lambda", () => {
     } as any;
   }
 
-  it("should accept a valid invitation code and set auto-confirm to false", async () => {
+  it("should accept a valid invitation code and auto-confirm the invited user", async () => {
     const now = Math.floor(Date.now() / 1000);
     mockDynamoSend.mockResolvedValueOnce({
       Item: {
@@ -87,8 +87,11 @@ describe("PreSignup Lambda", () => {
 
     const result = await handler(event, {} as any, () => {});
 
-    expect(result!.response.autoConfirmUser).toBe(false);
-    expect(result!.response.autoVerifyEmail).toBe(false);
+    // Passwordless magic-link sign-in needs a CONFIRMED user; invited sign-ups
+    // are auto-confirmed/verified (entry is gated by the invitation code, and
+    // the magic-link challenge is the real email-ownership/access gate).
+    expect(result!.response.autoConfirmUser).toBe(true);
+    expect(result!.response.autoVerifyEmail).toBe(true);
   });
 
   it("should throw when no invitation code is provided", async () => {
@@ -162,7 +165,7 @@ describe("PreSignup Lambda", () => {
     const event = makeEvent(undefined, { invitationCode: "META-CODE" });
 
     const result = await handler(event, {} as any, () => {});
-    expect(result!.response.autoConfirmUser).toBe(false);
+    expect(result!.response.autoConfirmUser).toBe(true);
   });
 
   it("should throw when DynamoDB fails (allows Lambda retry)", async () => {
