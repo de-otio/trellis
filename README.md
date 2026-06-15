@@ -38,7 +38,10 @@ Trellis is **dual-licensed**.
 - A **commercial license** is available for use without the AGPL's
   source-disclosure obligations — see [`COMMERCIAL.md`](COMMERCIAL.md).
 - The **extension API** (`@de-otio/trellis-extension-api`) is **MIT**-licensed,
-  so you can build extensions — including proprietary ones — freely.
+  so you can write extensions against it freely. Note that a *closed-source*
+  extension run as a network service is a combined work with the AGPL core and
+  needs a commercial license (open-source AGPL extensions are free) — see
+  [`COMMERCIAL.md`](COMMERCIAL.md).
 
 External contributions are **not currently being accepted** — see
 [`CONTRIBUTING.md`](CONTRIBUTING.md). A [Contributor License Agreement](CLA.md)
