@@ -64,7 +64,7 @@
     "@aws-sdk/util-dynamodb": "^3.996.5",
     "@de-otio/saas-foundation": "^0.3.0",
     "@de-otio/trellis-extension-api": "^0.3.0",
-    "@de-otio/vestibulum": "^0.3.0",
+    "@de-otio/vestibulum": "^0.3.2",
     "@fedify/fedify": "2.2.5",
     "@prisma/adapter-pg": "^7.8.0",
     "@prisma/client": "^7.8.0",
