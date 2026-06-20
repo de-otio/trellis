@@ -20,6 +20,15 @@ import type {
   ExecutionContext,
   AnalyticsEngineDataset,
 } from "./types/cloudflare-compat.js";
+import type { NotificationType } from "@prisma/client";
+import type { RealtimeTransport } from "./lib/realtime/index.js";
+import {
+  PollTransport,
+  NoopRealtimeTransport,
+  InMemorySettingStore,
+  CalmDeliveryResolver,
+  resolveRealtimeTransport,
+} from "./lib/realtime/index.js";
 
 const stage = process.env.STAGE || "dev";
 
@@ -258,6 +267,134 @@ export interface Env {
   INTERACTION_EVENT_PRUNE_BATCH_SIZE?: string;
   /** Prune circuit-breaker: max iterations per run. Default 1000. */
   INTERACTION_EVENT_PRUNE_MAX_ITERATIONS?: string;
+
+  // --- Realtime transport seam (single-writer is env.ts) ---------------------
+  // Capability seam: core ships a poll default and an interface a consuming app
+  // (Skybber) injects a concrete transport into via setRealtimeProvider(). Core
+  // never names "appsync" in code. Operational parameters are runtime config per
+  // the threshold-secrecy invariant (no compiled-in thresholds).
+  /**
+   * Feature gates for the realtime seam.
+   *   realtimeTransport: which transport core selects as the FALLBACK when no
+   *     provider is injected — "poll" (default) | "appsync-events".
+   *   realtimePush: whether the createNotification() push hand-off is enabled
+   *     (default false). The floor decision is computed either way; this only
+   *     gates whether deliver() is invoked.
+   */
+  features: {
+    realtimeTransport: "poll" | "appsync-events";
+    realtimePush: boolean;
+  };
+  /**
+   * Manipulative re-engagement NotificationTypes denied to non-adult recipients
+   * by the delivery FLOOR (minor-protection). RUNTIME CONFIG per the
+   * threshold-secrecy invariant. Default EMPTY (v1 ships no such type).
+   */
+  REALTIME_REENGAGEMENT_TYPES: ReadonlySet<NotificationType>;
+  /** Setting-sync blob namespaces the deployment permits (allowlist). Empty = sync off. */
+  REALTIME_SETTING_NAMESPACES: string[];
+  /** Max bytes for a single encrypted setting blob (size cap; runtime config). */
+  REALTIME_SETTING_MAX_BYTES: number;
+  /**
+   * Retention window (days) for realtime connection/access logs. Treated like
+   * SecurityEvent (retention-bound), never durable ops data. Default short (7).
+   */
+  REALTIME_CONN_LOG_RETENTION_DAYS: number;
+  /**
+   * The resolved transport instance. Populated by the env builder with the
+   * default (Poll/Noop) via resolveRealtimeTransport(); a consuming app
+   * OVERWRITES the slot by calling setRealtimeProvider() before serving.
+   * Handlers read env.realtimeTransport — never construct one.
+   */
+  realtimeTransport: RealtimeTransport;
+  // --- end Realtime transport seam ------------------------------------------
+}
+
+/**
+ * Track A — the RESERVED key-ring namespace. The client stores its wrapped-DEK
+ * bundle under this namespace; the server is blind to it (opaque ciphertext, no
+ * parsing). Always allowed, regardless of REALTIME_SETTING_NAMESPACES, so the
+ * key-ring works even when no other setting sync is opted in.
+ */
+export const KEYRING_NAMESPACE = "__keyring";
+
+/**
+ * Resolve the realtime config block + the default transport instance from
+ * process.env. Single-writer: this is the ONLY place that reads the REALTIME_*
+ * env vars. The default is `poll` with an in-memory store + the calm-delivery
+ * resolver — fully functional with zero infra. A consuming app overrides the
+ * transport via setRealtimeProvider() (resolved here).
+ *
+ * REALTIME_SETTING_NAMESPACES always includes the reserved `__keyring` namespace
+ * (Track A), independent of the deployment's opt-in allowlist.
+ */
+export function resolveRealtimeEnv(): {
+  features: { realtimeTransport: "poll" | "appsync-events"; realtimePush: boolean };
+  REALTIME_REENGAGEMENT_TYPES: ReadonlySet<NotificationType>;
+  REALTIME_SETTING_NAMESPACES: string[];
+  REALTIME_SETTING_MAX_BYTES: number;
+  REALTIME_CONN_LOG_RETENTION_DAYS: number;
+  realtimeTransport: RealtimeTransport;
+} {
+  const transportKind =
+    process.env.REALTIME_TRANSPORT === "appsync-events"
+      ? "appsync-events"
+      : "poll";
+  const realtimePush = process.env.REALTIME_PUSH_ENABLED === "true";
+
+  // Minor-protection re-engagement denylist (runtime config; default empty).
+  const reengagementTypes: ReadonlySet<NotificationType> = new Set(
+    (process.env.REALTIME_REENGAGEMENT_TYPES ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0) as NotificationType[],
+  );
+
+  const configured = (process.env.REALTIME_SETTING_NAMESPACES ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  // Track A — RESERVED system namespace. `__keyring` holds the wrapped-DEK
+  // key-ring bundle and is ALWAYS allowed (the store treats it as opaque
+  // ciphertext — no parsing), independent of the deployment's opt-in allowlist.
+  const namespaces = configured.includes(KEYRING_NAMESPACE)
+    ? configured
+    : [...configured, KEYRING_NAMESPACE];
+
+  const maxBytesRaw = Number.parseInt(
+    process.env.REALTIME_SETTING_MAX_BYTES ?? "",
+    10,
+  );
+  const maxBytes = Number.isFinite(maxBytesRaw) && maxBytesRaw > 0
+    ? maxBytesRaw
+    : 65536; // 64 KiB default cap
+
+  const retentionRaw = Number.parseInt(
+    process.env.REALTIME_CONN_LOG_RETENTION_DAYS ?? "",
+    10,
+  );
+  const connLogRetentionDays =
+    Number.isFinite(retentionRaw) && retentionRaw > 0 ? retentionRaw : 7;
+
+  // Default transport: in-memory store + calm-delivery resolver. Skybber injects
+  // a push transport. Core never constructs an AppSync transport —
+  // "appsync-events" without an injected provider falls back to noop.
+  const settingStore = new InMemorySettingStore();
+  const policyResolver = new CalmDeliveryResolver({ reengagementTypes });
+  const fallback: RealtimeTransport =
+    transportKind === "appsync-events"
+      ? new NoopRealtimeTransport(policyResolver)
+      : new PollTransport(settingStore, policyResolver);
+  const realtimeTransport = resolveRealtimeTransport(fallback);
+
+  return {
+    features: { realtimeTransport: transportKind, realtimePush },
+    REALTIME_REENGAGEMENT_TYPES: reengagementTypes,
+    REALTIME_SETTING_NAMESPACES: namespaces,
+    REALTIME_SETTING_MAX_BYTES: maxBytes,
+    REALTIME_CONN_LOG_RETENTION_DAYS: connLogRetentionDays,
+    realtimeTransport,
+  };
 }
 
 /**
@@ -455,6 +592,10 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
   const databaseUrl = await resolveDatabaseUrl();
 
   return {
+    // Realtime transport seam: resolveRealtimeEnv() reads the REALTIME_* vars
+    // and selects the default (poll/noop) transport; Skybber overrides via
+    // setRealtimeProvider() before serving.
+    ...resolveRealtimeEnv(),
     DATABASE_URL: databaseUrl,
     DATABASE_URL_CN: process.env.DATABASE_URL_CN,
     DIRECT_URL: process.env.DIRECT_URL,

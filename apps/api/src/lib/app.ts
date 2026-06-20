@@ -85,6 +85,7 @@ import { privacyRoutes } from "./routes/privacy.js";
 import { productTaxonomyRoutes } from "./routes/products.js";
 import { relationshipRoutes } from "./routes/relationships.js";
 import { sentimentsRoutes } from "./routes/sentiments.js";
+import { settingsRoutes } from "./routes/settings.js";
 import { setupStatusRoutes } from "./routes/setup-status.js";
 import { taxonomyRoutes } from "./routes/taxonomy.js";
 import { taxonomyAnalyticsRoutes } from "./routes/taxonomy-analytics.js";
@@ -362,6 +363,10 @@ const PORTED_ROUTE_SETS: ReadonlyArray<ReadonlyArray<Route>> = [
   postsRoutes,
   productTaxonomyRoutes,
   sentimentsRoutes,
+  // settings.ts: CHANGES_PATTERN is exact (/api/settings/changes) and listed
+  // first in the set so it wins over the NAMESPACE_PATTERN ([^/]+) capture in
+  // registration order — "changes" is never matched as a :namespace.
+  settingsRoutes,
   setupStatusRoutes,
   tenantRoutes,
   tenantAuditRoutes,

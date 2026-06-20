@@ -55,6 +55,7 @@ export const TENANT_SCOPED_MODELS: ReadonlySet<string> = new Set([
   "PostComment",
   "Entity",
   "Notification",
+  "BlockedUser",
   "Group",
   "GroupMember",
   "EntityOwnership",
@@ -108,6 +109,7 @@ export const UNSCOPED_MODELS: ReadonlyMap<string, string> = new Map([
   ["UploadSession", "user"],
   ["MfaEnrollment", "user"],
   ["UserEncryptionKey", "user"],
+  ["EncryptedUserSetting", "user"],
   ["Consent", "user"],
   ["NotificationPreference", "user"],
   // Generalized report model (Surveillance-hardening Phase 0, E3; folds in the

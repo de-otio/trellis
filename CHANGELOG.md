@@ -15,6 +15,23 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-06-20
+
+### Added
+
+- **Realtime / server-blind settings sync + delivery safety floor.** A
+  `RealtimeTransport` capability seam (poll default; a consuming app injects a
+  concrete transport — e.g. AppSync Events — via the new `setRealtimeProvider`
+  export, so core stays infra-agnostic). Server-blind `EncryptedUserSetting`
+  store + `GET/PUT /api/settings/:namespace` and `GET /api/settings/changes`
+  (opaque AEAD ciphertext, CAS versioning, offline-backfill cursor); a reserved
+  `__keyring` namespace for the wrapped-DEK bundle. The notification delivery
+  floor is migrated into `CalmDeliveryResolver` and now **enforces** blocked-
+  sender and minor-protection drops (quiet-hours / preference behavior
+  preserved), plus a best-effort content-free push hand-off. New
+  `EncryptedUserSetting` and `BlockedUser` Prisma models. Operational thresholds
+  are runtime config (`REALTIME_*` env vars); no compiled-in values.
+
 ## [0.10.7] — 2026-06-07
 
 ### Changed
