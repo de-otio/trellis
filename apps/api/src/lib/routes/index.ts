@@ -63,6 +63,7 @@ import { productTaxonomyRoutes } from "./products.js";
 import { notificationsRoutes } from "./notifications.js";
 import { parentalControlRoutes } from "./parental-controls.js";
 import { sentimentsRoutes } from "./sentiments.js";
+import { settingsRoutes } from "./settings.js";
 import { taxonomyRoutes } from "./taxonomy.js";
 import { taxonomyAnalyticsRoutes } from "./taxonomy-analytics.js";
 import type { Route } from "./types.js";
@@ -205,6 +206,8 @@ const coreRoutes: Route[] = [
 
   // Sentiments/Reactions
   ...sentimentsRoutes,
+  // Realtime / server-blind settings sync
+  ...settingsRoutes,
 
   // Media uploads
   ...mediaRoutes,

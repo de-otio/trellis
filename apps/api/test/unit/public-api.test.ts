@@ -16,6 +16,7 @@ const EXPECTED_EXPORTS = [
   "getExtension",
   "getExtensions",
   "registerExtension",
+  "setRealtimeProvider",
   "startServer",
 ].sort();
 
