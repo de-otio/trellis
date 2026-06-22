@@ -21,9 +21,15 @@ permissions:
   contents: write
   pull-requests: write
 
+# Cancel superseded runs when Dependabot rebases/synchronizes a PR.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
+
 jobs:
   auto-merge:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     if: github.event.pull_request.user.login == 'dependabot[bot]'
     steps:
       - name: Enable auto-merge (squash)

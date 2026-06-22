@@ -11,6 +11,11 @@ on:
 permissions:
   contents: write
 
+# Release chain — serialize and never cancel an in-flight release.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release:
     if: |
