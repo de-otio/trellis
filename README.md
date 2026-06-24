@@ -5,6 +5,18 @@ multi-tenancy with per-tenant IdP federation (SAML/OIDC), feeds, posts,
 comments, media handling, moderation, and ActivityPub federation as a
 foundation that vertical-specific applications extend.
 
+Trellis is **public-interest digital infrastructure for the social layer** —
+an open core, federated by default, stewarded by [De Otio](https://de-otio.org)
+in the public interest, with reciprocity required of those who build commercial
+products on it. It is not "open source" in the thin, code-only sense: the
+design commitments (data sovereignty, no engagement-maximising objective,
+provenance) and the governance that backs them are part of what Trellis *is*.
+
+- **[Principles](PRINCIPLES.md)** — what Trellis is for and the design
+  commitments that follow.
+- **[Governance](GOVERNANCE.md)** — how Trellis is stewarded and the reciprocity
+  expected of commercial users (including De Otio's own verticals).
+
 ## Documentation
 
 The documentation lives in [`docs/`](docs/) and is the single source of truth:

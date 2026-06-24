@@ -37,6 +37,7 @@ and authored (single source of truth, frontmatter ordering, kebab-case).
 
 These live at the repository root on GitHub:
 
+- [Principles](https://github.com/de-otio/trellis/blob/main/PRINCIPLES.md) — what Trellis is for and its design commitments · [Governance](https://github.com/de-otio/trellis/blob/main/GOVERNANCE.md) — stewardship and reciprocity
 - [License](https://github.com/de-otio/trellis/blob/main/LICENSE)
 - [Contributing](https://github.com/de-otio/trellis/blob/main/CONTRIBUTING.md) · [Code of conduct](https://github.com/de-otio/trellis/blob/main/CODE_OF_CONDUCT.md)
 - [Security policy](https://github.com/de-otio/trellis/blob/main/SECURITY.md) — how to report a vulnerability
