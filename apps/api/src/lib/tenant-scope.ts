@@ -74,6 +74,11 @@ export const TENANT_SCOPED_MODELS: ReadonlySet<string> = new Set([
   // this middleware, always filter tenant_id explicitly).
   "Relationship",
   "EntityRelationship",
+  // D18: MediaFile is now tenant-scoped (carries its own tenantId). Dedup is
+  // within-tenant via @@unique([tenantId, contentHash]). PostMedia is
+  // "by-relation" (no own tenantId) and crosses the scope boundary via
+  // the post→media join — flagged for T9/integration.
+  "MediaFile",
 ]);
 
 /**
@@ -99,7 +104,8 @@ export const UNSCOPED_MODELS: ReadonlyMap<string, string> = new Map([
   ["FeatureToggle", "global"],
   ["IngestState", "global"],
   ["RoleMetadata", "global"],
-  ["MediaFile", "global-content-addressed"],
+  // Note: MediaFile was here as "global-content-addressed" prior to D18.
+  // It now carries its own tenantId and is in TENANT_SCOPED_MODELS above.
   // User-scoped (boundary is userId, not tenant).
   ["User", "user"],
   ["CircleConfig", "user"],
