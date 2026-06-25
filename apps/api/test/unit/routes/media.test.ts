@@ -48,6 +48,8 @@ vi.mock("../../../src/lib/cors-handler", () => ({
 const mockMediaFileFindUnique = vi.fn();
 const mockMediaFileCreate = vi.fn();
 const mockMediaFileUpsert = vi.fn();
+const mockMediaFileCount = vi.fn();
+const mockMediaFileAggregate = vi.fn();
 const mockCreatePrismaForRegion = vi.hoisted(() => vi.fn());
 vi.mock("../../../src/db", () => ({
   createPrismaForRegion: mockCreatePrismaForRegion,
@@ -106,6 +108,7 @@ vi.mock("@de-otio/saas-foundation/tenant", () => ({
 const mockR2Head = vi.fn();
 const mockR2Put = vi.fn();
 const mockR2Get = vi.fn();
+const mockR2Delete = vi.fn();
 
 // Mock MediaHandler - simple factory pattern
 const mockMediaHandlerInstance = vi.hoisted(() => ({
@@ -156,6 +159,7 @@ describe("Media Routes", () => {
         head: mockR2Head,
         put: mockR2Put,
         get: mockR2Get,
+        delete: mockR2Delete,
       },
       // Media config block required by the re-encode pipeline + allowlist
       // (T4/T7) and the configurable caps (T10). Mirrors the block in
@@ -177,6 +181,10 @@ describe("Media Routes", () => {
         thresholds: {},
         canonicalFormat: "jpeg" as const,
         canonicalQuality: 85,
+        uploadQuota: {
+          maxObjects: 1000,
+          maxBytes: 1024 * 1024 * 1024, // 1 GiB
+        },
       },
     };
 
@@ -197,6 +205,8 @@ describe("Media Routes", () => {
         findUnique: mockMediaFileFindUnique,
         create: mockMediaFileCreate,
         upsert: mockMediaFileUpsert,
+        count: mockMediaFileCount,
+        aggregate: mockMediaFileAggregate,
       },
     };
     mockCreatePrismaForRegion.mockReturnValue(mockDb);
@@ -209,6 +219,10 @@ describe("Media Routes", () => {
       id: "media-123",
       contentHash: "test-hash",
     });
+    // Default: well under quota (0 objects, 0 bytes used).
+    mockMediaFileCount.mockResolvedValue(0);
+    mockMediaFileAggregate.mockResolvedValue({ _sum: { size: 0 } });
+    mockR2Delete.mockResolvedValue(undefined);
 
     // Default withQueryTimeoutAndRetry mock - executes query function with mockDb
     mockWithQueryTimeoutAndRetry.mockImplementation(
@@ -728,15 +742,19 @@ describe("Media Routes", () => {
         body: formData,
       });
 
+      mockMediaFileCreate.mockResolvedValue({ id: "p1", uploadId: "c" + "0".repeat(24), originalKey: null });
+
       const response = await uploadRoute!.handler(mockRequest, mockEnv, {
         url: new URL("https://api.rkm1.de/api/media/upload"),
         pathname: "/api/media/upload",
         params: {},
       });
 
-      expect(response.status).toBe(200);
+      // P0b: video now takes the async-pending path → 202 Accepted.
+      expect(response.status).toBe(202);
       const body = await response.json();
-      expect(body).toHaveProperty("contentHash");
+      expect(body).toHaveProperty("uploadId");
+      expect(body).toHaveProperty("status", "pending");
     });
 
     it("should reject videos that are too large", async () => {
@@ -763,6 +781,213 @@ describe("Media Routes", () => {
       const body = await response.json();
       expect(body).toHaveProperty("error", "File too large");
       expect(body.message).toContain("100MB");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // B2 P0b routing test cases
+  // -------------------------------------------------------------------------
+
+  describe("POST /api/media/upload — quota enforcement", () => {
+    const uploadRoute = mediaRoutes.find(
+      (r) => r.path === "/api/media/upload" && r.method === "POST",
+    );
+
+    it("rejects with 429 when object cap is reached", async () => {
+      // Saturate the object count so the quota check fails with object-cap.
+      mockMediaFileCount.mockResolvedValue(1000); // == maxObjects
+      mockMediaFileAggregate.mockResolvedValue({ _sum: { size: 0 } });
+
+      const jpegMagic = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]);
+      const formData = new FormData();
+      formData.append("file", new Blob([jpegMagic], { type: "image/jpeg" }), "test.jpg");
+
+      const response = await uploadRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/upload", { method: "POST", body: formData }),
+        mockEnv,
+        { url: new URL("https://api.rkm1.de/api/media/upload"), pathname: "/api/media/upload", params: {} },
+      );
+
+      expect(response.status).toBe(429);
+      const body = await response.json();
+      expect(body).toHaveProperty("error", "Upload quota exceeded");
+    });
+
+    it("rejects with 413 when byte cap is reached", async () => {
+      // currentBytes already at the ceiling, even a tiny file tips over.
+      const oneByteBelowCap = 1024 * 1024 * 1024 - 1; // 1 GiB - 1 byte
+      mockMediaFileCount.mockResolvedValue(0);
+      mockMediaFileAggregate.mockResolvedValue({ _sum: { size: oneByteBelowCap } });
+
+      // File size 4 bytes — currentBytes + 4 > maxBytes.
+      const jpegMagic = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]);
+      const formData = new FormData();
+      formData.append("file", new Blob([jpegMagic], { type: "image/jpeg" }), "test.jpg");
+
+      const response = await uploadRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/upload", { method: "POST", body: formData }),
+        mockEnv,
+        { url: new URL("https://api.rkm1.de/api/media/upload"), pathname: "/api/media/upload", params: {} },
+      );
+
+      expect(response.status).toBe(413);
+      const body = await response.json();
+      expect(body).toHaveProperty("error", "Upload quota exceeded");
+    });
+
+    it("allows upload when usage is just under both caps", async () => {
+      // currentObjects = 999 (one below 1000 cap), currentBytes = 0 — should pass.
+      mockMediaFileCount.mockResolvedValue(999);
+      mockMediaFileAggregate.mockResolvedValue({ _sum: { size: 0 } });
+
+      const jpegMagic = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]);
+      const formData = new FormData();
+      formData.append("file", new Blob([jpegMagic], { type: "image/jpeg" }), "test.jpg");
+
+      const response = await uploadRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/upload", { method: "POST", body: formData }),
+        mockEnv,
+        { url: new URL("https://api.rkm1.de/api/media/upload"), pathname: "/api/media/upload", params: {} },
+      );
+
+      // Should reach the sync-image path and succeed (200).
+      expect(response.status).toBe(200);
+    });
+  });
+
+  describe("POST /api/media/upload — async-pending routing (video/audio)", () => {
+    const uploadRoute = mediaRoutes.find(
+      (r) => r.path === "/api/media/upload" && r.method === "POST",
+    );
+
+    it("routes video/mp4 to async-pending: 202, uploadId + status=pending, no originalKey", async () => {
+      // MP4 magic: ftyp box at offset 4
+      const mp4Bytes = new Uint8Array([
+        0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70,
+        0x69, 0x73, 0x6f, 0x6d, // brand = "isom"
+      ]);
+      const formData = new FormData();
+      formData.append("file", new Blob([mp4Bytes], { type: "video/mp4" }), "test.mp4");
+
+      mockMediaFileCreate.mockResolvedValue({
+        id: "pending-row-1",
+        uploadId: "c" + "0".repeat(24),
+        moderationStatus: "PENDING",
+        originalKey: null,
+      });
+
+      const response = await uploadRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/upload", { method: "POST", body: formData }),
+        mockEnv,
+        { url: new URL("https://api.rkm1.de/api/media/upload"), pathname: "/api/media/upload", params: {} },
+      );
+
+      expect(response.status).toBe(202);
+      const body = await response.json();
+      expect(body).toHaveProperty("status", "pending");
+      expect(body).toHaveProperty("uploadId");
+      // uploadId must match UPLOAD_ID_RE: c[a-z0-9]{24}
+      expect(body.uploadId).toMatch(/^c[0-9a-f]{24}$/);
+
+      // Raw bytes must have been written to a pending/ key in R2 — NOT to cas/.
+      expect(mockR2Put).toHaveBeenCalledTimes(1);
+      const [putKey] = mockR2Put.mock.calls[0];
+      expect(putKey).toMatch(/^pending\//);
+      expect(putKey).toContain(TEST_TENANT_ID);
+
+      // DB row must be created (not upserted) with null originalKey and the uploadId.
+      expect(mockMediaFileCreate).toHaveBeenCalledTimes(1);
+      const createCall = mockMediaFileCreate.mock.calls[0][0];
+      expect(createCall.data.originalKey).toBeNull();
+      expect(createCall.data.uploadId).toMatch(/^c[0-9a-f]{24}$/);
+      // moderationStatus defaults to PENDING in the schema; we only supply uploadId + uploadStatus.
+      expect(createCall.data.uploadStatus).toBe("PENDING");
+
+      // MediaUploadService.uploadSingle must NOT be called on the async path.
+      expect(mockUploadSingle).not.toHaveBeenCalled();
+    });
+
+    it("routes video/webm to async-pending: 202", async () => {
+      // WebM magic: 1A 45 DF A3
+      const webmBytes = new Uint8Array([0x1a, 0x45, 0xdf, 0xa3, 0x00]);
+      const formData = new FormData();
+      formData.append("file", new Blob([webmBytes], { type: "video/webm" }), "test.webm");
+
+      mockMediaFileCreate.mockResolvedValue({ id: "p2", uploadId: "c" + "1".repeat(24), originalKey: null });
+
+      const response = await uploadRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/upload", { method: "POST", body: formData }),
+        mockEnv,
+        { url: new URL("https://api.rkm1.de/api/media/upload"), pathname: "/api/media/upload", params: {} },
+      );
+
+      expect(response.status).toBe(202);
+      const body = await response.json();
+      expect(body).toHaveProperty("status", "pending");
+      expect(mockUploadSingle).not.toHaveBeenCalled();
+    });
+
+    it("image still follows sync path: 200 with contentHash (not 202)", async () => {
+      const jpegMagic = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]);
+      const formData = new FormData();
+      formData.append("file", new Blob([jpegMagic], { type: "image/jpeg" }), "test.jpg");
+
+      const response = await uploadRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/upload", { method: "POST", body: formData }),
+        mockEnv,
+        { url: new URL("https://api.rkm1.de/api/media/upload"), pathname: "/api/media/upload", params: {} },
+      );
+
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body).toHaveProperty("contentHash");
+      // Sync path uses MediaUploadService (no pending/ R2 write)
+      expect(mockUploadSingle).toHaveBeenCalled();
+      // No pending/ key was written
+      if (mockR2Put.mock.calls.length > 0) {
+        const [putKey] = mockR2Put.mock.calls[0];
+        expect(putKey).not.toMatch(/^pending\//);
+      }
+    });
+
+    it("returns 400 for unknown/unsupported content type when routeUpload says reject", async () => {
+      // application/pdf has no valid magic numbers and is not in the allowed lists,
+      // but even if we contrive bytes that pass earlier checks, routeUpload gates it.
+      const pdfBytes = new Uint8Array([0x25, 0x50, 0x44, 0x46]); // %PDF
+      const formData = new FormData();
+      formData.append("file", new Blob([pdfBytes], { type: "application/pdf" }), "doc.pdf");
+
+      const response = await uploadRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/upload", { method: "POST", body: formData }),
+        mockEnv,
+        { url: new URL("https://api.rkm1.de/api/media/upload"), pathname: "/api/media/upload", params: {} },
+      );
+
+      expect(response.status).toBe(400);
+    });
+
+    it("video pending DB failure triggers R2 cleanup and returns 500", async () => {
+      const mp4Bytes = new Uint8Array([
+        0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70,
+        0x69, 0x73, 0x6f, 0x6d,
+      ]);
+      const formData = new FormData();
+      formData.append("file", new Blob([mp4Bytes], { type: "video/mp4" }), "test.mp4");
+
+      // DB create throws — simulates DB outage after R2 write succeeded.
+      mockMediaFileCreate.mockRejectedValue(new Error("DB unavailable"));
+
+      const response = await uploadRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/upload", { method: "POST", body: formData }),
+        mockEnv,
+        { url: new URL("https://api.rkm1.de/api/media/upload"), pathname: "/api/media/upload", params: {} },
+      );
+
+      expect(response.status).toBe(500);
+      // R2 delete was attempted to clean up the orphaned pending object.
+      expect(mockR2Delete).toHaveBeenCalledTimes(1);
+      const [deleteKey] = mockR2Delete.mock.calls[0];
+      expect(deleteKey).toMatch(/^pending\//);
     });
   });
 
@@ -1881,8 +2106,10 @@ describe("Media Routes", () => {
       const route = mediaRoutes.find((r) => r.path === "/api/media/upload");
       const response = await route?.handler(request, mockEnv);
 
-      // Should accept WebM video
-      expect(response?.status).toBe(200);
+      // P0b: WebM video now takes the async-pending path → 202 Accepted.
+      expect(response?.status).toBe(202);
+      const webmBody = await response!.json();
+      expect(webmBody).toHaveProperty("status", "pending");
     });
 
     it("should handle form data parsing errors", async () => {
@@ -2081,8 +2308,10 @@ describe("Media Routes", () => {
       const route = mediaRoutes.find((r) => r.path === "/api/media/upload");
       const response = await route?.handler(request, mockEnv);
 
-      // Should accept QuickTime video
-      expect(response?.status).toBe(200);
+      // P0b: QuickTime video now takes the async-pending path → 202 Accepted.
+      expect(response?.status).toBe(202);
+      const qtBody = await response!.json();
+      expect(qtBody).toHaveProperty("status", "pending");
     });
   });
 
@@ -2460,16 +2689,19 @@ describe("Media Routes", () => {
         body: formData,
       });
 
+      mockMediaFileCreate.mockResolvedValue({ id: "pv1", uploadId: "c" + "0".repeat(24), originalKey: null });
+
       const response = await uploadRoute!.handler(mockRequest, mockEnv, {
         url: new URL("https://api.rkm1.de/api/media/upload"),
         pathname: "/api/media/upload",
         params: {},
       });
 
-      expect(response.status).toBe(200);
+      // P0b: video takes the async-pending path → 202 Accepted.
+      expect(response.status).toBe(202);
 
-      // Normalization should NOT be called for video uploads
-      // (This depends on Agent A's implementation)
+      // Normalization (reencodeImage) must NOT be called for video uploads.
+      expect(mockReencodeImage).not.toHaveBeenCalled();
     });
 
     it("should succeed even if normalization fails", async () => {
@@ -2632,36 +2864,42 @@ describe("Media Routes", () => {
 
     it("accepts a QuickTime-brand ftyp ('qt  ') as video/quicktime", async () => {
       // brand 'qt  ' → detectedMimeType video/quicktime → in video allowlist.
+      // P0b: video takes the async-pending path → 202 Accepted.
       const response = await runUpload(
         ftypBlob("qt  ", "application/octet-stream"),
         "clip.mov",
       );
-      expect(response.status).toBe(200);
+      expect(response.status).toBe(202);
       const body = await response.json();
-      expect(body).toHaveProperty("contentHash");
-      expect(mockUploadSingle).toHaveBeenCalled();
+      expect(body).toHaveProperty("status", "pending");
+      expect(body).toHaveProperty("uploadId");
+      // Sync MediaUploadService must NOT be called on the async path.
+      expect(mockUploadSingle).not.toHaveBeenCalled();
     });
 
     it("accepts a default ISO-BMFF brand (isom) as video/mp4", async () => {
+      // P0b: video takes the async-pending path → 202 Accepted.
       const response = await runUpload(
         ftypBlob("isom", "application/octet-stream"),
         "clip.mp4",
       );
-      expect(response.status).toBe(200);
-      expect(mockUploadSingle).toHaveBeenCalled();
+      expect(response.status).toBe(202);
+      expect(mockUploadSingle).not.toHaveBeenCalled();
     });
 
     it("accepts an mp42-brand ftyp as video/mp4", async () => {
+      // P0b: video takes the async-pending path → 202 Accepted.
       const response = await runUpload(
         ftypBlob("mp42", "application/octet-stream"),
         "clip.mp4",
       );
-      expect(response.status).toBe(200);
-      expect(mockUploadSingle).toHaveBeenCalled();
+      expect(response.status).toBe(202);
+      expect(mockUploadSingle).not.toHaveBeenCalled();
     });
 
     it("treats a brand-less minimal ftyp (bytes < 12) as video/mp4 (default branch)", async () => {
       // Only 8 bytes: size + 'ftyp', no brand → brand === "" → default → mp4.
+      // P0b: video takes the async-pending path → 202 Accepted.
       const bytes = new Uint8Array([
         0x00, 0x00, 0x00, 0x08, 0x66, 0x74, 0x79, 0x70,
       ]);
@@ -2669,12 +2907,12 @@ describe("Media Routes", () => {
         new Blob([bytes], { type: "application/octet-stream" }),
         "clip.mp4",
       );
-      expect(response.status).toBe(200);
-      expect(mockUploadSingle).toHaveBeenCalled();
+      expect(response.status).toBe(202);
+      expect(mockUploadSingle).not.toHaveBeenCalled();
     });
 
     // Property: every default (non-HEIF, non-"qt  ") 4-char brand maps to mp4
-    // and is accepted as a video.
+    // and is accepted as a video → async-pending 202.
     it("property: arbitrary non-HEIF/non-qt 4-char brands map to video/mp4", async () => {
       const heif = new Set([
         "heic",
@@ -2695,12 +2933,15 @@ describe("Media Routes", () => {
             .filter((s) => s.length === 4 && !heif.has(s) && s !== "qt  "),
           async (brand) => {
             mockUploadSingle.mockClear();
+            mockMediaFileCreate.mockClear();
+            mockMediaFileCreate.mockResolvedValue({ id: "p-fc", uploadId: "c" + "0".repeat(24), originalKey: null });
             const response = await runUpload(
               ftypBlob(brand, "application/octet-stream"),
               "clip.bin",
             );
-            expect(response.status).toBe(200);
-            expect(mockUploadSingle).toHaveBeenCalled();
+            // P0b: video takes the async-pending path → 202 Accepted.
+            expect(response.status).toBe(202);
+            expect(mockUploadSingle).not.toHaveBeenCalled();
           },
         ),
         { seed: 20260625, numRuns: 50 },
@@ -3685,8 +3926,12 @@ describe("Media Routes", () => {
         },
       );
       // Default fallback list includes video/mp4 → accepted.
-      expect(response.status).toBe(200);
-      expect(mockUploadSingle).toHaveBeenCalled();
+      // P0b: video takes the async-pending path → 202 Accepted.
+      expect(response.status).toBe(202);
+      const fallbackBody = await response.json();
+      expect(fallbackBody).toHaveProperty("status", "pending");
+      // Sync MediaUploadService must NOT be called on the async path.
+      expect(mockUploadSingle).not.toHaveBeenCalled();
     });
 
     it("batch falls back to the default video allowlist when env video allowlist is empty (1169)", async () => {

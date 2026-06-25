@@ -5,6 +5,7 @@
  * Implements content-addressed storage (CAS) with SHA-256 hashing for deduplication.
  */
 
+import { randomBytes as cryptoRandomBytes } from "node:crypto";
 import { CorsHandler } from "../cors-handler.js";
 import { sharedDatabaseConnectionManager } from "../database-connection-manager.js";
 import {
@@ -12,14 +13,16 @@ import {
   withQueryTimeoutAndRetry,
 } from "../db-query-helper.js";
 import { getLogger, Logger } from "../logger.js";
-import { casKey, isCasKeyError, validateContentHash } from "../media/cas-keys.js";
+import { casKey, isCasKeyError, pendingKey, validateContentHash } from "../media/cas-keys.js";
 import { buildMediaUpsertArgs } from "../media/media-upsert.js";
+import { checkUploadQuota } from "../media/quota-check.js";
 import type { ModerationStatus } from "../media/moderation-status.js";
 import {
   canonicalContentType,
   isServable,
 } from "../media/serve-gate.js";
 import { resolveMediaTenantId } from "../media/tenant-resolution.js";
+import { routeUpload } from "../media/route-upload.js";
 import { MediaHandler } from "../media-handler.js";
 import { corsMiddleware, csrfMiddleware } from "../middleware.js";
 import { RateLimiter } from "../rate-limit.js";
@@ -84,6 +87,20 @@ async function resolveUploadTenantId(
 
   const resolution = resolveMediaTenantId(ambient, personalTenantId, scopeMode);
   return resolution.ok ? resolution.tenantId : null;
+}
+
+/**
+ * Generate a CUID v1-shaped upload ID suitable for `pendingKey`.
+ *
+ * Uses `node:crypto` randomBytes — the ONLY source of non-determinism allowed
+ * in this module (imperative shell; not a pure-core unit). The shape
+ * `c[a-z0-9]{24}` matches the UPLOAD_ID_RE used by `pendingKey`.
+ */
+function generateUploadId(): string {
+  // 12 random bytes → 24 lowercase hex chars → prepend 'c' = 25-char cuid-shaped id
+  // matching UPLOAD_ID_RE = /^c[a-z0-9]{24}$/ in cas-keys.ts.
+  const hex = cryptoRandomBytes(12).toString("hex"); // exactly 24 [0-9a-f] chars
+  return `c${hex}`;
 }
 
 /**
@@ -828,46 +845,268 @@ export const mediaRoutes: Route[] = [
           return CorsHandler.addCorsHeaders(errorResponse, request, env);
         }
 
+        // Resolve the tenant that scopes this media object (T9 / D18).
+        // Moved before quota check and route decision so both use the same
+        // resolved tenantId.
+        const uploadRegion = "US"; // TODO: Get from session or request
+        const tenantId = await resolveUploadTenantId(
+          session.userId,
+          uploadRegion,
+          env,
+        );
+        if (!tenantId) {
+          logger.error("[Media Upload] No tenant context for upload", {
+            userId: session.userId,
+          });
+          const errorResponse = securityHeaders.createSecureResponse(
+            JSON.stringify({
+              error: "Tenant resolution failed",
+              message: "Could not resolve a tenant for this upload.",
+            }),
+            { status: 500, headers: { "content-type": "application/json" } },
+          );
+          return CorsHandler.addCorsHeaders(errorResponse, request, env);
+        }
+
+        // Quota check (P0b): count + size-sum for the tenant from the DB.
+        // ASSUMPTION: quota usage = all non-deleted MediaFile rows for the
+        // tenant (count = currentObjects, sum(size) = currentBytes).
+        // checkUploadQuota is fail-closed: any bad number => denied.
+        {
+          let quotaState = { currentObjects: 0, currentBytes: 0 };
+          try {
+            const raw = await withQueryTimeoutAndRetry(
+              sharedDatabaseConnectionManager,
+              uploadRegion,
+              env as any,
+              async (db) => {
+                const dbAny = db as any;
+                if (!dbAny.mediaFile) return null;
+                const [countResult, sumResult] = await Promise.all([
+                  dbAny.mediaFile.count({
+                    where: { tenantId, deletedAt: null },
+                  }),
+                  dbAny.mediaFile.aggregate({
+                    where: { tenantId, deletedAt: null },
+                    _sum: { size: true },
+                  }),
+                ]);
+                return { count: countResult as number, sumBytes: (sumResult?._sum?.size ?? 0) as number };
+              },
+              {
+                ...QueryTimeoutPresets.USER_FACING,
+                maxRetries: 1,
+                context: { operation: "mediaUpload_quotaCheck", userId: session.userId },
+              },
+            );
+            if (raw) {
+              quotaState = { currentObjects: raw.count, currentBytes: raw.sumBytes };
+            }
+          } catch {
+            // Quota DB read failure — fail-closed: deny the upload.
+            logger.warn("[Media Upload] Quota check DB query failed — denying upload", {
+              userId: session.userId,
+              tenantId,
+            });
+            const errorResponse = securityHeaders.createSecureResponse(
+              JSON.stringify({ error: "Upload unavailable" }),
+              { status: 503, headers: { "content-type": "application/json" } },
+            );
+            return CorsHandler.addCorsHeaders(errorResponse, request, env);
+          }
+
+          const quotaResult = checkUploadQuota(
+            quotaState,
+            file.size,
+            env.media.uploadQuota,
+          );
+          if (!quotaResult.allowed) {
+            logger.warn("[Media Upload] Quota exceeded", {
+              userId: session.userId,
+              tenantId,
+              reason: quotaResult.reason,
+            });
+            // Use 413 for byte-cap (payload too large) and 429 for object-cap
+            // (too many requests semantically — too many objects stored).
+            const quotaStatus = quotaResult.reason === "byte-cap" ? 413 : 429;
+            const errorResponse = securityHeaders.createSecureResponse(
+              JSON.stringify({ error: "Upload quota exceeded" }),
+              { status: quotaStatus, headers: { "content-type": "application/json" } },
+            );
+            return CorsHandler.addCorsHeaders(errorResponse, request, env);
+          }
+        }
+
+        // Route the upload: sync-image (P0a re-encode path) vs async-pending
+        // (video/audio → land in pending/ staging, P0b worker picks it up) vs
+        // reject (fail-closed — unknown type not caught by earlier type check).
+        const ingestRoute = routeUpload(mimeType);
+
+        if (ingestRoute.kind === "reject") {
+          // Should not normally reach here (type check above is stricter), but
+          // routeUpload is the authoritative gate — honor it fail-closed.
+          const errorResponse = securityHeaders.createSecureResponse(
+            JSON.stringify({ error: "Unsupported media type" }),
+            { status: 400, headers: { "content-type": "application/json" } },
+          );
+          return CorsHandler.addCorsHeaders(errorResponse, request, env);
+        }
+
+        if (ingestRoute.kind === "async-pending") {
+          // --- Async-pending path (video / audio) --------------------------------
+          // 1. Write RAW bytes to pending/{tenantId}/{uploadId} in R2.
+          // 2. Create a MediaFile DB row: moderationStatus=PENDING,
+          //    originalKey=null, uploadId=<generated>.
+          // No inline hashing, no transcoding, no moderation — the P0b worker
+          // picks up the staged object via the S3 trigger on the pending/ prefix.
+          const uploadId = generateUploadId();
+          const stagingKey = pendingKey(tenantId, uploadId);
+          if (isCasKeyError(stagingKey)) {
+            logger.error("[Media Upload] Failed to build pending key", {
+              userId: session.userId,
+              kind: stagingKey.kind,
+            });
+            const errorResponse = securityHeaders.createSecureResponse(
+              JSON.stringify({ error: "Upload error" }),
+              { status: 500, headers: { "content-type": "application/json" } },
+            );
+            return CorsHandler.addCorsHeaders(errorResponse, request, env);
+          }
+
+          const r2Bucket = (env as any).MEDIA_BUCKET_R2 || (env as any).R2_BUCKET;
+          if (!r2Bucket) {
+            logger.error("[Media Upload] No R2 bucket configured for pending write", {
+              userId: session.userId,
+            });
+            const errorResponse = securityHeaders.createSecureResponse(
+              JSON.stringify({ error: "Upload unavailable" }),
+              { status: 503, headers: { "content-type": "application/json" } },
+            );
+            return CorsHandler.addCorsHeaders(errorResponse, request, env);
+          }
+
+          try {
+            await r2Bucket.put(stagingKey, fileBuffer, {
+              httpMetadata: { contentType: mimeType },
+            });
+          } catch (r2Error: any) {
+            logger.error("[Media Upload] R2 pending write failed", {
+              userId: session.userId,
+              error: r2Error.message,
+            });
+            const errorResponse = securityHeaders.createSecureResponse(
+              JSON.stringify({ error: "Upload failed" }),
+              { status: 500, headers: { "content-type": "application/json" } },
+            );
+            return CorsHandler.addCorsHeaders(errorResponse, request, env);
+          }
+
+          // Create the MediaFile row: PENDING + null originalKey + uploadId.
+          // The row exists immediately so the client can track the upload by
+          // uploadId; originalKey is filled by the P0b worker after transcoding.
+          try {
+            await withQueryTimeoutAndRetry(
+              sharedDatabaseConnectionManager,
+              uploadRegion,
+              env as any,
+              async (db) => {
+                const dbAny = db as any;
+                if (!dbAny.mediaFile) throw new Error("mediaFile model unavailable");
+                return await dbAny.mediaFile.create({
+                  data: {
+                    tenantId,
+                    // contentHash is null until known: the P0b worker computes
+                    // the real SHA-256 of the transcoded bytes and sets it via
+                    // persistCleanedContent. The within-tenant unique tolerates
+                    // many NULL content_hash rows (distinct NULLs in Postgres).
+                    contentHash: null,
+                    mimeType,
+                    size: file.size,
+                    originalKey: null,
+                    uploadId,
+                    uploadStatus: "PENDING",
+                    uploadedBy: session.userId,
+                    // moderationStatus defaults to PENDING in the schema.
+                  },
+                });
+              },
+              {
+                ...QueryTimeoutPresets.USER_FACING,
+                maxRetries: 1,
+                context: { operation: "mediaUpload_createPendingRecord", userId: session.userId },
+              },
+            );
+          } catch (dbError: any) {
+            logger.error("[Media Upload] Pending DB record creation failed", {
+              uploadId,
+              error: dbError.message,
+            });
+            // Best-effort: attempt to remove the orphaned R2 object so the
+            // pending/ prefix stays clean. Non-fatal if this fails.
+            try { await r2Bucket.delete(stagingKey); } catch { /* ignore */ }
+            const errorResponse = securityHeaders.createSecureResponse(
+              JSON.stringify({ error: "Database error" }),
+              { status: 500, headers: { "content-type": "application/json" } },
+            );
+            return CorsHandler.addCorsHeaders(errorResponse, request, env);
+          }
+
+          logger.info("[Media Upload] Async-pending upload accepted", {
+            userId: session.userId,
+            uploadId,
+            stagingKey,
+            mimeType,
+            size: file.size,
+          });
+
+          const pendingResponse = securityHeaders.createSecureResponse(
+            JSON.stringify({
+              uploadId,
+              status: "pending",
+            }),
+            { status: 202, headers: { "content-type": "application/json" } },
+          );
+          return CorsHandler.addCorsHeaders(pendingResponse, request, env);
+        }
+
+        // --- Sync-image path (ingestRoute.kind === "sync-image") ---------------
         // Re-encode images to canonical safe raster format (T7).
         // This is the polyglot + pixel-bomb defense: re-encoding strips any
         // embedded script payload, bakes EXIF orientation into pixels, and
         // drops all metadata (EXIF/GPS/ICC/maker-notes). The hash is computed
         // from the re-encoded bytes so the CAS key is of clean output only.
-        // Video/audio are stored as-is (transcode is P0b async worker).
         // uploadBuffer is re-typed to ArrayBuffer for the upload service;
         // Buffer (a Uint8Array subclass) is structurally compatible at runtime
         // with all consumers (crypto.subtle.digest, R2 put, etc.).
         let uploadBuffer: ArrayBuffer = fileBuffer;
-        if (isImage) {
-          try {
-            const reencoded = await reencodeImage(fileBuffer, env);
-            // Buffer is a Uint8Array subclass — cast is safe for all consumers.
-            uploadBuffer = reencoded.buffer as unknown as ArrayBuffer;
-            // Use the canonical MIME type from the re-encode output
-            mimeType = reencoded.canonicalMimeType;
-            logger.info("image_reencode.completed", {
-              userId: session.userId,
-              canonicalMimeType: mimeType,
-              inputSize: fileBuffer.byteLength,
-              outputSize: reencoded.buffer.byteLength,
-            });
-          } catch (reencodeError: any) {
-            logger.warn("image_reencode.failed — rejecting upload", {
-              userId: session.userId,
-              fileName: file.name,
-              error: reencodeError.message,
-            });
-            const errorResponse = securityHeaders.createSecureResponse(
-              JSON.stringify({
-                error: "Image processing failed",
-                message:
-                  "The uploaded image could not be processed. It may be corrupt, " +
-                  "an unsupported format, or exceed the maximum image dimensions.",
-              }),
-              { status: 400, headers: { "content-type": "application/json" } },
-            );
-            return CorsHandler.addCorsHeaders(errorResponse, request, env);
-          }
+        try {
+          const reencoded = await reencodeImage(fileBuffer, env);
+          // Buffer is a Uint8Array subclass — cast is safe for all consumers.
+          uploadBuffer = reencoded.buffer as unknown as ArrayBuffer;
+          // Use the canonical MIME type from the re-encode output
+          mimeType = reencoded.canonicalMimeType;
+          logger.info("image_reencode.completed", {
+            userId: session.userId,
+            canonicalMimeType: mimeType,
+            inputSize: fileBuffer.byteLength,
+            outputSize: reencoded.buffer.byteLength,
+          });
+        } catch (reencodeError: any) {
+          logger.warn("image_reencode.failed — rejecting upload", {
+            userId: session.userId,
+            fileName: file.name,
+            error: reencodeError.message,
+          });
+          const errorResponse = securityHeaders.createSecureResponse(
+            JSON.stringify({
+              error: "Image processing failed",
+              message:
+                "The uploaded image could not be processed. It may be corrupt, " +
+                "an unsupported format, or exceed the maximum image dimensions.",
+            }),
+            { status: 400, headers: { "content-type": "application/json" } },
+          );
+          return CorsHandler.addCorsHeaders(errorResponse, request, env);
         }
 
         // Extract metadata (best effort, non-fatal).
@@ -897,31 +1136,6 @@ export const mediaRoutes: Route[] = [
             extracted?.exifData?.height || extracted?.videoMetadata?.height,
           duration: extracted?.videoMetadata?.duration,
         };
-
-        // Resolve the tenant that scopes this media object (T9 / D18).
-        // Ambient tenant (auth seam) wins; with TENANT_SCOPE_MODE="off" (the
-        // default) there is no ambient tenant, so we fall back to the
-        // uploader's personalTenantId — see tenant-resolution.ts for the
-        // recorded assumption.
-        const uploadRegion = "US"; // TODO: Get from session or request
-        const tenantId = await resolveUploadTenantId(
-          session.userId,
-          uploadRegion,
-          env,
-        );
-        if (!tenantId) {
-          logger.error("[Media Upload] No tenant context for upload", {
-            userId: session.userId,
-          });
-          const errorResponse = securityHeaders.createSecureResponse(
-            JSON.stringify({
-              error: "Tenant resolution failed",
-              message: "Could not resolve a tenant for this upload.",
-            }),
-            { status: 500, headers: { "content-type": "application/json" } },
-          );
-          return CorsHandler.addCorsHeaders(errorResponse, request, env);
-        }
 
         // Use MediaUploadService for eventual consistency upload.
         // Pass the re-encoded buffer (uploadBuffer) so the content hash is of

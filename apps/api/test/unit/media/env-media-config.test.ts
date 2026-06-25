@@ -37,6 +37,13 @@ const MEDIA_ENV_KEYS = [
   "MEDIA_THRESHOLDS_JSON",
   "MEDIA_CANONICAL_FORMAT",
   "MEDIA_CANONICAL_QUALITY",
+  // P0b additions
+  "MEDIA_MAX_DURATION_SECONDS",
+  "MEDIA_REVIEW_RATE_CAP",
+  "MEDIA_QUOTA_MAX_OBJECTS",
+  "MEDIA_QUOTA_MAX_BYTES",
+  "MEDIA_TRANSCRIBE_OUTPUT_BUCKET",
+  "MEDIA_TRANSCRIBE_LANGUAGE_CODE",
 ] as const;
 
 function clearMediaEnv(): void {
@@ -511,6 +518,206 @@ describe("parseMediaThresholds — property tests (fast-check, seeded)", () => {
         },
       ),
       { seed: 20260624, numRuns: 300 },
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P0b additions — maxDurationSeconds, reviewRateCap, uploadQuota, transcribe
+// ---------------------------------------------------------------------------
+
+describe("resolveMediaEnv P0b — maxDurationSeconds", () => {
+  beforeEach(clearMediaEnv);
+  afterEach(clearMediaEnv);
+
+  it("returns a positive default when MEDIA_MAX_DURATION_SECONDS is unset", () => {
+    const { media } = resolveMediaEnv();
+    expect(media.maxDurationSeconds).toBeGreaterThan(0);
+  });
+
+  it("parses a valid MEDIA_MAX_DURATION_SECONDS from env", () => {
+    process.env.MEDIA_MAX_DURATION_SECONDS = "120";
+    const { media } = resolveMediaEnv();
+    expect(media.maxDurationSeconds).toBe(120);
+  });
+
+  it("falls back to default when MEDIA_MAX_DURATION_SECONDS is zero", () => {
+    process.env.MEDIA_MAX_DURATION_SECONDS = "0";
+    const { media } = resolveMediaEnv();
+    expect(media.maxDurationSeconds).toBeGreaterThan(0);
+  });
+
+  it("falls back to default when MEDIA_MAX_DURATION_SECONDS is negative", () => {
+    process.env.MEDIA_MAX_DURATION_SECONDS = "-30";
+    const { media } = resolveMediaEnv();
+    expect(media.maxDurationSeconds).toBeGreaterThan(0);
+  });
+
+  it("falls back to default when MEDIA_MAX_DURATION_SECONDS is non-numeric", () => {
+    process.env.MEDIA_MAX_DURATION_SECONDS = "forever";
+    const { media } = resolveMediaEnv();
+    expect(media.maxDurationSeconds).toBeGreaterThan(0);
+  });
+
+  it("property: any positive integer is parsed as-is", () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 1, max: 86400 }),
+        (seconds) => {
+          process.env.MEDIA_MAX_DURATION_SECONDS = String(seconds);
+          const { media } = resolveMediaEnv();
+          delete process.env.MEDIA_MAX_DURATION_SECONDS;
+          return media.maxDurationSeconds === seconds;
+        },
+      ),
+      { seed: 20260625, numRuns: 100 },
+    );
+  });
+});
+
+describe("resolveMediaEnv P0b — reviewRateCap", () => {
+  beforeEach(clearMediaEnv);
+  afterEach(clearMediaEnv);
+
+  it("returns a positive default when MEDIA_REVIEW_RATE_CAP is unset", () => {
+    const { media } = resolveMediaEnv();
+    expect(media.reviewRateCap).toBeGreaterThan(0);
+  });
+
+  it("parses a valid MEDIA_REVIEW_RATE_CAP from env", () => {
+    process.env.MEDIA_REVIEW_RATE_CAP = "50";
+    const { media } = resolveMediaEnv();
+    expect(media.reviewRateCap).toBe(50);
+  });
+
+  it("falls back to default when MEDIA_REVIEW_RATE_CAP is zero", () => {
+    process.env.MEDIA_REVIEW_RATE_CAP = "0";
+    const { media } = resolveMediaEnv();
+    expect(media.reviewRateCap).toBeGreaterThan(0);
+  });
+
+  it("falls back to default when MEDIA_REVIEW_RATE_CAP is non-numeric", () => {
+    process.env.MEDIA_REVIEW_RATE_CAP = "many";
+    const { media } = resolveMediaEnv();
+    expect(media.reviewRateCap).toBeGreaterThan(0);
+  });
+});
+
+describe("resolveMediaEnv P0b — uploadQuota", () => {
+  beforeEach(clearMediaEnv);
+  afterEach(clearMediaEnv);
+
+  it("returns positive defaults for both quota fields when env is unset", () => {
+    const { media } = resolveMediaEnv();
+    expect(media.uploadQuota.maxObjects).toBeGreaterThan(0);
+    expect(media.uploadQuota.maxBytes).toBeGreaterThan(0);
+  });
+
+  it("parses MEDIA_QUOTA_MAX_OBJECTS from env", () => {
+    process.env.MEDIA_QUOTA_MAX_OBJECTS = "500";
+    const { media } = resolveMediaEnv();
+    expect(media.uploadQuota.maxObjects).toBe(500);
+  });
+
+  it("parses MEDIA_QUOTA_MAX_BYTES from env", () => {
+    process.env.MEDIA_QUOTA_MAX_BYTES = "2147483648"; // 2 GiB
+    const { media } = resolveMediaEnv();
+    expect(media.uploadQuota.maxBytes).toBe(2_147_483_648);
+  });
+
+  it("falls back to default maxObjects when value is zero", () => {
+    process.env.MEDIA_QUOTA_MAX_OBJECTS = "0";
+    const { media } = resolveMediaEnv();
+    expect(media.uploadQuota.maxObjects).toBeGreaterThan(0);
+  });
+
+  it("falls back to default maxObjects when value is negative", () => {
+    process.env.MEDIA_QUOTA_MAX_OBJECTS = "-1";
+    const { media } = resolveMediaEnv();
+    expect(media.uploadQuota.maxObjects).toBeGreaterThan(0);
+  });
+
+  it("falls back to default maxBytes when value is non-numeric", () => {
+    process.env.MEDIA_QUOTA_MAX_BYTES = "unlimited";
+    const { media } = resolveMediaEnv();
+    expect(media.uploadQuota.maxBytes).toBeGreaterThan(0);
+  });
+
+  it("property: any positive integer for maxObjects is parsed as-is", () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 1, max: 100_000 }),
+        (n) => {
+          process.env.MEDIA_QUOTA_MAX_OBJECTS = String(n);
+          const { media } = resolveMediaEnv();
+          delete process.env.MEDIA_QUOTA_MAX_OBJECTS;
+          return media.uploadQuota.maxObjects === n;
+        },
+      ),
+      { seed: 20260625, numRuns: 100 },
+    );
+  });
+});
+
+describe("resolveMediaEnv P0b — transcribe", () => {
+  beforeEach(clearMediaEnv);
+  afterEach(clearMediaEnv);
+
+  it("outputBucket is undefined when MEDIA_TRANSCRIBE_OUTPUT_BUCKET is unset", () => {
+    const { media } = resolveMediaEnv();
+    expect(media.transcribe.outputBucket).toBeUndefined();
+  });
+
+  it("parses MEDIA_TRANSCRIBE_OUTPUT_BUCKET from env", () => {
+    process.env.MEDIA_TRANSCRIBE_OUTPUT_BUCKET = "my-transcription-bucket";
+    const { media } = resolveMediaEnv();
+    expect(media.transcribe.outputBucket).toBe("my-transcription-bucket");
+  });
+
+  it("languageCode defaults to en-US when MEDIA_TRANSCRIBE_LANGUAGE_CODE is unset", () => {
+    const { media } = resolveMediaEnv();
+    expect(media.transcribe.languageCode).toBe("en-US");
+  });
+
+  it("parses MEDIA_TRANSCRIBE_LANGUAGE_CODE from env", () => {
+    process.env.MEDIA_TRANSCRIBE_LANGUAGE_CODE = "de-DE";
+    const { media } = resolveMediaEnv();
+    expect(media.transcribe.languageCode).toBe("de-DE");
+  });
+
+  it("falls back to en-US when MEDIA_TRANSCRIBE_LANGUAGE_CODE is empty string", () => {
+    process.env.MEDIA_TRANSCRIBE_LANGUAGE_CODE = "";
+    const { media } = resolveMediaEnv();
+    expect(media.transcribe.languageCode).toBe("en-US");
+  });
+
+  it("falls back to en-US when MEDIA_TRANSCRIBE_LANGUAGE_CODE is whitespace only", () => {
+    process.env.MEDIA_TRANSCRIBE_LANGUAGE_CODE = "   ";
+    const { media } = resolveMediaEnv();
+    expect(media.transcribe.languageCode).toBe("en-US");
+  });
+
+  it("outputBucket is undefined when MEDIA_TRANSCRIBE_OUTPUT_BUCKET is empty string", () => {
+    // An empty-string bucket name is not a valid S3 name; we want undefined, not "".
+    process.env.MEDIA_TRANSCRIBE_OUTPUT_BUCKET = "";
+    const { media } = resolveMediaEnv();
+    expect(media.transcribe.outputBucket).toBeUndefined();
+  });
+
+  it("property: any non-empty language-code string is passed through unchanged", () => {
+    // BCP-47 tags are arbitrary short strings; we pass them through as-is.
+    fc.assert(
+      fc.property(
+        fc.string({ minLength: 1, maxLength: 20 }).filter((s) => s.trim().length > 0),
+        (langCode) => {
+          process.env.MEDIA_TRANSCRIBE_LANGUAGE_CODE = langCode;
+          const { media } = resolveMediaEnv();
+          delete process.env.MEDIA_TRANSCRIBE_LANGUAGE_CODE;
+          // trim() is applied in the parser; assert trimmed value is returned.
+          return media.transcribe.languageCode === langCode.trim();
+        },
+      ),
+      { seed: 20260625, numRuns: 100 },
     );
   });
 });

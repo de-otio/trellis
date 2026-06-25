@@ -107,9 +107,31 @@ vi.mock("@de-otio/saas-foundation/tenant", () => ({
   getCurrentTenantId: () => "ctenant0000000000000000aa",
 }));
 
+// Query helper: invoke the queryFn against a mock db. The P0b upload path runs
+// two query callsites through here on the sync-image path — the quota check
+// (count + aggregate) and the mediaFile.upsert — plus reconciliation reads on
+// other routes. count/aggregate return zero usage so checkUploadQuota allows the
+// upload; upsert returns a row id. Routes that pass a queryFn expecting other
+// models still get `null` for unknown shapes (the queryFn guards on dbAny.*).
 vi.mock("../../src/lib/db-query-helper", () => ({
   QueryTimeoutPresets: { USER_FACING: {} },
-  withQueryTimeoutAndRetry: vi.fn().mockResolvedValue(null),
+  withQueryTimeoutAndRetry: vi.fn(
+    async (
+      _mgr: any,
+      _region: string,
+      _env: any,
+      queryFn?: (db: any) => Promise<any>,
+    ) => {
+      if (typeof queryFn !== "function") return null;
+      return queryFn({
+        mediaFile: {
+          upsert: vi.fn(async () => ({ id: "mediafile-1" })),
+          count: vi.fn(async () => 0),
+          aggregate: vi.fn(async () => ({ _sum: { size: 0 } })),
+        },
+      });
+    },
+  ),
 }));
 
 vi.mock("../../src/lib/metadata/metadata-extractor", () => ({
@@ -147,6 +169,10 @@ const mockEnv = {
     thresholds: {},
     canonicalFormat: "jpeg" as const,
     canonicalQuality: 85,
+    // P0b quota ceilings (injected from Env.media). Generous so the quota gate
+    // allows the image upload to reach its 200 assertion. Without this the gate
+    // reads undefined limits and fails closed (checkUploadQuota -> denied).
+    uploadQuota: { maxObjects: 1_000_000, maxBytes: 1_000_000_000_000 },
   },
 };
 

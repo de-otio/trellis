@@ -104,6 +104,10 @@ export const UNSCOPED_MODELS: ReadonlyMap<string, string> = new Map([
   ["FeatureToggle", "global"],
   ["IngestState", "global"],
   ["RoleMetadata", "global"],
+  // P0b moderation-message dedupe ledger: a system-global exactly-once table
+  // keyed on an opaque messageDedupeKey. No tenantId column; identical bytes
+  // share fan-in across tenants by design — never auto-scoped.
+  ["ProcessedModerationMessage", "global"],
   // Note: MediaFile was here as "global-content-addressed" prior to D18.
   // It now carries its own tenantId and is in TENANT_SCOPED_MODELS above.
   // User-scoped (boundary is userId, not tenant).
@@ -128,6 +132,11 @@ export const UNSCOPED_MODELS: ReadonlyMap<string, string> = new Map([
   ["DirectMessage", "user-pair"],
   // Scoped-by-relation: no own tenantId yet (doc/14 §04 C / WS0). Rely on the
   // parent's scope + the RLS backstop until tenantId is denormalized onto them.
+  // P0b moderation job: tenant-scoped through its parent MediaFile via mediaId
+  // (onDelete: Cascade). No own tenantId column, so it cannot be auto-scoped by
+  // the where-merge/create-stamp extension — same posture as the other
+  // by-relation child tables (parent scope + RLS backstop).
+  ["MediaModerationJob", "by-relation"],
   ["PostMedia", "by-relation"],
   ["PostSentiment", "by-relation"],
   ["PostSubject", "by-relation"],

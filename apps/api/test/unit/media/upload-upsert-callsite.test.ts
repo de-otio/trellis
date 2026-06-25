@@ -103,15 +103,24 @@ vi.mock("../../../src/lib/database-connection-manager", () => ({
 }));
 
 // Query helper: route the queryFn against a db whose mediaFile.upsert we capture.
-// resolveUploadTenantId does NOT hit this path (ambient present), so the ONLY
-// call that flows through here is the route's mediaFile.upsert.
+// resolveUploadTenantId does NOT hit this path (ambient present). Two query
+// callsites flow through here on the sync-image path: the P0b quota check
+// (count + aggregate) and the route's mediaFile.upsert. The quota mock returns
+// zero usage so checkUploadQuota allows the upload and the flow reaches upsert.
 vi.mock("../../../src/lib/db-query-helper", () => ({
   withQueryTimeoutAndRetry: async (
     _mgr: any,
     _region: string,
     _env: any,
     queryFn: (db: any) => Promise<any>,
-  ) => queryFn({ mediaFile: { upsert: upsertMock } }),
+  ) =>
+    queryFn({
+      mediaFile: {
+        upsert: upsertMock,
+        count: vi.fn(async () => 0),
+        aggregate: vi.fn(async () => ({ _sum: { size: 0 } })),
+      },
+    }),
   QueryTimeoutPresets: { USER_FACING: {}, INTERNAL: {} },
 }));
 
@@ -143,6 +152,9 @@ function makeEnv() {
       maxBytes: { image: 10_000_000, video: 100_000_000 },
       allowlist: { video: ["video/mp4", "video/webm", "video/quicktime"] },
       rateLimits: { uploadPerMin: 60, batchPerMin: 10, servePerMin: 600 },
+      // P0b quota ceilings (injected from Env.media). Generous so the quota
+      // gate allows the upload and the flow reaches the upsert under test.
+      uploadQuota: { maxObjects: 1_000_000, maxBytes: 1_000_000_000_000 },
     },
   };
 }

@@ -367,6 +367,46 @@ export interface Env {
      * Source: MEDIA_CANONICAL_QUALITY. Default: 85 (conservative dev default).
      */
     canonicalQuality: number;
+    /**
+     * Maximum video duration in seconds the pipeline will accept. Clips
+     * exceeding this cap are rejected before transcoding begins (cost + abuse
+     * guard). Source: MEDIA_MAX_DURATION_SECONDS. Default: 60 (conservative
+     * dev default; consumer injects operative value via SSM/env).
+     */
+    maxDurationSeconds: number;
+    /**
+     * Per-tenant cap on the number of uploads that may reach REVIEW status
+     * within the rolling rate window. Tenants that exceed this cap have
+     * subsequent uploads auto-rejected until the window resets. Source:
+     * MEDIA_REVIEW_RATE_CAP. Default: 20 (conservative dev default; consumer
+     * injects operative value via SSM/env).
+     */
+    reviewRateCap: number;
+    /**
+     * Per-tenant upload quota: maximum number of stored objects and total
+     * bytes. Quota enforcement is advisory in P0b (logged, not hard-blocked);
+     * the consumer's CDK env sets hard values. Sources: MEDIA_QUOTA_MAX_OBJECTS
+     * / MEDIA_QUOTA_MAX_BYTES.
+     */
+    uploadQuota: {
+      /** Maximum number of stored MediaFile objects per tenant. Default: 1000. */
+      maxObjects: number;
+      /** Maximum total bytes of stored media per tenant. Default: 1 GiB. */
+      maxBytes: number;
+    };
+    /**
+     * Transcription configuration for audio moderation (AUDIO track).
+     * outputBucket: S3 bucket for transcription output (no default — absent
+     *   means the AUDIO track cannot submit jobs; callers must check).
+     * languageCode: BCP-47 language code for the transcription model.
+     *   Source: MEDIA_TRANSCRIBE_LANGUAGE_CODE. Default: "en-US".
+     */
+    transcribe: {
+      /** S3 bucket for transcription job output. Source: MEDIA_TRANSCRIBE_OUTPUT_BUCKET. No default. */
+      outputBucket?: string;
+      /** BCP-47 language code. Source: MEDIA_TRANSCRIBE_LANGUAGE_CODE. Default: "en-US". */
+      languageCode: string;
+    };
   };
   // --- end Media config seam -------------------------------------------------
 }
@@ -477,6 +517,10 @@ export function resolveMediaEnv(): { media: {
   thresholds: Record<string, { review: number; quarantine: number }>;
   canonicalFormat: "jpeg" | "png" | "webp";
   canonicalQuality: number;
+  maxDurationSeconds: number;
+  reviewRateCap: number;
+  uploadQuota: { maxObjects: number; maxBytes: number };
+  transcribe: { outputBucket?: string; languageCode: string };
 } } {
   // --- maxBytes: conservative dev defaults (10 MiB image, 100 MiB video/audio) ---
   const parseBytes = (raw: string | undefined, fallback: number): number => {
@@ -565,6 +609,54 @@ export function resolveMediaEnv(): { media: {
       ? rawQuality
       : 85; // Conservative dev default
 
+  // --- maxDurationSeconds: video clip cap ---
+  const maxDurationSecondsRaw = Number.parseInt(
+    process.env.MEDIA_MAX_DURATION_SECONDS ?? "",
+    10,
+  );
+  // 60 s conservative dev default; consumer injects operative value via env.
+  const maxDurationSeconds =
+    Number.isFinite(maxDurationSecondsRaw) && maxDurationSecondsRaw > 0
+      ? maxDurationSecondsRaw
+      : 60;
+
+  // --- reviewRateCap: per-tenant REVIEW-generating upload cap ---
+  const reviewRateCapRaw = Number.parseInt(
+    process.env.MEDIA_REVIEW_RATE_CAP ?? "",
+    10,
+  );
+  // 20 conservative dev default; consumer injects operative value via env.
+  const reviewRateCap =
+    Number.isFinite(reviewRateCapRaw) && reviewRateCapRaw > 0
+      ? reviewRateCapRaw
+      : 20;
+
+  // --- uploadQuota: per-tenant object count + byte ceiling ---
+  const quotaMaxObjectsRaw = Number.parseInt(
+    process.env.MEDIA_QUOTA_MAX_OBJECTS ?? "",
+    10,
+  );
+  const quotaMaxObjects =
+    Number.isFinite(quotaMaxObjectsRaw) && quotaMaxObjectsRaw > 0
+      ? quotaMaxObjectsRaw
+      : 1000; // 1 000 objects dev default
+
+  const quotaMaxBytesRaw = Number.parseInt(
+    process.env.MEDIA_QUOTA_MAX_BYTES ?? "",
+    10,
+  );
+  const quotaMaxBytes =
+    Number.isFinite(quotaMaxBytesRaw) && quotaMaxBytesRaw > 0
+      ? quotaMaxBytesRaw
+      : 1024 * 1024 * 1024; // 1 GiB dev default
+
+  // --- transcribe config ---
+  // outputBucket has no default (absent ⇒ AUDIO track cannot submit jobs).
+  const transcribeOutputBucket = process.env.MEDIA_TRANSCRIBE_OUTPUT_BUCKET || undefined;
+
+  const rawLanguageCode = (process.env.MEDIA_TRANSCRIBE_LANGUAGE_CODE ?? "").trim();
+  const transcribeLanguageCode = rawLanguageCode.length > 0 ? rawLanguageCode : "en-US";
+
   return {
     media: {
       maxBytes: { image: maxBytesImage, video: maxBytesVideo, audio: maxBytesAudio },
@@ -575,6 +667,10 @@ export function resolveMediaEnv(): { media: {
       thresholds,
       canonicalFormat,
       canonicalQuality,
+      maxDurationSeconds,
+      reviewRateCap,
+      uploadQuota: { maxObjects: quotaMaxObjects, maxBytes: quotaMaxBytes },
+      transcribe: { outputBucket: transcribeOutputBucket, languageCode: transcribeLanguageCode },
     },
   };
 }
