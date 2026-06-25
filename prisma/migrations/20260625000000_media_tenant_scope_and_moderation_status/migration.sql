@@ -30,8 +30,11 @@ ALTER TABLE "media_files"
 -- DropIndex: remove bare global unique on content_hash
 DROP INDEX "media_files_content_hash_key";
 
--- DropIndex: remove GPS composite index (columns gone)
-DROP INDEX "media_files_gps_latitude_gps_longitude_idx";
+-- DropIndex: the GPS composite index is already removed by the DROP COLUMN
+-- above (Postgres cascades indexes that depend on a dropped column). IF EXISTS
+-- makes this explicit drop a safe no-op whether or not the index is still
+-- present / was ever named this in the migration history.
+DROP INDEX IF EXISTS "media_files_gps_latitude_gps_longitude_idx";
 
 -- CreateIndex: within-tenant dedup (replaces bare @unique)
 CREATE UNIQUE INDEX "media_files_tenant_id_content_hash_key" ON "media_files"("tenant_id", "content_hash");
