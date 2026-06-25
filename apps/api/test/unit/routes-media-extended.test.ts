@@ -81,10 +81,30 @@ vi.mock("../../src/lib/services/image-normalizer", () => ({
   ImageNormalizer: class {
     normalize = mockNormalize;
   },
+  // T7: REENCODABLE_IMAGE_TYPES — the set of sharp-re-encodable MIME types
+  REENCODABLE_IMAGE_TYPES: new Set([
+    "image/jpeg",
+    "image/jpg",
+    "image/png",
+    "image/webp",
+    "image/gif",
+  ]),
+  // T7: reencodeImage — pass-through in tests (returns the input buffer unchanged)
+  reencodeImage: vi.fn().mockImplementation(async (buf: ArrayBuffer) => ({
+    buffer: Buffer.from(buf instanceof Buffer ? buf : new Uint8Array(buf)),
+    canonicalMimeType: "image/jpeg",
+  })),
 }));
 
 vi.mock("../../src/lib/database-connection-manager", () => ({
   sharedDatabaseConnectionManager: {},
+}));
+
+// T9: media upload resolves a tenant via the ambient auth seam
+// (getCurrentTenantId). Provide a valid CUID-shaped ambient tenant so the
+// canonical CAS key (cas/{tenantId}/{hash}) can be built in tests.
+vi.mock("@de-otio/saas-foundation/tenant", () => ({
+  getCurrentTenantId: () => "ctenant0000000000000000aa",
 }));
 
 vi.mock("../../src/lib/db-query-helper", () => ({
@@ -117,6 +137,17 @@ const mockEnv = {
   SESSION_SECRET: "test-secret",
   MEDIA_BUCKET_R2: null,
   IMAGES: null,
+  // T7/T4: media config block required by the re-encode pipeline and allowlist
+  media: {
+    maxBytes: { image: 10 * 1024 * 1024, video: 100 * 1024 * 1024, audio: 100 * 1024 * 1024 },
+    maxPixels: 25_000_000,
+    rateLimits: { uploadPerMin: 10, batchPerMin: 5, servePerMin: 60 },
+    allowlist: { image: ["image/jpeg", "image/png", "image/webp", "image/gif"], video: ["video/mp4"], audio: [] },
+    presets: [],
+    thresholds: {},
+    canonicalFormat: "jpeg" as const,
+    canonicalQuality: 85,
+  },
 };
 
 const mockSession = { userId: "user-1" };
@@ -276,9 +307,12 @@ describe("Media Routes - Extended", () => {
         body: formData,
       });
 
+      // T9: contentHash must be a valid 64-char hex digest so the canonical
+      // casKey can be built; the handler now rejects malformed hashes.
+      const hashA = "a".repeat(64);
       mockUploadSingle.mockResolvedValue({
-        url: "https://cdn.example.com/media/abc123.jpg",
-        contentHash: "abc123",
+        url: `https://cdn.example.com/api/media/${hashA}`,
+        contentHash: hashA,
         status: "uploaded",
       });
 
@@ -286,7 +320,7 @@ describe("Media Routes - Extended", () => {
 
       expect(mockUploadSingle).toHaveBeenCalled();
       expect(mockCreateSecureResponse).toHaveBeenCalledWith(
-        expect.stringContaining("abc123"),
+        expect.stringContaining(hashA),
         expect.objectContaining({ status: 200 }),
       );
     });
@@ -303,8 +337,8 @@ describe("Media Routes - Extended", () => {
       });
 
       mockUploadSingle.mockResolvedValue({
-        url: "https://cdn.example.com/media/def456.png",
-        contentHash: "def456",
+        url: `https://cdn.example.com/api/media/${"b".repeat(64)}`,
+        contentHash: "b".repeat(64),
         status: "uploaded",
       });
 

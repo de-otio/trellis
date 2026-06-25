@@ -1454,10 +1454,12 @@ export class MediaHandler {
       const optimizedUrl = `${apiDomain}/api/media/${media.contentHash}?variant=optimized`;
       const originalUrl = `${apiDomain}/api/media/${media.contentHash}?variant=original`;
 
-      // This endpoint is owner-only (ownership verified above).
-      // Always return full metadata to the owner — privacy flags control
-      // what OTHER users see, not the owner. The flags are still included
-      // in the response so the frontend can render the toggle state.
+      // Privacy flags gate the metadata fields in the response (D13 data-minimization).
+      // metadataVisible defaults false — metadata is private unless the owner has
+      // explicitly enabled sharing. locationVisible gates any location-bearing fields.
+      // The flags themselves are always included so the frontend can render the toggle.
+      const metadataVisible = media.metadataVisible ?? false;
+      const locationVisible = media.locationVisible ?? false;
 
       const result = {
         id: media.id,
@@ -1471,12 +1473,16 @@ export class MediaHandler {
         width: media.width ?? undefined,
         height: media.height ?? undefined,
         duration: media.duration ?? undefined,
-        exifData: media.exifData ?? undefined,
-        iptcData: media.iptcData ?? undefined,
+        // exifData/iptcData/dateTaken: withheld when metadataVisible is false
+        ...(metadataVisible && {
+          exifData: media.exifData ?? undefined,
+          iptcData: media.iptcData ?? undefined,
+          dateTaken: media.dateTaken?.toISOString(),
+        }),
+        // videoMetadata does not contain privacy-sensitive EXIF; gated separately
         videoMetadata: media.videoMetadata ?? undefined,
-        dateTaken: media.dateTaken?.toISOString(),
-        metadataVisible: media.metadataVisible ?? false,
-        locationVisible: media.locationVisible ?? false,
+        metadataVisible,
+        locationVisible,
         createdAt: media.createdAt.toISOString(),
         updatedAt: media.updatedAt.toISOString(),
         hidden: media.hidden || false,

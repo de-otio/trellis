@@ -308,6 +308,67 @@ export interface Env {
    */
   realtimeTransport: RealtimeTransport;
   // --- end Realtime transport seam ------------------------------------------
+
+  // --- Media config seam (P0a) -----------------------------------------------
+  // Every value is env-injected (threshold-secrecy invariant, CLAUDE.md rule 8).
+  // Defaults are conservative/fail-closed for local dev; operative values are
+  // injected by the consumer (Skybber) via SSM/env vars. The npm tarball is
+  // public — no compiled cap/rate-limit/threshold literal ever reaches dist/.
+  //
+  // Parsed by resolveMediaEnv() below. Handlers read env.media — never construct.
+  /**
+   * Media upload/serve configuration. All operational thresholds come from
+   * env vars; code ships only conservative safe-for-dev defaults.
+   */
+  media: {
+    /**
+     * Maximum file size in bytes per media type.
+     * Sources: MEDIA_MAX_BYTES_IMAGE / MEDIA_MAX_BYTES_VIDEO / MEDIA_MAX_BYTES_AUDIO.
+     */
+    maxBytes: { image: number; video: number; audio: number };
+    /**
+     * Maximum total pixels (width × height) for uploaded images. Guards against
+     * decompression-bomb attacks (sharp limitInputPixels). Source: MEDIA_MAX_PIXELS.
+     */
+    maxPixels: number;
+    /**
+     * Upload and serve rate limits (requests per minute). Operational values
+     * come from env; code ships conservative dev defaults.
+     * Sources: MEDIA_RATE_UPLOAD_PER_MIN / MEDIA_RATE_BATCH_PER_MIN / MEDIA_RATE_SERVE_PER_MIN.
+     */
+    rateLimits: { uploadPerMin: number; batchPerMin: number; servePerMin: number };
+    /**
+     * Accepted MIME-type allowlists per media type.
+     * Sources: MEDIA_ALLOWLIST_IMAGE_JSON / MEDIA_ALLOWLIST_VIDEO_JSON / MEDIA_ALLOWLIST_AUDIO_JSON
+     * (JSON arrays). Defaults to narrow safe sets; consumer widens as needed.
+     */
+    allowlist: { image: string[]; video: string[]; audio: string[] };
+    /**
+     * Enumerated derivative preset identifiers. Bounds the closed union used by
+     * the CAS key builder (T3). Source: MEDIA_PRESETS_JSON (JSON string array).
+     */
+    presets: string[];
+    /**
+     * Per-category moderation thresholds: review and quarantine confidence
+     * boundaries (0–1). Absence of a key ⇒ fail-closed (treat as review).
+     * Source: MEDIA_THRESHOLDS_JSON (JSON object). Real operative numbers live
+     * in the consumer's SSM; compiled defaults are intentionally absent so the
+     * public tarball contains no threshold values.
+     */
+    thresholds: Record<string, { review: number; quarantine: number }>;
+    /**
+     * Canonical output format for the image re-encode pipeline (T7).
+     * Must be one of the sharp-writable formats: "jpeg" | "png" | "webp".
+     * Source: MEDIA_CANONICAL_FORMAT. Default: "jpeg".
+     */
+    canonicalFormat: "jpeg" | "png" | "webp";
+    /**
+     * JPEG/WebP output quality for the re-encode pipeline (1–100).
+     * Source: MEDIA_CANONICAL_QUALITY. Default: 85 (conservative dev default).
+     */
+    canonicalQuality: number;
+  };
+  // --- end Media config seam -------------------------------------------------
 }
 
 /**
@@ -395,6 +456,175 @@ export function resolveRealtimeEnv(): {
     REALTIME_CONN_LOG_RETENTION_DAYS: connLogRetentionDays,
     realtimeTransport,
   };
+}
+
+/**
+ * Resolve the media config block from process.env.
+ *
+ * Single-writer: this is the ONLY place that reads the MEDIA_* env vars.
+ * Threshold-secrecy invariant (CLAUDE.md rule 8): no cap / rate-limit /
+ * threshold *value* is compiled in. Defaults are conservative dev-safe
+ * values only; the consumer injects operative values via SSM/env vars.
+ *
+ * Absence of a threshold entry ⇒ fail-closed (treated as "review" by the gate).
+ */
+export function resolveMediaEnv(): { media: {
+  maxBytes: { image: number; video: number; audio: number };
+  maxPixels: number;
+  rateLimits: { uploadPerMin: number; batchPerMin: number; servePerMin: number };
+  allowlist: { image: string[]; video: string[]; audio: string[] };
+  presets: string[];
+  thresholds: Record<string, { review: number; quarantine: number }>;
+  canonicalFormat: "jpeg" | "png" | "webp";
+  canonicalQuality: number;
+} } {
+  // --- maxBytes: conservative dev defaults (10 MiB image, 100 MiB video/audio) ---
+  const parseBytes = (raw: string | undefined, fallback: number): number => {
+    const n = Number.parseInt(raw ?? "", 10);
+    return Number.isFinite(n) && n > 0 ? n : fallback;
+  };
+
+  const maxBytesImage = parseBytes(
+    process.env.MEDIA_MAX_BYTES_IMAGE,
+    10 * 1024 * 1024,   // 10 MiB (dev default; prod value injected via env)
+  );
+  const maxBytesVideo = parseBytes(
+    process.env.MEDIA_MAX_BYTES_VIDEO,
+    100 * 1024 * 1024,  // 100 MiB (dev default; prod value injected via env)
+  );
+  const maxBytesAudio = parseBytes(
+    process.env.MEDIA_MAX_BYTES_AUDIO,
+    100 * 1024 * 1024,  // 100 MiB (dev default; prod value injected via env)
+  );
+
+  // --- maxPixels: decompression-bomb guard for sharp(limitInputPixels) ---
+  const maxPixelsRaw = Number.parseInt(
+    process.env.MEDIA_MAX_PIXELS ?? "",
+    10,
+  );
+  // 25 MP dev default — conservative; real limit injected via env
+  const maxPixels =
+    Number.isFinite(maxPixelsRaw) && maxPixelsRaw > 0
+      ? maxPixelsRaw
+      : 25_000_000;
+
+  // --- rate limits (requests per minute; conservative dev defaults) ---
+  const parseRateLimit = (raw: string | undefined, fallback: number): number => {
+    const n = Number.parseInt(raw ?? "", 10);
+    return Number.isFinite(n) && n > 0 ? n : fallback;
+  };
+  const uploadPerMin = parseRateLimit(process.env.MEDIA_RATE_UPLOAD_PER_MIN, 10);
+  const batchPerMin = parseRateLimit(process.env.MEDIA_RATE_BATCH_PER_MIN, 5);
+  const servePerMin = parseRateLimit(process.env.MEDIA_RATE_SERVE_PER_MIN, 60);
+
+  // --- MIME allowlists: narrow safe dev defaults; consumer widens as needed ---
+  const parseJsonArray = (raw: string | undefined, fallback: string[]): string[] => {
+    if (!raw) return fallback;
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.every((x) => typeof x === "string")) {
+        return parsed as string[];
+      }
+    } catch {
+      // Malformed JSON → fail-closed: use fallback
+    }
+    return fallback;
+  };
+
+  const allowlistImage = parseJsonArray(
+    process.env.MEDIA_ALLOWLIST_IMAGE_JSON,
+    ["image/jpeg", "image/png", "image/webp", "image/gif"],
+  );
+  const allowlistVideo = parseJsonArray(
+    process.env.MEDIA_ALLOWLIST_VIDEO_JSON,
+    ["video/mp4"],
+  );
+  const allowlistAudio = parseJsonArray(
+    process.env.MEDIA_ALLOWLIST_AUDIO_JSON,
+    ["audio/mpeg", "audio/mp4"],
+  );
+
+  // --- presets: derivative variant identifiers (empty = no derivatives in P0a) ---
+  const presets = parseJsonArray(process.env.MEDIA_PRESETS_JSON, []);
+
+  // --- thresholds: fail-closed; NO default numeric values ---
+  // Absence of a key ⇒ the moderation gate treats the category as "review".
+  // Real operative numbers live in the consumer's SSM; the public tarball
+  // must never contain a compiled threshold literal (threshold-secrecy invariant).
+  const thresholds = parseMediaThresholds(process.env.MEDIA_THRESHOLDS_JSON);
+
+  // --- canonicalFormat: the sharp output format for the re-encode pipeline ---
+  const rawFormat = process.env.MEDIA_CANONICAL_FORMAT ?? "jpeg";
+  const canonicalFormat: "jpeg" | "png" | "webp" =
+    rawFormat === "png" || rawFormat === "webp" ? rawFormat : "jpeg";
+
+  // --- canonicalQuality: JPEG/WebP output quality (1-100) ---
+  const rawQuality = Number.parseInt(process.env.MEDIA_CANONICAL_QUALITY ?? "", 10);
+  const canonicalQuality =
+    Number.isFinite(rawQuality) && rawQuality >= 1 && rawQuality <= 100
+      ? rawQuality
+      : 85; // Conservative dev default
+
+  return {
+    media: {
+      maxBytes: { image: maxBytesImage, video: maxBytesVideo, audio: maxBytesAudio },
+      maxPixels,
+      rateLimits: { uploadPerMin, batchPerMin, servePerMin },
+      allowlist: { image: allowlistImage, video: allowlistVideo, audio: allowlistAudio },
+      presets,
+      thresholds,
+      canonicalFormat,
+      canonicalQuality,
+    },
+  };
+}
+
+/**
+ * Parse MEDIA_THRESHOLDS_JSON into a validated threshold map.
+ *
+ * Only entries whose `review` and `quarantine` values are numbers in [0, 1] are
+ * accepted. Out-of-range entries are silently dropped — an invalid threshold is
+ * treated as absent, which ⇒ fail-closed (review). This guards against a
+ * misconfigured value accidentally opening the gate.
+ *
+ * Exported for unit testing.
+ */
+export function parseMediaThresholds(
+  raw: string | undefined,
+): Record<string, { review: number; quarantine: number }> {
+  if (!raw) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return {};
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return {};
+  }
+  const result: Record<string, { review: number; quarantine: number }> = {};
+  for (const [category, value] of Object.entries(
+    parsed as Record<string, unknown>,
+  )) {
+    if (
+      typeof value === "object" &&
+      value !== null &&
+      !Array.isArray(value) &&
+      typeof (value as any).review === "number" &&
+      typeof (value as any).quarantine === "number" &&
+      (value as any).review >= 0 &&
+      (value as any).review <= 1 &&
+      (value as any).quarantine >= 0 &&
+      (value as any).quarantine <= 1
+    ) {
+      result[category] = {
+        review: (value as any).review as number,
+        quarantine: (value as any).quarantine as number,
+      };
+    }
+    // Out-of-range or malformed entries are dropped (fail-closed)
+  }
+  return result;
 }
 
 /**
@@ -596,6 +826,9 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     // and selects the default (poll/noop) transport; Skybber overrides via
     // setRealtimeProvider() before serving.
     ...resolveRealtimeEnv(),
+    // Media config seam: resolveMediaEnv() reads all MEDIA_* vars; no compiled
+    // threshold values ship in the tarball (threshold-secrecy invariant).
+    ...resolveMediaEnv(),
     DATABASE_URL: databaseUrl,
     DATABASE_URL_CN: process.env.DATABASE_URL_CN,
     DIRECT_URL: process.env.DIRECT_URL,

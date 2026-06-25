@@ -12,14 +12,79 @@ import {
   withQueryTimeoutAndRetry,
 } from "../db-query-helper.js";
 import { getLogger, Logger } from "../logger.js";
+import { casKey, isCasKeyError, validateContentHash } from "../media/cas-keys.js";
+import { buildMediaUpsertArgs } from "../media/media-upsert.js";
+import type { ModerationStatus } from "../media/moderation-status.js";
+import {
+  canonicalContentType,
+  isServable,
+} from "../media/serve-gate.js";
+import { resolveMediaTenantId } from "../media/tenant-resolution.js";
 import { MediaHandler } from "../media-handler.js";
 import { corsMiddleware, csrfMiddleware } from "../middleware.js";
 import { RateLimiter } from "../rate-limit.js";
 import { SecurityHeaders } from "../security-headers.js";
 import { SessionManager } from "../session-cookie.js";
-import { ImageNormalizer } from "../services/image-normalizer.js";
+import {
+  ImageNormalizer,
+  REENCODABLE_IMAGE_TYPES,
+  reencodeImage,
+} from "../services/image-normalizer.js";
 import { MediaUploadService } from "../services/media-upload-service.js";
 import type { Route } from "./types.js";
+
+/**
+ * Resolve the tenant id that scopes a media upload (T9 / D18) — the imperative
+ * shell around the pure `resolveMediaTenantId` decision.
+ *
+ * Reads the ambient tenant (auth seam ALS); with `TENANT_SCOPE_MODE="off"` (the
+ * default) no ambient tenant is set, so we load the uploader's
+ * `personalTenantId` from the DB and fall back to it. Returns null when no
+ * tenant can be resolved (caller fails closed). See media/tenant-resolution.ts
+ * for the recorded assumption.
+ */
+async function resolveUploadTenantId(
+  userId: string,
+  region: string,
+  env: any,
+): Promise<string | null> {
+  const { getCurrentTenantId } = await import(
+    "@de-otio/saas-foundation/tenant"
+  );
+  const { resolveTenantScopeMode } = await import("../tenant-scope.js");
+  const scopeMode = resolveTenantScopeMode();
+  const ambient = getCurrentTenantId();
+
+  // Only hit the DB for the personal-tenant fallback when scope is off and
+  // there is no ambient tenant (the common dev/default case).
+  let personalTenantId: string | null = null;
+  if (!ambient && scopeMode === "off") {
+    try {
+      personalTenantId = await withQueryTimeoutAndRetry(
+        sharedDatabaseConnectionManager,
+        region,
+        env,
+        async (db) => {
+          const user = await db.user.findUnique({
+            where: { id: userId },
+            select: { personalTenantId: true },
+          });
+          return user?.personalTenantId ?? null;
+        },
+        {
+          ...QueryTimeoutPresets.USER_FACING,
+          maxRetries: 1,
+          context: { operation: "media_resolve_tenant", userId },
+        },
+      );
+    } catch {
+      personalTenantId = null;
+    }
+  }
+
+  const resolution = resolveMediaTenantId(ambient, personalTenantId, scopeMode);
+  return resolution.ok ? resolution.tenantId : null;
+}
 
 /**
  * Generate SHA-256 content hash for content-addressed storage
@@ -165,10 +230,56 @@ function validateMagicNumbers(
 }
 
 /**
- * Serve media file by content hash with variant support
- * Shared function used by both /api/media/:mediaId and /api/media/:hash routes
+ * The single, byte-identical "deny" response (T5 anti-oracle).
+ *
+ * EVERY non-APPROVED outcome — PENDING/REVIEW/QUARANTINED/REJECTED, not-found,
+ * DB-error, hidden, soft-deleted, and the unexpected-error/catch path — returns
+ * exactly this: the same status code, the same byte-identical body, and the
+ * same fixed minimal viewer-independent header set. No `contentHash`, no
+ * `variant`, no `userId`, no `source`, no `error.message`, no `codeVersion`, no
+ * `X-Debug-*`, no per-user `Cache-Key`. A prober cannot distinguish "absent"
+ * from "exists-but-not-approved" from "DB down" — they are the same bytes.
+ *
+ * The body and header set are constants (no `Date.now()`, no request-derived
+ * values beyond the constant CORS reflection applied uniformly below), so two
+ * deny outcomes are indistinguishable at the byte level.
  */
-async function serveMediaByHash(
+const MEDIA_DENY_BODY = JSON.stringify({ error: "Media not found" });
+
+async function mediaDenyResponse(
+  request: Request,
+  env: any,
+): Promise<Response> {
+  const response = new Response(MEDIA_DENY_BODY, {
+    status: 404,
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+    },
+  });
+  return CorsHandler.addCorsHeaders(response, request, env);
+}
+
+/**
+ * Serve media file by content hash (T5: fail-closed APPROVED-only gate).
+ *
+ * Shared function used by both /api/media/:mediaId and /api/media/:hash routes.
+ *
+ * Decision flow (functional core in `media/serve-gate.ts`):
+ *  1. Validate the inbound URL hash via `validateContentHash` BEFORE any lookup.
+ *  2. Look up the DB record (the ONLY source of a servable key — the no-DB
+ *     storage-probe maze was deleted in T9; storage is never probed for
+ *     un-recorded bytes).
+ *  3. `isServable` gate: serve ONLY when `moderationStatus === "APPROVED"` AND
+ *     not `hidden` AND not soft-deleted — for EVERY viewer incl. the owner.
+ *  4. Every other outcome (incl. not-found / DB-error / invalid-hash / error
+ *     path) returns the single byte-identical {@link mediaDenyResponse}.
+ *
+ * `variant` is retained for call-site compatibility but never influences the
+ * gate; the served key is always the canonical `originalKey` from the DB record.
+ */
+export async function serveMediaByHash(
   contentHash: string,
   variant: string,
   request: Request,
@@ -176,23 +287,44 @@ async function serveMediaByHash(
   session: { userId: string },
 ): Promise<Response> {
   const logger = getLogger();
-  logger.debug("SERVE MEDIA BY HASH: Starting", {
-    contentHash,
-    variant,
-    userId: session.userId,
-  });
-
-  const securityHeaders = new SecurityHeaders(env);
 
   try {
-    // Wrap entire function in try-catch to catch any unexpected errors
-    logger.debug("SERVE MEDIA: Inside try block");
+    // (1) Validate the inbound URL hash BEFORE any lookup. A malformed hash is
+    // indistinguishable from a not-found object — same deny response.
+    const normalizedHash = validateContentHash(contentHash);
+    if (isCasKeyError(normalizedHash)) {
+      return mediaDenyResponse(request, env);
+    }
 
-    // Find media file in database - using retry logic
-    let mediaFile: any = null;
+    // (2) Look up the DB record. A null record (not-found) or a thrown query
+    // (DB-error) both resolve to `mediaFile = null` and deny identically — no
+    // separate I/O shape on either branch (no extra audit/DB write).
+    let mediaFile: {
+      moderationStatus: ModerationStatus;
+      hidden: boolean;
+      deletedAt: Date | null;
+      originalKey: string | null;
+    } | null = null;
+    const region = "US"; // TODO: derive from session/request residency
+
+    // Media is tenant-scoped (D18): the canonical identity is
+    // (tenantId, contentHash), so a bare hash is NOT a unique key. Scope the
+    // lookup to the VIEWER's resolved tenant — fail-closed and isolation-safe:
+    // a wrong-tenant hash simply misses -> uniform deny, never a cross-tenant
+    // read. NOTE (P0c design decision): cross-tenant "social" viewing by bare
+    // hash is intentionally NOT supported here; that read-addressing belongs to
+    // the P0c tenant-aware delivery seam (per-tenant domains, D9) or a
+    // mediaId/post-scoped lookup that carries the owner's tenant.
+    const viewerTenantId = await resolveUploadTenantId(
+      session.userId,
+      region,
+      env,
+    );
+    if (!viewerTenantId) {
+      return mediaDenyResponse(request, env);
+    }
+
     try {
-      const region = "US"; // TODO: Get from session or request
-      // Using retry logic with exponential backoff for connection resilience
       mediaFile = await withQueryTimeoutAndRetry(
         sharedDatabaseConnectionManager,
         region,
@@ -201,7 +333,12 @@ async function serveMediaByHash(
           const dbAny = db as any;
           if (dbAny.mediaFile) {
             return await dbAny.mediaFile.findUnique({
-              where: { contentHash },
+              where: {
+                tenantId_contentHash: {
+                  tenantId: viewerTenantId,
+                  contentHash: normalizedHash,
+                },
+              },
             });
           }
           return null;
@@ -210,419 +347,70 @@ async function serveMediaByHash(
           ...QueryTimeoutPresets.USER_FACING,
           maxRetries: 3,
           baseDelayMs: 100,
-          context: {
-            operation: "media_get",
-            contentHash,
-          },
+          context: { operation: "media_get" },
         },
       );
-      if (!mediaFile) {
-        logger.debug(
-          "MediaFile not found in database, using fallback key lookup",
-          {
-            contentHash,
-            variant,
-          },
-        );
-      } else {
-        logger.debug("MediaFile found in database", {
-          contentHash,
-          variant,
-          originalKey: mediaFile.originalKey,
-          optimizedKey: mediaFile.optimizedKey,
-          thumbnailKey: mediaFile.thumbnailKey,
-        });
-      }
-    } catch (error: any) {
-      logger.warn("Failed to query MediaFile, using fallback key lookup", {
-        error: error.message,
-        contentHash,
-        variant,
-      });
+    } catch {
+      // DB-error: deny exactly like not-found (anti-oracle). No error detail
+      // leaks to the caller; logging stays internal and carries no per-viewer
+      // identity.
+      logger.warn("Failed to query MediaFile; serving uniform deny");
+      mediaFile = null;
     }
 
-    // Fetch from R2
+    // (3) Fail-closed gate. No record → deny. Record present → serve ONLY when
+    // APPROVED and not hidden and not soft-deleted. Owner-vs-other never changes
+    // this decision (no owner exception). With no P0b worker, video/audio remain
+    // PENDING and are denied here.
+    if (
+      !mediaFile ||
+      !isServable({
+        moderationStatus: mediaFile.moderationStatus,
+        hidden: mediaFile.hidden,
+        deletedAt: mediaFile.deletedAt,
+      })
+    ) {
+      return mediaDenyResponse(request, env);
+    }
+
+    // The canonical key is the DB record's originalKey (== cas/{tenantId}/{hash}).
+    // No key → not servable (deny), never a storage probe.
+    const r2Key = mediaFile.originalKey;
+    if (!r2Key) {
+      return mediaDenyResponse(request, env);
+    }
+
     const r2Bucket = (env as any).MEDIA_BUCKET_R2 || (env as any).R2_BUCKET;
     if (!r2Bucket) {
-      const errorResponse = securityHeaders.createSecureResponse(
-        JSON.stringify({ error: "Media storage not configured" }),
-        { status: 503, headers: { "content-type": "application/json" } },
-      );
-      return CorsHandler.addCorsHeaders(errorResponse, request, env);
-    }
-
-    // Determine which R2 key to serve
-    let r2Key: string | null = null;
-    let contentType: string = "application/octet-stream";
-
-    if (mediaFile) {
-      logger.debug("SERVE MEDIA: Found database record", {
-        contentHash,
-        variant,
-        hasOriginalKey: !!mediaFile.originalKey,
-        hasOptimizedKey: !!mediaFile.optimizedKey,
-        hasThumbnailKey: !!mediaFile.thumbnailKey,
-        originalKey: mediaFile.originalKey,
-        optimizedKey: mediaFile.optimizedKey,
-        thumbnailKey: mediaFile.thumbnailKey,
-      });
-
-      switch (variant) {
-        case "thumbnail":
-          r2Key =
-            mediaFile.thumbnailKey ||
-            mediaFile.optimizedKey ||
-            mediaFile.originalKey;
-          contentType =
-            mediaFile.thumbnailKey || mediaFile.optimizedKey
-              ? "image/webp"
-              : mediaFile.mimeType || "application/octet-stream";
-          break;
-        case "optimized":
-          // For optimized variant, prefer optimized but ALWAYS fall back to original
-          r2Key = mediaFile.optimizedKey || mediaFile.originalKey;
-          // If still no key, this is a data integrity issue - log and continue to fallback
-          if (!r2Key) {
-            logger.error("SERVE MEDIA: Database record has no keys!", {
-              contentHash,
-              mediaFileId: (mediaFile as any).id,
-            });
-          }
-          contentType = mediaFile.optimizedKey
-            ? "image/webp"
-            : mediaFile.mimeType || "application/octet-stream";
-          break;
-        case "original":
-          r2Key = mediaFile.originalKey;
-          contentType = mediaFile.mimeType || "application/octet-stream";
-          break;
-        default:
-          // Default to optimized with fallback to original
-          r2Key = mediaFile.optimizedKey || mediaFile.originalKey;
-          contentType = mediaFile.optimizedKey
-            ? "image/webp"
-            : mediaFile.mimeType || "application/octet-stream";
-      }
-
-      logger.debug("SERVE MEDIA: Using database record", {
-        contentHash,
-        variant,
-        r2Key,
-        contentType,
-        hasOptimized: !!mediaFile.optimizedKey,
-        hasOriginal: !!mediaFile.originalKey,
-      });
-
-      // CRITICAL FIX: If r2Key is still null after using database record,
-      // fall back to R2 key lookup
-      if (!r2Key) {
-        logger.debug(
-          "SERVE MEDIA: Database record has no keys, falling back to R2 lookup",
-          {
-            contentHash,
-            variant,
-          },
-        );
-        // Set mediaFile to null to trigger fallback logic
-        mediaFile = null;
-      }
-    }
-
-    if (!mediaFile) {
-      // Fallback: construct key from hash and variant
-      logger.debug("SERVE MEDIA: Using R2 fallback key lookup", {
-        contentHash,
-        variant,
-      });
-
-      const commonExtensions = ["jpg", "jpeg", "png", "webp", "gif"];
-
-      // First, try to find the original file with any extension
-      let foundOriginalKey: string | null = null;
-      let foundContentType: string = "image/jpeg";
-
-      for (const ext of commonExtensions) {
-        const testKey = `media/${contentHash}.${ext}`;
-        logger.debug("SERVE MEDIA: Trying R2 key", { testKey });
-        try {
-          const testObject = await r2Bucket.head(testKey);
-          if (testObject) {
-            foundOriginalKey = testKey;
-            foundContentType = `image/${ext === "jpg" ? "jpeg" : ext}`;
-            logger.debug("SERVE MEDIA: Found media file in R2 fallback", {
-              contentHash,
-              key: testKey,
-              contentType: foundContentType,
-            });
-            break;
-          }
-        } catch (error: any) {
-          // head() can throw errors, continue trying other extensions
-          logger.debug("SERVE MEDIA: R2 head() failed for key", {
-            key: testKey,
-            error: error.message,
-          });
-        }
-      }
-
-      logger.debug("SERVE MEDIA: Original file search complete", {
-        foundOriginalKey,
-        foundContentType,
-      });
-
-      // Now determine which key to use based on variant
-      if (variant === "thumbnail") {
-        // Try thumbnail first
-        let foundThumb = false;
-        for (const ext of ["webp", ...commonExtensions]) {
-          const testKey = `media/${contentHash}_thumb.${ext}`;
-          try {
-            const testObject = await r2Bucket.head(testKey);
-            if (testObject) {
-              r2Key = testKey;
-              contentType = "image/webp";
-              foundThumb = true;
-              break;
-            }
-          } catch (error: any) {
-            // head() can throw errors, continue trying other extensions
-            logger.debug("R2 head() failed for thumbnail key", {
-              key: testKey,
-              error: error.message,
-            });
-          }
-        }
-        // Fall back to optimized if no thumbnail
-        if (!foundThumb) {
-          for (const ext of ["webp", ...commonExtensions]) {
-            const testKey = `media/${contentHash}_opt.${ext}`;
-            try {
-              const testObject = await r2Bucket.head(testKey);
-              if (testObject) {
-                r2Key = testKey;
-                contentType = "image/webp";
-                foundThumb = true;
-                break;
-              }
-            } catch (error: any) {
-              // head() can throw errors, continue trying other extensions
-              logger.debug("R2 head() failed for optimized key", {
-                key: testKey,
-                error: error.message,
-              });
-            }
-          }
-        }
-        // Fall back to original if no thumbnail or optimized
-        if (!foundThumb && foundOriginalKey) {
-          r2Key = foundOriginalKey;
-          contentType = foundContentType;
-        }
-      } else if (variant === "optimized") {
-        // Try optimized first
-        logger.debug("SERVE MEDIA: Looking for optimized variant", {
-          contentHash,
-        });
-        let foundOpt = false;
-        for (const ext of ["webp", ...commonExtensions]) {
-          const testKey = `media/${contentHash}_opt.${ext}`;
-          logger.debug("SERVE MEDIA: Trying optimized key", { testKey });
-          try {
-            const testObject = await r2Bucket.head(testKey);
-            if (testObject) {
-              r2Key = testKey;
-              contentType = "image/webp";
-              foundOpt = true;
-              logger.debug("SERVE MEDIA: Found optimized variant", { testKey });
-              break;
-            }
-          } catch (error: any) {
-            // head() can throw errors, continue trying other extensions
-            logger.debug("SERVE MEDIA: R2 head() failed for optimized key", {
-              key: testKey,
-              error: error.message,
-            });
-          }
-        }
-        // Fall back to original if no optimized version
-        // ALWAYS fall back to original if we didn't find an optimized version
-        if (!foundOpt) {
-          if (foundOriginalKey) {
-            r2Key = foundOriginalKey;
-            contentType = foundContentType;
-            logger.debug(
-              "SERVE MEDIA: Falling back to original for optimized variant",
-              {
-                r2Key,
-                contentType,
-              },
-            );
-          } else {
-            // If we still haven't found the original, log it for debugging
-            logger.debug(
-              "SERVE MEDIA: No optimized version found and foundOriginalKey is null",
-              {
-                contentHash,
-                variant,
-              },
-            );
-          }
-        }
-      } else {
-        // Original variant or any other variant: use the found original key
-        if (foundOriginalKey) {
-          r2Key = foundOriginalKey;
-          contentType = foundContentType;
-        }
-      }
-    }
-
-    logger.debug("SERVE MEDIA: Final R2 key selection", {
-      r2Key,
-      contentType,
-      variant,
-      contentHash,
-      hasMediaFile: !!mediaFile,
-    });
-
-    // CRITICAL FIX: If r2Key is still null at this point, try one more fallback
-    // This handles edge cases where the database record exists but has null keys,
-    // or the fallback R2 lookup failed for some reason
-    if (!r2Key) {
-      logger.debug("SERVE MEDIA: r2Key is null, attempting final fallback", {
-        contentHash,
-        variant,
-      });
-
-      // Try to find the file with common extensions
-      const commonExtensions = ["png", "jpg", "jpeg", "webp", "gif"];
-      for (const ext of commonExtensions) {
-        const testKey = `media/${contentHash}.${ext}`;
-        logger.debug("SERVE MEDIA: Final fallback trying key", { testKey });
-        try {
-          const testObject = await r2Bucket.head(testKey);
-          if (testObject) {
-            r2Key = testKey;
-            contentType = `image/${ext === "jpg" ? "jpeg" : ext}`;
-            logger.debug("SERVE MEDIA: Final fallback found file", {
-              r2Key,
-              contentType,
-            });
-            break;
-          }
-        } catch (error: any) {
-          logger.debug("SERVE MEDIA: Final fallback head() failed", {
-            key: testKey,
-            error: error.message,
-          });
-        }
-      }
-    }
-
-    if (!r2Key) {
-      logger.debug("SERVE MEDIA: No R2 key found, returning 404", {
-        contentHash,
-        variant,
-        hasMediaFile: !!mediaFile,
-      });
-
-      // In dev, return detailed debug info
-      const debugInfo =
-        env.ENVIRONMENT === "dev"
-          ? {
-              contentHash,
-              variant,
-              hasMediaFile: !!mediaFile,
-              mediaFileKeys: mediaFile
-                ? {
-                    original: mediaFile.originalKey,
-                    optimized: mediaFile.optimizedKey,
-                    thumbnail: mediaFile.thumbnailKey,
-                  }
-                : null,
-              codeVersion: "v2-with-debug",
-            }
-          : undefined;
-
-      const errorResponse = securityHeaders.createSecureResponse(
-        JSON.stringify({
-          error: "Media not found",
-          source: "serveMediaByHash-noKey",
-          ...(debugInfo && { debug: debugInfo }),
-        }),
-        { status: 404, headers: { "content-type": "application/json" } },
-      );
-      return CorsHandler.addCorsHeaders(errorResponse, request, env);
+      // Misconfiguration is also a non-serve outcome: deny uniformly rather than
+      // emit a distinguishing 503 (which would itself be an oracle).
+      return mediaDenyResponse(request, env);
     }
 
     const object = await r2Bucket.get(r2Key);
     if (!object) {
-      logger.debug("SERVE MEDIA: R2 object not found", {
-        r2Key,
-        contentHash,
-        variant,
-      });
-
-      // In dev, return detailed debug info
-      const debugInfo =
-        env.ENVIRONMENT === "dev"
-          ? {
-              r2Key,
-              contentHash,
-              variant,
-              message: "R2 object not found at key",
-              codeVersion: "v2-with-debug",
-            }
-          : undefined;
-
-      const errorResponse = securityHeaders.createSecureResponse(
-        JSON.stringify({
-          error: "Media not found",
-          source: "serveMediaByHash",
-          ...(debugInfo && { debug: debugInfo }),
-        }),
-        { status: 404, headers: { "content-type": "application/json" } },
-      );
-      return CorsHandler.addCorsHeaders(errorResponse, request, env);
+      // DB says APPROVED but the bytes are absent: still deny uniformly.
+      return mediaDenyResponse(request, env);
     }
 
-    // Get content type from object metadata or use determined type
-    const objectContentType = object.httpMetadata?.contentType || contentType;
-
-    // Return file with appropriate cache headers
+    // (4) APPROVED serve. Content-Disposition: attachment (same-origin until
+    // P0c's isolated CloudFront origin). Content-type derives ONLY from the
+    // re-encoded canonical format (T7) — NEVER from object.httpMetadata or the
+    // stored mimeType (attacker-influenced).
     const response = new Response(object.body, {
       headers: {
-        "Content-Type": objectContentType,
-        "Cache-Control": `no-cache, no-store, must-revalidate`,
-        Pragma: "no-cache",
-        Expires: "0",
-        "Cache-Key": `media:${session.userId}:${contentHash}:${variant}`,
+        "Content-Type": canonicalContentType(env.media.canonicalFormat),
+        "Content-Disposition": "attachment",
+        "Cache-Control": "no-store",
         "X-Content-Type-Options": "nosniff",
-        "X-Debug-Variant": variant, // Simple debug header
-        "X-Debug-Timestamp": Date.now().toString(), // Unique per request
       },
     });
     return CorsHandler.addCorsHeaders(response, request, env);
-  } catch (unexpectedError: any) {
-    // Catch any unexpected errors in serveMediaByHash
-    logger.error("SERVE MEDIA BY HASH: Unexpected error", {
-      error: unexpectedError.message,
-      stack: unexpectedError.stack,
-      contentHash,
-      variant,
-    });
-
-    const errorResponse = securityHeaders.createSecureResponse(
-      JSON.stringify({
-        error: "Internal server error",
-        message: unexpectedError.message || "An unexpected error occurred",
-        source: "serveMediaByHash-unexpected",
-        contentHash,
-        variant,
-      }),
-      { status: 500, headers: { "content-type": "application/json" } },
-    );
-    return CorsHandler.addCorsHeaders(errorResponse, request, env);
+  } catch {
+    // Any unexpected error returns the SAME placeholder — no message, no source,
+    // no contentHash, no codeVersion.
+    logger.error("SERVE MEDIA BY HASH: serving uniform deny on error");
+    return mediaDenyResponse(request, env);
   }
 }
 
@@ -712,12 +500,12 @@ export const mediaRoutes: Route[] = [
         return CorsHandler.addCorsHeaders(errorResponse, request, env);
       }
 
-      // Apply rate limiting: 10 uploads per 60s per user
+      // Apply rate limiting: uploads per minute per user (from env.media.rateLimits)
       const rateLimitResponse = await rateLimiter.applyRateLimitKV(
         env as any,
         request,
         "/api/media/upload",
-        10,
+        env.media.rateLimits.uploadPerMin,
         60,
         session.userId,
       );
@@ -778,21 +566,16 @@ export const mediaRoutes: Route[] = [
           return CorsHandler.addCorsHeaders(errorResponse, request, env);
         }
 
-        // Validate file type
-        const allowedImageTypes = [
-          "image/jpeg",
-          "image/jpg",
-          "image/png",
-          "image/gif",
-          "image/webp",
-          "image/heic",
-          "image/heif",
-        ];
-        const allowedVideoTypes = [
-          "video/mp4",
-          "video/webm",
-          "video/quicktime",
-        ];
+        // Validate file type.
+        // Image allowlist is the sharp-re-encodable set (REENCODABLE_IMAGE_TYPES).
+        // HEIC/HEIF are excluded because sharp write support requires the optional
+        // libheif native module (absent in this build); full HEIC support is P1/D12.
+        // SVG is excluded — no safe raster transcode.
+        // Video is accepted (stored PENDING, served only after P0b worker approves).
+        const allowedImageTypes = Array.from(REENCODABLE_IMAGE_TYPES);
+        const allowedVideoTypes = env.media.allowlist.video.length > 0
+          ? env.media.allowlist.video
+          : ["video/mp4", "video/webm", "video/quicktime"];
 
         // Read file bytes first to detect MIME type if not provided
         let fileBuffer: ArrayBuffer;
@@ -881,8 +664,36 @@ export const mediaRoutes: Route[] = [
           bytes[6] === 0x79 &&
           bytes[7] === 0x70
         ) {
-          // HEIC/HEIF: ISO Base Media File Format with ftyp box
-          detectedMimeType = "image/heic";
+          // ISO Base Media File Format (ftyp box). The container is shared by
+          // MP4/QuickTime *video* and HEIC/HEIF *images*, so disambiguate by the
+          // major brand (bytes 8-11) instead of assuming HEIC — otherwise every
+          // mp4 is misdetected as image/heic and rejected once HEIC leaves the
+          // re-encodable image allowlist (T7).
+          const brand =
+            bytes.length >= 12
+              ? String.fromCharCode(bytes[8], bytes[9], bytes[10], bytes[11])
+              : "";
+          const heifBrands = new Set([
+            "heic",
+            "heix",
+            "hevc",
+            "hevx",
+            "heim",
+            "heis",
+            "hevm",
+            "hevs",
+            "mif1",
+            "msf1",
+          ]);
+          if (heifBrands.has(brand)) {
+            detectedMimeType = "image/heic";
+          } else if (brand === "qt  ") {
+            detectedMimeType = "video/quicktime";
+          } else {
+            // Default ISO-BMFF container (isom/iso2/mp41/mp42/avc1/…, or a
+            // brand-less minimal ftyp) → MP4-family video.
+            detectedMimeType = "video/mp4";
+          }
         }
 
         // Use detected type if we found one, otherwise fall back to declared type
@@ -943,10 +754,8 @@ export const mediaRoutes: Route[] = [
           return CorsHandler.addCorsHeaders(errorResponse, request, env);
         }
 
-        // Validate file size (per documentation: 10MB for images, 100MB for videos)
-        const maxImageSize = 10 * 1024 * 1024; // 10MB
-        const maxVideoSize = 100 * 1024 * 1024; // 100MB
-        const maxSize = isImage ? maxImageSize : maxVideoSize;
+        // Validate file size (from env.media.maxBytes config)
+        const maxSize = isImage ? env.media.maxBytes.image : env.media.maxBytes.video;
 
         if (file.size > maxSize) {
           const errorResponse = securityHeaders.createSecureResponse(
@@ -996,30 +805,81 @@ export const mediaRoutes: Route[] = [
           return CorsHandler.addCorsHeaders(errorResponse, request, env);
         }
 
-        // Check for suspicious patterns
+        // Check for suspicious patterns. For types that are not re-encoded in
+        // P0a (video/audio whose transcode is P0b), any suspicious pattern is
+        // an immediate reject. For re-encodable images the re-encode pipeline
+        // below strips the payload, but we still reject pre-encode to avoid
+        // storing the raw polyglot bytes even briefly.
         const suspicious = checkSuspiciousContent(bytes, mimeType);
         if (suspicious.length > 0) {
-          logger.warn("Suspicious file detected", {
+          logger.warn("Suspicious file detected — rejecting", {
             userId: session.userId,
             fileName: file.name,
             mimeType,
             suspicious,
           });
-          // For now, log but don't reject (can be made stricter later)
-          // In production, you might want to reject or quarantine
+          const errorResponse = securityHeaders.createSecureResponse(
+            JSON.stringify({
+              error: "Suspicious content detected",
+              message: "The uploaded file contains unexpected content patterns.",
+            }),
+            { status: 400, headers: { "content-type": "application/json" } },
+          );
+          return CorsHandler.addCorsHeaders(errorResponse, request, env);
         }
 
-        // Get extension from MIME type
-        const ext = getExtensionFromMimeType(mimeType);
+        // Re-encode images to canonical safe raster format (T7).
+        // This is the polyglot + pixel-bomb defense: re-encoding strips any
+        // embedded script payload, bakes EXIF orientation into pixels, and
+        // drops all metadata (EXIF/GPS/ICC/maker-notes). The hash is computed
+        // from the re-encoded bytes so the CAS key is of clean output only.
+        // Video/audio are stored as-is (transcode is P0b async worker).
+        // uploadBuffer is re-typed to ArrayBuffer for the upload service;
+        // Buffer (a Uint8Array subclass) is structurally compatible at runtime
+        // with all consumers (crypto.subtle.digest, R2 put, etc.).
+        let uploadBuffer: ArrayBuffer = fileBuffer;
+        if (isImage) {
+          try {
+            const reencoded = await reencodeImage(fileBuffer, env);
+            // Buffer is a Uint8Array subclass — cast is safe for all consumers.
+            uploadBuffer = reencoded.buffer as unknown as ArrayBuffer;
+            // Use the canonical MIME type from the re-encode output
+            mimeType = reencoded.canonicalMimeType;
+            logger.info("image_reencode.completed", {
+              userId: session.userId,
+              canonicalMimeType: mimeType,
+              inputSize: fileBuffer.byteLength,
+              outputSize: reencoded.buffer.byteLength,
+            });
+          } catch (reencodeError: any) {
+            logger.warn("image_reencode.failed — rejecting upload", {
+              userId: session.userId,
+              fileName: file.name,
+              error: reencodeError.message,
+            });
+            const errorResponse = securityHeaders.createSecureResponse(
+              JSON.stringify({
+                error: "Image processing failed",
+                message:
+                  "The uploaded image could not be processed. It may be corrupt, " +
+                  "an unsupported format, or exceed the maximum image dimensions.",
+              }),
+              { status: 400, headers: { "content-type": "application/json" } },
+            );
+            return CorsHandler.addCorsHeaders(errorResponse, request, env);
+          }
+        }
 
-        // Extract metadata (best effort, non-fatal)
+        // Extract metadata (best effort, non-fatal).
+        // Extraction runs on the re-encoded bytes for images so we get
+        // dimensions from the clean output (EXIF orientation already baked).
         let extracted: any = {};
         try {
           const { MetadataExtractor } = await import(
             "../metadata/metadata-extractor.js"
           );
           const extractor = new MetadataExtractor(env);
-          extracted = await extractor.extractAll(fileBuffer, mimeType);
+          extracted = await extractor.extractAll(uploadBuffer, mimeType);
         } catch (metaError: any) {
           logger.warn("[Media Upload] Metadata extraction failed", {
             userId: session.userId,
@@ -1038,94 +898,91 @@ export const mediaRoutes: Route[] = [
           duration: extracted?.videoMetadata?.duration,
         };
 
-        // Use MediaUploadService for eventual consistency upload
-        // Pass the already-read fileBuffer to avoid a second file.arrayBuffer() call.
-        // On Cloudflare Workers, File objects from FormData may not support
-        // reliable re-reads of arrayBuffer(), causing a different contentHash.
+        // Resolve the tenant that scopes this media object (T9 / D18).
+        // Ambient tenant (auth seam) wins; with TENANT_SCOPE_MODE="off" (the
+        // default) there is no ambient tenant, so we fall back to the
+        // uploader's personalTenantId — see tenant-resolution.ts for the
+        // recorded assumption.
+        const uploadRegion = "US"; // TODO: Get from session or request
+        const tenantId = await resolveUploadTenantId(
+          session.userId,
+          uploadRegion,
+          env,
+        );
+        if (!tenantId) {
+          logger.error("[Media Upload] No tenant context for upload", {
+            userId: session.userId,
+          });
+          const errorResponse = securityHeaders.createSecureResponse(
+            JSON.stringify({
+              error: "Tenant resolution failed",
+              message: "Could not resolve a tenant for this upload.",
+            }),
+            { status: 500, headers: { "content-type": "application/json" } },
+          );
+          return CorsHandler.addCorsHeaders(errorResponse, request, env);
+        }
+
+        // Use MediaUploadService for eventual consistency upload.
+        // Pass the re-encoded buffer (uploadBuffer) so the content hash is of
+        // the clean output bytes, not the raw upload. The service writes the
+        // bytes to the canonical CAS key `cas/{tenantId}/{hash}`.
         const uploadService = new MediaUploadService(env);
         const result = await uploadService.uploadSingle(
           file,
           session.userId,
+          tenantId,
           metadata,
-          fileBuffer,
+          uploadBuffer,
         );
 
-        // Normalize images to sRGB (non-blocking, best effort)
-        let optimizedKey: string | null = null;
-        if (mimeType.startsWith("image/")) {
-          if (env.IMAGES && env.MEDIA_BUCKET_R2) {
-            const normalizer = new ImageNormalizer(
-              env.IMAGES,
-              env.MEDIA_BUCKET_R2,
-            );
-            const startTime = Date.now();
-            logger.info("image_normalization.started", {
-              contentHash: result.contentHash,
-              mimeType,
-            });
-            optimizedKey = await normalizer.normalize(
-              `media/${result.contentHash}.${getExtensionFromMimeType(mimeType)}`,
-              result.contentHash,
-            );
-            const durationMs = Date.now() - startTime;
-            if (optimizedKey) {
-              logger.info("image_normalization.completed", {
-                contentHash: result.contentHash,
-                optimizedKey,
-                durationMs,
-              });
-            } else {
-              logger.warn("image_normalization.failed", {
-                contentHash: result.contentHash,
-                durationMs,
-              });
-            }
-          } else {
-            logger.info("image_normalization.skipped", {
-              contentHash: result.contentHash,
-              reason: "images_binding_not_available",
-            });
-          }
-        } else {
-          logger.info("image_normalization.skipped", {
-            contentHash: result.contentHash,
-            reason: "not_image",
+        // T9: the DB originalKey stores the SAME canonical CAS key the bytes
+        // were written to, so the serve path reads exactly what upload wrote.
+        const uploadOriginalKey = casKey(tenantId, result.contentHash);
+        if (isCasKeyError(uploadOriginalKey)) {
+          logger.error("[Media Upload] Failed to build CAS key", {
+            userId: session.userId,
+            kind: uploadOriginalKey.kind,
           });
+          const errorResponse = securityHeaders.createSecureResponse(
+            JSON.stringify({
+              error: "Database error",
+              message:
+                "Failed to register uploaded media. Please try again.",
+            }),
+            { status: 500, headers: { "content-type": "application/json" } },
+          );
+          return CorsHandler.addCorsHeaders(errorResponse, request, env);
         }
 
         // Create MediaFile DB record synchronously so post creation can
-        // reference it immediately (reconciliation will enrich it later)
-        const uploadOriginalKey = `media/${result.contentHash}.${getExtensionFromMimeType(mimeType)}`;
-        const uploadRegion = "US"; // TODO: Get from session or request
+        // reference it immediately (reconciliation will enrich it later).
+        // Dedup is within-tenant via @@unique([tenantId, contentHash]) (D18).
         try {
           await withQueryTimeoutAndRetry(
             sharedDatabaseConnectionManager,
             uploadRegion,
             env as any,
             async (db) => {
-              return await db.mediaFile.upsert({
-                where: { contentHash: result.contentHash },
-                create: {
+              // T9: a within-tenant dedup hit (identical bytes re-uploaded)
+              // must NOT transfer ownership or de-publish the canonical row.
+              // buildMediaUpsertArgs guarantees the `update` payload touches
+              // neither uploadedBy nor moderationStatus — subsequent uploaders
+              // get a reference (via the post→media relation), not a mutation
+              // of the shared row.
+              return await db.mediaFile.upsert(
+                buildMediaUpsertArgs({
+                  tenantId,
                   contentHash: result.contentHash,
-                  mimeType: mimeType,
+                  mimeType,
                   size: file.size,
                   originalKey: uploadOriginalKey,
-                  optimizedKey: optimizedKey ?? undefined,
-                  uploadStatus: "COMPLETE",
                   uploadedBy: session.userId,
                   width: metadata?.width,
                   height: metadata?.height,
                   duration: metadata?.duration,
-                },
-                update: {
-                  // If record already exists (e.g. re-upload), update status and ownership
-                  // Clear deletedAt so previously-deleted media can be reused
-                  uploadStatus: "COMPLETE",
-                  uploadedBy: session.userId,
-                  optimizedKey: optimizedKey ?? undefined,
-                  deletedAt: null,
-                },
-              });
+                }),
+              );
             },
             {
               ...QueryTimeoutPresets.USER_FACING,
@@ -1228,12 +1085,12 @@ export const mediaRoutes: Route[] = [
         return CorsHandler.addCorsHeaders(errorResponse, request, env);
       }
 
-      // Apply rate limiting: 5 batch uploads per 60s per user (stricter than single)
+      // Apply rate limiting: batch uploads per minute per user (from env.media.rateLimits)
       const rateLimitResponse = await rateLimiter.applyRateLimitKV(
         env as any,
         request,
         "/api/media/upload/batch",
-        5,
+        env.media.rateLimits.batchPerMin,
         60,
         session.userId,
       );
@@ -1301,9 +1158,126 @@ export const mediaRoutes: Route[] = [
           fileCount: files.length,
         });
 
-        // Use MediaUploadService for batch upload
+        // Validate and re-encode each file before uploading (T7/T6).
+        // The batch path applies the same pipeline as the single-upload path:
+        // size check → type check → magic-number check → suspicious-content check
+        // → re-encode images → upload with re-encoded buffer.
+        const batchAllowedImageTypes = new Set(REENCODABLE_IMAGE_TYPES);
+        const batchAllowedVideoTypes = new Set(
+          env.media.allowlist.video.length > 0
+            ? env.media.allowlist.video
+            : ["video/mp4", "video/webm", "video/quicktime"],
+        );
+
+        interface ProcessedFile {
+          file: File;
+          buffer: ArrayBuffer;
+          mimeType: string;
+        }
+        const processed: Array<ProcessedFile | { error: string }> = [];
+
+        for (const batchFile of files) {
+          // Size check
+          const batchFileBuffer = await batchFile.arrayBuffer();
+          const batchIsImage = batchAllowedImageTypes.has(batchFile.type) ||
+            // detect from magic bytes for images
+            (() => {
+              const b = new Uint8Array(batchFileBuffer);
+              if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return true; // JPEG
+              if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return true; // PNG
+              if (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x38) return true; // GIF
+              if (b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 &&
+                  b.length >= 12 && b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return true; // WebP
+              return false;
+            })();
+          const batchIsVideo = batchAllowedVideoTypes.has(batchFile.type);
+
+          if (!batchIsImage && !batchIsVideo) {
+            processed.push({ error: `Unsupported file type: ${batchFile.type || "unknown"}` });
+            continue;
+          }
+
+          const maxSize = batchIsImage ? env.media.maxBytes.image : env.media.maxBytes.video;
+          if (batchFile.size > maxSize) {
+            processed.push({ error: `File too large: ${batchFile.name}` });
+            continue;
+          }
+
+          const batchBytes = new Uint8Array(batchFileBuffer);
+
+          // Suspicious content check — reject the file
+          const batchSuspicious = checkSuspiciousContent(batchBytes, batchFile.type || "application/octet-stream");
+          if (batchSuspicious.length > 0) {
+            logger.warn("[Media Batch Upload] Suspicious file detected — skipping", {
+              userId: session.userId,
+              fileName: batchFile.name,
+              suspicious: batchSuspicious,
+            });
+            processed.push({ error: "Suspicious content detected" });
+            continue;
+          }
+
+          // Re-encode images (T7)
+          if (batchIsImage) {
+            try {
+              const reencoded = await reencodeImage(batchFileBuffer, env);
+              // Buffer is a Uint8Array subclass — cast is safe for all consumers.
+              processed.push({ file: batchFile, buffer: reencoded.buffer as unknown as ArrayBuffer, mimeType: reencoded.canonicalMimeType });
+            } catch (reencodeErr: any) {
+              logger.warn("[Media Batch Upload] Re-encode failed — skipping file", {
+                userId: session.userId,
+                fileName: batchFile.name,
+                error: reencodeErr.message,
+              });
+              processed.push({ error: "Image processing failed" });
+            }
+          } else {
+            processed.push({ file: batchFile, buffer: batchFileBuffer, mimeType: batchFile.type });
+          }
+        }
+
+        // Resolve the tenant that scopes these uploads (T9 / D18) — same
+        // canonical CAS scheme as the single-upload path.
+        const batchTenantId = await resolveUploadTenantId(
+          session.userId,
+          "US",
+          env,
+        );
+        if (!batchTenantId) {
+          logger.error("[Media Batch Upload] No tenant context for upload", {
+            userId: session.userId,
+          });
+          const errorResponse = securityHeaders.createSecureResponse(
+            JSON.stringify({
+              error: "Tenant resolution failed",
+              message: "Could not resolve a tenant for this upload.",
+            }),
+            { status: 500, headers: { "content-type": "application/json" } },
+          );
+          return CorsHandler.addCorsHeaders(errorResponse, request, env);
+        }
+
+        // Upload each successfully processed file individually (preserves re-encoded buffer)
         const uploadService = new MediaUploadService(env);
-        const results = await uploadService.uploadBatch(files, session.userId);
+        const results = await Promise.all(
+          processed.map(async (item): Promise<{ success: boolean; contentHash: string; url: string; status: string; warning?: string }> => {
+            if ("error" in item) {
+              return { success: false, contentHash: "", url: "", status: "failed", warning: item.error };
+            }
+            try {
+              const uploadResult = await uploadService.uploadSingle(
+                item.file,
+                session.userId,
+                batchTenantId,
+                undefined,
+                item.buffer,
+              );
+              return uploadResult;
+            } catch (err: any) {
+              return { success: false, contentHash: "", url: "", status: "failed", warning: `Upload failed: ${err.message}` };
+            }
+          }),
+        );
 
         const successCount = results.filter((r) => r.success).length;
         const failureCount = results.filter((r) => !r.success).length;
@@ -1372,12 +1346,12 @@ export const mediaRoutes: Route[] = [
         return CorsHandler.addCorsHeaders(errorResponse, request, env);
       }
 
-      // Apply rate limiting: 60 requests per minute per user
+      // Apply rate limiting: serve requests per minute per user (from env.media.rateLimits)
       const rateLimitResponse = await rateLimiter.applyRateLimitKV(
         env as any,
         request,
         "/api/media/grouped",
-        60,
+        env.media.rateLimits.servePerMin,
         60,
         session.userId,
       );
@@ -1563,12 +1537,12 @@ export const mediaRoutes: Route[] = [
         return CorsHandler.addCorsHeaders(errorResponse, request, env);
       }
 
-      // Apply rate limiting: 60 requests per minute per user
+      // Apply rate limiting: serve requests per minute per user (from env.media.rateLimits)
       const rateLimitResponse = await rateLimiter.applyRateLimitKV(
         env as any,
         request,
         "/api/media/stats",
-        60,
+        env.media.rateLimits.servePerMin,
         60,
         session.userId,
       );
@@ -1685,12 +1659,12 @@ export const mediaRoutes: Route[] = [
         return CorsHandler.addCorsHeaders(errorResponse, request, env);
       }
 
-      // Apply rate limiting: 120 requests per minute per user
+      // Apply rate limiting: serve requests per minute per user (from env.media.rateLimits)
       const rateLimitResponse = await rateLimiter.applyRateLimitKV(
         env as any,
         request,
         "/api/media/:mediaId",
-        120,
+        env.media.rateLimits.servePerMin,
         60,
         session.userId,
       );
@@ -1978,12 +1952,12 @@ export const mediaRoutes: Route[] = [
         return CorsHandler.addCorsHeaders(errorResponse, request, env);
       }
 
-      // Apply rate limiting: 60 requests per minute per user
+      // Apply rate limiting: serve requests per minute per user (from env.media.rateLimits)
       const rateLimitResponse = await rateLimiter.applyRateLimitKV(
         env as any,
         request,
         "/api/media",
-        60,
+        env.media.rateLimits.servePerMin,
         60,
         session.userId,
       );
