@@ -128,6 +128,10 @@ beforeEach(() => {
   process.env.AWS_REGION = "eu-central-1";
   process.env.DB_SECRET_ARN = "arn:aws:secretsmanager:eu-central-1:123:secret:db";
   process.env.DYNAMODB_TABLE = "dev-trellis";
+  // Read-after-write retry knobs: a known retry budget and a zero backoff so
+  // the retry-path tests run instantly (real default is 150ms between tries).
+  process.env.PRETOKEN_RDS_RETRY_MAX = "4";
+  process.env.PRETOKEN_RDS_RETRY_DELAY_MS = "0";
 
   mockSecretsSend.mockResolvedValue({
     SecretString: JSON.stringify({
@@ -383,6 +387,106 @@ describe("PreTokenGeneration — cache miss", () => {
       result!.response.claimsAndScopeOverrideDetails!.accessTokenGeneration!
         .claimsToAddOrOverride;
     expect(claims["custom:userId"]).toBe("u_new");
+  });
+});
+
+describe("PreTokenGeneration — read-after-write race (RDS retry)", () => {
+  it("retries the RDS lookup and recovers when the user row is not yet visible", async () => {
+    // The brand-new signup's first token is minted before PostConfirmation's
+    // provisioning transaction is visible: attempt 1 sees no row, attempt 2
+    // does. The token MUST carry the real cuid, not the drift sentinel.
+    mockDdbSend.mockResolvedValueOnce({ Item: undefined }); // cache miss
+    mockUserFindUnique
+      .mockResolvedValueOnce(null) // not yet committed
+      .mockResolvedValueOnce({
+        id: "u_clxxx",
+        role: "END_USER",
+        handle: "alice",
+        suspended: false,
+        suspendedAt: null,
+        personalTenantId: "t_personal",
+      });
+    mockTenantMemberFindMany.mockResolvedValueOnce([
+      {
+        tenantId: "t_personal",
+        role: "OWNER",
+        tenant: {
+          id: "t_personal",
+          slug: "personal-u_clxxx",
+          status: "ACTIVE",
+          type: "PERSONAL",
+        },
+      },
+    ]);
+
+    const handler = await loadHandler();
+    const result = await handler(makeEvent(), {} as any, () => {});
+
+    expect(mockUserFindUnique.mock.calls.length).toBeGreaterThanOrEqual(2);
+    const claims =
+      result!.response.claimsAndScopeOverrideDetails!.idTokenGeneration!
+        .claimsToAddOrOverride;
+    expect(claims["custom:userId"]).toBe("u_clxxx");
+    expect(claims["custom:activeTenantId"]).toBe("t_personal");
+    // The recovered claims are cached so the next issuance is a clean hit.
+    const puts = mockDdbSend.mock.calls.filter((c) => c[0].kind === "PUT");
+    expect(puts.length).toBe(1);
+  });
+
+  it("falls through to the drift sentinel after exhausting RDS retries", async () => {
+    // Genuine drift (post-RDS-restore): the row never appears. Behaviour is
+    // unchanged from the single-shot case — empty claims, no cache write — but
+    // now only after the bounded retry budget is spent.
+    process.env.PRETOKEN_RDS_RETRY_MAX = "3";
+    mockDdbSend.mockResolvedValue({ Item: undefined });
+    mockUserFindUnique.mockResolvedValue(null);
+
+    const handler = await loadHandler();
+    const result = await handler(makeEvent(), {} as any, () => {});
+
+    expect(mockUserFindUnique.mock.calls.length).toBe(3);
+    const claims =
+      result!.response.claimsAndScopeOverrideDetails!.idTokenGeneration!
+        .claimsToAddOrOverride;
+    expect(claims["custom:userId"]).toBe("");
+    const puts = mockDdbSend.mock.calls.filter((c) => c[0].kind === "PUT");
+    expect(puts.length).toBe(0);
+  });
+
+  it("treats a cached entry with an empty userId as a miss and recovers from RDS", async () => {
+    // No path should ever cache an empty userId, but if one is ever present
+    // (a poisoned/legacy row), serving it would mint a token with an empty
+    // `custom:userId`. Defensive: treat it as a miss and fall back to RDS.
+    mockDdbSend.mockResolvedValueOnce(freshClaimsItem({ userId: { S: "" } }));
+    mockUserFindUnique.mockResolvedValueOnce({
+      id: "u_real",
+      role: "END_USER",
+      handle: "alice",
+      suspended: false,
+      suspendedAt: null,
+      personalTenantId: "t_personal",
+    });
+    mockTenantMemberFindMany.mockResolvedValueOnce([
+      {
+        tenantId: "t_personal",
+        role: "OWNER",
+        tenant: {
+          id: "t_personal",
+          slug: "personal-u_real",
+          status: "ACTIVE",
+          type: "PERSONAL",
+        },
+      },
+    ]);
+
+    const handler = await loadHandler();
+    const result = await handler(makeEvent(), {} as any, () => {});
+
+    expect(mockUserFindUnique).toHaveBeenCalled();
+    const claims =
+      result!.response.claimsAndScopeOverrideDetails!.idTokenGeneration!
+        .claimsToAddOrOverride;
+    expect(claims["custom:userId"]).toBe("u_real");
   });
 });
 
