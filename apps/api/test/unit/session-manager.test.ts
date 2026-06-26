@@ -14,6 +14,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionManager, type Session } from "../../src/lib/session-cookie.js";
 
+// Mock Cognito JWT verification (the Bearer-token auth strategy).
+const { mockVerifyCognitoJwt } = vi.hoisted(() => ({
+  mockVerifyCognitoJwt: vi.fn(),
+}));
+vi.mock("../../src/lib/auth/cognito-jwt", () => ({
+  verifyCognitoJwt: mockVerifyCognitoJwt,
+}));
+
 // Mock session-config - simple mock that returns default config
 vi.mock("../../src/lib/session-config", () => ({
   getSessionConfig: (env: any) => ({
@@ -148,6 +156,39 @@ describe("SessionManager", () => {
   });
 
   describe("getSession", () => {
+    const bearerReq = (token = "h.cA.s") =>
+      new Request("https://example.com/api/test", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+    it("JWT Bearer: session.userId is the cuid in custom:userId, not the Cognito sub", async () => {
+      // Regression (media uploads "Tenant resolution failed"): DB User.id is a
+      // cuid and handlers look up the session user via where:{id:session.userId};
+      // the media routes authenticate via THIS getSession Bearer path.
+      mockVerifyCognitoJwt.mockResolvedValue({
+        sub: "23643892-00c1-7057-551c-aed44aed1f13", // Cognito sub (UUID)
+        "custom:userId": "cmqurmq7x000002i80nqmgfr8", // DB User.id (cuid)
+        email: "user@example.com",
+        username: "user@example.com",
+      });
+
+      const session = await sessionManager.getSession(bearerReq(), testSecret, testEnv);
+
+      expect(session?.userId).toBe("cmqurmq7x000002i80nqmgfr8");
+    });
+
+    it("JWT Bearer: falls back to sub when custom:userId is absent (legacy tokens)", async () => {
+      mockVerifyCognitoJwt.mockResolvedValue({
+        sub: "legacy-sub-123",
+        email: "legacy@example.com",
+        username: "legacy@example.com",
+      });
+
+      const session = await sessionManager.getSession(bearerReq(), testSecret, testEnv);
+
+      expect(session?.userId).toBe("legacy-sub-123");
+    });
+
     it("should return null for missing Cookie header", async () => {
       const request = new Request("https://example.com/api/test", {
         method: "GET",
