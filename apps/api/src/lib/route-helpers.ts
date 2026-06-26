@@ -64,7 +64,15 @@ export class RouteHelpers {
             username: claims.username,
           });
           return {
-            userId: claims.sub,
+            // Prefer the cuid in `custom:userId` — that is the DB `User.id`
+            // (written by the pre-token-generation Lambda; matches how
+            // auth-middleware derives the user). The whole app looks up the
+            // session user via `where: { id: session.userId }`, so using the
+            // Cognito `sub` here mismatched the cuid-keyed row and broke every
+            // such lookup for JWT-Bearer clients (e.g. media tenant resolution
+            // → 500 "Tenant resolution failed"). Fall back to `sub` only for
+            // legacy tokens minted without the claim.
+            userId: claims["custom:userId"] || claims.sub,
             email: claims.email || claims.username,
           };
         } catch (err) {

@@ -17,18 +17,25 @@ vi.mock("../../src/lib/cors-handler", () => ({
 }));
 
 // Hoist all mock functions to avoid circular dependency issues
-const { mockGetSession, mockCreateSecureResponse, mockAddSecurityHeaders, mockSanitizeError } = vi.hoisted(() => {
+const { mockGetSession, mockCreateSecureResponse, mockAddSecurityHeaders, mockSanitizeError, mockVerifyCognitoJwt } = vi.hoisted(() => {
   const mockGetSession = vi.fn();
   const mockCreateSecureResponse = vi.fn();
   const mockAddSecurityHeaders = vi.fn();
   const mockSanitizeError = vi.fn((error) => error?.message || "Unknown error");
+  const mockVerifyCognitoJwt = vi.fn();
   return {
     mockGetSession,
     mockCreateSecureResponse,
     mockAddSecurityHeaders,
     mockSanitizeError,
+    mockVerifyCognitoJwt,
   };
 });
+
+// Mock Cognito JWT verification (the Bearer-token auth strategy)
+vi.mock("../../src/lib/auth/cognito-jwt", () => ({
+  verifyCognitoJwt: mockVerifyCognitoJwt,
+}));
 
 // Mock SessionManager
 vi.mock("../../src/lib/session-cookie", () => ({
@@ -112,6 +119,46 @@ describe("RouteHelpers", () => {
   });
 
   describe("getSessionFromRequest", () => {
+    const bearer = (token = "h.p.s") =>
+      new Request("https://example.com/api/test", {
+        method: "GET",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+    it("JWT Bearer: session.userId is the cuid in custom:userId, not the Cognito sub", async () => {
+      // Regression: the DB User.id is a cuid and every handler looks up the
+      // session user via `where: { id: session.userId }`. Using claims.sub here
+      // mismatched the cuid-keyed row and broke those lookups (e.g. media
+      // tenant resolution → "Tenant resolution failed").
+      mockVerifyCognitoJwt.mockResolvedValue({
+        sub: "23643892-00c1-7057-551c-aed44aed1f13", // Cognito sub (UUID)
+        "custom:userId": "cmqurmq7x000002i80nqmgfr8", // DB User.id (cuid)
+        email: "user@example.com",
+        username: "user@example.com",
+      });
+
+      const result = await routeHelpers.getSessionFromRequest(bearer());
+
+      expect(result).toEqual({
+        userId: "cmqurmq7x000002i80nqmgfr8",
+        email: "user@example.com",
+      });
+      // The session-cookie fallback must not be consulted on a valid JWT.
+      expect(mockGetSession).not.toHaveBeenCalled();
+    });
+
+    it("JWT Bearer: falls back to sub when custom:userId is absent (legacy tokens)", async () => {
+      mockVerifyCognitoJwt.mockResolvedValue({
+        sub: "legacy-sub-123",
+        email: "legacy@example.com",
+        username: "legacy@example.com",
+      });
+
+      const result = await routeHelpers.getSessionFromRequest(bearer());
+
+      expect(result).toEqual({ userId: "legacy-sub-123", email: "legacy@example.com" });
+    });
+
     it("should get session successfully", async () => {
       const mockSession = {
         userId: "user-123",
