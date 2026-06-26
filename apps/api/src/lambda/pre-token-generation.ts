@@ -51,6 +51,20 @@ const DRIFT_CLAIMS: CachedClaims = {
   handle: "",
 };
 
+// Read-after-write retry budget for the RDS fallback. On a brand-new signup,
+// the first token can be minted before PostConfirmation's provisioning
+// transaction is visible; a single miss would emit the drift sentinel (empty
+// `custom:userId`) and break every downstream `where:{id}` lookup until the
+// user re-auths. We retry the load a bounded number of times so the write can
+// land. Genuine drift (post-RDS-restore) simply exhausts the budget and falls
+// through to the sentinel exactly as before. Runtime config, not compiled-in
+// constants (threshold-secrecy rule).
+const DEFAULT_RDS_RETRY_MAX = 4;
+const DEFAULT_RDS_RETRY_DELAY_MS = 150;
+
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
 function parseIdpGroups(raw: string | undefined | null): string[] {
   if (!raw) return [];
   return raw
@@ -191,6 +205,15 @@ export const handler: PreTokenGenerationV2TriggerHandler = async (event) => {
   // Without invalidation, suspended users keep valid claims for up to one
   // cache TTL (DEFAULT_CACHE_TTL_SECONDS = 3600s). Tracked as G2 finding H3.
   let claims = await claimsCache.get(cognitoSub);
+  // A cached entry with an empty userId is never legitimate: a real user's
+  // claims always carry the cuid, and the drift sentinel is never written to
+  // the cache (both `put` sites guard on a truthy userId). Treat such an entry
+  // as a miss so the RDS fallback can recover the real userId rather than
+  // serving a token with an empty `custom:userId`.
+  if (claims && !claims.userId) {
+    logger.warn("pretoken.empty_cache_entry", { cognitoSub });
+    claims = null;
+  }
   let cacheHit = !!claims;
 
   if (!claims) {
@@ -211,13 +234,47 @@ export const handler: PreTokenGenerationV2TriggerHandler = async (event) => {
         error: (err as { code?: string })?.code ?? "unknown",
       });
     }
-    const loaded = await withLambdaDbBreaker(
+
+    // Bounded read-after-write retry: re-read until the user row is visible or
+    // the budget is spent (see DEFAULT_RDS_RETRY_* above). Each attempt is wrapped
+    // in the breaker, so a saturated DB still fast-fails (the breaker throws and
+    // issuance fails) rather than being retried into an exhausted instance — a
+    // null return is a successful read, not a breaker failure, so retrying it is
+    // safe.
+    const retryMax = Math.max(
+      1,
+      Number(process.env.PRETOKEN_RDS_RETRY_MAX ?? DEFAULT_RDS_RETRY_MAX),
+    );
+    const retryDelayMs = Math.max(
+      0,
+      Number(process.env.PRETOKEN_RDS_RETRY_DELAY_MS ?? DEFAULT_RDS_RETRY_DELAY_MS),
+    );
+    let loaded = await withLambdaDbBreaker(
       () => loadFromRds(db, cognitoSub, federated, preferredTenantId),
       "pretoken.load_from_rds",
     );
+    let rdsAttempts = 1;
+    while (!loaded.user && rdsAttempts < retryMax) {
+      await sleep(retryDelayMs);
+      loaded = await withLambdaDbBreaker(
+        () => loadFromRds(db, cognitoSub, federated, preferredTenantId),
+        "pretoken.load_from_rds",
+      );
+      rdsAttempts++;
+    }
+    if (rdsAttempts > 1) {
+      // Fires only when the race actually occurred — a low-noise signal that
+      // distinguishes the read-after-write window from steady state, and shows
+      // whether the retry recovered the row.
+      logger.warn("pretoken.rds_retry", {
+        cognitoSub,
+        rdsAttempts,
+        recovered: !!loaded.user,
+      });
+    }
 
     if (!loaded.user) {
-      logger.warn("pretoken.drift", { cognitoSub });
+      logger.warn("pretoken.drift", { cognitoSub, rdsAttempts });
       claims = { ...DRIFT_CLAIMS };
       writeTokenClaims(event, claims);
       return event;
