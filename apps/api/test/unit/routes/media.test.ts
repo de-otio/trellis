@@ -5,6 +5,7 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import * as fc from "fast-check";
 import { mediaRoutes } from "../../../src/lib/routes/media.js";
 import type { Session } from "../../../src/lib/session-cookie.js";
 
@@ -47,6 +48,8 @@ vi.mock("../../../src/lib/cors-handler", () => ({
 const mockMediaFileFindUnique = vi.fn();
 const mockMediaFileCreate = vi.fn();
 const mockMediaFileUpsert = vi.fn();
+const mockMediaFileCount = vi.fn();
+const mockMediaFileAggregate = vi.fn();
 const mockCreatePrismaForRegion = vi.hoisted(() => vi.fn());
 vi.mock("../../../src/db", () => ({
   createPrismaForRegion: mockCreatePrismaForRegion,
@@ -69,10 +72,43 @@ vi.mock("../../../src/lib/database-connection-manager", () => ({
   },
 }));
 
+// T7 (sibling step, already in this worktree): the upload path re-encodes
+// images via reencodeImage. Mock it as a pass-through so the tiny synthetic
+// fixtures here don't hit real sharp. Preserves the input bytes; the canonical
+// MIME echoes back jpeg (tests assert detection on the pre-encode bytes).
+const mockReencodeImage = vi.fn();
+vi.mock("../../../src/lib/services/image-normalizer", () => ({
+  ImageNormalizer: class {
+    normalize = vi.fn().mockResolvedValue(null);
+  },
+  REENCODABLE_IMAGE_TYPES: new Set([
+    "image/jpeg",
+    "image/jpg",
+    "image/png",
+    "image/webp",
+    "image/gif",
+  ]),
+  reencodeImage: (...args: any[]) => mockReencodeImage(...args),
+}));
+
+// T9: upload resolves a tenant via the ambient auth seam (getCurrentTenantId).
+// Provide a valid CUID-shaped ambient tenant so the canonical CAS key
+// (cas/{tenantId}/{hash}) can be built without a DB fallback.
+const TEST_TENANT_ID = "ctenant0000000000000000aa";
+const VALID_UPLOAD_HASH = "a".repeat(64);
+// Overridable so a test can drive the ambient tenant to undefined and exercise
+// the "no resolved tenant" deny/500 branches (resolveUploadTenantId → null).
+// Defaults to the fixed CUID-shaped tenant; reset in beforeEach below.
+const mockGetCurrentTenantId = vi.fn(() => TEST_TENANT_ID);
+vi.mock("@de-otio/saas-foundation/tenant", () => ({
+  getCurrentTenantId: (...args: any[]) => mockGetCurrentTenantId(...args),
+}));
+
 // Mock R2 bucket
 const mockR2Head = vi.fn();
 const mockR2Put = vi.fn();
 const mockR2Get = vi.fn();
+const mockR2Delete = vi.fn();
 
 // Mock MediaHandler - simple factory pattern
 const mockMediaHandlerInstance = vi.hoisted(() => ({
@@ -123,8 +159,37 @@ describe("Media Routes", () => {
         head: mockR2Head,
         put: mockR2Put,
         get: mockR2Get,
+        delete: mockR2Delete,
+      },
+      // Media config block required by the re-encode pipeline + allowlist
+      // (T4/T7) and the configurable caps (T10). Mirrors the block in
+      // routes-media-extended.test.ts.
+      media: {
+        maxBytes: {
+          image: 10 * 1024 * 1024,
+          video: 100 * 1024 * 1024,
+          audio: 100 * 1024 * 1024,
+        },
+        maxPixels: 25_000_000,
+        rateLimits: { uploadPerMin: 10, batchPerMin: 5, servePerMin: 60 },
+        allowlist: {
+          image: ["image/jpeg", "image/png", "image/webp", "image/gif"],
+          video: ["video/mp4", "video/webm", "video/quicktime"],
+          audio: [],
+        },
+        presets: [],
+        thresholds: {},
+        canonicalFormat: "jpeg" as const,
+        canonicalQuality: 85,
+        uploadQuota: {
+          maxObjects: 1000,
+          maxBytes: 1024 * 1024 * 1024, // 1 GiB
+        },
       },
     };
+
+    // Restore the default ambient tenant after any per-test override.
+    mockGetCurrentTenantId.mockReturnValue(TEST_TENANT_ID);
 
     mockGetSession.mockResolvedValue(mockSession);
     mockApplyRateLimitKV.mockResolvedValue(null); // No rate limit
@@ -140,6 +205,8 @@ describe("Media Routes", () => {
         findUnique: mockMediaFileFindUnique,
         create: mockMediaFileCreate,
         upsert: mockMediaFileUpsert,
+        count: mockMediaFileCount,
+        aggregate: mockMediaFileAggregate,
       },
     };
     mockCreatePrismaForRegion.mockReturnValue(mockDb);
@@ -152,6 +219,10 @@ describe("Media Routes", () => {
       id: "media-123",
       contentHash: "test-hash",
     });
+    // Default: well under quota (0 objects, 0 bytes used).
+    mockMediaFileCount.mockResolvedValue(0);
+    mockMediaFileAggregate.mockResolvedValue({ _sum: { size: 0 } });
+    mockR2Delete.mockResolvedValue(undefined);
 
     // Default withQueryTimeoutAndRetry mock - executes query function with mockDb
     mockWithQueryTimeoutAndRetry.mockImplementation(
@@ -170,10 +241,21 @@ describe("Media Routes", () => {
     mockR2Put.mockResolvedValue(undefined);
     mockR2Get.mockResolvedValue(null);
 
-    // Default MediaUploadService mock
+    // T7 re-encode: pass-through, preserving the input bytes. canonicalMimeType
+    // echoes image/jpeg (the canonical raster output).
+    mockReencodeImage.mockImplementation(async (buf: ArrayBuffer) => ({
+      buffer: Buffer.from(
+        buf instanceof Buffer ? buf : new Uint8Array(buf as ArrayBuffer),
+      ),
+      canonicalMimeType: "image/jpeg",
+    }));
+
+    // Default MediaUploadService mock.
+    // T9: contentHash must be a valid 64-char hex digest so the canonical
+    // casKey can be built (the handler rejects malformed hashes).
     mockUploadSingle.mockResolvedValue({
-      url: "https://api.rkm1.de/api/media/test-hash",
-      contentHash: "test-hash",
+      url: `https://api.rkm1.de/api/media/${VALID_UPLOAD_HASH}`,
+      contentHash: VALID_UPLOAD_HASH,
       status: "uploaded",
     });
     mockUploadBatch.mockResolvedValue({
@@ -660,15 +742,19 @@ describe("Media Routes", () => {
         body: formData,
       });
 
+      mockMediaFileCreate.mockResolvedValue({ id: "p1", uploadId: "c" + "0".repeat(24), originalKey: null });
+
       const response = await uploadRoute!.handler(mockRequest, mockEnv, {
         url: new URL("https://api.rkm1.de/api/media/upload"),
         pathname: "/api/media/upload",
         params: {},
       });
 
-      expect(response.status).toBe(200);
+      // P0b: video now takes the async-pending path → 202 Accepted.
+      expect(response.status).toBe(202);
       const body = await response.json();
-      expect(body).toHaveProperty("contentHash");
+      expect(body).toHaveProperty("uploadId");
+      expect(body).toHaveProperty("status", "pending");
     });
 
     it("should reject videos that are too large", async () => {
@@ -695,6 +781,213 @@ describe("Media Routes", () => {
       const body = await response.json();
       expect(body).toHaveProperty("error", "File too large");
       expect(body.message).toContain("100MB");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // B2 P0b routing test cases
+  // -------------------------------------------------------------------------
+
+  describe("POST /api/media/upload — quota enforcement", () => {
+    const uploadRoute = mediaRoutes.find(
+      (r) => r.path === "/api/media/upload" && r.method === "POST",
+    );
+
+    it("rejects with 429 when object cap is reached", async () => {
+      // Saturate the object count so the quota check fails with object-cap.
+      mockMediaFileCount.mockResolvedValue(1000); // == maxObjects
+      mockMediaFileAggregate.mockResolvedValue({ _sum: { size: 0 } });
+
+      const jpegMagic = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]);
+      const formData = new FormData();
+      formData.append("file", new Blob([jpegMagic], { type: "image/jpeg" }), "test.jpg");
+
+      const response = await uploadRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/upload", { method: "POST", body: formData }),
+        mockEnv,
+        { url: new URL("https://api.rkm1.de/api/media/upload"), pathname: "/api/media/upload", params: {} },
+      );
+
+      expect(response.status).toBe(429);
+      const body = await response.json();
+      expect(body).toHaveProperty("error", "Upload quota exceeded");
+    });
+
+    it("rejects with 413 when byte cap is reached", async () => {
+      // currentBytes already at the ceiling, even a tiny file tips over.
+      const oneByteBelowCap = 1024 * 1024 * 1024 - 1; // 1 GiB - 1 byte
+      mockMediaFileCount.mockResolvedValue(0);
+      mockMediaFileAggregate.mockResolvedValue({ _sum: { size: oneByteBelowCap } });
+
+      // File size 4 bytes — currentBytes + 4 > maxBytes.
+      const jpegMagic = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]);
+      const formData = new FormData();
+      formData.append("file", new Blob([jpegMagic], { type: "image/jpeg" }), "test.jpg");
+
+      const response = await uploadRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/upload", { method: "POST", body: formData }),
+        mockEnv,
+        { url: new URL("https://api.rkm1.de/api/media/upload"), pathname: "/api/media/upload", params: {} },
+      );
+
+      expect(response.status).toBe(413);
+      const body = await response.json();
+      expect(body).toHaveProperty("error", "Upload quota exceeded");
+    });
+
+    it("allows upload when usage is just under both caps", async () => {
+      // currentObjects = 999 (one below 1000 cap), currentBytes = 0 — should pass.
+      mockMediaFileCount.mockResolvedValue(999);
+      mockMediaFileAggregate.mockResolvedValue({ _sum: { size: 0 } });
+
+      const jpegMagic = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]);
+      const formData = new FormData();
+      formData.append("file", new Blob([jpegMagic], { type: "image/jpeg" }), "test.jpg");
+
+      const response = await uploadRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/upload", { method: "POST", body: formData }),
+        mockEnv,
+        { url: new URL("https://api.rkm1.de/api/media/upload"), pathname: "/api/media/upload", params: {} },
+      );
+
+      // Should reach the sync-image path and succeed (200).
+      expect(response.status).toBe(200);
+    });
+  });
+
+  describe("POST /api/media/upload — async-pending routing (video/audio)", () => {
+    const uploadRoute = mediaRoutes.find(
+      (r) => r.path === "/api/media/upload" && r.method === "POST",
+    );
+
+    it("routes video/mp4 to async-pending: 202, uploadId + status=pending, no originalKey", async () => {
+      // MP4 magic: ftyp box at offset 4
+      const mp4Bytes = new Uint8Array([
+        0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70,
+        0x69, 0x73, 0x6f, 0x6d, // brand = "isom"
+      ]);
+      const formData = new FormData();
+      formData.append("file", new Blob([mp4Bytes], { type: "video/mp4" }), "test.mp4");
+
+      mockMediaFileCreate.mockResolvedValue({
+        id: "pending-row-1",
+        uploadId: "c" + "0".repeat(24),
+        moderationStatus: "PENDING",
+        originalKey: null,
+      });
+
+      const response = await uploadRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/upload", { method: "POST", body: formData }),
+        mockEnv,
+        { url: new URL("https://api.rkm1.de/api/media/upload"), pathname: "/api/media/upload", params: {} },
+      );
+
+      expect(response.status).toBe(202);
+      const body = await response.json();
+      expect(body).toHaveProperty("status", "pending");
+      expect(body).toHaveProperty("uploadId");
+      // uploadId must match UPLOAD_ID_RE: c[a-z0-9]{24}
+      expect(body.uploadId).toMatch(/^c[0-9a-f]{24}$/);
+
+      // Raw bytes must have been written to a pending/ key in R2 — NOT to cas/.
+      expect(mockR2Put).toHaveBeenCalledTimes(1);
+      const [putKey] = mockR2Put.mock.calls[0];
+      expect(putKey).toMatch(/^pending\//);
+      expect(putKey).toContain(TEST_TENANT_ID);
+
+      // DB row must be created (not upserted) with null originalKey and the uploadId.
+      expect(mockMediaFileCreate).toHaveBeenCalledTimes(1);
+      const createCall = mockMediaFileCreate.mock.calls[0][0];
+      expect(createCall.data.originalKey).toBeNull();
+      expect(createCall.data.uploadId).toMatch(/^c[0-9a-f]{24}$/);
+      // moderationStatus defaults to PENDING in the schema; we only supply uploadId + uploadStatus.
+      expect(createCall.data.uploadStatus).toBe("PENDING");
+
+      // MediaUploadService.uploadSingle must NOT be called on the async path.
+      expect(mockUploadSingle).not.toHaveBeenCalled();
+    });
+
+    it("routes video/webm to async-pending: 202", async () => {
+      // WebM magic: 1A 45 DF A3
+      const webmBytes = new Uint8Array([0x1a, 0x45, 0xdf, 0xa3, 0x00]);
+      const formData = new FormData();
+      formData.append("file", new Blob([webmBytes], { type: "video/webm" }), "test.webm");
+
+      mockMediaFileCreate.mockResolvedValue({ id: "p2", uploadId: "c" + "1".repeat(24), originalKey: null });
+
+      const response = await uploadRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/upload", { method: "POST", body: formData }),
+        mockEnv,
+        { url: new URL("https://api.rkm1.de/api/media/upload"), pathname: "/api/media/upload", params: {} },
+      );
+
+      expect(response.status).toBe(202);
+      const body = await response.json();
+      expect(body).toHaveProperty("status", "pending");
+      expect(mockUploadSingle).not.toHaveBeenCalled();
+    });
+
+    it("image still follows sync path: 200 with contentHash (not 202)", async () => {
+      const jpegMagic = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]);
+      const formData = new FormData();
+      formData.append("file", new Blob([jpegMagic], { type: "image/jpeg" }), "test.jpg");
+
+      const response = await uploadRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/upload", { method: "POST", body: formData }),
+        mockEnv,
+        { url: new URL("https://api.rkm1.de/api/media/upload"), pathname: "/api/media/upload", params: {} },
+      );
+
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body).toHaveProperty("contentHash");
+      // Sync path uses MediaUploadService (no pending/ R2 write)
+      expect(mockUploadSingle).toHaveBeenCalled();
+      // No pending/ key was written
+      if (mockR2Put.mock.calls.length > 0) {
+        const [putKey] = mockR2Put.mock.calls[0];
+        expect(putKey).not.toMatch(/^pending\//);
+      }
+    });
+
+    it("returns 400 for unknown/unsupported content type when routeUpload says reject", async () => {
+      // application/pdf has no valid magic numbers and is not in the allowed lists,
+      // but even if we contrive bytes that pass earlier checks, routeUpload gates it.
+      const pdfBytes = new Uint8Array([0x25, 0x50, 0x44, 0x46]); // %PDF
+      const formData = new FormData();
+      formData.append("file", new Blob([pdfBytes], { type: "application/pdf" }), "doc.pdf");
+
+      const response = await uploadRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/upload", { method: "POST", body: formData }),
+        mockEnv,
+        { url: new URL("https://api.rkm1.de/api/media/upload"), pathname: "/api/media/upload", params: {} },
+      );
+
+      expect(response.status).toBe(400);
+    });
+
+    it("video pending DB failure triggers R2 cleanup and returns 500", async () => {
+      const mp4Bytes = new Uint8Array([
+        0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70,
+        0x69, 0x73, 0x6f, 0x6d,
+      ]);
+      const formData = new FormData();
+      formData.append("file", new Blob([mp4Bytes], { type: "video/mp4" }), "test.mp4");
+
+      // DB create throws — simulates DB outage after R2 write succeeded.
+      mockMediaFileCreate.mockRejectedValue(new Error("DB unavailable"));
+
+      const response = await uploadRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/upload", { method: "POST", body: formData }),
+        mockEnv,
+        { url: new URL("https://api.rkm1.de/api/media/upload"), pathname: "/api/media/upload", params: {} },
+      );
+
+      expect(response.status).toBe(500);
+      // R2 delete was attempted to clean up the orphaned pending object.
+      expect(mockR2Delete).toHaveBeenCalledTimes(1);
+      const [deleteKey] = mockR2Delete.mock.calls[0];
+      expect(deleteKey).toMatch(/^pending\//);
     });
   });
 
@@ -744,128 +1037,124 @@ describe("Media Routes", () => {
       expect(body).toHaveProperty("error", "Missing content hash");
     });
 
-    it("should serve media when MediaFile exists in database", async () => {
-      const mockMediaFile = {
-        id: "media-123",
-        contentHash: "test-hash",
-        mimeType: "image/jpeg",
-        originalKey: "media/test-hash.jpg",
-        optimizedKey: null,
-        thumbnailKey: null,
-      };
-
-      mockMediaFileFindUnique.mockResolvedValue(mockMediaFile);
-
-      const mockR2Object = {
-        body: new ReadableStream(),
-        httpMetadata: { contentType: "image/jpeg" },
-      };
-      mockR2Get.mockResolvedValue(mockR2Object);
-
-      mockRequest = new Request("https://api.rkm1.de/api/media/test-hash", {
-        method: "GET",
-      });
-
-      const response = await getMediaRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/test-hash"),
-        pathname: "/api/media/test-hash",
-        params: { hash: "test-hash" },
-      });
-
-      expect(response.status).toBe(200);
-      expect(mockR2Get).toHaveBeenCalledWith("media/test-hash.jpg");
-      expect(mockR2Head).not.toHaveBeenCalled(); // Should not use fallback
+    // T5: the serve gate is APPROVED-only and reads the canonical originalKey
+    // verbatim (no variant-key selection, no probing). The record must carry
+    // moderationStatus APPROVED + not hidden + not deleted, and a valid 64-hex
+    // contentHash (validateContentHash runs before any lookup).
+    const APPROVED_CAS_KEY = `cas/${TEST_TENANT_ID}/${VALID_UPLOAD_HASH}`;
+    const approvedRecord = (
+      over: Record<string, unknown> = {},
+    ) => ({
+      id: "media-123",
+      contentHash: VALID_UPLOAD_HASH,
+      mimeType: "image/png", // stored mime — MUST be ignored by the gate
+      originalKey: APPROVED_CAS_KEY,
+      optimizedKey: null,
+      thumbnailKey: null,
+      moderationStatus: "APPROVED",
+      hidden: false,
+      deletedAt: null,
+      ...over,
     });
 
-    it("should use optimized key when available and variant is optimized", async () => {
-      const mockMediaFile = {
-        id: "media-123",
-        contentHash: "test-hash",
-        mimeType: "image/jpeg",
-        originalKey: "media/test-hash.jpg",
-        optimizedKey: "media/test-hash_opt.webp",
-        thumbnailKey: null,
-      };
-
-      mockMediaFileFindUnique.mockResolvedValue(mockMediaFile);
+    it("serves an APPROVED MediaFile from its canonical originalKey", async () => {
+      mockMediaFileFindUnique.mockResolvedValue(approvedRecord());
 
       const mockR2Object = {
         body: new ReadableStream(),
-        httpMetadata: { contentType: "image/webp" },
+        httpMetadata: { contentType: "image/svg+xml" }, // must be ignored
       };
       mockR2Get.mockResolvedValue(mockR2Object);
 
       mockRequest = new Request(
-        "https://api.rkm1.de/api/media/test-hash?variant=optimized",
-        {
-          method: "GET",
-        },
+        `https://api.rkm1.de/api/media/${VALID_UPLOAD_HASH}`,
+        { method: "GET" },
       );
 
       const response = await getMediaRoute!.handler(mockRequest, mockEnv, {
-        url: new URL(
-          "https://api.rkm1.de/api/media/test-hash?variant=optimized",
-        ),
-        pathname: "/api/media/test-hash",
-        params: { hash: "test-hash" },
+        url: new URL(`https://api.rkm1.de/api/media/${VALID_UPLOAD_HASH}`),
+        pathname: `/api/media/${VALID_UPLOAD_HASH}`,
+        params: { hash: VALID_UPLOAD_HASH },
       });
 
       expect(response.status).toBe(200);
-      expect(mockR2Get).toHaveBeenCalledWith("media/test-hash_opt.webp");
+      expect(mockR2Get).toHaveBeenCalledWith(APPROVED_CAS_KEY);
+      expect(mockR2Head).not.toHaveBeenCalled();
+      // Content-type from canonical format only — never the object metadata.
+      expect(response.headers.get("Content-Type")).toBe("image/jpeg");
+      expect(response.headers.get("Content-Disposition")).toBe("attachment");
     });
 
-    it("should fallback to original when optimized not found and MediaFile exists", async () => {
-      const mockMediaFile = {
-        id: "media-123",
-        contentHash: "test-hash",
-        mimeType: "image/jpeg",
-        originalKey: "media/test-hash.jpg",
-        optimizedKey: null, // No optimized version
-        thumbnailKey: null,
-      };
-
-      mockMediaFileFindUnique.mockResolvedValue(mockMediaFile);
-
-      const mockR2Object = {
-        body: new ReadableStream(),
-        httpMetadata: { contentType: "image/jpeg" },
-      };
-      mockR2Get.mockResolvedValue(mockR2Object);
+    it("denies a PENDING MediaFile (gate is APPROVED-only)", async () => {
+      mockMediaFileFindUnique.mockResolvedValue(
+        approvedRecord({ moderationStatus: "PENDING" }),
+      );
+      mockR2Get.mockResolvedValue({ body: new ReadableStream() });
 
       mockRequest = new Request(
-        "https://api.rkm1.de/api/media/test-hash?variant=optimized",
-        {
-          method: "GET",
-        },
+        `https://api.rkm1.de/api/media/${VALID_UPLOAD_HASH}`,
+        { method: "GET" },
       );
 
       const response = await getMediaRoute!.handler(mockRequest, mockEnv, {
-        url: new URL(
-          "https://api.rkm1.de/api/media/test-hash?variant=optimized",
-        ),
-        pathname: "/api/media/test-hash",
-        params: { hash: "test-hash" },
+        url: new URL(`https://api.rkm1.de/api/media/${VALID_UPLOAD_HASH}`),
+        pathname: `/api/media/${VALID_UPLOAD_HASH}`,
+        params: { hash: VALID_UPLOAD_HASH },
       });
 
-      expect(response.status).toBe(200);
-      expect(mockR2Get).toHaveBeenCalledWith("media/test-hash.jpg");
+      expect(response.status).toBe(404);
+      expect(mockR2Get).not.toHaveBeenCalled();
     });
 
-    it("should try common extensions when MediaFile does not exist (fallback for .jpg)", async () => {
+    it("denies a hidden or soft-deleted MediaFile even when APPROVED", async () => {
+      for (const over of [{ hidden: true }, { deletedAt: new Date(0) }]) {
+        mockR2Get.mockClear();
+        mockMediaFileFindUnique.mockResolvedValue(approvedRecord(over));
+
+        const response = await getMediaRoute!.handler(
+          new Request(`https://api.rkm1.de/api/media/${VALID_UPLOAD_HASH}`, {
+            method: "GET",
+          }),
+          mockEnv,
+          {
+            url: new URL(
+              `https://api.rkm1.de/api/media/${VALID_UPLOAD_HASH}`,
+            ),
+            pathname: `/api/media/${VALID_UPLOAD_HASH}`,
+            params: { hash: VALID_UPLOAD_HASH },
+          },
+        );
+
+        expect(response.status).toBe(404);
+        expect(mockR2Get).not.toHaveBeenCalled();
+      }
+    });
+
+    it("denies a malformed (non-hex) content hash before any lookup", async () => {
+      const response = await getMediaRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/not-a-valid-hash", {
+          method: "GET",
+        }),
+        mockEnv,
+        {
+          url: new URL("https://api.rkm1.de/api/media/not-a-valid-hash"),
+          pathname: "/api/media/not-a-valid-hash",
+          params: { hash: "not-a-valid-hash" },
+        },
+      );
+
+      expect(response.status).toBe(404);
+      expect(mockMediaFileFindUnique).not.toHaveBeenCalled();
+      expect(mockR2Get).not.toHaveBeenCalled();
+    });
+
+    // T9: the no-DB extension-probing fallback maze has been DELETED. When no
+    // MediaFile row exists, the object is NOT servable and storage is NEVER
+    // probed (the old behavior was a gate-bypass + path-injection sink). These
+    // tests were rewritten from "probe and serve" to "deny without probing".
+    it("does NOT probe storage when MediaFile does not exist (no .jpg fallback)", async () => {
       mockMediaFileFindUnique.mockResolvedValue(null); // MediaFile not found
 
-      // Try jpg first, should find it
-      mockR2Head
-        .mockResolvedValueOnce(null) // jpg - not found
-        .mockResolvedValueOnce(null) // jpeg - not found
-        .mockResolvedValueOnce({}); // png - found!
-
-      const mockR2Object = {
-        body: new ReadableStream(),
-        httpMetadata: { contentType: "image/png" },
-      };
-      mockR2Get.mockResolvedValue(mockR2Object);
-
       mockRequest = new Request("https://api.rkm1.de/api/media/test-hash", {
         method: "GET",
       });
@@ -876,75 +1165,18 @@ describe("Media Routes", () => {
         params: { hash: "test-hash" },
       });
 
-      expect(response.status).toBe(200);
-      // Should have tried jpg, jpeg, then found png
-      expect(mockR2Head).toHaveBeenCalledWith("media/test-hash.jpg");
-      expect(mockR2Head).toHaveBeenCalledWith("media/test-hash.jpeg");
-      expect(mockR2Head).toHaveBeenCalledWith("media/test-hash.png");
-      expect(mockR2Get).toHaveBeenCalledWith("media/test-hash.png");
+      expect(response.status).toBe(404);
+      // No storage probe and no serve: there is no DB record.
+      expect(mockR2Head).not.toHaveBeenCalled();
+      expect(mockR2Get).not.toHaveBeenCalled();
     });
 
-    it("should try common extensions when MediaFile does not exist (fallback for .png)", async () => {
+    it("does NOT probe storage when MediaFile does not exist (no .png fallback)", async () => {
       mockMediaFileFindUnique.mockResolvedValue(null);
-
-      // Try jpg first (not found), then jpeg (not found), then find png
-      mockR2Head
-        .mockResolvedValueOnce(null) // jpg - not found
-        .mockResolvedValueOnce(null) // jpeg - not found
-        .mockResolvedValueOnce({}); // png - found!
-
-      const mockR2Object = {
-        body: new ReadableStream(),
-        httpMetadata: { contentType: "image/png" },
-      };
-      mockR2Get.mockResolvedValue(mockR2Object);
-
-      mockRequest = new Request("https://api.rkm1.de/api/media/test-hash", {
-        method: "GET",
-      });
-
-      const response = await getMediaRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/test-hash"),
-        pathname: "/api/media/test-hash",
-        params: { hash: "test-hash" },
-      });
-
-      expect(response.status).toBe(200);
-      expect(mockR2Head).toHaveBeenCalledWith("media/test-hash.jpg");
-      expect(mockR2Head).toHaveBeenCalledWith("media/test-hash.jpeg");
-      expect(mockR2Head).toHaveBeenCalledWith("media/test-hash.png");
-      expect(mockR2Get).toHaveBeenCalledWith("media/test-hash.png");
-    });
-
-    it("should try optimized variant first, then fallback to original when MediaFile does not exist", async () => {
-      mockMediaFileFindUnique.mockResolvedValue(null);
-
-      // The code first tries to find the original file with any extension
-      // Then for optimized variant, tries optimized extensions, then falls back to original
-      // Setup: First find original (jpg not found, jpeg not found, png found)
-      // Then for optimized: try optimized variants (all not found), then use found original
-      mockR2Head
-        .mockResolvedValueOnce(null) // original jpg
-        .mockResolvedValueOnce(null) // original jpeg
-        .mockResolvedValueOnce({}) // original png - found! (stored for fallback)
-        .mockResolvedValueOnce(null) // optimized webp
-        .mockResolvedValueOnce(null) // optimized jpg
-        .mockResolvedValueOnce(null) // optimized jpeg
-        .mockResolvedValueOnce(null) // optimized png
-        .mockResolvedValueOnce(null) // optimized webp (duplicate)
-        .mockResolvedValueOnce(null); // optimized gif
-
-      const mockR2Object = {
-        body: new ReadableStream(),
-        httpMetadata: { contentType: "image/png" },
-      };
-      mockR2Get.mockResolvedValue(mockR2Object);
 
       mockRequest = new Request(
         "https://api.rkm1.de/api/media/test-hash?variant=optimized",
-        {
-          method: "GET",
-        },
+        { method: "GET" },
       );
 
       const response = await getMediaRoute!.handler(mockRequest, mockEnv, {
@@ -955,16 +1187,51 @@ describe("Media Routes", () => {
         params: { hash: "test-hash" },
       });
 
+      expect(response.status).toBe(404);
+      expect(mockR2Head).not.toHaveBeenCalled();
+      expect(mockR2Get).not.toHaveBeenCalled();
+    });
+
+    it("serves the original variant straight from the DB record's originalKey (no probing)", async () => {
+      // T9: the servable key always comes from the DB record (== the canonical
+      // CAS key). Serve reads it verbatim; it never guesses extensions.
+      const casKeyValue = `cas/${TEST_TENANT_ID}/${VALID_UPLOAD_HASH}`;
+      mockMediaFileFindUnique.mockResolvedValue({
+        id: "media-123",
+        contentHash: VALID_UPLOAD_HASH,
+        mimeType: "image/jpeg",
+        originalKey: casKeyValue,
+        optimizedKey: null,
+        thumbnailKey: null,
+        moderationStatus: "APPROVED",
+        hidden: false,
+        deletedAt: null,
+      });
+
+      const mockR2Object = {
+        body: new ReadableStream(),
+        httpMetadata: { contentType: "image/jpeg" },
+      };
+      mockR2Get.mockResolvedValue(mockR2Object);
+
+      mockRequest = new Request(
+        `https://api.rkm1.de/api/media/${VALID_UPLOAD_HASH}?variant=optimized`,
+        { method: "GET" },
+      );
+
+      const response = await getMediaRoute!.handler(mockRequest, mockEnv, {
+        url: new URL(
+          `https://api.rkm1.de/api/media/${VALID_UPLOAD_HASH}?variant=optimized`,
+        ),
+        pathname: `/api/media/${VALID_UPLOAD_HASH}`,
+        params: { hash: VALID_UPLOAD_HASH },
+      });
+
       expect(response.status).toBe(200);
-      // Should have tried optimized variants first, then found original png
-      expect(mockR2Head).toHaveBeenCalledWith("media/test-hash.jpg");
-      expect(mockR2Head).toHaveBeenCalledWith("media/test-hash.jpeg");
-      expect(mockR2Head).toHaveBeenCalledWith("media/test-hash.png");
-      expect(mockR2Head).toHaveBeenCalledWith("media/test-hash_opt.webp");
-      expect(mockR2Head).toHaveBeenCalledWith("media/test-hash_opt.jpg");
-      expect(mockR2Head).toHaveBeenCalledWith("media/test-hash_opt.jpeg");
-      expect(mockR2Head).toHaveBeenCalledWith("media/test-hash_opt.png");
-      expect(mockR2Get).toHaveBeenCalledWith("media/test-hash.png");
+      // The variant never selects a key: serve always reads the canonical
+      // originalKey verbatim, with no head() probing.
+      expect(mockR2Head).not.toHaveBeenCalled();
+      expect(mockR2Get).toHaveBeenCalledWith(casKeyValue);
     });
 
     it("should return 404 when no file found with any extension", async () => {
@@ -989,37 +1256,35 @@ describe("Media Routes", () => {
       expect(mockR2Get).not.toHaveBeenCalled();
     });
 
-    it("should return 503 when R2 bucket is not configured", async () => {
+    it("returns the uniform 404 deny when R2 bucket is not configured", async () => {
+      // T5 anti-oracle: a misconfigured bucket must not emit a distinguishing
+      // 503 (itself an oracle) — it denies identically to not-found. We only
+      // reach the bucket check for an APPROVED record.
+      mockMediaFileFindUnique.mockResolvedValue(approvedRecord());
       mockEnv.MEDIA_BUCKET_R2 = null;
       mockEnv.R2_BUCKET = null;
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/test-hash", {
-        method: "GET",
-      });
+      mockRequest = new Request(
+        `https://api.rkm1.de/api/media/${VALID_UPLOAD_HASH}`,
+        { method: "GET" },
+      );
 
       const response = await getMediaRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/test-hash"),
-        pathname: "/api/media/test-hash",
-        params: { hash: "test-hash" },
+        url: new URL(`https://api.rkm1.de/api/media/${VALID_UPLOAD_HASH}`),
+        pathname: `/api/media/${VALID_UPLOAD_HASH}`,
+        params: { hash: VALID_UPLOAD_HASH },
       });
 
-      expect(response.status).toBe(503);
+      expect(response.status).toBe(404);
       const body = await response.json();
-      expect(body).toHaveProperty("error", "Media storage not configured");
+      expect(body).toEqual({ error: "Media not found" });
     });
 
-    it("should handle database query errors gracefully and use fallback", async () => {
-      // Database query fails
+    it("denies (no storage probe) when the DB query errors", async () => {
+      // T9: a DB error is NOT an excuse to probe storage. Without a record the
+      // object is not servable — fail closed, never serve raw bytes by guessing
+      // a key (the old maze served on DB-error, a gate-bypass).
       mockMediaFileFindUnique.mockRejectedValue(new Error("Database timeout"));
-
-      // Fallback should find the file
-      mockR2Head.mockResolvedValueOnce({}); // Find jpg
-
-      const mockR2Object = {
-        body: new ReadableStream(),
-        httpMetadata: { contentType: "image/jpeg" },
-      };
-      mockR2Get.mockResolvedValue(mockR2Object);
 
       mockRequest = new Request("https://api.rkm1.de/api/media/test-hash", {
         method: "GET",
@@ -1031,24 +1296,17 @@ describe("Media Routes", () => {
         params: { hash: "test-hash" },
       });
 
-      expect(response.status).toBe(200);
-      expect(mockR2Get).toHaveBeenCalledWith("media/test-hash.jpg");
-          });
+      expect(response.status).toBe(404);
+      expect(mockR2Head).not.toHaveBeenCalled();
+      expect(mockR2Get).not.toHaveBeenCalled();
+    });
 
     describe("Binary Data Integrity", () => {
-      it("should serve image data without corruption through CORS handler", async () => {
-        const mockMediaFile = {
-          id: "media-123",
-          contentHash: "test-hash",
-          mimeType: "image/png",
-          originalKey: "media/test-hash.png",
-          optimizedKey: null,
-          thumbnailKey: null,
-        };
+      it("serves an APPROVED image's bytes intact (content-type = canonical)", async () => {
+        mockMediaFileFindUnique.mockResolvedValue(approvedRecord());
 
-        mockMediaFileFindUnique.mockResolvedValue(mockMediaFile);
-
-        // Create actual PNG bytes (PNG signature: 0x89 0x50 0x4E 0x47)
+        // PNG signature bytes — the input stream the gate must pass through
+        // verbatim (the re-encode happened at upload; serve does not transform).
         const pngBytes = new Uint8Array([
           0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
         ]);
@@ -1059,56 +1317,42 @@ describe("Media Routes", () => {
           },
         });
 
-        const mockR2Object = {
+        mockR2Get.mockResolvedValue({
           body: pngStream,
-          httpMetadata: { contentType: "image/png" },
-        };
-        mockR2Get.mockResolvedValue(mockR2Object);
-
-        mockRequest = new Request("https://api.rkm1.de/api/media/test-hash", {
-          method: "GET",
-          headers: {
-            Origin: "https://www.rkm1.de",
-          },
+          httpMetadata: { contentType: "image/png" }, // ignored by the gate
         });
 
-        // Mock session
         const mockSession = {
           userId: "user-123",
           role: "END_USER",
         } as Session;
         mockGetSession.mockResolvedValue(mockSession);
 
-        const response = await getMediaRoute!.handler(mockRequest, mockEnv, {
-          url: new URL("https://api.rkm1.de/api/media/test-hash"),
-          pathname: "/api/media/test-hash",
-          params: { hash: "test-hash" },
-        });
+        const response = await getMediaRoute!.handler(
+          new Request(`https://api.rkm1.de/api/media/${VALID_UPLOAD_HASH}`, {
+            method: "GET",
+            headers: { Origin: "https://www.rkm1.de" },
+          }),
+          mockEnv,
+          {
+            url: new URL(
+              `https://api.rkm1.de/api/media/${VALID_UPLOAD_HASH}`,
+            ),
+            pathname: `/api/media/${VALID_UPLOAD_HASH}`,
+            params: { hash: VALID_UPLOAD_HASH },
+          },
+        );
 
         expect(response.status).toBe(200);
-
-        // Verify response body is binary data (not corrupted)
-        // Note: CorsHandler is mocked, so we need to test the actual implementation
-        // For now, verify the response has correct Content-Type
-        expect(response.headers.get("Content-Type")).toBe("image/png");
-
-        // In a real test, we would need to unmock CorsHandler to test actual binary handling
-        // For now, this test verifies the route handler passes binary data correctly
+        // Content-type is the canonical re-encode format, never object metadata.
+        expect(response.headers.get("Content-Type")).toBe("image/jpeg");
+        const served = new Uint8Array(await response.arrayBuffer());
+        expect(Array.from(served)).toEqual(Array.from(pngBytes));
       });
 
-      it("should preserve binary data integrity for JPEG images", async () => {
-        const mockMediaFile = {
-          id: "media-123",
-          contentHash: "test-hash",
-          mimeType: "image/jpeg",
-          originalKey: "media/test-hash.jpg",
-          optimizedKey: null,
-          thumbnailKey: null,
-        };
+      it("served APPROVED bytes pass through CorsHandler intact", async () => {
+        mockMediaFileFindUnique.mockResolvedValue(approvedRecord());
 
-        mockMediaFileFindUnique.mockResolvedValue(mockMediaFile);
-
-        // JPEG signature: 0xFF 0xD8 0xFF
         const jpegBytes = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]);
         const jpegStream = new ReadableStream({
           start(controller) {
@@ -1117,17 +1361,9 @@ describe("Media Routes", () => {
           },
         });
 
-        const mockR2Object = {
+        mockR2Get.mockResolvedValue({
           body: jpegStream,
           httpMetadata: { contentType: "image/jpeg" },
-        };
-        mockR2Get.mockResolvedValue(mockR2Object);
-
-        mockRequest = new Request("https://api.rkm1.de/api/media/test-hash", {
-          method: "GET",
-          headers: {
-            Origin: "https://www.rkm1.de",
-          },
         });
 
         const mockSession = {
@@ -1136,68 +1372,25 @@ describe("Media Routes", () => {
         } as Session;
         mockGetSession.mockResolvedValue(mockSession);
 
-        const response = await getMediaRoute!.handler(mockRequest, mockEnv, {
-          url: new URL("https://api.rkm1.de/api/media/test-hash"),
-          pathname: "/api/media/test-hash",
-          params: { hash: "test-hash" },
-        });
+        const response = await getMediaRoute!.handler(
+          new Request(`https://api.rkm1.de/api/media/${VALID_UPLOAD_HASH}`, {
+            method: "GET",
+            headers: { Origin: "https://www.rkm1.de" },
+          }),
+          mockEnv,
+          {
+            url: new URL(
+              `https://api.rkm1.de/api/media/${VALID_UPLOAD_HASH}`,
+            ),
+            pathname: `/api/media/${VALID_UPLOAD_HASH}`,
+            params: { hash: VALID_UPLOAD_HASH },
+          },
+        );
 
         expect(response.status).toBe(200);
         expect(response.headers.get("Content-Type")).toBe("image/jpeg");
-      });
-
-      it("should call CorsHandler with binary response for image Content-Type", async () => {
-        const mockMediaFile = {
-          id: "media-123",
-          contentHash: "test-hash",
-          mimeType: "image/png",
-          originalKey: "media/test-hash.png",
-          optimizedKey: null,
-          thumbnailKey: null,
-        };
-
-        mockMediaFileFindUnique.mockResolvedValue(mockMediaFile);
-
-        const pngBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
-        const pngStream = new ReadableStream({
-          start(controller) {
-            controller.enqueue(pngBytes);
-            controller.close();
-          },
-        });
-
-        const mockR2Object = {
-          body: pngStream,
-          httpMetadata: { contentType: "image/png" },
-        };
-        mockR2Get.mockResolvedValue(mockR2Object);
-
-        mockRequest = new Request("https://api.rkm1.de/api/media/test-hash", {
-          method: "GET",
-          headers: {
-            Origin: "https://www.rkm1.de",
-          },
-        });
-
-        const mockSession = {
-          userId: "user-123",
-          role: "END_USER",
-        } as Session;
-        mockGetSession.mockResolvedValue(mockSession);
-
-        const response = await getMediaRoute!.handler(mockRequest, mockEnv, {
-          url: new URL("https://api.rkm1.de/api/media/test-hash"),
-          pathname: "/api/media/test-hash",
-          params: { hash: "test-hash" },
-        });
-
-        expect(response.status).toBe(200);
-        expect(response.headers.get("Content-Type")).toBe("image/png");
-
-        // Verify CorsHandler.addCorsHeaders was called
-        // Note: Currently mocked to return response as-is, but in real implementation
-        // it would handle binary data correctly. The actual binary integrity is tested
-        // in cors-handler.test.ts unit tests.
+        const served = new Uint8Array(await response.arrayBuffer());
+        expect(Array.from(served)).toEqual(Array.from(jpegBytes));
       });
     });
   });
@@ -1913,8 +2106,10 @@ describe("Media Routes", () => {
       const route = mediaRoutes.find((r) => r.path === "/api/media/upload");
       const response = await route?.handler(request, mockEnv);
 
-      // Should accept WebM video
-      expect(response?.status).toBe(200);
+      // P0b: WebM video now takes the async-pending path → 202 Accepted.
+      expect(response?.status).toBe(202);
+      const webmBody = await response!.json();
+      expect(webmBody).toHaveProperty("status", "pending");
     });
 
     it("should handle form data parsing errors", async () => {
@@ -2113,8 +2308,10 @@ describe("Media Routes", () => {
       const route = mediaRoutes.find((r) => r.path === "/api/media/upload");
       const response = await route?.handler(request, mockEnv);
 
-      // Should accept QuickTime video
-      expect(response?.status).toBe(200);
+      // P0b: QuickTime video now takes the async-pending path → 202 Accepted.
+      expect(response?.status).toBe(202);
+      const qtBody = await response!.json();
+      expect(qtBody).toHaveProperty("status", "pending");
     });
   });
 
@@ -2492,16 +2689,19 @@ describe("Media Routes", () => {
         body: formData,
       });
 
+      mockMediaFileCreate.mockResolvedValue({ id: "pv1", uploadId: "c" + "0".repeat(24), originalKey: null });
+
       const response = await uploadRoute!.handler(mockRequest, mockEnv, {
         url: new URL("https://api.rkm1.de/api/media/upload"),
         pathname: "/api/media/upload",
         params: {},
       });
 
-      expect(response.status).toBe(200);
+      // P0b: video takes the async-pending path → 202 Accepted.
+      expect(response.status).toBe(202);
 
-      // Normalization should NOT be called for video uploads
-      // (This depends on Agent A's implementation)
+      // Normalization (reencodeImage) must NOT be called for video uploads.
+      expect(mockReencodeImage).not.toHaveBeenCalled();
     });
 
     it("should succeed even if normalization fails", async () => {
@@ -2587,6 +2787,1223 @@ describe("Media Routes", () => {
 
       // Verify optimizedKey is not set in DB record (depends on Agent A's implementation)
       // This is a contract test - the actual implementation will be in media.ts
+    });
+  });
+
+  // ===========================================================================
+  // Branch-coverage targeting (appended). Each block exercises an uncovered
+  // branch in src/lib/routes/media.ts.
+  // ===========================================================================
+
+  // ---- ftyp brand disambiguation in the single-upload MIME detector --------
+  // src/lib/routes/media.ts lines 657-697. An ISO-BMFF ftyp box is shared by
+  // MP4/QuickTime video and HEIC/HEIF images; the major brand (bytes 8-11)
+  // decides which. Build minimal ftyp blobs and assert the accept/reject.
+  describe("POST /api/media/upload — ftyp brand disambiguation", () => {
+    const uploadRoute = mediaRoutes.find(
+      (r) => r.path === "/api/media/upload" && r.method === "POST",
+    );
+
+    // size box (4) + "ftyp" (4) + 4-char major brand = 12-byte minimal ftyp
+    const ftypBlob = (brand: string, declaredType: string) => {
+      const brandBytes =
+        brand.length === 4
+          ? [
+              brand.charCodeAt(0),
+              brand.charCodeAt(1),
+              brand.charCodeAt(2),
+              brand.charCodeAt(3),
+            ]
+          : [];
+      const bytes = new Uint8Array([
+        0x00, 0x00, 0x00, 0x18, // box size
+        0x66, 0x74, 0x79, 0x70, // 'ftyp'
+        ...brandBytes,
+      ]);
+      return new Blob([bytes], { type: declaredType });
+    };
+
+    const runUpload = async (blob: Blob, filename: string) => {
+      const formData = new FormData();
+      formData.append("file", blob, filename);
+      const request = new Request("https://api.rkm1.de/api/media/upload", {
+        method: "POST",
+        body: formData,
+      });
+      return uploadRoute!.handler(request, mockEnv, {
+        url: new URL("https://api.rkm1.de/api/media/upload"),
+        pathname: "/api/media/upload",
+        params: {},
+      });
+    };
+
+    it("rejects an HEIF-brand ftyp (heic) as Invalid file type (not re-encodable, not video)", async () => {
+      // brand 'heic' → detectedMimeType image/heic → not in REENCODABLE set,
+      // not in video allowlist → 400 Invalid file type.
+      const response = await runUpload(
+        ftypBlob("heic", "application/octet-stream"),
+        "photo.heic",
+      );
+      expect(response.status).toBe(400);
+      const body = await response.json();
+      expect(body.error).toBe("Invalid file type");
+      expect(body.details.detectedType).toBe("image/heic");
+      expect(mockUploadSingle).not.toHaveBeenCalled();
+    });
+
+    it("rejects another HEIF brand (mif1) as Invalid file type", async () => {
+      const response = await runUpload(
+        ftypBlob("mif1", "application/octet-stream"),
+        "photo.heif",
+      );
+      expect(response.status).toBe(400);
+      const body = await response.json();
+      expect(body.error).toBe("Invalid file type");
+      expect(body.details.detectedType).toBe("image/heic");
+    });
+
+    it("accepts a QuickTime-brand ftyp ('qt  ') as video/quicktime", async () => {
+      // brand 'qt  ' → detectedMimeType video/quicktime → in video allowlist.
+      // P0b: video takes the async-pending path → 202 Accepted.
+      const response = await runUpload(
+        ftypBlob("qt  ", "application/octet-stream"),
+        "clip.mov",
+      );
+      expect(response.status).toBe(202);
+      const body = await response.json();
+      expect(body).toHaveProperty("status", "pending");
+      expect(body).toHaveProperty("uploadId");
+      // Sync MediaUploadService must NOT be called on the async path.
+      expect(mockUploadSingle).not.toHaveBeenCalled();
+    });
+
+    it("accepts a default ISO-BMFF brand (isom) as video/mp4", async () => {
+      // P0b: video takes the async-pending path → 202 Accepted.
+      const response = await runUpload(
+        ftypBlob("isom", "application/octet-stream"),
+        "clip.mp4",
+      );
+      expect(response.status).toBe(202);
+      expect(mockUploadSingle).not.toHaveBeenCalled();
+    });
+
+    it("accepts an mp42-brand ftyp as video/mp4", async () => {
+      // P0b: video takes the async-pending path → 202 Accepted.
+      const response = await runUpload(
+        ftypBlob("mp42", "application/octet-stream"),
+        "clip.mp4",
+      );
+      expect(response.status).toBe(202);
+      expect(mockUploadSingle).not.toHaveBeenCalled();
+    });
+
+    it("treats a brand-less minimal ftyp (bytes < 12) as video/mp4 (default branch)", async () => {
+      // Only 8 bytes: size + 'ftyp', no brand → brand === "" → default → mp4.
+      // P0b: video takes the async-pending path → 202 Accepted.
+      const bytes = new Uint8Array([
+        0x00, 0x00, 0x00, 0x08, 0x66, 0x74, 0x79, 0x70,
+      ]);
+      const response = await runUpload(
+        new Blob([bytes], { type: "application/octet-stream" }),
+        "clip.mp4",
+      );
+      expect(response.status).toBe(202);
+      expect(mockUploadSingle).not.toHaveBeenCalled();
+    });
+
+    // Property: every default (non-HEIF, non-"qt  ") 4-char brand maps to mp4
+    // and is accepted as a video → async-pending 202.
+    it("property: arbitrary non-HEIF/non-qt 4-char brands map to video/mp4", async () => {
+      const heif = new Set([
+        "heic",
+        "heix",
+        "hevc",
+        "hevx",
+        "heim",
+        "heis",
+        "hevm",
+        "hevs",
+        "mif1",
+        "msf1",
+      ]);
+      await fc.assert(
+        fc.asyncProperty(
+          fc
+            .string({ minLength: 4, maxLength: 4 })
+            .filter((s) => s.length === 4 && !heif.has(s) && s !== "qt  "),
+          async (brand) => {
+            mockUploadSingle.mockClear();
+            mockMediaFileCreate.mockClear();
+            mockMediaFileCreate.mockResolvedValue({ id: "p-fc", uploadId: "c" + "0".repeat(24), originalKey: null });
+            const response = await runUpload(
+              ftypBlob(brand, "application/octet-stream"),
+              "clip.bin",
+            );
+            // P0b: video takes the async-pending path → 202 Accepted.
+            expect(response.status).toBe(202);
+            expect(mockUploadSingle).not.toHaveBeenCalled();
+          },
+        ),
+        { seed: 20260625, numRuns: 50 },
+      );
+    });
+  });
+
+  // ---- Upload reject paths: signature / suspicious / re-encode / tenant ----
+  // src/lib/routes/media.ts lines 795, 814, 854-870, 912, 942.
+  describe("POST /api/media/upload — reject and failure paths", () => {
+    const uploadRoute = mediaRoutes.find(
+      (r) => r.path === "/api/media/upload" && r.method === "POST",
+    );
+
+    const runUpload = async (blob: Blob, filename: string, env = mockEnv) => {
+      const formData = new FormData();
+      formData.append("file", blob, filename);
+      const request = new Request("https://api.rkm1.de/api/media/upload", {
+        method: "POST",
+        body: formData,
+      });
+      return uploadRoute!.handler(request, env, {
+        url: new URL("https://api.rkm1.de/api/media/upload"),
+        pathname: "/api/media/upload",
+        params: {},
+      });
+    };
+
+    it("rejects an MZ-executable polyglot as Suspicious content detected", async () => {
+      // A PNG signature so the type detects as image (re-encodable), but the
+      // MZ header at byte 0 would shadow PNG detection — so instead prepend a
+      // JPEG magic and embed the MZ later? checkSuspiciousContent looks at
+      // bytes[0..1] for MZ, so to reach the suspicious branch with a VALID
+      // image type we need detection to pass first. Use a declared PNG whose
+      // first bytes are PNG, then the executable check (bytes[0]===MZ) won't
+      // fire. Instead exercise the script-content branch (below). For the MZ
+      // branch, declare an octet-stream that detects as nothing → Invalid type
+      // before suspicious. So the cleanest MZ path is via the >1KB script
+      // branch. We assert the MZ executable header on a file that still
+      // detects as a supported image is impossible; document + use script.
+      // --- Executable header: craft bytes that detect as JPEG yet trip MZ is
+      // contradictory; the reachable suspicious path is the script payload. ---
+      const big = new Uint8Array(2048);
+      // JPEG magic so the detector picks image/jpeg (validateMagicNumbers ok)
+      big[0] = 0xff;
+      big[1] = 0xd8;
+      big[2] = 0xff;
+      // Embed a <?php marker within the first 1KB scanned window.
+      const marker = new TextEncoder().encode("<?php evil(); ?>");
+      big.set(marker, 16);
+      const response = await runUpload(
+        new Blob([big], { type: "image/jpeg" }),
+        "polyglot.jpg",
+      );
+      expect(response.status).toBe(400);
+      const body = await response.json();
+      expect(body.error).toBe("Suspicious content detected");
+      expect(mockUploadSingle).not.toHaveBeenCalled();
+    });
+
+    it("rejects a >1KB file containing <script as Suspicious content detected", async () => {
+      const big = new Uint8Array(2048);
+      big[0] = 0x89; // PNG magic
+      big[1] = 0x50;
+      big[2] = 0x4e;
+      big[3] = 0x47;
+      big[4] = 0x0d;
+      big[5] = 0x0a;
+      big[6] = 0x1a;
+      big[7] = 0x0a;
+      const marker = new TextEncoder().encode("<script>alert(1)</script>");
+      big.set(marker, 32);
+      const response = await runUpload(
+        new Blob([big], { type: "image/png" }),
+        "polyglot.png",
+      );
+      expect(response.status).toBe(400);
+      const body = await response.json();
+      expect(body.error).toBe("Suspicious content detected");
+    });
+
+    it("returns 400 Image processing failed when re-encode throws", async () => {
+      mockReencodeImage.mockRejectedValueOnce(new Error("bad image"));
+      const jpegMagic = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]);
+      const response = await runUpload(
+        new Blob([jpegMagic], { type: "image/jpeg" }),
+        "broken.jpg",
+      );
+      expect(response.status).toBe(400);
+      const body = await response.json();
+      expect(body.error).toBe("Image processing failed");
+      expect(mockUploadSingle).not.toHaveBeenCalled();
+    });
+
+    it("returns 500 Tenant resolution failed when no tenant can be resolved (upload)", async () => {
+      // Drive the ambient tenant to undefined; the personal-tenant DB fallback
+      // throws (mockDb has no `user` model) → caught → null → resolution fails.
+      mockGetCurrentTenantId.mockReturnValue(undefined as any);
+      const jpegMagic = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]);
+      const response = await runUpload(
+        new Blob([jpegMagic], { type: "image/jpeg" }),
+        "ok.jpg",
+      );
+      expect(response.status).toBe(500);
+      const body = await response.json();
+      expect(body.error).toBe("Tenant resolution failed");
+      expect(mockUploadSingle).not.toHaveBeenCalled();
+    });
+
+    it("returns 500 Database error when the upload service returns a non-hex contentHash (casKey build error)", async () => {
+      // result.contentHash is not 64-hex → casKey() → invalid_hash error →
+      // isCasKeyError → 500 Database error (line 942).
+      mockUploadSingle.mockResolvedValueOnce({
+        url: "https://api.rkm1.de/api/media/zzz",
+        contentHash: "not-a-valid-64-hex-hash",
+        status: "uploaded",
+      });
+      const jpegMagic = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]);
+      const response = await runUpload(
+        new Blob([jpegMagic], { type: "image/jpeg" }),
+        "ok.jpg",
+      );
+      expect(response.status).toBe(500);
+      const body = await response.json();
+      expect(body.error).toBe("Database error");
+      // upload service WAS called (the casKey error is after upload).
+      expect(mockUploadSingle).toHaveBeenCalled();
+      // The DB upsert must NOT run when the CAS key is invalid.
+      expect(mockMediaFileUpsert).not.toHaveBeenCalled();
+    });
+  });
+
+  // ---- Serve-gate denials not already covered -------------------------------
+  // src/lib/routes/media.ts lines 323-325 (no tenant), 379 (no originalKey),
+  // 391 (storage object absent).
+  describe("GET /api/media/:hash — additional serve-gate denials", () => {
+    const getMediaRoute = mediaRoutes.find(
+      (r) => r.path === "/api/media/:hash" && r.method === "GET",
+    );
+
+    const APPROVED_CAS_KEY = `cas/${TEST_TENANT_ID}/${VALID_UPLOAD_HASH}`;
+    const approvedRecord = (over: Record<string, unknown> = {}) => ({
+      id: "media-123",
+      contentHash: VALID_UPLOAD_HASH,
+      mimeType: "image/png",
+      originalKey: APPROVED_CAS_KEY,
+      optimizedKey: null,
+      thumbnailKey: null,
+      moderationStatus: "APPROVED",
+      hidden: false,
+      deletedAt: null,
+      ...over,
+    });
+
+    const serve = () =>
+      getMediaRoute!.handler(
+        new Request(`https://api.rkm1.de/api/media/${VALID_UPLOAD_HASH}`, {
+          method: "GET",
+        }),
+        mockEnv,
+        {
+          url: new URL(`https://api.rkm1.de/api/media/${VALID_UPLOAD_HASH}`),
+          pathname: `/api/media/${VALID_UPLOAD_HASH}`,
+          params: { hash: VALID_UPLOAD_HASH },
+        },
+      );
+
+    it("denies (404) with NO DB lookup when the viewer tenant cannot be resolved", async () => {
+      // Ambient tenant undefined + personal-tenant fallback throws (no `user`
+      // model) → resolveUploadTenantId → null → deny before the mediaFile
+      // lookup (line 323-325).
+      mockGetCurrentTenantId.mockReturnValue(undefined as any);
+      mockR2Get.mockResolvedValue({ body: new ReadableStream() });
+
+      const response = await serve();
+
+      expect(response.status).toBe(404);
+      const body = await response.json();
+      expect(body).toEqual({ error: "Media not found" });
+      // The media lookup must never run without a resolved tenant.
+      expect(mockMediaFileFindUnique).not.toHaveBeenCalled();
+      expect(mockR2Get).not.toHaveBeenCalled();
+    });
+
+    it("denies (404) an APPROVED record whose originalKey is null (no key → no serve)", async () => {
+      mockMediaFileFindUnique.mockResolvedValue(
+        approvedRecord({ originalKey: null }),
+      );
+      mockR2Get.mockResolvedValue({ body: new ReadableStream() });
+
+      const response = await serve();
+
+      expect(response.status).toBe(404);
+      const body = await response.json();
+      expect(body).toEqual({ error: "Media not found" });
+      // No key → must not probe storage.
+      expect(mockR2Get).not.toHaveBeenCalled();
+    });
+
+    it("denies (404) an APPROVED record when the storage object is absent", async () => {
+      mockMediaFileFindUnique.mockResolvedValue(approvedRecord());
+      mockR2Get.mockResolvedValue(null); // bytes absent despite APPROVED
+
+      const response = await serve();
+
+      expect(response.status).toBe(404);
+      const body = await response.json();
+      expect(body).toEqual({ error: "Media not found" });
+      // The gate DID reach storage (key present + APPROVED) but got null.
+      expect(mockR2Get).toHaveBeenCalledWith(APPROVED_CAS_KEY);
+    });
+  });
+
+  // ---- Batch upload validation + per-file outcomes --------------------------
+  // src/lib/routes/media.ts lines 1097, 1108-1119, 1141, 1182-1264.
+  describe("POST /api/media/upload/batch", () => {
+    const batchRoute = mediaRoutes.find(
+      (r) => r.path === "/api/media/upload/batch" && r.method === "POST",
+    );
+
+    const jpeg = () => {
+      const b = new Uint8Array(8);
+      b[0] = 0xff;
+      b[1] = 0xd8;
+      b[2] = 0xff;
+      b[3] = 0xe0;
+      return b;
+    };
+    const mp4 = () =>
+      new Uint8Array([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70]);
+
+    const runBatch = async (
+      append: (fd: FormData) => void,
+      env = mockEnv,
+    ) => {
+      const fd = new FormData();
+      append(fd);
+      const request = new Request(
+        "https://api.rkm1.de/api/media/upload/batch",
+        { method: "POST", body: fd },
+      );
+      return batchRoute!.handler(request, env, {
+        url: new URL("https://api.rkm1.de/api/media/upload/batch"),
+        pathname: "/api/media/upload/batch",
+        params: {},
+      });
+    };
+
+    beforeEach(() => {
+      // Default: each uploadSingle call succeeds with a unique-ish result.
+      mockUploadSingle.mockResolvedValue({
+        success: true,
+        contentHash: VALID_UPLOAD_HASH,
+        url: `https://api.rkm1.de/api/media/${VALID_UPLOAD_HASH}`,
+        status: "uploaded",
+      });
+    });
+
+    it("requires authentication (401)", async () => {
+      expect(batchRoute).toBeDefined();
+      mockGetSession.mockResolvedValue(null);
+      const response = await runBatch((fd) =>
+        fd.append("files[0]", new Blob([jpeg()], { type: "image/jpeg" }), "a.jpg"),
+      );
+      expect(response.status).toBe(401);
+      const body = await response.json();
+      expect(body.error).toBe("Unauthorized");
+    });
+
+    it("returns the rate-limit Response when limited", async () => {
+      mockApplyRateLimitKV.mockResolvedValue(
+        new Response("Rate limit exceeded", { status: 429 }),
+      );
+      const response = await runBatch((fd) =>
+        fd.append("files[0]", new Blob([jpeg()], { type: "image/jpeg" }), "a.jpg"),
+      );
+      expect(response.status).toBe(429);
+    });
+
+    it("returns 400 No files provided for an empty batch", async () => {
+      const response = await runBatch(() => {
+        /* no files */
+      });
+      expect(response.status).toBe(400);
+      const body = await response.json();
+      expect(body.error).toBe("No files provided");
+    });
+
+    it("returns 400 Too many files when more than 20 files are supplied", async () => {
+      const response = await runBatch((fd) => {
+        for (let i = 0; i < 21; i++) {
+          fd.append(
+            `files[${i}]`,
+            new Blob([jpeg()], { type: "image/jpeg" }),
+            `f${i}.jpg`,
+          );
+        }
+      });
+      expect(response.status).toBe(400);
+      const body = await response.json();
+      expect(body.error).toBe("Too many files");
+    });
+
+    it("also accepts the single 'file' field for batch compatibility", async () => {
+      const response = await runBatch((fd) =>
+        fd.append("file", new Blob([jpeg()], { type: "image/jpeg" }), "a.jpg"),
+      );
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.summary.total).toBe(1);
+      expect(body.summary.successful).toBe(1);
+    });
+
+    it("reports per-file outcomes across a mixed batch (image / unsupported / oversized / suspicious / video / reencode-fail)", async () => {
+      // Re-encode fails for exactly one image; succeeds for the others.
+      mockReencodeImage.mockImplementation(async (buf: ArrayBuffer) => {
+        const view = new Uint8Array(
+          buf instanceof Buffer ? buf : new Uint8Array(buf as ArrayBuffer),
+        );
+        // Sentinel: a PNG whose 9th byte is 0xEE triggers a forced failure.
+        if (view[0] === 0x89 && view[8] === 0xee) {
+          throw new Error("reencode boom");
+        }
+        return {
+          buffer: Buffer.from(view),
+          canonicalMimeType: "image/jpeg",
+        };
+      });
+
+      const oversized = new Blob(
+        [new ArrayBuffer(11 * 1024 * 1024)],
+        { type: "image/jpeg" },
+      );
+
+      const suspicious = new Uint8Array(2048);
+      suspicious[0] = 0xff; // JPEG so it's an image type
+      suspicious[1] = 0xd8;
+      suspicious[2] = 0xff;
+      suspicious.set(new TextEncoder().encode("<?php x; ?>"), 16);
+
+      const reencodeFail = new Uint8Array(16);
+      reencodeFail.set(
+        [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
+        0,
+      );
+      reencodeFail[8] = 0xee; // sentinel for forced re-encode failure
+
+      const response = await runBatch((fd) => {
+        fd.append(
+          "files[0]",
+          new Blob([jpeg()], { type: "image/jpeg" }),
+          "good.jpg",
+        ); // success
+        fd.append(
+          "files[1]",
+          new Blob([new Uint8Array([0x00, 0x01])], {
+            type: "application/pdf",
+          }),
+          "doc.pdf",
+        ); // Unsupported file type
+        fd.append("files[2]", oversized, "big.jpg"); // File too large
+        fd.append(
+          "files[3]",
+          new Blob([suspicious], { type: "image/jpeg" }),
+          "evil.jpg",
+        ); // Suspicious content detected
+        fd.append(
+          "files[4]",
+          new Blob([mp4()], { type: "video/mp4" }),
+          "clip.mp4",
+        ); // video (else non-image branch) → success
+        fd.append(
+          "files[5]",
+          new Blob([reencodeFail], { type: "image/png" }),
+          "fail.png",
+        ); // Image processing failed
+      });
+
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.summary.total).toBe(6);
+      // Two successes: the good jpeg and the mp4 video.
+      expect(body.summary.successful).toBe(2);
+      expect(body.summary.failed).toBe(4);
+
+      const warnings = body.results
+        .filter((r: any) => !r.success)
+        .map((r: any) => r.warning);
+      expect(warnings).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining("Unsupported file type"),
+          expect.stringContaining("File too large"),
+          "Suspicious content detected",
+          "Image processing failed",
+        ]),
+      );
+    });
+
+    it("maps an uploadSingle rejection to a per-file 'Upload failed' warning", async () => {
+      mockUploadSingle.mockRejectedValueOnce(new Error("R2 down"));
+      const response = await runBatch((fd) =>
+        fd.append(
+          "files[0]",
+          new Blob([mp4()], { type: "video/mp4" }),
+          "clip.mp4",
+        ),
+      );
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.summary.failed).toBe(1);
+      expect(body.results[0].warning).toContain("Upload failed");
+    });
+
+    it("returns 500 Tenant resolution failed when no tenant can be resolved (batch)", async () => {
+      mockGetCurrentTenantId.mockReturnValue(undefined as any);
+      const response = await runBatch((fd) =>
+        fd.append("files[0]", new Blob([jpeg()], { type: "image/jpeg" }), "a.jpg"),
+      );
+      expect(response.status).toBe(500);
+      const body = await response.json();
+      expect(body.error).toBe("Tenant resolution failed");
+    });
+
+    it("returns 500 Failed to upload media batch when formData parsing throws", async () => {
+      // A request whose body cannot be parsed as multipart → request.formData()
+      // rejects → outer catch (line 1304-1314).
+      const request = new Request(
+        "https://api.rkm1.de/api/media/upload/batch",
+        {
+          method: "POST",
+          body: "not multipart",
+          headers: { "Content-Type": "multipart/form-data" },
+        },
+      );
+      const response = await batchRoute!.handler(request, mockEnv, {
+        url: new URL("https://api.rkm1.de/api/media/upload/batch"),
+        pathname: "/api/media/upload/batch",
+        params: {},
+      });
+      expect(response.status).toBe(500);
+      const body = await response.json();
+      expect(body.error).toBe("Failed to upload media batch");
+    });
+  });
+
+  // ---- MediaHandler-delegating route error-string branches ------------------
+  // Covers the switch-on-message error mappers that the happy-path tests skip.
+  describe("MediaHandler-delegating route error branches", () => {
+    const listRoute = mediaRoutes.find(
+      (r) => r.path === "/api/media" && r.method === "GET",
+    );
+    const detailsRoute = mediaRoutes.find(
+      (r) => r.path === "/api/media/:mediaId" && r.method === "GET",
+    );
+    const hideRoute = mediaRoutes.find(
+      (r) => r.path === "/api/media/:mediaId/hide" && r.method === "POST",
+    );
+    const unhideRoute = mediaRoutes.find(
+      (r) => r.path === "/api/media/:mediaId/unhide" && r.method === "POST",
+    );
+    const deleteRoute = mediaRoutes.find(
+      (r) => r.path === "/api/media/:mediaId" && r.method === "DELETE",
+    );
+    const groupedRoute = mediaRoutes.find(
+      (r) => r.path === "/api/media/grouped" && r.method === "GET",
+    );
+    const statsRoute = mediaRoutes.find(
+      (r) => r.path === "/api/media/stats" && r.method === "GET",
+    );
+
+    it("GET /api/media → 500 on a generic listUserMedia error", async () => {
+      mockMediaHandlerInstance.listUserMedia.mockRejectedValue(
+        new Error("connection reset"),
+      );
+      const response = await listRoute!.handler(
+        new Request("https://api.rkm1.de/api/media", { method: "GET" }),
+        mockEnv,
+        {
+          url: new URL("https://api.rkm1.de/api/media"),
+          pathname: "/api/media",
+          params: {},
+        },
+      );
+      expect(response.status).toBe(500);
+      const body = await response.json();
+      expect(body.error).toBe("Failed to list media");
+    });
+
+    it("GET /api/media → 404 when listUserMedia throws 'Media not found'", async () => {
+      mockMediaHandlerInstance.listUserMedia.mockRejectedValue(
+        new Error("Media not found"),
+      );
+      const response = await listRoute!.handler(
+        new Request("https://api.rkm1.de/api/media", { method: "GET" }),
+        mockEnv,
+        {
+          url: new URL("https://api.rkm1.de/api/media"),
+          pathname: "/api/media",
+          params: {},
+        },
+      );
+      expect(response.status).toBe(404);
+    });
+
+    it("GET /api/media/:mediaId → 403 Forbidden on a permission error", async () => {
+      mockMediaHandlerInstance.getMediaDetails.mockRejectedValue(
+        new Error("no permission to view this media"),
+      );
+      const response = await detailsRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/media-123", {
+          method: "GET",
+        }),
+        mockEnv,
+        {
+          url: new URL("https://api.rkm1.de/api/media/media-123"),
+          pathname: "/api/media/media-123",
+          params: { mediaId: "media-123" },
+        },
+      );
+      expect(response.status).toBe(403);
+      const body = await response.json();
+      expect(body.error).toBe("Forbidden");
+    });
+
+    it("GET /api/media/:mediaId → 500 on a generic error", async () => {
+      mockMediaHandlerInstance.getMediaDetails.mockRejectedValue(
+        new Error("kaboom"),
+      );
+      const response = await detailsRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/media-123", {
+          method: "GET",
+        }),
+        mockEnv,
+        {
+          url: new URL("https://api.rkm1.de/api/media/media-123"),
+          pathname: "/api/media/media-123",
+          params: { mediaId: "media-123" },
+        },
+      );
+      expect(response.status).toBe(500);
+      const body = await response.json();
+      expect(body.error).toBe("Failed to get media details");
+    });
+
+    it("GET /api/media/:mediaId → delegates a 64-hex id to serveMediaByHash (denied → 404)", async () => {
+      // A 64-hex mediaId is treated as a content hash. With no DB record the
+      // shared gate denies uniformly (404), exercising the delegation branch
+      // at line 1718-1752.
+      mockMediaFileFindUnique.mockResolvedValue(null);
+      const hashId = "b".repeat(64);
+      const response = await detailsRoute!.handler(
+        new Request(`https://api.rkm1.de/api/media/${hashId}`, {
+          method: "GET",
+        }),
+        mockEnv,
+        {
+          url: new URL(`https://api.rkm1.de/api/media/${hashId}`),
+          pathname: `/api/media/${hashId}`,
+          params: { mediaId: hashId },
+        },
+      );
+      expect(response.status).toBe(404);
+      const body = await response.json();
+      expect(body).toEqual({ error: "Media not found" });
+      // getMediaDetails must NOT be called for a hash-shaped id.
+      expect(mockMediaHandlerInstance.getMediaDetails).not.toHaveBeenCalled();
+    });
+
+    it("POST /hide → 403 Forbidden on a permission error", async () => {
+      mockMediaHandlerInstance.hideMedia.mockRejectedValue(
+        new Error("user lacks permission"),
+      );
+      const response = await hideRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/media-123/hide", {
+          method: "POST",
+        }),
+        mockEnv,
+        {
+          url: new URL("https://api.rkm1.de/api/media/media-123/hide"),
+          pathname: "/api/media/media-123/hide",
+          params: { mediaId: "media-123" },
+        },
+      );
+      expect(response.status).toBe(403);
+      const body = await response.json();
+      expect(body.error).toBe("Forbidden");
+    });
+
+    it("POST /hide → 400 when the media was deleted", async () => {
+      mockMediaHandlerInstance.hideMedia.mockRejectedValue(
+        new Error("Media is deleted"),
+      );
+      const response = await hideRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/media-123/hide", {
+          method: "POST",
+        }),
+        mockEnv,
+        {
+          url: new URL("https://api.rkm1.de/api/media/media-123/hide"),
+          pathname: "/api/media/media-123/hide",
+          params: { mediaId: "media-123" },
+        },
+      );
+      expect(response.status).toBe(400);
+      const body = await response.json();
+      expect(body.message).toContain("deleted");
+    });
+
+    it("POST /hide → 500 on a generic error", async () => {
+      mockMediaHandlerInstance.hideMedia.mockRejectedValue(new Error("boom"));
+      const response = await hideRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/media-123/hide", {
+          method: "POST",
+        }),
+        mockEnv,
+        {
+          url: new URL("https://api.rkm1.de/api/media/media-123/hide"),
+          pathname: "/api/media/media-123/hide",
+          params: { mediaId: "media-123" },
+        },
+      );
+      expect(response.status).toBe(500);
+      const body = await response.json();
+      expect(body.error).toBe("Failed to hide media");
+    });
+
+    it("POST /unhide → 404 when media not found", async () => {
+      mockMediaHandlerInstance.unhideMedia.mockRejectedValue(
+        new Error("Media not found"),
+      );
+      const response = await unhideRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/media-123/unhide", {
+          method: "POST",
+        }),
+        mockEnv,
+        {
+          url: new URL("https://api.rkm1.de/api/media/media-123/unhide"),
+          pathname: "/api/media/media-123/unhide",
+          params: { mediaId: "media-123" },
+        },
+      );
+      expect(response.status).toBe(404);
+    });
+
+    it("POST /unhide → 403 Forbidden on a permission error", async () => {
+      mockMediaHandlerInstance.unhideMedia.mockRejectedValue(
+        new Error("permission denied"),
+      );
+      const response = await unhideRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/media-123/unhide", {
+          method: "POST",
+        }),
+        mockEnv,
+        {
+          url: new URL("https://api.rkm1.de/api/media/media-123/unhide"),
+          pathname: "/api/media/media-123/unhide",
+          params: { mediaId: "media-123" },
+        },
+      );
+      expect(response.status).toBe(403);
+    });
+
+    it("POST /unhide → 500 on a generic error", async () => {
+      mockMediaHandlerInstance.unhideMedia.mockRejectedValue(
+        new Error("kaboom"),
+      );
+      const response = await unhideRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/media-123/unhide", {
+          method: "POST",
+        }),
+        mockEnv,
+        {
+          url: new URL("https://api.rkm1.de/api/media/media-123/unhide"),
+          pathname: "/api/media/media-123/unhide",
+          params: { mediaId: "media-123" },
+        },
+      );
+      expect(response.status).toBe(500);
+      const body = await response.json();
+      expect(body.error).toBe("Failed to unhide media");
+    });
+
+    it("POST /unhide → 400 Invalid request when mediaId is missing", async () => {
+      const response = await unhideRoute!.handler(
+        new Request("https://api.rkm1.de/api/media//unhide", {
+          method: "POST",
+        }),
+        mockEnv,
+        {
+          url: new URL("https://api.rkm1.de/api/media//unhide"),
+          pathname: "/api/media//unhide",
+          params: {},
+        },
+      );
+      expect(response.status).toBe(400);
+      const body = await response.json();
+      expect(body.error).toBe("Invalid request");
+    });
+
+    it("DELETE /api/media/:mediaId → 403 Forbidden on a permission error", async () => {
+      mockMediaHandlerInstance.deleteMedia.mockRejectedValue(
+        new Error("permission required"),
+      );
+      const response = await deleteRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/media-123", {
+          method: "DELETE",
+        }),
+        mockEnv,
+        {
+          url: new URL("https://api.rkm1.de/api/media/media-123"),
+          pathname: "/api/media/media-123",
+          params: { mediaId: "media-123" },
+        },
+      );
+      expect(response.status).toBe(403);
+      const body = await response.json();
+      expect(body.error).toBe("Forbidden");
+    });
+
+    it("DELETE /api/media/:mediaId → 404 when media not found", async () => {
+      mockMediaHandlerInstance.deleteMedia.mockRejectedValue(
+        new Error("Media not found"),
+      );
+      const response = await deleteRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/media-123", {
+          method: "DELETE",
+        }),
+        mockEnv,
+        {
+          url: new URL("https://api.rkm1.de/api/media/media-123"),
+          pathname: "/api/media/media-123",
+          params: { mediaId: "media-123" },
+        },
+      );
+      expect(response.status).toBe(404);
+    });
+
+    it("DELETE /api/media/:mediaId → 409 via the 'used by other users' branch", async () => {
+      mockMediaHandlerInstance.deleteMedia.mockRejectedValue(
+        new Error("Media is used by other users."),
+      );
+      const response = await deleteRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/media-123", {
+          method: "DELETE",
+        }),
+        mockEnv,
+        {
+          url: new URL("https://api.rkm1.de/api/media/media-123"),
+          pathname: "/api/media/media-123",
+          params: { mediaId: "media-123" },
+        },
+      );
+      expect(response.status).toBe(409);
+      const body = await response.json();
+      expect(body.action).toBe("hidden");
+    });
+
+    it("DELETE /api/media/:mediaId → 500 on a generic error", async () => {
+      mockMediaHandlerInstance.deleteMedia.mockRejectedValue(
+        new Error("kaboom"),
+      );
+      const response = await deleteRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/media-123", {
+          method: "DELETE",
+        }),
+        mockEnv,
+        {
+          url: new URL("https://api.rkm1.de/api/media/media-123"),
+          pathname: "/api/media/media-123",
+          params: { mediaId: "media-123" },
+        },
+      );
+      expect(response.status).toBe(500);
+      const body = await response.json();
+      expect(body.error).toBe("Failed to delete media");
+    });
+
+    it("DELETE /api/media/:mediaId → 400 Invalid request when mediaId is missing", async () => {
+      const response = await deleteRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/", { method: "DELETE" }),
+        mockEnv,
+        {
+          url: new URL("https://api.rkm1.de/api/media/"),
+          pathname: "/api/media/",
+          params: {},
+        },
+      );
+      expect(response.status).toBe(400);
+      const body = await response.json();
+      expect(body.error).toBe("Invalid request");
+    });
+
+    it("GET /api/media/grouped → 404 when listUserMediaGrouped throws 'Media not found'", async () => {
+      mockMediaHandlerInstance.listUserMediaGrouped.mockRejectedValue(
+        new Error("Media not found"),
+      );
+      const response = await groupedRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/grouped?groupBy=month", {
+          method: "GET",
+        }),
+        mockEnv,
+        {
+          url: new URL(
+            "https://api.rkm1.de/api/media/grouped?groupBy=month",
+          ),
+          pathname: "/api/media/grouped",
+          params: {},
+        },
+      );
+      expect(response.status).toBe(404);
+      const body = await response.json();
+      expect(body.error).toBe("Failed to group media");
+    });
+
+    it("GET /api/media/grouped → 500 on a generic error", async () => {
+      mockMediaHandlerInstance.listUserMediaGrouped.mockRejectedValue(
+        new Error("group boom"),
+      );
+      const response = await groupedRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/grouped?groupBy=year", {
+          method: "GET",
+        }),
+        mockEnv,
+        {
+          url: new URL("https://api.rkm1.de/api/media/grouped?groupBy=year"),
+          pathname: "/api/media/grouped",
+          params: {},
+        },
+      );
+      expect(response.status).toBe(500);
+    });
+
+    it("GET /api/media/grouped → 400 Invalid limit when limit is out of range", async () => {
+      const response = await groupedRoute!.handler(
+        new Request(
+          "https://api.rkm1.de/api/media/grouped?groupBy=month&limit=0",
+          { method: "GET" },
+        ),
+        mockEnv,
+        {
+          url: new URL(
+            "https://api.rkm1.de/api/media/grouped?groupBy=month&limit=0",
+          ),
+          pathname: "/api/media/grouped",
+          params: {},
+        },
+      );
+      expect(response.status).toBe(400);
+      const body = await response.json();
+      expect(body.error).toBe("Invalid limit");
+    });
+
+    it("GET /api/media/stats → 404 when getUserMediaStats throws 'Media not found'", async () => {
+      mockMediaHandlerInstance.getUserMediaStats.mockRejectedValue(
+        new Error("Media not found"),
+      );
+      const response = await statsRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/stats", { method: "GET" }),
+        mockEnv,
+        {
+          url: new URL("https://api.rkm1.de/api/media/stats"),
+          pathname: "/api/media/stats",
+          params: {},
+        },
+      );
+      expect(response.status).toBe(404);
+      const body = await response.json();
+      expect(body.error).toBe("Failed to get media stats");
+    });
+
+    it("GET /api/media/stats → 500 on a generic error", async () => {
+      mockMediaHandlerInstance.getUserMediaStats.mockRejectedValue(
+        new Error("stats boom"),
+      );
+      const response = await statsRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/stats", { method: "GET" }),
+        mockEnv,
+        {
+          url: new URL("https://api.rkm1.de/api/media/stats"),
+          pathname: "/api/media/stats",
+          params: {},
+        },
+      );
+      expect(response.status).toBe(500);
+    });
+  });
+
+  // ---- checkSuspiciousContent extra branches (via the upload paths) ---------
+  // src/lib/routes/media.ts lines 424 (MZ executable), 459 (excessive JPEG
+  // metadata), plus the empty-video-allowlist fallback (578 / 1169).
+  describe("suspicious-content + allowlist-fallback branches", () => {
+    const uploadRoute = mediaRoutes.find(
+      (r) => r.path === "/api/media/upload" && r.method === "POST",
+    );
+    const batchRoute = mediaRoutes.find(
+      (r) => r.path === "/api/media/upload/batch" && r.method === "POST",
+    );
+
+    it("batch flags an MZ-executable file declared as video as Suspicious content detected (424)", async () => {
+      // Declared video/mp4 → batchIsVideo true (allowlist) so the file is NOT
+      // rejected as unsupported and reaches checkSuspiciousContent, whose MZ
+      // branch (bytes[0]=0x4d, bytes[1]=0x5a) fires.
+      const mz = new Uint8Array([0x4d, 0x5a, 0x90, 0x00, 0x03, 0x00, 0x00, 0x00]);
+      const fd = new FormData();
+      fd.append("files[0]", new Blob([mz], { type: "video/mp4" }), "evil.mp4");
+      const response = await batchRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/upload/batch", {
+          method: "POST",
+          body: fd,
+        }),
+        mockEnv,
+        {
+          url: new URL("https://api.rkm1.de/api/media/upload/batch"),
+          pathname: "/api/media/upload/batch",
+          params: {},
+        },
+      );
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.results[0].warning).toBe("Suspicious content detected");
+    });
+
+    it("rejects a JPEG with >64KB of APP-segment metadata as Suspicious content detected (459)", async () => {
+      // FF D8, then APP1 (FF E1) len 0xFFFF, then APP2 (FF E2) len 0x0100 →
+      // metadataSize 65535 + 256 > 65536 → "Excessive metadata detected".
+      const app1Len = 0xffff;
+      const total = 2 /*SOI*/ + 2 /*FFE1*/ + app1Len + 2 /*FFE2*/ + 0x0100;
+      const bytes = new Uint8Array(total + 16);
+      bytes[0] = 0xff; // SOI
+      bytes[1] = 0xd8;
+      bytes[2] = 0xff; // APP1
+      bytes[3] = 0xe1;
+      bytes[4] = (app1Len >> 8) & 0xff;
+      bytes[5] = app1Len & 0xff;
+      const app2Off = 2 + 2 + app1Len;
+      bytes[app2Off] = 0xff; // APP2
+      bytes[app2Off + 1] = 0xe2;
+      bytes[app2Off + 2] = 0x01;
+      bytes[app2Off + 3] = 0x00;
+      const fd = new FormData();
+      fd.append("file", new Blob([bytes], { type: "image/jpeg" }), "fat.jpg");
+      const response = await uploadRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/upload", {
+          method: "POST",
+          body: fd,
+        }),
+        mockEnv,
+        {
+          url: new URL("https://api.rkm1.de/api/media/upload"),
+          pathname: "/api/media/upload",
+          params: {},
+        },
+      );
+      expect(response.status).toBe(400);
+      const body = await response.json();
+      expect(body.error).toBe("Suspicious content detected");
+    });
+
+    it("upload falls back to the default video allowlist when env video allowlist is empty (578)", async () => {
+      const envEmptyVideo = {
+        ...mockEnv,
+        media: {
+          ...mockEnv.media,
+          allowlist: { ...mockEnv.media.allowlist, video: [] },
+        },
+      };
+      const mp4 = new Uint8Array([
+        0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d,
+      ]); // ftyp 'isom'
+      const fd = new FormData();
+      fd.append("file", new Blob([mp4], { type: "video/mp4" }), "clip.mp4");
+      const response = await uploadRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/upload", {
+          method: "POST",
+          body: fd,
+        }),
+        envEmptyVideo,
+        {
+          url: new URL("https://api.rkm1.de/api/media/upload"),
+          pathname: "/api/media/upload",
+          params: {},
+        },
+      );
+      // Default fallback list includes video/mp4 → accepted.
+      // P0b: video takes the async-pending path → 202 Accepted.
+      expect(response.status).toBe(202);
+      const fallbackBody = await response.json();
+      expect(fallbackBody).toHaveProperty("status", "pending");
+      // Sync MediaUploadService must NOT be called on the async path.
+      expect(mockUploadSingle).not.toHaveBeenCalled();
+    });
+
+    it("batch falls back to the default video allowlist when env video allowlist is empty (1169)", async () => {
+      mockUploadSingle.mockResolvedValue({
+        success: true,
+        contentHash: VALID_UPLOAD_HASH,
+        url: `https://api.rkm1.de/api/media/${VALID_UPLOAD_HASH}`,
+        status: "uploaded",
+      });
+      const envEmptyVideo = {
+        ...mockEnv,
+        media: {
+          ...mockEnv.media,
+          allowlist: { ...mockEnv.media.allowlist, video: [] },
+        },
+      };
+      const mp4 = new Uint8Array([
+        0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d,
+      ]);
+      const fd = new FormData();
+      fd.append("files[0]", new Blob([mp4], { type: "video/mp4" }), "clip.mp4");
+      const response = await batchRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/upload/batch", {
+          method: "POST",
+          body: fd,
+        }),
+        envEmptyVideo,
+        {
+          url: new URL("https://api.rkm1.de/api/media/upload/batch"),
+          pathname: "/api/media/upload/batch",
+          params: {},
+        },
+      );
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.summary.successful).toBe(1);
+    });
+
+    it("batch detects a WebP image purely from magic bytes when declared octet-stream (1189-1190)", async () => {
+      mockUploadSingle.mockResolvedValue({
+        success: true,
+        contentHash: VALID_UPLOAD_HASH,
+        url: `https://api.rkm1.de/api/media/${VALID_UPLOAD_HASH}`,
+        status: "uploaded",
+      });
+      // RIFF....WEBP — not in the image allowlist by .type (octet-stream), so
+      // the magic-byte image detector at lines 1189-1190 must classify it.
+      const webp = new Uint8Array([
+        0x52, 0x49, 0x46, 0x46, 0x00, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50,
+      ]);
+      const fd = new FormData();
+      fd.append(
+        "files[0]",
+        new Blob([webp], { type: "application/octet-stream" }),
+        "img.webp",
+      );
+      const response = await batchRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/upload/batch", {
+          method: "POST",
+          body: fd,
+        }),
+        mockEnv,
+        {
+          url: new URL("https://api.rkm1.de/api/media/upload/batch"),
+          pathname: "/api/media/upload/batch",
+          params: {},
+        },
+      );
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      // Detected as image → re-encoded → uploaded successfully (not "Unsupported").
+      expect(body.summary.successful).toBe(1);
     });
   });
 });

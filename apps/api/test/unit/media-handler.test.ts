@@ -1130,6 +1130,157 @@ describe("MediaHandler", () => {
       // Verify withQueryTimeoutAndRetry was called multiple times
       expect(mockWithQueryTimeoutAndRetry).toHaveBeenCalled();
     });
+
+    // ── T11: metadata-visibility gate ──────────────────────────────────────
+
+    /**
+     * Wire up the six withQueryTimeoutAndRetry calls that getMediaDetails makes,
+     * using the supplied mediaFile fixture for the first (findUnique) call.
+     */
+    function setupGetMediaDetailsMocks(mediaFixture: Record<string, unknown>) {
+      let callCount = 0;
+      mockWithQueryTimeoutAndRetry.mockImplementation(
+        async (
+          _manager: any,
+          _region: string,
+          _env: any,
+          queryFn: (db: any) => Promise<any>,
+        ) => {
+          callCount++;
+          if (callCount === 1) {
+            return await queryFn({
+              ...mockDb,
+              mediaFile: {
+                findUnique: vi.fn().mockResolvedValue(mediaFixture),
+              },
+            });
+          }
+          if (callCount === 2) {
+            return await queryFn({
+              ...mockDb,
+              post: { findMany: vi.fn().mockResolvedValue([{ id: "post-1" }]) },
+            });
+          }
+          if (callCount === 3) {
+            return await queryFn({
+              ...mockDb,
+              postMedia: {
+                findFirst: vi.fn().mockResolvedValue({ mediaId: "media-1", postId: "post-1" }),
+              },
+            });
+          }
+          // callCount === 4: userEntities — handled by mockDb default (returns [])
+          if (callCount === 5) {
+            return await queryFn({
+              ...mockDb,
+              post: {
+                findMany: vi.fn().mockResolvedValue([
+                  {
+                    id: "post-1",
+                    text: "test",
+                    createdAt: new Date("2024-01-01"),
+                    visibility: "PUBLIC",
+                  },
+                ]),
+              },
+            });
+          }
+          if (callCount === 6) {
+            return await queryFn({
+              ...mockDb,
+              postMedia: {
+                findMany: vi.fn().mockResolvedValue([{ post: { authorId: "user-123" } }]),
+              },
+            });
+          }
+          return await queryFn(mockDb);
+        },
+      );
+    }
+
+    it("should omit exif/iptc/dateTaken when metadataVisible is false", async () => {
+      setupGetMediaDetailsMocks({
+        id: "media-1",
+        contentHash: "abc123",
+        mimeType: "image/jpeg",
+        size: 2048,
+        createdAt: new Date("2024-06-01"),
+        updatedAt: new Date("2024-06-01"),
+        hidden: false,
+        hiddenAt: null,
+        deletedAt: null,
+        metadataVisible: false,
+        locationVisible: false,
+        exifData: { make: "Canon", model: "EOS" },
+        iptcData: { caption: "A photo" },
+        dateTaken: new Date("2024-05-15"),
+        videoMetadata: null,
+      });
+
+      const result = await handler.getMediaDetails("media-1", "user-123", mockEnv);
+
+      expect(result.metadataVisible).toBe(false);
+      expect(result.exifData).toBeUndefined();
+      expect(result.iptcData).toBeUndefined();
+      expect(result.dateTaken).toBeUndefined();
+    });
+
+    it("should include exif/iptc/dateTaken when metadataVisible is true", async () => {
+      setupGetMediaDetailsMocks({
+        id: "media-1",
+        contentHash: "abc123",
+        mimeType: "image/jpeg",
+        size: 2048,
+        createdAt: new Date("2024-06-01"),
+        updatedAt: new Date("2024-06-01"),
+        hidden: false,
+        hiddenAt: null,
+        deletedAt: null,
+        metadataVisible: true,
+        locationVisible: false,
+        exifData: { make: "Canon", model: "EOS" },
+        iptcData: { caption: "A photo" },
+        dateTaken: new Date("2024-05-15T12:00:00Z"),
+        videoMetadata: null,
+      });
+
+      const result = await handler.getMediaDetails("media-1", "user-123", mockEnv);
+
+      expect(result.metadataVisible).toBe(true);
+      expect(result.exifData).toEqual({ make: "Canon", model: "EOS" });
+      expect(result.iptcData).toEqual({ caption: "A photo" });
+      expect(result.dateTaken).toBe("2024-05-15T12:00:00.000Z");
+    });
+
+    it("should hide metadata by default (new row: metadataVisible defaults false)", async () => {
+      // Simulate a freshly-created row where metadataVisible is absent/null (DB default = false)
+      setupGetMediaDetailsMocks({
+        id: "media-new",
+        contentHash: "def456",
+        mimeType: "image/png",
+        size: 512,
+        createdAt: new Date("2024-07-01"),
+        updatedAt: new Date("2024-07-01"),
+        hidden: false,
+        hiddenAt: null,
+        deletedAt: null,
+        metadataVisible: null,   // simulates a missing/null value (falls back to false)
+        locationVisible: null,
+        exifData: { software: "Example" },
+        iptcData: null,
+        dateTaken: null,
+        videoMetadata: null,
+      });
+
+      const result = await handler.getMediaDetails("media-new", "user-123", mockEnv);
+
+      // Default row: metadata must be hidden
+      expect(result.metadataVisible).toBe(false);
+      expect(result.locationVisible).toBe(false);
+      expect(result.exifData).toBeUndefined();
+      expect(result.iptcData).toBeUndefined();
+      expect(result.dateTaken).toBeUndefined();
+    });
   });
 
   describe("hideMedia", () => {
@@ -3439,6 +3590,1099 @@ describe("MediaHandler", () => {
 
       expect(result.totalCount).toBe(1);
       expect(result.hiddenCount).toBe(1);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Targeted branch-coverage additions (appended)
+  // ─────────────────────────────────────────────────────────────────────────
+
+  describe("constructor / DEFAULT_REGION fallback (branch coverage)", () => {
+    it("constructs without env (logger stub branch)", () => {
+      // env undefined -> logger = {} as Logger (line 16 false side)
+      const h = new MediaHandler();
+      expect(h).toBeInstanceOf(MediaHandler);
+    });
+
+    it("falls back to 'EU' when DEFAULT_REGION is falsy (no request)", async () => {
+      // env.DEFAULT_REGION = "" exercises the `|| "EU"` right side of the
+      // region ternary in every method (binary-expr[1] at 98/393/779/...).
+      const envNoRegion = { ...mockEnv, DEFAULT_REGION: "" } as Env;
+      const h = new MediaHandler(envNoRegion);
+      mockDb.post.findMany.mockResolvedValue([]);
+
+      const result = await h.getUserMediaStats("user-123", {}, envNoRegion);
+      expect(result.totalCount).toBe(0);
+      // region used should be the EU fallback
+      const regionArg = mockWithQueryTimeoutAndRetry.mock.calls[0][1];
+      expect(regionArg).toBe("EU");
+    });
+  });
+
+  // ── getUserMediaStats: avatar-URL classification (lines 489-526) ──────────
+  describe("getUserMediaStats avatar classification (branch coverage)", () => {
+    // Wires: 1=userPosts, 2=postMedia, 3=userEntities, then conditionally
+    // 4=avatarMedia (only if a contentHash was extracted), then mediaRows.
+    function wireStats(opts: {
+      entities: any[];
+      avatarMediaRows?: any[]; // returned by mediaFile.findMany when hashes>0
+      mediaRows: any[]; // final mediaRows
+      postMedia?: any[];
+    }) {
+      const hasHashCall = (opts.avatarMediaRows ?? null) !== null;
+      let call = 0;
+      mockWithQueryTimeoutAndRetry.mockImplementation(
+        async (
+          _m: any,
+          _r: string,
+          _e: any,
+          queryFn: (db: any) => Promise<any>,
+        ) => {
+          call++;
+          if (call === 1) {
+            return queryFn({
+              ...mockDb,
+              post: { findMany: vi.fn().mockResolvedValue([{ id: "post-1" }]) },
+            });
+          }
+          if (call === 2) {
+            return queryFn({
+              ...mockDb,
+              postMedia: {
+                findMany: vi
+                  .fn()
+                  .mockResolvedValue(opts.postMedia ?? []),
+              },
+            });
+          }
+          if (call === 3) {
+            return queryFn({
+              ...mockDb,
+              entity: { findMany: vi.fn().mockResolvedValue(opts.entities) },
+            });
+          }
+          if (hasHashCall && call === 4) {
+            return queryFn({
+              ...mockDb,
+              mediaFile: {
+                findMany: vi.fn().mockResolvedValue(opts.avatarMediaRows),
+              },
+            });
+          }
+          // mediaRows fetch is call 4 (no hash call) or call 5 (with hash call)
+          const mediaRowsCall = hasHashCall ? 5 : 4;
+          if (call === mediaRowsCall) {
+            return queryFn({
+              ...mockDb,
+              mediaFile: {
+                findMany: vi.fn().mockResolvedValue(opts.mediaRows),
+              },
+            });
+          }
+          return queryFn(mockDb);
+        },
+      );
+    }
+
+    const baseMediaRow = {
+      id: "cmrow00000000000000000000",
+      mimeType: "image/jpeg",
+      size: 1000,
+      hidden: false,
+      createdAt: new Date("2025-03-01T00:00:00Z"),
+    };
+
+    it("classifies a direct CUID media-id avatar (no extra DB call)", async () => {
+      const cuid = "cmavatar00000000000000000";
+      wireStats({
+        entities: [{ metadata: { avatar: cuid } }],
+        mediaRows: [{ ...baseMediaRow, id: cuid }],
+      });
+      const result = await handler.getUserMediaStats("user-123", {}, mockEnv);
+      expect(result.totalCount).toBe(1);
+      // 4 calls: posts, postMedia, entities, mediaRows (no avatar-hash lookup)
+      expect(mockWithQueryTimeoutAndRetry).toHaveBeenCalledTimes(4);
+    });
+
+    it("classifies a bare contentHash avatar and resolves it via extra DB call", async () => {
+      const hash = "a".repeat(64);
+      const resolvedId = "cmresolved000000000000000";
+      wireStats({
+        entities: [{ metadata: { avatar: hash } }],
+        avatarMediaRows: [{ id: resolvedId }],
+        mediaRows: [{ ...baseMediaRow, id: resolvedId }],
+      });
+      const result = await handler.getUserMediaStats("user-123", {}, mockEnv);
+      expect(result.totalCount).toBe(1);
+      // 5 calls because the contentHash triggers the avatarMedia lookup
+      expect(mockWithQueryTimeoutAndRetry).toHaveBeenCalledTimes(5);
+    });
+
+    it("extracts contentHash from a full /api/media/<hash> URL avatar", async () => {
+      const hash = "b".repeat(40);
+      const resolvedId = "cmurlhash0000000000000000";
+      wireStats({
+        entities: [
+          {
+            metadata: {
+              avatar: `https://api.test.com/api/media/${hash}?variant=optimized`,
+            },
+          },
+        ],
+        avatarMediaRows: [{ id: resolvedId }],
+        mediaRows: [{ ...baseMediaRow, id: resolvedId }],
+      });
+      const result = await handler.getUserMediaStats("user-123", {}, mockEnv);
+      expect(result.totalCount).toBe(1);
+      expect(mockWithQueryTimeoutAndRetry).toHaveBeenCalledTimes(5);
+    });
+
+    it("extracts a CUID media-id from a /api/media/<cuid> URL avatar", async () => {
+      // Not a hex hash, but the path segment is a CUID -> avatarMediaIdsDirect
+      const cuid = "cmpathid00000000000000000";
+      wireStats({
+        entities: [{ metadata: { avatar: `/api/media/${cuid}` } }],
+        mediaRows: [{ ...baseMediaRow, id: cuid }],
+      });
+      const result = await handler.getUserMediaStats("user-123", {}, mockEnv);
+      expect(result.totalCount).toBe(1);
+      // direct id, no hash lookup -> 4 calls
+      expect(mockWithQueryTimeoutAndRetry).toHaveBeenCalledTimes(4);
+    });
+
+    it("ignores a garbage avatar string (no match) and yields zero stats", async () => {
+      wireStats({
+        entities: [{ metadata: { avatar: "not-a-media-reference!!" } }],
+        mediaRows: [],
+      });
+      const result = await handler.getUserMediaStats("user-123", {}, mockEnv);
+      expect(result.totalCount).toBe(0);
+      // no avatar contributed, no posts media -> allMediaIds empty short-circuit
+      // (3 calls: posts, postMedia, entities; mediaRows never queried)
+      expect(mockWithQueryTimeoutAndRetry).toHaveBeenCalledTimes(3);
+    });
+
+    it("ignores a null avatar value", async () => {
+      wireStats({
+        entities: [{ metadata: { avatar: null } }],
+        mediaRows: [],
+      });
+      const result = await handler.getUserMediaStats("user-123", {}, mockEnv);
+      expect(result.totalCount).toBe(0);
+      expect(mockWithQueryTimeoutAndRetry).toHaveBeenCalledTimes(3);
+    });
+
+    it("ignores a non-string avatar value (number)", async () => {
+      wireStats({
+        entities: [{ metadata: { avatar: 12345 } }],
+        mediaRows: [],
+      });
+      const result = await handler.getUserMediaStats("user-123", {}, mockEnv);
+      expect(result.totalCount).toBe(0);
+      expect(mockWithQueryTimeoutAndRetry).toHaveBeenCalledTimes(3);
+    });
+
+    it("ignores an empty-string avatar value", async () => {
+      wireStats({
+        entities: [{ metadata: { avatar: "" } }],
+        mediaRows: [],
+      });
+      const result = await handler.getUserMediaStats("user-123", {}, mockEnv);
+      expect(result.totalCount).toBe(0);
+      expect(mockWithQueryTimeoutAndRetry).toHaveBeenCalledTimes(3);
+    });
+
+    it("ignores entity metadata that is null", async () => {
+      wireStats({
+        entities: [{ metadata: null }],
+        mediaRows: [],
+      });
+      const result = await handler.getUserMediaStats("user-123", {}, mockEnv);
+      expect(result.totalCount).toBe(0);
+      expect(mockWithQueryTimeoutAndRetry).toHaveBeenCalledTimes(3);
+    });
+
+    it("ignores entity metadata that is not an object (string)", async () => {
+      wireStats({
+        entities: [{ metadata: "just-a-string" }],
+        mediaRows: [],
+      });
+      const result = await handler.getUserMediaStats("user-123", {}, mockEnv);
+      expect(result.totalCount).toBe(0);
+      expect(mockWithQueryTimeoutAndRetry).toHaveBeenCalledTimes(3);
+    });
+
+    it("ignores entity metadata without an avatar key", async () => {
+      wireStats({
+        entities: [{ metadata: { somethingElse: "x" } }],
+        mediaRows: [],
+      });
+      const result = await handler.getUserMediaStats("user-123", {}, mockEnv);
+      expect(result.totalCount).toBe(0);
+      expect(mockWithQueryTimeoutAndRetry).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  // ── getUserMediaStats: aggregation + early-exit branches ──────────────────
+  describe("getUserMediaStats aggregation branches (branch coverage)", () => {
+    function wireStatsSimple(mediaRows: any[], postMedia: any[] = [{ mediaId: "cmrow00000000000000000000" }]) {
+      let call = 0;
+      mockWithQueryTimeoutAndRetry.mockImplementation(
+        async (_m: any, _r: string, _e: any, queryFn: (db: any) => Promise<any>) => {
+          call++;
+          if (call === 1)
+            return queryFn({ ...mockDb, post: { findMany: vi.fn().mockResolvedValue([{ id: "post-1" }]) } });
+          if (call === 2)
+            return queryFn({ ...mockDb, postMedia: { findMany: vi.fn().mockResolvedValue(postMedia) } });
+          // call 3 = entities (default [])
+          if (call === 4)
+            return queryFn({ ...mockDb, mediaFile: { findMany: vi.fn().mockResolvedValue(mediaRows) } });
+          return queryFn(mockDb);
+        },
+      );
+    }
+
+    it("returns zero stats when mediaRows is empty (post media id present but row filtered)", async () => {
+      // allMediaIds non-empty (from postMedia) but mediaFile.findMany returns []
+      // -> hits the `mediaRows.length === 0` early-return at line 627.
+      wireStatsSimple([]);
+      const result = await handler.getUserMediaStats("user-123", {}, mockEnv);
+      expect(result.totalCount).toBe(0);
+      expect(result.oldestMedia).toBeNull();
+      expect(result.newestMedia).toBeNull();
+    });
+
+    it("counts videos and applies the video type filter branch", async () => {
+      wireStatsSimple([
+        {
+          id: "cmrow00000000000000000000",
+          mimeType: "video/mp4",
+          size: 5000,
+          hidden: false,
+          createdAt: new Date("2025-02-10T00:00:00Z"),
+        },
+      ]);
+      const result = await handler.getUserMediaStats(
+        "user-123",
+        { type: "video" },
+        mockEnv,
+      );
+      expect(result.videoCount).toBe(1);
+      expect(result.photoCount).toBe(0);
+      expect(result.totalSize).toBe(5000);
+    });
+
+    it("aggregates oldest/newest across multiple rows and handles size undefined + string dates", async () => {
+      wireStatsSimple([
+        {
+          id: "cmrowa0000000000000000000",
+          mimeType: "image/png",
+          size: undefined, // exercises `row.size || 0`
+          hidden: true,
+          createdAt: new Date("2025-01-01T00:00:00Z"), // oldest
+        },
+        {
+          id: "cmrowb0000000000000000000",
+          mimeType: "image/jpeg",
+          size: 200,
+          hidden: false,
+          createdAt: "2025-06-01T00:00:00Z", // string -> new Date(...) branch; newest
+        },
+        {
+          id: "cmrowc0000000000000000000",
+          mimeType: "image/gif",
+          size: 100,
+          hidden: false,
+          createdAt: new Date("2025-03-01T00:00:00Z"), // middle (neither newest nor oldest)
+        },
+      ]);
+      const result = await handler.getUserMediaStats(
+        "user-123",
+        { includeHidden: true },
+        mockEnv,
+      );
+      expect(result.totalCount).toBe(3);
+      expect(result.totalSize).toBe(300); // undefined size counted as 0
+      expect(result.hiddenCount).toBe(1);
+      expect(result.oldestMedia).toBe("2025-01-01T00:00:00.000Z");
+      expect(result.newestMedia).toBe("2025-06-01T00:00:00.000Z");
+      // three distinct months
+      expect(result.byMonth.length).toBe(3);
+    });
+
+    it("rethrows and logs when a query rejects (error with name)", async () => {
+      const err = new Error("boom");
+      err.name = "TimeoutError";
+      mockWithQueryTimeoutAndRetry.mockRejectedValueOnce(err);
+      await expect(
+        handler.getUserMediaStats("user-123", { type: "photo" }, mockEnv),
+      ).rejects.toThrow("boom");
+    });
+
+    it("rethrows when a query rejects with an error lacking a name (UnknownError branch)", async () => {
+      // throw a plain object without `.name` to hit the `|| "UnknownError"` side
+      mockWithQueryTimeoutAndRetry.mockImplementationOnce(async () => {
+        throw { message: "no name here" };
+      });
+      await expect(
+        handler.getUserMediaStats("user-123", {}, mockEnv),
+      ).rejects.toBeTruthy();
+    });
+  });
+
+  // ── listUserMedia: avatar classification + pagination + URL generation ────
+  describe("listUserMedia avatar + pagination branches (branch coverage)", () => {
+    function wireList(opts: {
+      entities?: any[];
+      postMedia?: any[];
+      avatarMediaRows?: any[] | null;
+      media: any[]; // returned by mediaFile.findMany (the page query)
+      postCount?: number;
+      totalCount?: number | null;
+    }) {
+      const hasHashCall = (opts.avatarMediaRows ?? null) !== null;
+      let call = 0;
+      mockWithQueryTimeoutAndRetry.mockImplementation(
+        async (_m: any, _r: string, _e: any, queryFn: (db: any) => Promise<any>) => {
+          call++;
+          if (call === 1)
+            return queryFn({ ...mockDb, post: { findMany: vi.fn().mockResolvedValue([{ id: "post-1" }]) } });
+          if (call === 2)
+            return queryFn({ ...mockDb, postMedia: { findMany: vi.fn().mockResolvedValue(opts.postMedia ?? []) } });
+          if (call === 3)
+            return queryFn({ ...mockDb, entity: { findMany: vi.fn().mockResolvedValue(opts.entities ?? []) } });
+          if (hasHashCall && call === 4)
+            return queryFn({ ...mockDb, mediaFile: { findMany: vi.fn().mockResolvedValue(opts.avatarMediaRows) } });
+          const mediaCall = hasHashCall ? 5 : 4;
+          if (call === mediaCall)
+            return queryFn({ ...mockDb, mediaFile: { findMany: vi.fn().mockResolvedValue(opts.media) } });
+          // subsequent calls: postMedia.count (per item) then optional mediaFile.count
+          return queryFn({
+            ...mockDb,
+            postMedia: { count: vi.fn().mockResolvedValue(opts.postCount ?? 0) },
+            mediaFile: { count: vi.fn().mockResolvedValue(opts.totalCount ?? 0) },
+          });
+        },
+      );
+    }
+
+    const mkMedia = (id: string, hash: string, createdAt: Date, extra: any = {}) => ({
+      id,
+      contentHash: hash,
+      mimeType: "image/jpeg",
+      size: 1234,
+      hidden: false,
+      createdAt,
+      ...extra,
+    });
+
+    it("returns hasMore=false and null cursor when page not full", async () => {
+      wireList({
+        postMedia: [{ mediaId: "cmrow00000000000000000000" }],
+        media: [mkMedia("cmrow00000000000000000000", "f".repeat(64), new Date("2025-01-01T00:00:00Z"))],
+        postCount: 2,
+      });
+      const result = await handler.listUserMedia("user-123", { limit: 50 }, mockEnv);
+      expect(result.media).toHaveLength(1);
+      expect(result.cursor).toBeNull();
+      expect(result.media[0].postCount).toBe(2);
+      // URL generation exercised via real getApiDomain
+      expect(result.media[0].thumbnailUrl).toContain("/api/media/");
+    });
+
+    it("returns a next cursor when there are more results than the limit", async () => {
+      // limit=1 but two rows returned -> hasMore true, slice to 1, cursor set
+      const d1 = new Date("2025-05-02T00:00:00Z");
+      const d2 = new Date("2025-05-01T00:00:00Z");
+      wireList({
+        postMedia: [{ mediaId: "cmrowa0000000000000000000" }],
+        media: [
+          mkMedia("cmrowa0000000000000000000", "a".repeat(64), d1),
+          mkMedia("cmrowb0000000000000000000", "b".repeat(64), d2),
+        ],
+        postCount: 1,
+      });
+      const result = await handler.listUserMedia("user-123", { limit: 1 }, mockEnv);
+      expect(result.media).toHaveLength(1);
+      expect(result.cursor).toBe(d1.toISOString());
+    });
+
+    it("resolves an avatar contentHash and merges it into the media id set", async () => {
+      const resolved = "cmavm00000000000000000000";
+      wireList({
+        entities: [{ metadata: { avatar: "c".repeat(64) } }],
+        avatarMediaRows: [{ id: resolved }],
+        media: [mkMedia(resolved, "c".repeat(64), new Date("2025-04-01T00:00:00Z"))],
+        postCount: 0,
+      });
+      const result = await handler.listUserMedia("user-123", {}, mockEnv);
+      expect(result.media).toHaveLength(1);
+      // avatar media has postCount 0 (its contentHash is in avatarContentHashes)
+      expect(result.media[0].postCount).toBe(0);
+    });
+
+    it("returns totalCount when includeTotalCount=true (with avatar-direct id, no hash call)", async () => {
+      const cuid = "cmdir000000000000000000000".slice(0, 25);
+      wireList({
+        entities: [{ metadata: { avatar: cuid } }],
+        media: [mkMedia(cuid, "d".repeat(64), new Date("2025-04-01T00:00:00Z"))],
+        postCount: 3,
+        totalCount: 7,
+      });
+      const result = await handler.listUserMedia(
+        "user-123",
+        { includeTotalCount: true },
+        mockEnv,
+      );
+      expect(result.totalCount).toBe(7);
+    });
+
+    it("returns empty media list when there are no posts and no avatar media", async () => {
+      // postMedia [] + entities [] -> allMediaIds empty -> early return line 962
+      wireList({ media: [] });
+      const result = await handler.listUserMedia("user-123", {}, mockEnv);
+      expect(result.media).toEqual([]);
+      expect(result.cursor).toBeNull();
+    });
+
+    it("applies cursor with oldest sort (gt) branch", async () => {
+      wireList({
+        postMedia: [{ mediaId: "cmrow00000000000000000000" }],
+        media: [mkMedia("cmrow00000000000000000000", "e".repeat(64), new Date("2025-07-01T00:00:00Z"))],
+        postCount: 0,
+      });
+      const result = await handler.listUserMedia(
+        "user-123",
+        { cursor: "2025-06-01T00:00:00Z", sort: "oldest" },
+        mockEnv,
+      );
+      expect(result.media).toHaveLength(1);
+    });
+
+    it("rethrows and logs on listUserMedia query failure (error without name)", async () => {
+      mockWithQueryTimeoutAndRetry.mockImplementationOnce(async () => {
+        throw "string-error";
+      });
+      await expect(
+        handler.listUserMedia("user-123", { sort: "oldest", type: "video" }, mockEnv),
+      ).rejects.toBeTruthy();
+    });
+  });
+
+  // ── getMediaDetails: avatar ownership detection + metadata/canDelete ──────
+  describe("getMediaDetails ownership + metadata branches (branch coverage)", () => {
+    // Ownership via avatar only (no posts): postIds empty -> findFirst &
+    // postsWithMedia are skipped. Sequence: findUnique, post.findMany([]),
+    // entity.findMany, postMedia.findMany (checkShared).
+    function wireAvatarOnly(media: any, entities: any[], shared: any[] = []) {
+      let call = 0;
+      mockWithQueryTimeoutAndRetry.mockImplementation(
+        async (_m: any, _r: string, _e: any, queryFn: (db: any) => Promise<any>) => {
+          call++;
+          if (call === 1)
+            return queryFn({ ...mockDb, mediaFile: { findUnique: vi.fn().mockResolvedValue(media) } });
+          if (call === 2)
+            return queryFn({ ...mockDb, post: { findMany: vi.fn().mockResolvedValue([]) } });
+          if (call === 3)
+            return queryFn({ ...mockDb, entity: { findMany: vi.fn().mockResolvedValue(entities) } });
+          if (call === 4)
+            return queryFn({ ...mockDb, postMedia: { findMany: vi.fn().mockResolvedValue(shared) } });
+          return queryFn(mockDb);
+        },
+      );
+    }
+
+    const baseMedia = {
+      id: "cmgmdid000000000000000000",
+      contentHash: "ab".repeat(20), // 40-char hex
+      cid: null,
+      mimeType: "image/jpeg",
+      size: 1024,
+      width: null,
+      height: null,
+      duration: null,
+      exifData: null,
+      iptcData: null,
+      dateTaken: null,
+      videoMetadata: null,
+      metadataVisible: false,
+      locationVisible: false,
+      createdAt: new Date("2025-01-01T00:00:00Z"),
+      updatedAt: new Date("2025-01-02T00:00:00Z"),
+      hidden: false,
+      hiddenAt: null,
+      deletedAt: null,
+    };
+
+    it("detects avatar ownership when avatarUrl === media.id", async () => {
+      wireAvatarOnly(baseMedia, [{ metadata: { avatar: baseMedia.id } }]);
+      const result = await handler.getMediaDetails(baseMedia.id, "user-123", mockEnv);
+      expect(result.id).toBe(baseMedia.id);
+      expect(result.posts).toEqual([]);
+    });
+
+    it("detects avatar ownership when avatarUrl === media.contentHash", async () => {
+      wireAvatarOnly(baseMedia, [{ metadata: { avatar: baseMedia.contentHash } }]);
+      const result = await handler.getMediaDetails(baseMedia.id, "user-123", mockEnv);
+      expect(result.contentHash).toBe(baseMedia.contentHash);
+    });
+
+    it("detects avatar ownership via URL-extracted contentHash === media.contentHash", async () => {
+      wireAvatarOnly(baseMedia, [
+        { metadata: { avatar: `https://api.test.com/api/media/${baseMedia.contentHash}?variant=optimized` } },
+      ]);
+      const result = await handler.getMediaDetails(baseMedia.id, "user-123", mockEnv);
+      expect(result.id).toBe(baseMedia.id);
+    });
+
+    it("detects avatar ownership via URL-extracted media id === media.id", async () => {
+      // contentHash must NOT be hex-extractable so the second regex matches the id
+      const media = { ...baseMedia, contentHash: "zz-not-hex" };
+      wireAvatarOnly(media, [{ metadata: { avatar: `/api/media/${media.id}` } }]);
+      const result = await handler.getMediaDetails(media.id, "user-123", mockEnv);
+      expect(result.id).toBe(media.id);
+    });
+
+    it("throws 'Media not found' when not in posts and no avatar match", async () => {
+      wireAvatarOnly(baseMedia, [{ metadata: { avatar: "unrelated-value" } }]);
+      await expect(
+        handler.getMediaDetails(baseMedia.id, "user-123", mockEnv),
+      ).rejects.toThrow("Media not found");
+    });
+
+    it("skips non-string/null avatar entities while scanning for ownership", async () => {
+      wireAvatarOnly(baseMedia, [
+        { metadata: null },
+        { metadata: "string-meta" },
+        { metadata: { avatar: 999 } },
+        { metadata: { avatar: null } },
+        { metadata: { avatar: baseMedia.id } }, // finally a match
+      ]);
+      const result = await handler.getMediaDetails(baseMedia.id, "user-123", mockEnv);
+      expect(result.id).toBe(baseMedia.id);
+    });
+  });
+
+  // ── getMediaDetails: metadata field gating + canDelete/canHide ────────────
+  describe("getMediaDetails field-gating branches (branch coverage)", () => {
+    // Ownership via posts. Sequence: 1 findUnique, 2 post.findMany([post-1]),
+    // 3 postMedia.findFirst (in posts), 4 entity.findMany([]), 5 postsWithMedia,
+    // 6 checkShared.
+    function wireInPosts(media: any, opts: { postsWithMedia?: any[]; shared?: any[] } = {}) {
+      let call = 0;
+      mockWithQueryTimeoutAndRetry.mockImplementation(
+        async (_m: any, _r: string, _e: any, queryFn: (db: any) => Promise<any>) => {
+          call++;
+          if (call === 1)
+            return queryFn({ ...mockDb, mediaFile: { findUnique: vi.fn().mockResolvedValue(media) } });
+          if (call === 2)
+            return queryFn({ ...mockDb, post: { findMany: vi.fn().mockResolvedValue([{ id: "post-1" }]) } });
+          if (call === 3)
+            return queryFn({ ...mockDb, postMedia: { findFirst: vi.fn().mockResolvedValue({ mediaId: media.id, postId: "post-1" }) } });
+          // call 4 = entities (default [])
+          if (call === 5)
+            return queryFn({ ...mockDb, post: { findMany: vi.fn().mockResolvedValue(opts.postsWithMedia ?? []) } });
+          if (call === 6)
+            return queryFn({ ...mockDb, postMedia: { findMany: vi.fn().mockResolvedValue(opts.shared ?? [{ post: { authorId: "user-123" } }]) } });
+          return queryFn(mockDb);
+        },
+      );
+    }
+
+    const m = (over: any = {}) => ({
+      id: "cmgmdid000000000000000000",
+      contentHash: "cd".repeat(20),
+      cid: null,
+      mimeType: "image/jpeg",
+      size: 2048,
+      width: null,
+      height: null,
+      duration: null,
+      exifData: null,
+      iptcData: null,
+      dateTaken: null,
+      videoMetadata: null,
+      metadataVisible: false,
+      locationVisible: false,
+      createdAt: new Date("2025-01-01T00:00:00Z"),
+      updatedAt: new Date("2025-01-02T00:00:00Z"),
+      hidden: false,
+      hiddenAt: null,
+      deletedAt: null,
+      ...over,
+    });
+
+    it("includes width/height/duration/cid when present", async () => {
+      wireInPosts(m({ width: 800, height: 600, duration: 12, cid: "bafycid123" }));
+      const result = await handler.getMediaDetails("cmgmdid000000000000000000", "user-123", mockEnv);
+      expect(result.width).toBe(800);
+      expect(result.height).toBe(600);
+      expect(result.duration).toBe(12);
+      expect(result.cid).toBe("bafycid123");
+    });
+
+    it("maps width/height/duration to undefined and cid to null when absent", async () => {
+      wireInPosts(m({ width: null, height: null, duration: null, cid: null }));
+      const result = await handler.getMediaDetails("cmgmdid000000000000000000", "user-123", mockEnv);
+      expect(result.width).toBeUndefined();
+      expect(result.height).toBeUndefined();
+      expect(result.duration).toBeUndefined();
+      expect(result.cid).toBeNull();
+    });
+
+    it("includes videoMetadata when present (separate gate from exif)", async () => {
+      wireInPosts(m({ mimeType: "video/mp4", videoMetadata: { codec: "h264" }, metadataVisible: false }));
+      const result = await handler.getMediaDetails("cmgmdid000000000000000000", "user-123", mockEnv);
+      // videoMetadata is NOT behind metadataVisible
+      expect(result.videoMetadata).toEqual({ codec: "h264" });
+      // exif still withheld
+      expect(result.exifData).toBeUndefined();
+    });
+
+    it("includes exif/iptc but coerces null fields to undefined when metadataVisible=true", async () => {
+      // metadataVisible true, but exifData/iptcData/dateTaken all null -> `?? undefined`
+      wireInPosts(m({ metadataVisible: true, exifData: null, iptcData: null, dateTaken: null }));
+      const result = await handler.getMediaDetails("cmgmdid000000000000000000", "user-123", mockEnv);
+      expect(result.metadataVisible).toBe(true);
+      expect(result.exifData).toBeUndefined();
+      expect(result.iptcData).toBeUndefined();
+      expect(result.dateTaken).toBeUndefined();
+    });
+
+    it("sets hiddenAt/deletedAt timestamps and canHide=false when hidden", async () => {
+      wireInPosts(
+        m({
+          hidden: true,
+          hiddenAt: new Date("2025-01-03T00:00:00Z"),
+          deletedAt: null,
+        }),
+      );
+      const result = await handler.getMediaDetails("cmgmdid000000000000000000", "user-123", mockEnv);
+      expect(result.hidden).toBe(true);
+      expect(result.hiddenAt).toBe("2025-01-03T00:00:00.000Z");
+      expect(result.deletedAt).toBeNull();
+      expect(result.canHide).toBe(false); // hidden -> cannot hide again
+      expect(result.canDelete).toBe(true); // not shared, not deleted
+    });
+
+    it("canDelete=false when media is shared with other users", async () => {
+      wireInPosts(m(), { shared: [{ post: { authorId: "someone-else" } }] });
+      const result = await handler.getMediaDetails("cmgmdid000000000000000000", "user-123", mockEnv);
+      expect(result.canDelete).toBe(false); // shared
+      expect(result.canHide).toBe(true);
+    });
+
+    it("canDelete=false and canHide=false when media already deleted", async () => {
+      wireInPosts(m({ deletedAt: new Date("2025-01-05T00:00:00Z") }));
+      const result = await handler.getMediaDetails("cmgmdid000000000000000000", "user-123", mockEnv);
+      expect(result.deletedAt).toBe("2025-01-05T00:00:00.000Z");
+      expect(result.canDelete).toBe(false);
+      expect(result.canHide).toBe(false);
+    });
+
+    it("maps posts with falsy text to empty string", async () => {
+      wireInPosts(m(), {
+        postsWithMedia: [
+          {
+            id: "post-1",
+            text: null, // -> "" branch at line 1493
+            createdAt: new Date("2025-01-01T00:00:00Z"),
+            visibility: "PUBLIC",
+          },
+        ],
+      });
+      const result = await handler.getMediaDetails("cmgmdid000000000000000000", "user-123", mockEnv);
+      expect(result.posts).toHaveLength(1);
+      expect(result.posts[0].text).toBe("");
+      expect(result.posts[0].url).toBe("/posts/post-1");
+    });
+
+    it("rethrows on getMediaDetails query failure (UnknownError branch)", async () => {
+      mockWithQueryTimeoutAndRetry.mockImplementationOnce(async () => {
+        throw { message: "nameless" };
+      });
+      await expect(
+        handler.getMediaDetails("cmgmdid000000000000000000", "user-123", mockEnv),
+      ).rejects.toBeTruthy();
+    });
+  });
+
+  // ── getApiDomain conversion exercised through a method that emits URLs ─────
+  describe("getApiDomain hostname conversion (branch coverage)", () => {
+    // listUserMedia generates URLs via getApiDomain only when there is media,
+    // so we must return an actual media row.
+    function wireOneMedia(env: Env) {
+      let call = 0;
+      mockWithQueryTimeoutAndRetry.mockImplementation(
+        async (_m: any, _r: string, _e: any, queryFn: (db: any) => Promise<any>) => {
+          call++;
+          if (call === 1)
+            return queryFn({ ...mockDb, post: { findMany: vi.fn().mockResolvedValue([{ id: "post-1" }]) } });
+          if (call === 2)
+            return queryFn({ ...mockDb, postMedia: { findMany: vi.fn().mockResolvedValue([{ mediaId: "cmrow00000000000000000000" }]) } });
+          // call 3 entities default []
+          if (call === 4)
+            return queryFn({
+              ...mockDb,
+              mediaFile: {
+                findMany: vi.fn().mockResolvedValue([
+                  {
+                    id: "cmrow00000000000000000000",
+                    contentHash: "f".repeat(64),
+                    mimeType: "image/jpeg",
+                    size: 10,
+                    hidden: false,
+                    createdAt: new Date("2025-01-01T00:00:00Z"),
+                  },
+                ]),
+              },
+            });
+          return queryFn({ ...mockDb, postMedia: { count: vi.fn().mockResolvedValue(0) } });
+        },
+      );
+    }
+
+    it("converts www. host to api. host in emitted media URLs", async () => {
+      const env = { ...mockEnv, APP_DOMAIN: "https://www.example.com" } as Env;
+      const h = new MediaHandler(env);
+      wireOneMedia(env);
+      const result = await h.listUserMedia("user-123", {}, env);
+      expect(result.media[0].thumbnailUrl.startsWith("https://api.example.com/")).toBe(true);
+    });
+
+    it("adds api. subdomain when host has none (example.com)", async () => {
+      const env = { ...mockEnv, APP_DOMAIN: "https://example.com" } as Env;
+      const h = new MediaHandler(env);
+      wireOneMedia(env);
+      const result = await h.listUserMedia("user-123", {}, env);
+      expect(result.media[0].optimizedUrl.startsWith("https://api.example.com/")).toBe(true);
+    });
+
+    it("falls back to default domain for a single-label host (parts.length < 2)", async () => {
+      const env = { ...mockEnv, APP_DOMAIN: "https://localhost" } as Env;
+      const h = new MediaHandler(env);
+      wireOneMedia(env);
+      const result = await h.listUserMedia("user-123", {}, env);
+      // single label: no api. added, returns protocol//localhost
+      expect(result.media[0].thumbnailUrl.startsWith("https://localhost/")).toBe(true);
+    });
+  });
+
+  // ── listUserMedia: URL-form avatar extraction (lines 905-921) ─────────────
+  describe("listUserMedia URL-form avatar extraction (branch coverage)", () => {
+    function wire(opts: { entities: any[]; avatarMediaRows?: any[] | null; media: any[] }) {
+      const hasHashCall = (opts.avatarMediaRows ?? null) !== null;
+      let call = 0;
+      mockWithQueryTimeoutAndRetry.mockImplementation(
+        async (_m: any, _r: string, _e: any, queryFn: (db: any) => Promise<any>) => {
+          call++;
+          if (call === 1)
+            return queryFn({ ...mockDb, post: { findMany: vi.fn().mockResolvedValue([]) } });
+          if (call === 2)
+            return queryFn({ ...mockDb, postMedia: { findMany: vi.fn().mockResolvedValue([]) } });
+          if (call === 3)
+            return queryFn({ ...mockDb, entity: { findMany: vi.fn().mockResolvedValue(opts.entities) } });
+          if (hasHashCall && call === 4)
+            return queryFn({ ...mockDb, mediaFile: { findMany: vi.fn().mockResolvedValue(opts.avatarMediaRows) } });
+          const mediaCall = hasHashCall ? 5 : 4;
+          if (call === mediaCall)
+            return queryFn({ ...mockDb, mediaFile: { findMany: vi.fn().mockResolvedValue(opts.media) } });
+          return queryFn({ ...mockDb, postMedia: { count: vi.fn().mockResolvedValue(0) } });
+        },
+      );
+    }
+
+    it("extracts contentHash from a /api/media/<hash> URL avatar (line 906)", async () => {
+      const hash = "9".repeat(48);
+      const resolved = "cmurlc0000000000000000000";
+      wire({
+        entities: [{ metadata: { avatar: `https://api.test.com/api/media/${hash}?variant=thumbnail` } }],
+        avatarMediaRows: [{ id: resolved }],
+        media: [
+          {
+            id: resolved,
+            contentHash: hash,
+            mimeType: "image/jpeg",
+            size: 10,
+            hidden: false,
+            createdAt: new Date("2025-01-01T00:00:00Z"),
+          },
+        ],
+      });
+      const result = await handler.listUserMedia("user-123", {}, mockEnv);
+      expect(result.media).toHaveLength(1);
+      expect(result.media[0].id).toBe(resolved);
+    });
+
+    it("extracts a CUID media id from a /api/media/<cuid> URL avatar (lines 916-921)", async () => {
+      const cuid = "cmurld0000000000000000000";
+      wire({
+        // avatar has no hex hash but the path is a CUID -> avatarMediaIdsDirect
+        entities: [{ metadata: { avatar: `/api/media/${cuid}` } }],
+        media: [
+          {
+            id: cuid,
+            contentHash: "gg-not-hex",
+            mimeType: "image/jpeg",
+            size: 10,
+            hidden: false,
+            createdAt: new Date("2025-01-01T00:00:00Z"),
+          },
+        ],
+      });
+      const result = await handler.listUserMedia("user-123", {}, mockEnv);
+      expect(result.media).toHaveLength(1);
+      expect(result.media[0].id).toBe(cuid);
+    });
+
+    it("uses EU fallback region when DEFAULT_REGION is falsy (line 779)", async () => {
+      const env = { ...mockEnv, DEFAULT_REGION: "" } as Env;
+      const h = new MediaHandler(env);
+      // no posts, no avatars -> early empty return, but region resolved first
+      let call = 0;
+      mockWithQueryTimeoutAndRetry.mockImplementation(
+        async (_m: any, _r: string, _e: any, queryFn: (db: any) => Promise<any>) => {
+          call++;
+          if (call === 1)
+            return queryFn({ ...mockDb, post: { findMany: vi.fn().mockResolvedValue([]) } });
+          if (call === 2)
+            return queryFn({ ...mockDb, postMedia: { findMany: vi.fn().mockResolvedValue([]) } });
+          return queryFn({ ...mockDb, entity: { findMany: vi.fn().mockResolvedValue([]) } });
+        },
+      );
+      const result = await h.listUserMedia("user-123", {}, env);
+      expect(result.media).toEqual([]);
+      expect(mockWithQueryTimeoutAndRetry.mock.calls[0][1]).toBe("EU");
+    });
+  });
+
+  // ── listUserMediaGrouped: empty-media + error branches ────────────────────
+  describe("listUserMediaGrouped extra branches (branch coverage)", () => {
+    it("returns empty groups when posts exist but distinct media ids are empty (line 171)", async () => {
+      let call = 0;
+      mockWithQueryTimeoutAndRetry.mockImplementation(
+        async (_m: any, _r: string, _e: any, queryFn: (db: any) => Promise<any>) => {
+          call++;
+          if (call === 1)
+            return queryFn({ ...mockDb, post: { findMany: vi.fn().mockResolvedValue([{ id: "post-1" }]) } });
+          if (call === 2)
+            // postMedia returns no rows -> mediaIds empty
+            return queryFn({ ...mockDb, postMedia: { findMany: vi.fn().mockResolvedValue([]) } });
+          return queryFn(mockDb);
+        },
+      );
+      const result = await handler.listUserMediaGrouped("user-123", "month", {}, mockEnv);
+      expect(result.groups).toEqual([]);
+    });
+
+    it("rethrows and logs with options metadata on failure (error with name)", async () => {
+      const err = new Error("grouped boom");
+      err.name = "QueryError";
+      mockWithQueryTimeoutAndRetry.mockRejectedValueOnce(err);
+      await expect(
+        handler.listUserMediaGrouped(
+          "user-123",
+          "year",
+          { includeHidden: true, type: "photo" },
+          mockEnv,
+        ),
+      ).rejects.toThrow("grouped boom");
+    });
+
+    it("rethrows on failure with a nameless error (UnknownError branch)", async () => {
+      mockWithQueryTimeoutAndRetry.mockImplementationOnce(async () => {
+        throw { message: "no name" };
+      });
+      await expect(
+        handler.listUserMediaGrouped("user-123", "month", {}, mockEnv),
+      ).rejects.toBeTruthy();
+    });
+
+    it("uses EU fallback region when DEFAULT_REGION is falsy (line 98)", async () => {
+      const env = { ...mockEnv, DEFAULT_REGION: "" } as Env;
+      const h = new MediaHandler(env);
+      mockWithQueryTimeoutAndRetry.mockImplementationOnce(
+        async (_m: any, _r: string, _e: any, queryFn: (db: any) => Promise<any>) =>
+          queryFn({ ...mockDb, post: { findMany: vi.fn().mockResolvedValue([]) } }),
+      );
+      const result = await h.listUserMediaGrouped("user-123", "month", {}, env);
+      expect(result.groups).toEqual([]);
+      expect(mockWithQueryTimeoutAndRetry.mock.calls[0][1]).toBe("EU");
+    });
+  });
+
+  // ── hide/unhide/delete: EU region fallback + nameless-error catch ─────────
+  describe("hide/unhide/delete region + error branches (branch coverage)", () => {
+    // Wire getMediaDetails (6 calls) for an owned, in-posts media, then a 7th
+    // call for the mutation. `mediaOver` customizes the media row.
+    function wireDetailsThenMutation(mediaOver: any, mutationResult: any) {
+      let call = 0;
+      mockWithQueryTimeoutAndRetry.mockImplementation(
+        async (_m: any, _r: string, _e: any, queryFn: (db: any) => Promise<any>) => {
+          call++;
+          if (call === 1)
+            return queryFn({
+              ...mockDb,
+              mediaFile: {
+                findUnique: vi.fn().mockResolvedValue({
+                  id: "cmhidea000000000000000000",
+                  contentHash: "ee".repeat(20),
+                  mimeType: "image/jpeg",
+                  size: 100,
+                  width: null,
+                  height: null,
+                  duration: null,
+                  cid: null,
+                  exifData: null,
+                  iptcData: null,
+                  dateTaken: null,
+                  videoMetadata: null,
+                  metadataVisible: false,
+                  locationVisible: false,
+                  createdAt: new Date("2025-01-01T00:00:00Z"),
+                  updatedAt: new Date("2025-01-01T00:00:00Z"),
+                  hidden: false,
+                  hiddenAt: null,
+                  deletedAt: null,
+                  ...mediaOver,
+                }),
+              },
+            });
+          if (call === 2)
+            return queryFn({ ...mockDb, post: { findMany: vi.fn().mockResolvedValue([{ id: "post-1" }]) } });
+          if (call === 3)
+            return queryFn({ ...mockDb, postMedia: { findFirst: vi.fn().mockResolvedValue({}) } });
+          // call 4 entities default []
+          if (call === 5)
+            return queryFn({ ...mockDb, post: { findMany: vi.fn().mockResolvedValue([]) } });
+          if (call === 6)
+            return queryFn({ ...mockDb, postMedia: { findMany: vi.fn().mockResolvedValue([{ post: { authorId: "user-123" } }]) } });
+          if (call === 7)
+            return queryFn({ ...mockDb, mediaFile: { update: vi.fn().mockResolvedValue(mutationResult) } });
+          return queryFn(mockDb);
+        },
+      );
+    }
+
+    it("hideMedia uses EU fallback region when DEFAULT_REGION is falsy", async () => {
+      const env = { ...mockEnv, DEFAULT_REGION: "" } as Env;
+      const h = new MediaHandler(env);
+      wireDetailsThenMutation(
+        { hidden: false },
+        { id: "cmhidea000000000000000000", hidden: true, hiddenAt: new Date("2025-01-02T00:00:00Z") },
+      );
+      const result = await h.hideMedia("cmhidea000000000000000000", "user-123", env);
+      expect(result.hidden).toBe(true);
+      // region passed to the DB layer should be the EU fallback
+      expect(mockWithQueryTimeoutAndRetry.mock.calls[0][1]).toBe("EU");
+    });
+
+    it("hideMedia rethrows with UnknownError when getMediaDetails throws nameless", async () => {
+      mockWithQueryTimeoutAndRetry.mockImplementationOnce(async () => {
+        throw { message: "nameless hide" };
+      });
+      await expect(
+        handler.hideMedia("cmhidea000000000000000000", "user-123", mockEnv),
+      ).rejects.toBeTruthy();
+    });
+
+    it("unhideMedia uses EU fallback region and unhides a hidden item", async () => {
+      const env = { ...mockEnv, DEFAULT_REGION: "" } as Env;
+      const h = new MediaHandler(env);
+      wireDetailsThenMutation(
+        { hidden: true, hiddenAt: new Date("2025-01-01T00:00:00Z") },
+        { id: "cmhidea000000000000000000", hidden: false, hiddenAt: null },
+      );
+      const result = await h.unhideMedia("cmhidea000000000000000000", "user-123", env);
+      expect(result.hidden).toBe(false);
+      expect(result.hiddenAt).toBeNull();
+      expect(mockWithQueryTimeoutAndRetry.mock.calls[0][1]).toBe("EU");
+    });
+
+    it("unhideMedia rethrows with UnknownError when getMediaDetails throws nameless", async () => {
+      mockWithQueryTimeoutAndRetry.mockImplementationOnce(async () => {
+        throw { message: "nameless unhide" };
+      });
+      await expect(
+        handler.unhideMedia("cmhidea000000000000000000", "user-123", mockEnv),
+      ).rejects.toBeTruthy();
+    });
+
+    it("unhideMedia handles audit logging failure gracefully", async () => {
+      mockAuditLoggerLog.mockRejectedValueOnce(new Error("audit down"));
+      wireDetailsThenMutation(
+        { hidden: true, hiddenAt: new Date("2025-01-01T00:00:00Z") },
+        { id: "cmhidea000000000000000000", hidden: false, hiddenAt: null },
+      );
+      const result = await handler.unhideMedia("cmhidea000000000000000000", "user-123", mockEnv);
+      expect(result.hidden).toBe(false);
+      expect(mockAuditLoggerLog).toHaveBeenCalled();
+    });
+
+    it("deleteMedia rethrows with UnknownError when getMediaDetails throws nameless", async () => {
+      mockWithQueryTimeoutAndRetry.mockImplementationOnce(async () => {
+        throw { message: "nameless delete" };
+      });
+      await expect(
+        handler.deleteMedia("cmdelid000000000000000000", "user-123", mockEnv),
+      ).rejects.toBeTruthy();
+    });
+
+    it("deleteMedia uses EU fallback region for an owned, unshared item", async () => {
+      const env = { ...mockEnv, DEFAULT_REGION: "" } as Env;
+      const h = new MediaHandler(env);
+      // deleteMedia: 6 (getMediaDetails) + 1 (checkShared) + 1 (soft delete update)
+      let call = 0;
+      mockWithQueryTimeoutAndRetry.mockImplementation(
+        async (_m: any, _r: string, _e: any, queryFn: (db: any) => Promise<any>) => {
+          call++;
+          if (call === 1)
+            return queryFn({
+              ...mockDb,
+              mediaFile: {
+                findUnique: vi.fn().mockResolvedValue({
+                  id: "cmdelid000000000000000000",
+                  contentHash: "dd".repeat(20),
+                  mimeType: "image/jpeg",
+                  size: 100,
+                  width: null,
+                  height: null,
+                  duration: null,
+                  cid: null,
+                  exifData: null,
+                  iptcData: null,
+                  dateTaken: null,
+                  videoMetadata: null,
+                  metadataVisible: false,
+                  locationVisible: false,
+                  createdAt: new Date("2025-01-01T00:00:00Z"),
+                  updatedAt: new Date("2025-01-01T00:00:00Z"),
+                  hidden: false,
+                  hiddenAt: null,
+                  deletedAt: null,
+                }),
+              },
+            });
+          if (call === 2)
+            return queryFn({ ...mockDb, post: { findMany: vi.fn().mockResolvedValue([{ id: "post-1" }]) } });
+          if (call === 3)
+            return queryFn({ ...mockDb, postMedia: { findFirst: vi.fn().mockResolvedValue({}) } });
+          if (call === 5)
+            return queryFn({ ...mockDb, post: { findMany: vi.fn().mockResolvedValue([]) } });
+          if (call === 6)
+            return queryFn({ ...mockDb, postMedia: { findMany: vi.fn().mockResolvedValue([{ post: { authorId: "user-123" } }]) } });
+          if (call === 7)
+            // deleteMedia checkShared: only this user's posts -> not shared
+            return queryFn({ ...mockDb, postMedia: { findMany: vi.fn().mockResolvedValue([{ post: { authorId: "user-123" } }]) } });
+          if (call === 8)
+            return queryFn({ ...mockDb, mediaFile: { update: vi.fn().mockResolvedValue({ id: "cmdelid000000000000000000", deletedAt: new Date() }) } });
+          return queryFn(mockDb);
+        },
+      );
+      await expect(
+        h.deleteMedia("cmdelid000000000000000000", "user-123", env),
+      ).resolves.toBeUndefined();
+      expect(mockWithQueryTimeoutAndRetry.mock.calls[0][1]).toBe("EU");
     });
   });
 });

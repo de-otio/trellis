@@ -66,6 +66,18 @@ enum EntityStatus {
   TRANSFERRED
 }
 
+// Media moderation lifecycle state. Mirrors the hand-written ModerationStatus
+// union in apps/api/src/lib/media/moderation-status.ts — spelling must match.
+// Every new MediaFile is born PENDING (fail-closed); only the moderation
+// pipeline can advance to APPROVED.
+enum ModerationStatus {
+  PENDING
+  APPROVED
+  REVIEW
+  QUARANTINED
+  REJECTED
+}
+
 model PostGeoIndex {
   postUri   String   @id @map("post_uri")
   // Multi-tenancy — denormalized from the owning post; location data is
@@ -180,7 +192,7 @@ model User {
   // migration. (WebFinger/AP still resolve on `username` until the federation
   // repoint — that change is code-only, no data migration, since `handle` is the
   // stable key.)
-  handle    String  @unique
+  handle    String   @unique
   createdAt DateTime @default(now()) @map("created_at")
 
   // Cognito Auth integration
@@ -362,8 +374,8 @@ model User {
 
   // Realtime / server-blind settings sync
   encryptedSettings EncryptedUserSetting[]
-  blocksInitiated   BlockedUser[]         @relation("BlockedUserBlocker")
-  blockedBy         BlockedUser[]         @relation("BlockedUserBlocked")
+  blocksInitiated   BlockedUser[]          @relation("BlockedUserBlocker")
+  blockedBy         BlockedUser[]          @relation("BlockedUserBlocked")
 
   // Connection codes (out-of-band invite mechanism)
   createdConnectionCodes  ConnectionCode[]           @relation("ConnectionCodeCreator")
@@ -605,16 +617,32 @@ model Post {
   @@map("posts")
 }
 
-// Media files (content-addressed storage)
+// Media files (tenant-scoped content-addressed storage).
+// tenantId is NOT NULL — every object belongs to exactly one tenant.
+// Dedup is within-tenant: @@unique([tenantId, contentHash]).
+// Every new object is born PENDING (fail-closed); the moderation pipeline
+// advances objects to APPROVED before they can be served.
 model MediaFile {
   id           String  @id @default(cuid())
-  contentHash  String  @unique @map("content_hash") // SHA-256 hash
+  tenantId     String  @map("tenant_id") // Tenant that owns this object (NOT NULL)
+  contentHash  String? @map("content_hash") // SHA-256 hash (lowercase hex); null until post-transcode for video (set by the P0b worker)
   cid          String? @unique // AT Protocol CID (optional, for compatibility)
   mimeType     String  @map("mime_type")
   size         Int
-  originalKey  String  @map("original_key") // S3 key: media/{hash}.{ext}
-  thumbnailKey String? @map("thumbnail_key") // S3 key: media/{hash}_thumb.webp
-  optimizedKey String? @map("optimized_key") // S3 key: media/{hash}_opt.webp
+  // uploadId: client-side idempotency key for the upload session. Nullable
+  // because rows created before P0b (or via the reconciliation path) have no
+  // upload session. UNIQUE so the same upload cannot race into two rows.
+  uploadId     String? @unique @map("upload_id")
+  // originalKey: S3 CAS key for the raw ingested object. Nullable for video —
+  // the CAS key is computed post-transcode by the pipeline worker; the row
+  // exists before transcoding completes.
+  originalKey  String? @map("original_key") // S3 key: cas/{tenantId}/{hash} (null until transcode for video)
+  thumbnailKey String? @map("thumbnail_key") // S3 key: cas/{tenantId}/{hash}/thumb
+  optimizedKey String? @map("optimized_key") // S3 key: cas/{tenantId}/{hash}/opt
+
+  // Moderation state — the lifecycle gate (see ModerationStatus enum above).
+  // Default PENDING means every object is fail-closed until approved.
+  moderationStatus ModerationStatus @default(PENDING) @map("moderation_status")
 
   // Media metadata (extracted from file headers)
   width    Int? // Image/video width in pixels
@@ -627,13 +655,13 @@ model MediaFile {
   videoMetadata Json? @map("video_metadata")
 
   // Denormalized/unified metadata fields
-  dateTaken    DateTime? @map("date_taken")
-  gpsLatitude  Float?    @map("gps_latitude")
-  gpsLongitude Float?    @map("gps_longitude")
-  keywords     String[]  @default([]) @map("keywords")
+  // GPS coordinates are NOT stored — dropped at ingestion (data-minimization).
+  dateTaken DateTime? @map("date_taken")
+  keywords  String[]  @default([]) @map("keywords")
 
-  // Privacy flags
-  metadataVisible Boolean @default(true) @map("metadata_visible")
+  // Privacy flags. metadataVisible defaults false: metadata is private unless
+  // the owner explicitly shares it (data-minimization default).
+  metadataVisible Boolean @default(false) @map("metadata_visible")
   locationVisible Boolean @default(false) @map("location_visible")
 
   // Media visibility and deletion tracking
@@ -659,16 +687,18 @@ model MediaFile {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   // Relations
-  posts PostMedia[] // Many-to-many with posts
+  posts          PostMedia[] // Many-to-many with posts
+  moderationJobs MediaModerationJob[] // P0b: per-track moderation job records
 
-  @@index([contentHash])
+  @@unique([tenantId, contentHash]) // Within-tenant dedup (replaces bare contentHash @unique)
   @@index([cid])
+  @@index([moderationStatus]) // Gate queries: find PENDING for the moderation queue
+  @@index([tenantId, contentHash]) // Serve path: tenant-scoped CAS lookup
   @@index([hidden, deletedAt]) // For filtering visible media
   @@index([createdAt]) // For chronological sorting
   @@index([dateTaken])
   @@index([metadataVisible])
   @@index([locationVisible])
-  @@index([gpsLatitude, gpsLongitude])
   @@index([uploadStatus])
   @@index([uploadedBy])
   @@index([uploadBatchId])
@@ -691,6 +721,54 @@ model UploadSession {
   @@index([userId, status])
   @@index([expiresAt])
   @@map("upload_sessions")
+}
+
+// ============================================================================
+// P0b — Moderation job tracking
+// ============================================================================
+
+// Discriminator for the two parallel moderation tracks.
+// VISUAL — frame/thumbnail-level visual content analysis.
+// AUDIO  — speech-to-text + audio content analysis.
+enum ModerationTrack {
+  VISUAL
+  AUDIO
+}
+
+// One row per (media, track) moderation job submitted to an external provider.
+// decision is String (not an enum) so the schema stays decoupled from
+// ModerationDecision evolution; app code validates the value on read.
+// thresholdSnapshot captures the operative thresholds at job-submission time
+// so historical decisions remain auditable after a threshold change.
+model MediaModerationJob {
+  id                String          @id @default(cuid())
+  mediaId           String          @map("media_id")
+  media             MediaFile       @relation(fields: [mediaId], references: [id], onDelete: Cascade)
+  track             ModerationTrack
+  // jobId: the external provider's job identifier (unique per provider call).
+  jobId             String          @unique @map("job_id")
+  // decision: resolved ModerationDecision value, or null while the job is in flight.
+  decision          String?
+  // thresholdSnapshot: a copy of env.media.thresholds at submission time (JSON).
+  thresholdSnapshot Json            @map("threshold_snapshot")
+  createdAt         DateTime        @default(now()) @map("created_at")
+  updatedAt         DateTime        @updatedAt @map("updated_at")
+
+  @@index([mediaId])
+  @@index([jobId])
+  @@map("media_moderation_jobs")
+}
+
+// Deduplication table for SQS moderation-result messages (exactly-once delivery).
+// A row is inserted (with ON CONFLICT DO NOTHING / unique-constraint) before
+// processing; duplicate deliveries of the same message find the row present and
+// are skipped. Rows may be pruned after a retention window by a cron worker.
+model ProcessedModerationMessage {
+  id               String   @id @default(cuid())
+  messageDedupeKey String   @unique @map("message_dedupe_key")
+  processedAt      DateTime @default(now()) @map("processed_at")
+
+  @@map("processed_moderation_messages")
 }
 
 // Post media

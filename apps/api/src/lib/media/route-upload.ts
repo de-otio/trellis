@@ -1,0 +1,102 @@
+/**
+ * routeUpload — pure functional-core routing decision for an inbound upload.
+ *
+ * Maps a `Content-Type` header value to one of three ingest routes:
+ *
+ * - `sync-image`    — the file is a re-encodable raster image (image/*,
+ *                     matching the P0a `REENCODABLE_IMAGE_TYPES` set); handled
+ *                     synchronously in the upload handler.
+ * - `async-pending` — the file is video/* or audio/*; stored PENDING and
+ *                     handed off to the P0b async worker.
+ * - `reject`        — anything else, including empty, malformed, or unknown
+ *                     types (fail-closed).
+ *
+ * Design invariants:
+ * - Pure and total: no I/O, no exceptions. Returns one of the three union
+ *   members for every input including null/undefined.
+ * - Case-insensitive: "Image/JPEG" and "image/jpeg" both route to sync-image.
+ * - Parameters stripped: "image/jpeg; charset=utf-8" is treated as
+ *   "image/jpeg".
+ * - Fail-closed: uncertainty → reject, never sync-image/async-pending.
+ * - No operational thresholds (no size caps, no rate limits) — those are
+ *   imperative-shell concerns.
+ */
+
+/**
+ * The three ingest routes for an uploaded object.
+ *
+ * - `sync-image`    — re-encode synchronously; the upload handler completes
+ *                     the full pipeline inline and records the object as APPROVED
+ *                     after the re-encode pass.
+ * - `async-pending` — store as-is, record as PENDING, fan out to the P0b
+ *                     async processing worker.
+ * - `reject`        — refuse the upload at the type-routing boundary (before
+ *                     bytes are read / stored). Caller must return an error.
+ */
+export type IngestRoute =
+  | { readonly kind: "sync-image" }
+  | { readonly kind: "async-pending" }
+  | { readonly kind: "reject" };
+
+// Singleton values avoid allocating a new object on every call.
+const SYNC_IMAGE: IngestRoute = { kind: "sync-image" };
+const ASYNC_PENDING: IngestRoute = { kind: "async-pending" };
+const REJECT: IngestRoute = { kind: "reject" };
+
+/**
+ * Route an inbound upload by its declared Content-Type (MIME type).
+ *
+ * Accepts the raw Content-Type string as sent by the browser/client.
+ * Parameters (`;` and everything after) are stripped before matching so
+ * "image/png; q=0.9" routes identically to "image/png".
+ *
+ * The image set mirrors `REENCODABLE_IMAGE_TYPES` from the P0a
+ * image-normalizer exactly: jpeg/jpg/png/webp/gif. SVG, HEIC/HEIF, TIFF, and
+ * all other image/* sub-types route to reject (fail-closed).
+ *
+ * @param contentType - The raw Content-Type header value. Accepts null/undefined
+ *   (both route to reject).
+ * @returns The routing decision — never throws.
+ */
+export function routeUpload(contentType: string): IngestRoute {
+  // Guard: null/undefined/empty → reject.
+  if (!contentType || typeof contentType !== "string") {
+    return REJECT;
+  }
+
+  // Strip parameters ("; charset=utf-8", "; boundary=…", etc.) and normalise
+  // to lowercase for case-insensitive matching.
+  const base = contentType.split(";")[0].trim().toLowerCase();
+
+  if (!base) {
+    return REJECT;
+  }
+
+  // --- image/* ---------------------------------------------------------------
+  // Only the re-encodable set (mirrors REENCODABLE_IMAGE_TYPES from
+  // apps/api/src/lib/services/image-normalizer.ts).  Other image/* sub-types
+  // (svg+xml, heic, heif, tiff, bmp, …) are rejected.
+  switch (base) {
+    case "image/jpeg":
+    case "image/jpg": // alias; normalised to image/jpeg downstream
+    case "image/png":
+    case "image/webp":
+    case "image/gif": // static raster in P0a (animated → first frame only)
+      return SYNC_IMAGE;
+  }
+
+  // --- video/* and audio/* ---------------------------------------------------
+  // Stored PENDING; transcoded and moderated by the P0b async worker.
+  if (base.startsWith("video/") || base.startsWith("audio/")) {
+    // Require a non-empty sub-type: "video/" (bare slash, no sub-type) is
+    // malformed and goes to reject.
+    const subType = base.slice(base.indexOf("/") + 1);
+    if (subType) {
+      return ASYNC_PENDING;
+    }
+    return REJECT;
+  }
+
+  // Everything else (application/*, text/*, unknown, etc.) → fail-closed.
+  return REJECT;
+}

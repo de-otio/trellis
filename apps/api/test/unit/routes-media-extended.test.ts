@@ -81,15 +81,57 @@ vi.mock("../../src/lib/services/image-normalizer", () => ({
   ImageNormalizer: class {
     normalize = mockNormalize;
   },
+  // T7: REENCODABLE_IMAGE_TYPES — the set of sharp-re-encodable MIME types
+  REENCODABLE_IMAGE_TYPES: new Set([
+    "image/jpeg",
+    "image/jpg",
+    "image/png",
+    "image/webp",
+    "image/gif",
+  ]),
+  // T7: reencodeImage — pass-through in tests (returns the input buffer unchanged)
+  reencodeImage: vi.fn().mockImplementation(async (buf: ArrayBuffer) => ({
+    buffer: Buffer.from(buf instanceof Buffer ? buf : new Uint8Array(buf)),
+    canonicalMimeType: "image/jpeg",
+  })),
 }));
 
 vi.mock("../../src/lib/database-connection-manager", () => ({
   sharedDatabaseConnectionManager: {},
 }));
 
+// T9: media upload resolves a tenant via the ambient auth seam
+// (getCurrentTenantId). Provide a valid CUID-shaped ambient tenant so the
+// canonical CAS key (cas/{tenantId}/{hash}) can be built in tests.
+vi.mock("@de-otio/saas-foundation/tenant", () => ({
+  getCurrentTenantId: () => "ctenant0000000000000000aa",
+}));
+
+// Query helper: invoke the queryFn against a mock db. The P0b upload path runs
+// two query callsites through here on the sync-image path — the quota check
+// (count + aggregate) and the mediaFile.upsert — plus reconciliation reads on
+// other routes. count/aggregate return zero usage so checkUploadQuota allows the
+// upload; upsert returns a row id. Routes that pass a queryFn expecting other
+// models still get `null` for unknown shapes (the queryFn guards on dbAny.*).
 vi.mock("../../src/lib/db-query-helper", () => ({
   QueryTimeoutPresets: { USER_FACING: {} },
-  withQueryTimeoutAndRetry: vi.fn().mockResolvedValue(null),
+  withQueryTimeoutAndRetry: vi.fn(
+    async (
+      _mgr: any,
+      _region: string,
+      _env: any,
+      queryFn?: (db: any) => Promise<any>,
+    ) => {
+      if (typeof queryFn !== "function") return null;
+      return queryFn({
+        mediaFile: {
+          upsert: vi.fn(async () => ({ id: "mediafile-1" })),
+          count: vi.fn(async () => 0),
+          aggregate: vi.fn(async () => ({ _sum: { size: 0 } })),
+        },
+      });
+    },
+  ),
 }));
 
 vi.mock("../../src/lib/metadata/metadata-extractor", () => ({
@@ -117,6 +159,21 @@ const mockEnv = {
   SESSION_SECRET: "test-secret",
   MEDIA_BUCKET_R2: null,
   IMAGES: null,
+  // T7/T4: media config block required by the re-encode pipeline and allowlist
+  media: {
+    maxBytes: { image: 10 * 1024 * 1024, video: 100 * 1024 * 1024, audio: 100 * 1024 * 1024 },
+    maxPixels: 25_000_000,
+    rateLimits: { uploadPerMin: 10, batchPerMin: 5, servePerMin: 60 },
+    allowlist: { image: ["image/jpeg", "image/png", "image/webp", "image/gif"], video: ["video/mp4"], audio: [] },
+    presets: [],
+    thresholds: {},
+    canonicalFormat: "jpeg" as const,
+    canonicalQuality: 85,
+    // P0b quota ceilings (injected from Env.media). Generous so the quota gate
+    // allows the image upload to reach its 200 assertion. Without this the gate
+    // reads undefined limits and fails closed (checkUploadQuota -> denied).
+    uploadQuota: { maxObjects: 1_000_000, maxBytes: 1_000_000_000_000 },
+  },
 };
 
 const mockSession = { userId: "user-1" };
@@ -276,9 +333,12 @@ describe("Media Routes - Extended", () => {
         body: formData,
       });
 
+      // T9: contentHash must be a valid 64-char hex digest so the canonical
+      // casKey can be built; the handler now rejects malformed hashes.
+      const hashA = "a".repeat(64);
       mockUploadSingle.mockResolvedValue({
-        url: "https://cdn.example.com/media/abc123.jpg",
-        contentHash: "abc123",
+        url: `https://cdn.example.com/api/media/${hashA}`,
+        contentHash: hashA,
         status: "uploaded",
       });
 
@@ -286,7 +346,7 @@ describe("Media Routes - Extended", () => {
 
       expect(mockUploadSingle).toHaveBeenCalled();
       expect(mockCreateSecureResponse).toHaveBeenCalledWith(
-        expect.stringContaining("abc123"),
+        expect.stringContaining(hashA),
         expect.objectContaining({ status: 200 }),
       );
     });
@@ -303,8 +363,8 @@ describe("Media Routes - Extended", () => {
       });
 
       mockUploadSingle.mockResolvedValue({
-        url: "https://cdn.example.com/media/def456.png",
-        contentHash: "def456",
+        url: `https://cdn.example.com/api/media/${"b".repeat(64)}`,
+        contentHash: "b".repeat(64),
         status: "uploaded",
       });
 

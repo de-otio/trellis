@@ -15,6 +15,7 @@ export default defineConfig({
       "test/integration/postdeployment/**/*.test.ts", // Exclude postdeployment tests - they require deployed infrastructure
       // Exclude integration tests that require live infrastructure (DB + running API)
       "test/integration/encryption-key-service.integration.test.ts",
+      "test/integration/encrypted-settings.integration.test.ts",
       "test/integration/example-authenticated.test.ts",
       "test/integration/feed-media-e2e.integration.test.ts",
       "test/integration/media-handler.integration.test.ts",

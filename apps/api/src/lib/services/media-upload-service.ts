@@ -10,6 +10,7 @@ import type { KVNamespace, R2Bucket, CloudflareQueue, Queue } from "../../types/
  */
 
 import { getLogger, Logger } from "../logger.js";
+import { casKey, isCasKeyError } from "../media/cas-keys.js";
 import type {
   MediaReconciliationMessage,
   R2MediaMetadata,
@@ -33,22 +34,20 @@ async function generateContentHash(file: ArrayBuffer): Promise<string> {
 }
 
 /**
- * Get file extension from MIME type
+ * Build the canonical CAS original key for a tenant-scoped object (T9 / D18).
+ *
+ * Delegates to the pure `casKey` builder (anchored allowlist validation). A
+ * validation failure here means the caller passed a malformed tenantId or hash
+ * — both are produced internally (tenantId resolved from auth context, hash
+ * from `crypto.subtle.digest`), so a failure is a programming error and is
+ * thrown rather than silently producing an unsafe key.
  */
-function getExtensionFromMimeType(mimeType: string): string {
-  const mimeMap: Record<string, string> = {
-    "image/jpeg": "jpg",
-    "image/jpg": "jpg",
-    "image/png": "png",
-    "image/gif": "gif",
-    "image/webp": "webp",
-    "image/heic": "heic",
-    "image/heif": "heif",
-    "video/mp4": "mp4",
-    "video/webm": "webm",
-    "video/quicktime": "mov",
-  };
-  return mimeMap[mimeType] || "bin";
+function buildCasOriginalKey(tenantId: string, contentHash: string): string {
+  const key = casKey(tenantId, contentHash);
+  if (isCasKeyError(key)) {
+    throw new Error(`Invalid CAS key inputs: ${key.kind}`);
+  }
+  return key;
 }
 
 export class MediaUploadService {
@@ -73,6 +72,7 @@ export class MediaUploadService {
   async uploadSingle(
     file: File,
     userId: string,
+    tenantId: string,
     metadata?: { width?: number; height?: number; duration?: number },
     preReadBuffer?: ArrayBuffer,
   ): Promise<UploadResult> {
@@ -85,8 +85,10 @@ export class MediaUploadService {
       // which may not work reliably on Cloudflare Workers for FormData Files)
       const fileBuffer = preReadBuffer ?? await file.arrayBuffer();
       const contentHash = await generateContentHash(fileBuffer);
-      const ext = getExtensionFromMimeType(file.type);
-      const originalKey = `originals/user-${userId}/${contentHash}.${ext}`;
+      // T9: the ONE canonical CAS scheme (D18) — `cas/{tenantId}/{hash}`.
+      // The same key is what the DB `originalKey` stores and what the serve
+      // path reads, so upload-target and serve-source can never disagree.
+      const originalKey = buildCasOriginalKey(tenantId, contentHash);
 
       logger.info("[MediaUpload] Starting upload", {
         contentHash,
@@ -172,6 +174,7 @@ export class MediaUploadService {
   async uploadBatch(
     files: File[],
     userId: string,
+    tenantId: string,
     metadataArray?: Array<{
       width?: number;
       height?: number;
@@ -192,8 +195,8 @@ export class MediaUploadService {
       files.map(async (file, index) => {
         const fileBuffer = await file.arrayBuffer();
         const contentHash = await generateContentHash(fileBuffer);
-        const ext = getExtensionFromMimeType(file.type);
-        const originalKey = `originals/user-${userId}/${contentHash}.${ext}`;
+        // T9: canonical CAS scheme — see uploadSingle.
+        const originalKey = buildCasOriginalKey(tenantId, contentHash);
         const metadata = metadataArray?.[index];
 
         const r2Metadata: R2MediaMetadata = {

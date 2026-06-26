@@ -387,7 +387,9 @@ export class PostHandler {
         // This ensures we use the correct database ID when creating PostMedia records
         const mediaIdMap = new Map<string, string>();
         for (const file of mediaFiles) {
-          mediaIdMap.set(file.contentHash, file.id);
+          // contentHash is null for a video still pending transcode — such a
+          // row is referenced by id only (it has no hash yet).
+          if (file.contentHash) mediaIdMap.set(file.contentHash, file.id);
           mediaIdMap.set(file.id, file.id);
         }
 
