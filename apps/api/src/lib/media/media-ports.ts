@@ -31,6 +31,16 @@ export interface TranscodeVideoResult {
   readonly cleanedPath: string;
   readonly posterPath: string;
   readonly durationSeconds: number;
+  /**
+   * Whether the cleaned output carries an audio stream. A video with no audio
+   * (a silent clip, a screen recording, a GIF-style mp4) has nothing to
+   * transcribe — the shell skips the AUDIO speech-to-text job and resolves the
+   * AUDIO track as vacuously approved (no audio ⇒ no audio content to be
+   * unsafe), instead of starting a transcription that would fail and fail the
+   * track closed to REVIEW forever. The adapter reports this from a probe of
+   * the produced output (NOT a guess); the shell never inspects bytes itself.
+   */
+  readonly hasAudio: boolean;
 }
 
 export interface TranscodeAudioInput {
@@ -103,19 +113,28 @@ export interface TranscribePort {
  */
 export class MockTranscodePort implements TranscodePort {
   private duration: number;
+  private hasAudio: boolean;
 
   /** Records of each call, for assertions. */
   readonly probeCalls: string[] = [];
   readonly videoCalls: TranscodeVideoInput[] = [];
   readonly audioCalls: TranscodeAudioInput[] = [];
 
-  constructor(opts: { duration?: number } = {}) {
+  constructor(opts: { duration?: number; hasAudio?: boolean } = {}) {
     this.duration = opts.duration ?? 0;
+    // Default to true: the common case is a video WITH audio, and existing
+    // tests assert the AUDIO-track-started path.
+    this.hasAudio = opts.hasAudio ?? true;
   }
 
   /** Program the duration returned by subsequent calls. */
   setDuration(seconds: number): void {
     this.duration = seconds;
+  }
+
+  /** Program whether `transcodeVideo` reports an audio stream. */
+  setHasAudio(hasAudio: boolean): void {
+    this.hasAudio = hasAudio;
   }
 
   async probeDurationSeconds(inputPath: string): Promise<number> {
@@ -129,6 +148,7 @@ export class MockTranscodePort implements TranscodePort {
       cleanedPath: input.outputPath,
       posterPath: input.posterPath,
       durationSeconds: this.duration,
+      hasAudio: this.hasAudio,
     };
   }
 

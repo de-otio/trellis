@@ -43,6 +43,7 @@ import {
 import { exceedsDurationCap } from "../lib/media/duration-cap.js";
 import { classifyWorkerError } from "../lib/media/classify-worker-error.js";
 import type { Track } from "../lib/media/track-verdict.js";
+import type { ModerationDecision } from "../lib/media/moderation-status.js";
 import type {
   StoragePort,
   TranscodePort,
@@ -89,12 +90,21 @@ export type ThresholdSnapshot = Record<
 export interface MediaPersistencePort {
   /** Load the MediaFile row for an upload session, or null if none exists. */
   findMediaByUploadId(uploadId: string): Promise<MediaFileRow | null>;
-  /** Persist a started per-track moderation job with its threshold snapshot. */
+  /**
+   * Persist a started per-track moderation job with its threshold snapshot.
+   *
+   * `initialDecision` pre-resolves the track's verdict at creation time. It is
+   * used ONLY for the vacuously-approved AUDIO track of a no-audio video: there
+   * is no transcription job to later fan in, so the decision is recorded up
+   * front and the completion worker reads it as the sibling track's outcome.
+   * Omitted for normal tracks (decision stays null until fan-in resolves it).
+   */
   createModerationJob(input: {
     mediaId: string;
     track: Track;
     jobId: string;
     thresholdSnapshot: ThresholdSnapshot;
+    initialDecision?: ModerationDecision;
   }): Promise<void>;
   /**
    * Persist the REAL content identity of the cleaned bytes onto the MediaFile
@@ -346,23 +356,49 @@ export async function processObjectKey(
       thresholdSnapshot: deps.config.thresholds,
     });
 
-    const audio = await deps.transcribe.startTranscription({
-      key: cleanedStagingKeyOut,
-      jobName: deps.newJobName(cleanedStagingKeyOut),
-    });
-    await deps.persistence.createModerationJob({
-      mediaId: row.id,
-      track: "AUDIO",
-      jobId: audio.jobId,
-      thresholdSnapshot: deps.config.thresholds,
-    });
+    // AUDIO track. A video with an audio stream is transcribed and moderated
+    // over the transcript (fan-in resolves the verdict later). A video with NO
+    // audio stream has nothing to transcribe: starting a transcription would
+    // fail and fail the track closed to REVIEW forever. Instead we record the
+    // AUDIO track as vacuously APPROVED at creation (no audio ⇒ no audio content
+    // to be unsafe) and start no transcription. The VISUAL completion then fans
+    // in against this pre-resolved decision. Fail-closed is preserved: this is a
+    // positive verdict on a track with no content, not approval-from-doubt.
+    let audioJobId: string;
+    if (transcodeResult.hasAudio) {
+      const audio = await deps.transcribe.startTranscription({
+        key: cleanedStagingKeyOut,
+        jobName: deps.newJobName(cleanedStagingKeyOut),
+      });
+      audioJobId = audio.jobId;
+      await deps.persistence.createModerationJob({
+        mediaId: row.id,
+        track: "AUDIO",
+        jobId: audioJobId,
+        thresholdSnapshot: deps.config.thresholds,
+      });
+    } else {
+      // Synthetic, unique job id: no provider job exists, and no completion
+      // message will ever reference it (the completion worker reads this track
+      // by mediaId+track, not by job id). Namespaced so it can never collide
+      // with a real Transcribe job name.
+      audioJobId = `noaudio:${row.id}`;
+      await deps.persistence.createModerationJob({
+        mediaId: row.id,
+        track: "AUDIO",
+        jobId: audioJobId,
+        thresholdSnapshot: deps.config.thresholds,
+        initialDecision: "approved",
+      });
+    }
 
     deps.logger.info("Started per-track moderation jobs", {
       mediaId: row.id,
       stagingKey: cleanedStagingKeyOut,
       casKey: cleanedCasKey,
       visualJobId: visual.jobId,
-      audioJobId: audio.jobId,
+      audioJobId,
+      hasAudio: transcodeResult.hasAudio,
     });
 
     return { disposition: "ack", reason: "started-moderation" };
