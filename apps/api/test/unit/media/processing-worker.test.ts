@@ -92,6 +92,7 @@ interface PersistenceFake {
     track: Track;
     jobId: string;
     thresholdSnapshot: ThresholdSnapshot;
+    initialDecision?: string;
   }>;
   /** persistCleanedContent calls: the real hash + serve key written per media. */
   cleaned: Array<{ mediaId: string; contentHash: string; originalKey: string }>;
@@ -125,6 +126,7 @@ function makeDeps(opts: {
       track: Track;
       jobId: string;
       thresholdSnapshot: ThresholdSnapshot;
+      initialDecision?: string;
     }): Promise<void> {
       if (opts.failPersistence) throw new Error("ThrottlingException");
       fake.jobs.push(input);
@@ -417,6 +419,41 @@ describe("processObjectKey — happy path", () => {
     // The cleaned bytes are NOT written to cas/ here — cas/ stays empty until the
     // completion worker promotes on approval.
     expect((storage as MockStoragePort).contentTypeOf(expectedCas)).toBeUndefined();
+  });
+
+  it("a no-audio video starts NO transcription and pre-resolves AUDIO as approved", async () => {
+    const cleaned = Buffer.from("silent-video-bytes");
+    const storage = happyStorage(TENANT_A, UPLOAD_1, cleaned);
+    const moderation = new MockModerationProvider();
+    const transcribe = new MockTranscribePort();
+    // The transcode reports no audio stream on the cleaned output.
+    const transcode = new MockTranscodePort({ duration: 10, hasAudio: false });
+    const { deps, fake } = makeDeps({
+      storage,
+      moderation,
+      transcribe,
+      transcode,
+      rows: [{ id: "media1", tenantId: TENANT_A, uploadId: UPLOAD_1 }],
+    });
+
+    const out = await processObjectKey(key(TENANT_A, UPLOAD_1), deps);
+
+    expect(out.disposition).toBe("ack");
+    expect(out.reason).toBe("started-moderation");
+
+    // NO transcription job was started — there is no audio to transcribe.
+    expect(transcribe.startCalls).toEqual([]);
+
+    // Still exactly two jobs: VISUAL (to be fanned in) + a pre-resolved AUDIO.
+    expect(fake.jobs).toHaveLength(2);
+    const audio = fake.jobs.find((j) => j.track === "AUDIO")!;
+    const visual = fake.jobs.find((j) => j.track === "VISUAL")!;
+    expect(visual.initialDecision).toBeUndefined(); // VISUAL resolves via fan-in
+    // AUDIO is pre-resolved as approved (vacuous: no audio content to be unsafe),
+    // under a synthetic, namespaced job id that no completion can ever reference.
+    expect(audio.initialDecision).toBe("approved");
+    expect(audio.jobId).toBe("noaudio:media1");
+    expect(audio.thresholdSnapshot).toEqual(THRESHOLDS);
   });
 
   it("starts moderation on the STAGING key, NEVER on the raw pending key or a cas/ key", async () => {
