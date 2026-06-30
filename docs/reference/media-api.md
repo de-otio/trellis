@@ -158,6 +158,16 @@ For completeness, the media routes also include:
 - `DELETE /api/media/:mediaId` — soft delete (hides instead if shared).
 - `GET /api/media/:hash` — serve the binary by content hash.
 
+> **The serve route is fail-closed: only `APPROVED` media returns bytes.**
+> `GET /api/media/:hash` streams the object only when its `moderationStatus`
+> is `APPROVED` (and it is not hidden or soft-deleted), for every viewer —
+> there is no owner exception. Every other case — `PENDING` / `REVIEW` /
+> `QUARANTINED` / `REJECTED`, not-found, or a backend error — returns a single
+> byte-identical "not found" response, so the endpoint cannot be probed as a
+> moderation-state oracle. Newly uploaded video/audio is `PENDING` and does
+> not serve until the asynchronous moderation pipeline approves it. See
+> [Media Moderation](../concepts/media-moderation.md).
+
 ## Response example (image details)
 
 ```json

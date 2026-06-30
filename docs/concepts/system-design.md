@@ -74,35 +74,44 @@ Writes go straight to the relevant Postgres edge tables (`relationships`, `entit
 
 ### Media Upload
 
+Uploads go **through the API** (multipart POST), not via presigned
+direct-to-S3 URLs. Images are re-encoded synchronously and written to the
+`cas/` prefix; video/audio land in `pending/` and are processed asynchronously.
+
 ```
 Client app
-    │  GET /api/media/upload-url
+    │  POST /api/media/upload (multipart)
     ▼
 Fargate API
-    │  generates presigned S3 PUT URL (short TTL)
-    ▼
-Client app
-    │  PUT directly to S3 (presigned URL — bypasses API)
-    ▼
-S3 bucket (originals/)
-    │  S3 event notification
-    ▼
-SQS media-processing queue
-    │
-    ▼
-Lambda (Sharp) — resize, transcode, store derivatives
+    │  validate + route by content type
+    ├─ image:  re-encode (strip EXIF/GPS) → write cas/{tenant}/{hash}
+    └─ video/audio: write pending/{tenant}/{upload}; row = PENDING
+                        │  S3 event notification (pending/)
+                        ▼
+                  SQS media-processing queue
+                        │
+                        ▼
+       Lambda media-processing-worker — transcode-and-discard,
+            hash cleaned bytes, start VISUAL + AUDIO moderation tracks
+                        │
+                        ▼
+       media-completion-worker — fan in both tracks;
+            on approval, promote cleaned bytes → cas/{tenant}/{hash}
 ```
+
+See [Media Moderation](media-moderation.md) for the moderation lifecycle and
+the fail-closed serve gate.
 
 ### Media Delivery
 
 ```
 Client app
-    │  HTTPS /media/*
+    │  HTTPS GET /api/media/{hash}
     ▼
-CloudFront
-    │  /media/* → S3 origin (via OAC — bucket is not public)
+CloudFront → Fargate API
+    │  fail-closed serve gate: serve only APPROVED, non-hidden objects
     ▼
-S3 (immutable cache headers, long-lived edge cache)
+S3 cas/ object (private; read server-side via OAC)
 ```
 
 ### Background Work (SQS → Lambda)

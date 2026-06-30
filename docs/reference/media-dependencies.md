@@ -76,7 +76,8 @@ required.
 #### Schema columns (on `MediaFile`)
 
 - `exifData`, `iptcData`, `videoMetadata` — nullable JSON columns.
-- Unified columns: `dateTaken`, `gpsLatitude`, `gpsLongitude`, `keywords`.
+- Unified columns: `dateTaken`, `keywords`. (GPS coordinate columns were
+  dropped for data minimization — see the data-model doc.)
 - Privacy flags: `metadataVisible`, `locationVisible`.
 
 See [Media metadata data model](./media-data-model.md) for the full column

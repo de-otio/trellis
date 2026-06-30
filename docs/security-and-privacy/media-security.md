@@ -12,6 +12,13 @@ that can include sensitive information such as GPS coordinates, device
 identifiers, and timestamps. Trellis treats this metadata as untrusted input and
 as personal data, and handles it accordingly.
 
+> This page covers **metadata** privacy. The complementary control is the
+> fail-closed **media-moderation** pipeline: uploaded bytes are served only
+> after explicit approval, images are re-encoded on ingest (stripping
+> EXIF/GPS), and video/audio pass a dual-track (visual + audio) moderation
+> check before any byte is served. See
+> [Media Moderation](../concepts/media-moderation.md).
+
 ## Validate everything
 
 All metadata is validated against a schema before it is stored. Metadata that is

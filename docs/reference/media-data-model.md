@@ -15,10 +15,11 @@ from the uploaded file:
 - **IPTC** (images) — keywords, copyright notice, creator, and caption.
 - **Video metadata** — basic technical fields parsed from the container header.
 
-The full metadata objects are stored as JSON; a few unified fields
-(`dateTaken`, `gpsLatitude`, `gpsLongitude`, `keywords`) have dedicated columns
-so they can be indexed. See the [Media metadata API](./media-api.md) for how
-these fields are exposed and
+The full metadata objects are stored as JSON; a couple of unified fields
+(`dateTaken`, `keywords`) have dedicated columns so they can be indexed. GPS
+coordinates are **not** stored as columns — they were dropped at ingestion for
+data minimization (see the flag below). See the
+[Media metadata API](./media-api.md) for how these fields are exposed and
 [Media privacy considerations](./media-privacy-considerations.md) for the
 visibility model.
 
@@ -83,30 +84,30 @@ model MediaFile {
   iptcData      Json? @map("iptc_data")
   videoMetadata Json? @map("video_metadata")
 
-  // Denormalized / unified metadata fields
+  // Denormalized / unified metadata fields.
+  // GPS coordinates are NOT stored — dropped at ingestion (data minimization).
   dateTaken    DateTime? @map("date_taken")
-  gpsLatitude  Float?    @map("gps_latitude")
-  gpsLongitude Float?    @map("gps_longitude")
   keywords     String[]  @default([]) @map("keywords")
 
-  // Privacy flags
-  metadataVisible Boolean @default(true)  @map("metadata_visible")
+  // Privacy flags. metadataVisible defaults false: metadata is private unless
+  // the owner explicitly shares it.
+  metadataVisible Boolean @default(false) @map("metadata_visible")
   locationVisible Boolean @default(false) @map("location_visible")
 }
 ```
 
-Note the column defaults: `metadataVisible` defaults to `true`, while
-`locationVisible` defaults to `false` — location is hidden until the owner
-explicitly enables it.
+Note the column defaults: both `metadataVisible` and `locationVisible` default
+to `false` — metadata and location are private until the owner explicitly
+enables sharing (private-by-default, data minimization).
 
 > **Flag — metadata columns are not populated on upload.** As shipped, the
 > upload path (`apps/api/src/lib/routes/media.ts`) runs extraction but writes
 > only `width`, `height`, and `duration` to the `MediaFile` record. The
-> `exifData`, `iptcData`, `videoMetadata`, `dateTaken`, `gpsLatitude`,
-> `gpsLongitude`, and `keywords` columns exist in the schema but are not
-> persisted by any current writer. The metadata-details response therefore
-> returns `null` for these fields. This is a data-model/wiring gap to resolve,
-> not behaviour to document as working.
+> `exifData`, `iptcData`, `videoMetadata`, `dateTaken`, and `keywords` columns
+> exist in the schema but are not persisted by any current writer (the
+> extracted metadata is computed in memory and then discarded). The
+> metadata-details response therefore returns `null` for these fields. This is
+> a data-model/wiring gap to resolve, not behaviour to document as working.
 
 ### Indexes
 
@@ -116,12 +117,12 @@ The shipped schema indexes the unified columns:
 @@index([dateTaken])
 @@index([metadataVisible])
 @@index([locationVisible])
-@@index([gpsLatitude, gpsLongitude])
 ```
 
-There are no `exif_make` / `exif_model`, `exif_datetime_original`,
-`video_datetime_original`, or `iptc_keywords` GIN indexes — those columns do
-not exist.
+There is no `gpsLatitude` / `gpsLongitude` geo-index — those columns were
+dropped (data minimization). There are likewise no `exif_make` / `exif_model`,
+`exif_datetime_original`, `video_datetime_original`, or `iptc_keywords`
+indexes — those columns do not exist.
 
 ## Type definitions
 
@@ -168,8 +169,8 @@ export interface VideoMetadata {
 ## Storage notes
 
 - **JSON columns** hold the validated metadata objects and can absorb new
-  fields without a schema change. A 32 KB per-blob size cap is enforced at
+  fields without a schema change. A per-blob size cap is enforced at
   extraction time (`METADATA_LIMITS.MAX_METADATA_SIZE_BYTES`).
-- **Unified columns** (`dateTaken`, `gpsLatitude`, `gpsLongitude`, `keywords`)
-  are intended to mirror the most-queried fields for indexing. See the flag
-  above: the wiring to populate them on upload is not yet in place.
+- **Unified columns** (`dateTaken`, `keywords`) are intended to mirror the
+  most-queried fields for indexing. See the flag above: the wiring to populate
+  them on upload is not yet in place.

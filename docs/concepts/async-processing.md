@@ -9,15 +9,21 @@ order: 14
 
 ## SQS Queues
 
-The API process binds five SQS queues (`apps/api/src/env.ts`): `user-export`, `delete-account`, `followers-events`, `link-check`, and `media-processing`. Each has a corresponding dead-letter queue (DLQ) for failed messages. Concrete per-queue tuning (visibility timeout, retention) is owned by the deploying application's infrastructure, not by Trellis.
+The API process binds six SQS queues (`apps/api/src/env.ts`): `user-export`, `delete-account`, `followers-events`, `link-check`, `media-processing`, and `media-reconciliation`. Each has a corresponding dead-letter queue (DLQ) for failed messages. Concrete per-queue tuning (visibility timeout, retention) is owned by the deploying application's infrastructure, not by Trellis.
 
 | Queue | Worker | Purpose | Status |
 |-------|--------|---------|--------|
 | `user-export` | (export handler) | GDPR/data-portability exports | Implemented |
 | `delete-account` | `delete-account-worker` | Account deletion pipeline | Implemented |
-| `media-processing` | `media-processing-worker` | Image resize/optimize with Sharp | Implemented |
+| `media-processing` | `media-processing-worker` | Transcode video/audio + start moderation tracks | Implemented |
+| `media-reconciliation` | `media-reconciliation-worker` | Reconcile uploaded media into DB rows | Implemented |
 | `link-check` | `link-check-worker` | Link security verification | Stub (`TODO: implement`) |
 | `followers-events` | `followers-events-worker` | Follower fan-out events | Stub (`TODO: implement`) |
+
+The `media-completion-worker` (which fans in the moderation tracks and promotes
+approved bytes) is triggered by moderation-completion events wired in the
+deploying application's infrastructure, not by an API-bound queue. See
+[Media Moderation](media-moderation.md).
 
 > Outbound ActivityPub delivery does **not** use an SQS queue. Activities are delivered through Fedify directly; see [ActivityPub federation](activitypub.md).
 
@@ -86,22 +92,26 @@ Each schedule invokes a dedicated Lambda.
 
 ## S3 Event Notifications
 
-S3 sends an event to the `media-processing` queue when a file lands in `originals/`:
+S3 sends an event to the `media-processing` queue when a video/audio object lands under the `pending/` prefix (the prefix the upload path writes for async media):
 
 ```typescript
 mediaBucket.addEventNotification(
   s3.EventType.OBJECT_CREATED,
   new s3n.SqsDestination(mediaProcessingQueue),
-  { prefix: 'originals/' },
+  { prefix: 'pending/' },
 );
 ```
 
-The `media-processing-worker` Lambda picks up the event, processes the image with Sharp, and writes derivatives back to S3.
+The `media-processing-worker` Lambda picks up the event, transcodes-and-discards
+the upload to a clean staging key, hashes the cleaned bytes, and starts the
+VISUAL + AUDIO moderation tracks. The `media-completion-worker` later fans in
+both tracks and, on approval, promotes the cleaned bytes to the served `cas/`
+prefix. Images are not processed here — they are re-encoded synchronously in the
+API upload handler. See [Media Moderation](media-moderation.md) and
+[Storage & CDN](storage-and-cdn.md).
 
-> **Wiring gap.** The worker triggers on the `originals/` prefix, but the API
-> upload service writes originals under `media/{hash}.{ext}`. In the shipped
-> code an API upload therefore does not fire this pipeline. See
-> [Storage & CDN](storage-and-cdn.md) for details.
+> The exact S3-event wiring (which prefix triggers which queue) is owned by the
+> deploying application's infrastructure; the snippet above shows the shape.
 
 ## Summary
 
@@ -110,7 +120,8 @@ The `media-processing-worker` Lambda picks up the event, processes the image wit
 | `user-export` | SQS | GDPR/data-portability exports |
 | `delete-account` | SQS | Account deletion pipeline |
 | `link-check` | SQS | Safe Browsing validation |
-| `media-processing` | SQS | Async image processing |
+| `media-processing` | SQS | Async video/audio transcode + moderation |
+| `media-reconciliation` | SQS | Reconcile uploaded media into DB rows |
 | `followers-events` | SQS | Follower fan-out events |
 | Every 5 minutes | EventBridge | Expired sessions, temp tokens |
 | Hourly | EventBridge | Metrics aggregation, feed cache |

@@ -7,6 +7,16 @@ order: 60
 
 # Media Metadata Extraction Timing
 
+> **Important — extracted metadata is computed, then discarded.** In the current
+> code only `width`, `height`, and `duration` are persisted to the `MediaFile`
+> row. The full EXIF/IPTC/video metadata is extracted in memory (best effort)
+> and then thrown away; the `exifData` / `iptcData` / `videoMetadata` columns
+> are never written by any current code path. This page documents *when* to
+> extract metadata if/when persistence is wired up — it does not describe a
+> shipped metadata store. See the
+> [Media metadata data model](../reference/media-data-model.md) for the full
+> picture.
+
 ## Problem
 
 Metadata (EXIF, IPTC, video metadata) can be **lost** if it is extracted after a media file has been:
@@ -24,11 +34,13 @@ Compressing, resizing, or re-encoding on the client can strip embedded
 metadata. If preserving capture metadata matters, the client should extract it
 from the original bytes *before* it compresses for upload.
 
-## Architecture (as shipped)
+## How extraction works today
 
-Trellis extracts metadata **server-side, from the received upload buffer**. The
-upload handler reads only the `file` field, then runs extraction on that buffer
-before storing the file:
+Trellis extracts metadata **server-side** (the extracted values are not
+persisted — see the callout above). For images the extraction runs on the
+**re-encoded** bytes, so dimensions come from the clean canonical output (EXIF
+orientation already baked in, EXIF/GPS already stripped). The upload handler
+reads the `file` field, re-encodes images, then runs extraction:
 
 ```typescript
 async function handleMediaUpload(request: Request, env: Env) {

@@ -158,6 +158,13 @@ The handler receives the parsed request, route params, the session (or `null`
 when unauthenticated), and the scoped `ExtensionContext`, and returns an
 `ExtensionResponse`:
 
+> **`session.userId` is the Trellis `User.id` (a cuid), not the Cognito `sub`.**
+> For JWT-Bearer requests it is derived from the `custom:userId` claim (written
+> by the pre-token-generation trigger), falling back to `sub` only for legacy
+> tokens minted without that claim. Use it directly in `where: { id: userId }`
+> lookups — do not expect a Cognito UUID. See
+> [Cognito federation](./cognito-federation.md).
+
 ```ts
 type ExtensionHandler = (
   request: Request,

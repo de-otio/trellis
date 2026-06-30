@@ -22,7 +22,8 @@ correctly as plain Markdown on GitHub.
 - **[Guides](guides/)** — task-oriented how-tos (migrations, feature flags,
   configuring an identity provider, observability).
 - **[Concepts](concepts/)** — how Trellis is designed and why (architecture,
-  tenancy, profiles).
+  tenancy, profiles, storage & CDN, and the
+  [media-moderation pipeline](concepts/media-moderation.md)).
 - **[Reference](reference/)** — precise specifications (APIs, data formats,
   the extension API, the glossary).
 - **[Security & privacy](security-and-privacy/)** — the security posture and
