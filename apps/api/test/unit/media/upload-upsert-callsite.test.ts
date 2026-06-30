@@ -77,12 +77,21 @@ vi.mock("../../../src/lib/services/image-normalizer", () => ({
   })),
 }));
 
-// Upload service: succeeds, returns a deterministic content hash.
-const CONTENT_HASH = "b".repeat(64);
+// Upload service: still mocked (used by the batch path); the sync-image path no
+// longer calls it (it stages + moderates + promotes via the storage port).
 vi.mock("../../../src/lib/services/media-upload-service", () => ({
   MediaUploadService: class {
     uploadSingle = uploadSingleMock;
   },
+}));
+
+// Request-path moderation seam (T1): default verdict = approved so the
+// sync-image path promotes to cas/ and records APPROVED on the create.
+const moderateImageMock = vi.hoisted(() =>
+  vi.fn().mockResolvedValue({ decision: "approved", labels: [], provider: "mock" }),
+);
+vi.mock("../../../src/lib/media/request-moderation", () => ({
+  getMediaModerationProvider: () => ({ moderateImage: moderateImageMock }),
 }));
 
 // Metadata extractor (dynamic import): no-op.
@@ -141,11 +150,26 @@ function makeJpegBytes(): Uint8Array {
   ]);
 }
 
+/**
+ * The content hash the route computes inline from the cleaned bytes — the
+ * re-encode mock is identity, so this is SHA-256 of makeJpegBytes(). Computed
+ * the same way the route does (crypto.subtle.digest) so the expected CAS/where
+ * key matches exactly.
+ */
+async function expectedContentHash(): Promise<string> {
+  const bytes = makeJpegBytes();
+  const digest = await crypto.subtle.digest("SHA-256", bytes.buffer);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 function makeEnv() {
   return {
     ENVIRONMENT: "dev",
     SESSION_SECRET: "test-secret-32-characters-long!!",
-    MEDIA_BUCKET_R2: { put: vi.fn(), get: vi.fn() },
+    MEDIA_BUCKET_NAME: "dev-trellis-media",
+    MEDIA_BUCKET_R2: { put: vi.fn(), get: vi.fn(), delete: vi.fn() },
     MEDIA_RECONCILIATION_QUEUE: { send: vi.fn() },
     media: {
       canonicalFormat: "jpeg" as const,
@@ -172,11 +196,13 @@ function makeUploadRequest(): Request {
 describe("/api/media/upload — upsert call-site dedup safety (T9)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    uploadSingleMock.mockResolvedValue({
-      success: true,
-      contentHash: CONTENT_HASH,
-      url: `https://api.example.com/api/media/${CONTENT_HASH}`,
-      status: "uploaded",
+    // The sync-image path no longer calls uploadSingle; the default approved
+    // verdict must be re-asserted after clearAllMocks so the create records
+    // APPROVED and the flow reaches the upsert under test.
+    moderateImageMock.mockResolvedValue({
+      decision: "approved",
+      labels: [],
+      provider: "mock",
     });
     upsertMock.mockResolvedValue({ id: "mediafile-1" });
   });
@@ -207,20 +233,24 @@ describe("/api/media/upload — upsert call-site dedup safety (T9)", () => {
   });
 
   it("the upsert is scoped by the within-tenant composite unique and creates a born-owned row", async () => {
+    const hash = await expectedContentHash();
     await uploadRoute.handler(makeUploadRequest(), makeEnv() as any, {
       params: {},
     } as any);
 
     const args = upsertMock.mock.calls[0][0];
     // Scoped to (tenantId, contentHash) — the within-tenant dedup key (D18).
+    // contentHash is now computed inline from the cleaned bytes.
     expect(args.where).toEqual({
-      tenantId_contentHash: { tenantId: TENANT, contentHash: CONTENT_HASH },
+      tenantId_contentHash: { tenantId: TENANT, contentHash: hash },
     });
     // create carries ownership (new rows are born owned)...
     expect(args.create.uploadedBy).toBe(USER_ID);
     expect(args.create.tenantId).toBe(TENANT);
-    expect(args.create.originalKey).toBe(`cas/${TENANT}/${CONTENT_HASH}`);
-    // ...but create does NOT pin moderationStatus (Prisma @default(PENDING) governs).
-    expect("moderationStatus" in args.create).toBe(false);
+    expect(args.create.originalKey).toBe(`cas/${TENANT}/${hash}`);
+    // ...and create now pins the moderation verdict for the CANONICAL upload
+    // (approved by the default mock verdict). The dedup-no-takeover invariant
+    // still holds on `update` (proven above).
+    expect(args.create.moderationStatus).toBe("APPROVED");
   });
 });

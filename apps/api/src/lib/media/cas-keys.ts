@@ -158,6 +158,40 @@ export function pendingKey(
 }
 
 // ---------------------------------------------------------------------------
+// processingKey
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the synchronous-image staging key for a tenant-scoped, content-hashed
+ * object.
+ *
+ * `processing/{tenantId}/{sha256}`
+ *
+ * The sync-image upload path computes the content hash of the cleaned bytes
+ * BEFORE moderation, so the staging key is content-addressed (unlike the
+ * async `pendingKey`, which is keyed by uploadId before the hash is known). The
+ * cleaned bytes live here until a verdict promotes them to `cas/`; `cas/` only
+ * ever holds APPROVED bytes.
+ *
+ * @returns The key string, or a typed error describing which input was invalid.
+ */
+export function processingKey(
+  tenantId: string,
+  sha256: string,
+): string | CasKeyError {
+  if (!TENANT_ID_RE.test(tenantId)) {
+    return { kind: "invalid_tenant_id", raw: tenantId };
+  }
+
+  const normalized = sha256.toLowerCase();
+  if (!SHA256_RE.test(normalized)) {
+    return { kind: "invalid_hash", raw: sha256 };
+  }
+
+  return `processing/${tenantId}/${normalized}`;
+}
+
+// ---------------------------------------------------------------------------
 // Type guard helpers
 // ---------------------------------------------------------------------------
 

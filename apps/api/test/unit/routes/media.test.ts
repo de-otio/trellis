@@ -137,6 +137,22 @@ vi.mock("../../../src/lib/services/media-upload-service", () => ({
   },
 }));
 
+// Mock the request-path moderation seam (T1). The sync-image upload path now
+// STAGES the cleaned bytes, calls moderateImage on the staged ref, and PROMOTES
+// to cas/ only on APPROVED. Tests drive the verdict via mockModerateImage and
+// assert on the staging→promote effects.
+const mockModerateImage = vi.fn();
+vi.mock("../../../src/lib/media/request-moderation", () => ({
+  getMediaModerationProvider: () => ({ moderateImage: mockModerateImage }),
+}));
+
+// Convenience: build a verdict object for a given 3-value decision.
+const verdictFor = (decision: "approved" | "review" | "quarantine") => ({
+  decision,
+  labels: [],
+  provider: "mock",
+});
+
 describe("Media Routes", () => {
   let mockEnv: any;
   let mockSession: Session;
@@ -155,6 +171,9 @@ describe("Media Routes", () => {
       APP_DOMAIN: "https://api.rkm1.de",
       SESSION_SECRET: "test-secret",
       ENVIRONMENT: "dev",
+      // The resolved media-bucket name the binding wraps; the moderation ref
+      // bucket is read from this exact field (single source — see env.ts).
+      MEDIA_BUCKET_NAME: "dev-trellis-media",
       MEDIA_BUCKET_R2: {
         head: mockR2Head,
         put: mockR2Put,
@@ -240,6 +259,11 @@ describe("Media Routes", () => {
     mockR2Head.mockResolvedValue(null); // File doesn't exist
     mockR2Put.mockResolvedValue(undefined);
     mockR2Get.mockResolvedValue(null);
+
+    // Default moderation verdict: approved (so the happy-path upload tests
+    // reach 200 with bytes promoted to cas/). Per-test overrides drive
+    // review/quarantine/throw.
+    mockModerateImage.mockResolvedValue(verdictFor("approved"));
 
     // T7 re-encode: pass-through, preserving the input bytes. canonicalMimeType
     // echoes image/jpeg (the canonical raster output).
@@ -545,7 +569,12 @@ describe("Media Routes", () => {
       expect(body).toHaveProperty("url");
       expect(body).toHaveProperty("mediaKey");
       expect(body).toHaveProperty("contentHash");
-      expect(mockUploadSingle).toHaveBeenCalled();
+      // Sync-image path: the staged object is moderated, then (approved by the
+      // default verdict) promoted to cas/.
+      expect(mockModerateImage).toHaveBeenCalled();
+      const putKeys = mockR2Put.mock.calls.map((c) => c[0] as string);
+      expect(putKeys.some((k) => k.startsWith("cas/"))).toBe(true);
+      expect(putKeys.some((k) => k.startsWith("processing/"))).toBe(true);
     });
 
     it("should successfully upload a valid PNG image", async () => {
@@ -601,13 +630,13 @@ describe("Media Routes", () => {
       });
 
       expect(response.status).toBe(200);
-      // Should not create new media file
+      // Dedup is handled idempotently by the within-tenant upsert (the `update`
+      // payload is deliberately minimal), never by mediaFile.create.
       expect(mockMediaFileCreate).not.toHaveBeenCalled();
-      // Should not upload to R2 if file exists
-      expect(mockR2Put).not.toHaveBeenCalled();
+      expect(mockMediaFileUpsert).toHaveBeenCalled();
     });
 
-    it("should handle missing R2 bucket gracefully", async () => {
+    it("returns 503 when no media bucket is configured (cannot stage → fail closed)", async () => {
       const jpegMagic = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]);
       const blob = new Blob([jpegMagic], { type: "image/jpeg" });
 
@@ -628,8 +657,11 @@ describe("Media Routes", () => {
         params: {},
       });
 
-      // Should still succeed, just without R2 storage
-      expect(response.status).toBe(200);
+      // No object store to stage into → fail closed (cannot moderate, must not
+      // serve). Moderation and DB write must NOT run.
+      expect(response.status).toBe(503);
+      expect(mockModerateImage).not.toHaveBeenCalled();
+      expect(mockMediaFileUpsert).not.toHaveBeenCalled();
     });
 
     it("should support legacy R2_BUCKET binding name for backward compatibility", async () => {
@@ -641,6 +673,7 @@ describe("Media Routes", () => {
         R2_BUCKET: {
           head: mockR2Head,
           put: mockR2Put,
+          delete: mockR2Delete,
         },
       };
       delete envWithLegacyR2.MEDIA_BUCKET_R2;
@@ -663,9 +696,10 @@ describe("Media Routes", () => {
         },
       );
 
-      // Should succeed and use R2_BUCKET
+      // Should succeed and stage via the legacy R2_BUCKET binding.
       expect(response.status).toBe(200);
-      expect(mockUploadSingle).toHaveBeenCalled();
+      expect(mockModerateImage).toHaveBeenCalled();
+      expect(mockR2Put).toHaveBeenCalled();
       const body = await response.json();
       expect(body).toHaveProperty("url");
     });
@@ -781,6 +815,182 @@ describe("Media Routes", () => {
       const body = await response.json();
       expect(body).toHaveProperty("error", "File too large");
       expect(body.message).toContain("100MB");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Synchronous image moderation (stage → moderate → promote-on-approve).
+  // The verdict drives moderationStatus; cas/ is written IFF approved; on
+  // anything else the bytes stay at staging (out of the serve path). Each
+  // assertion is mutation-sensitive: flipping the production decision flips a
+  // test red.
+  // -------------------------------------------------------------------------
+  describe("POST /api/media/upload — image moderation (stage→moderate→promote)", () => {
+    const uploadRoute = mediaRoutes.find(
+      (r) => r.path === "/api/media/upload" && r.method === "POST",
+    );
+
+    const runImageUpload = async () => {
+      const jpegMagic = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]);
+      const formData = new FormData();
+      formData.append("file", new Blob([jpegMagic], { type: "image/jpeg" }), "x.jpg");
+      return uploadRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/upload", {
+          method: "POST",
+          body: formData,
+        }),
+        mockEnv,
+        {
+          url: new URL("https://api.rkm1.de/api/media/upload"),
+          pathname: "/api/media/upload",
+          params: {},
+        },
+      );
+    };
+
+    const putKeys = () => mockR2Put.mock.calls.map((c) => c[0] as string);
+    const deleteKeys = () => mockR2Delete.mock.calls.map((c) => c[0] as string);
+    const casWritten = () => putKeys().some((k) => k.startsWith("cas/"));
+    // The moderationStatus the route handed to the upsert builder.
+    const upsertModerationStatus = () => {
+      const args = mockMediaFileUpsert.mock.calls[0]?.[0];
+      return args?.create?.moderationStatus;
+    };
+
+    it("approved → bytes promoted to cas/, staging deleted, row APPROVED", async () => {
+      mockModerateImage.mockResolvedValue(verdictFor("approved"));
+
+      const response = await runImageUpload();
+
+      expect(response.status).toBe(200);
+      // cas/ written (promotion) AND staging deleted.
+      expect(casWritten()).toBe(true);
+      expect(deleteKeys().some((k) => k.startsWith("processing/"))).toBe(true);
+      // Row records APPROVED.
+      expect(upsertModerationStatus()).toBe("APPROVED");
+      // moderateImage was called on the STAGING ref (processing/), not cas/.
+      const ref = mockModerateImage.mock.calls[0][0];
+      expect(ref.key).toMatch(/^processing\//);
+    });
+
+    it("review → bytes stay at staging, NO cas/ object, row REVIEW", async () => {
+      mockModerateImage.mockResolvedValue(verdictFor("review"));
+
+      const response = await runImageUpload();
+
+      expect(response.status).toBe(200);
+      // Staged (processing/) but NEVER promoted to cas/.
+      expect(putKeys().some((k) => k.startsWith("processing/"))).toBe(true);
+      expect(casWritten()).toBe(false);
+      // No staging delete (bytes must remain for the human reviewer).
+      expect(deleteKeys()).toHaveLength(0);
+      expect(upsertModerationStatus()).toBe("REVIEW");
+    });
+
+    it("quarantine → NO cas/ object, row QUARANTINED", async () => {
+      mockModerateImage.mockResolvedValue(verdictFor("quarantine"));
+
+      const response = await runImageUpload();
+
+      expect(response.status).toBe(200);
+      expect(casWritten()).toBe(false);
+      expect(upsertModerationStatus()).toBe("QUARANTINED");
+    });
+
+    it("provider THROWS → treated as review (fail-closed): NO cas/, row REVIEW", async () => {
+      mockModerateImage.mockRejectedValue(new Error("provider exploded"));
+
+      const response = await runImageUpload();
+
+      // Fail-closed: a throwing/timing-out provider must NOT auto-approve.
+      expect(response.status).toBe(200);
+      expect(casWritten()).toBe(false);
+      expect(upsertModerationStatus()).toBe("REVIEW");
+    });
+
+    it("moderateImage is called with the STAGING ref; cas/ written IFF approved", async () => {
+      // review → no cas/
+      mockModerateImage.mockResolvedValue(verdictFor("review"));
+      await runImageUpload();
+      const reviewRef = mockModerateImage.mock.calls[0][0];
+      expect(reviewRef.key).toMatch(/^processing\//);
+      expect(casWritten()).toBe(false);
+
+      // approved → cas/ (fresh mock state)
+      vi.clearAllMocks();
+      mockGetSession.mockResolvedValue(mockSession);
+      mockApplyRateLimitKV.mockResolvedValue(null);
+      mockCreateSecureResponse.mockImplementation(
+        (body, options) => new Response(body, options),
+      );
+      mockAddSecurityHeaders.mockImplementation((r) => r);
+      mockGetCurrentTenantId.mockReturnValue(TEST_TENANT_ID);
+      mockReencodeImage.mockImplementation(async (buf: ArrayBuffer) => ({
+        buffer: Buffer.from(
+          buf instanceof Buffer ? buf : new Uint8Array(buf as ArrayBuffer),
+        ),
+        canonicalMimeType: "image/jpeg",
+      }));
+      mockWithQueryTimeoutAndRetry.mockImplementation(
+        async (_m: any, _r: string, _e: any, queryFn: (db: any) => Promise<any>) =>
+          queryFn({
+            mediaFile: {
+              upsert: mockMediaFileUpsert,
+              count: mockMediaFileCount,
+              aggregate: mockMediaFileAggregate,
+            },
+          }),
+      );
+      mockMediaFileUpsert.mockResolvedValue({ id: "m" });
+      mockMediaFileCount.mockResolvedValue(0);
+      mockMediaFileAggregate.mockResolvedValue({ _sum: { size: 0 } });
+      mockR2Put.mockResolvedValue(undefined);
+      mockR2Delete.mockResolvedValue(undefined);
+      mockModerateImage.mockResolvedValue(verdictFor("approved"));
+
+      await runImageUpload();
+      const approvedRef = mockModerateImage.mock.calls[0][0];
+      expect(approvedRef.key).toMatch(/^processing\//);
+      expect(casWritten()).toBe(true);
+    });
+
+    it("moderateImage ref.bucket is the RESOLVED env bucket name (never empty), matching the staging write target", async () => {
+      // Regression guard for the silent fail-closed bug: the moderation READ
+      // ref must use the SAME resolved bucket name the staging WRITE binding
+      // wraps. The call site reads env.MEDIA_BUCKET_NAME (the single source),
+      // NOT `process.env.MEDIA_BUCKET_NAME ?? ""`. Prove the value comes from
+      // env by driving env.MEDIA_BUCKET_NAME to the resolved fallback while
+      // process.env.MEDIA_BUCKET_NAME is unset — reverting the call site to
+      // `?? ""` (or to process.env) would make ref.bucket "" / undefined and
+      // turn this red.
+      const savedProcEnv = process.env.MEDIA_BUCKET_NAME;
+      delete process.env.MEDIA_BUCKET_NAME;
+      try {
+        mockModerateImage.mockResolvedValue(verdictFor("approved"));
+
+        await runImageUpload();
+
+        const ref = mockModerateImage.mock.calls[0][0];
+        // The ref bucket equals the resolved env bucket name...
+        expect(ref.bucket).toBe(mockEnv.MEDIA_BUCKET_NAME);
+        expect(ref.bucket).toBe("dev-trellis-media");
+        // ...and is never the empty string (what `?? ""` produced on unset).
+        expect(ref.bucket).not.toBe("");
+        expect(typeof ref.bucket).toBe("string");
+        expect(ref.bucket.length).toBeGreaterThan(0);
+        // The staged object is moderated under that same bucket's processing/ key.
+        expect(ref.key).toMatch(/^processing\//);
+        const stagedPut = mockR2Put.mock.calls
+          .map((c) => c[0] as string)
+          .find((k) => k.startsWith("processing/"));
+        expect(stagedPut).toBe(ref.key);
+      } finally {
+        if (savedProcEnv === undefined) {
+          delete process.env.MEDIA_BUCKET_NAME;
+        } else {
+          process.env.MEDIA_BUCKET_NAME = savedProcEnv;
+        }
+      }
     });
   });
 
@@ -941,13 +1151,12 @@ describe("Media Routes", () => {
       expect(response.status).toBe(200);
       const body = await response.json();
       expect(body).toHaveProperty("contentHash");
-      // Sync path uses MediaUploadService (no pending/ R2 write)
-      expect(mockUploadSingle).toHaveBeenCalled();
-      // No pending/ key was written
-      if (mockR2Put.mock.calls.length > 0) {
-        const [putKey] = mockR2Put.mock.calls[0];
-        expect(putKey).not.toMatch(/^pending\//);
-      }
+      // Sync path moderates the staged object (no async pending/ write).
+      expect(mockModerateImage).toHaveBeenCalled();
+      const putKeys = mockR2Put.mock.calls.map((c) => c[0] as string);
+      // Sync staging uses processing/, never the async pending/ prefix.
+      expect(putKeys.every((k) => !k.startsWith("pending/"))).toBe(true);
+      expect(putKeys.some((k) => k.startsWith("processing/"))).toBe(true);
     });
 
     it("returns 400 for unknown/unsupported content type when routeUpload says reject", async () => {
@@ -3051,14 +3260,12 @@ describe("Media Routes", () => {
       expect(mockUploadSingle).not.toHaveBeenCalled();
     });
 
-    it("returns 500 Database error when the upload service returns a non-hex contentHash (casKey build error)", async () => {
-      // result.contentHash is not 64-hex → casKey() → invalid_hash error →
-      // isCasKeyError → 500 Database error (line 942).
-      mockUploadSingle.mockResolvedValueOnce({
-        url: "https://api.rkm1.de/api/media/zzz",
-        contentHash: "not-a-valid-64-hex-hash",
-        status: "uploaded",
-      });
+    it("returns 500 Database error when the DB upsert fails after a successful stage+promote", async () => {
+      // The content hash is now computed inline from the cleaned bytes (always
+      // 64-hex), so the casKey can't fail on the hash. The remaining failure
+      // surface is the DB upsert — which must fail closed to 500 (the client
+      // retries) rather than leaving an unreferenced cas/ object as a success.
+      mockMediaFileUpsert.mockRejectedValueOnce(new Error("DB down"));
       const jpegMagic = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]);
       const response = await runUpload(
         new Blob([jpegMagic], { type: "image/jpeg" }),
@@ -3067,10 +3274,8 @@ describe("Media Routes", () => {
       expect(response.status).toBe(500);
       const body = await response.json();
       expect(body.error).toBe("Database error");
-      // upload service WAS called (the casKey error is after upload).
-      expect(mockUploadSingle).toHaveBeenCalled();
-      // The DB upsert must NOT run when the CAS key is invalid.
-      expect(mockMediaFileUpsert).not.toHaveBeenCalled();
+      // Moderation ran before the DB write.
+      expect(mockModerateImage).toHaveBeenCalled();
     });
   });
 

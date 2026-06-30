@@ -11,6 +11,8 @@
  * `db.mediaFile.upsert(buildMediaUpsertArgs(...))`.
  */
 
+import type { ModerationStatus } from "./moderation-status.js";
+
 export interface MediaUpsertInput {
   tenantId: string;
   contentHash: string;
@@ -21,6 +23,13 @@ export interface MediaUpsertInput {
   width?: number;
   height?: number;
   duration?: number;
+  /**
+   * The moderation verdict for the CANONICAL (first) upload of these bytes.
+   * Applied to `create` only — a dedup hit must NOT re-moderate or de-publish
+   * the existing canonical row (see module doc + the deliberately-minimal
+   * `update` payload). Absent ⇒ the schema default (`PENDING`) stands.
+   */
+  moderationStatus?: ModerationStatus;
 }
 
 /**
@@ -43,6 +52,7 @@ export interface MediaUpsertArgs {
     width?: number;
     height?: number;
     duration?: number;
+    moderationStatus?: ModerationStatus;
   };
   update: {
     // DELIBERATELY MINIMAL. See module doc: a dedup hit must not touch
@@ -73,6 +83,11 @@ export function buildMediaUpsertArgs(
       width: input.width,
       height: input.height,
       duration: input.duration,
+      // Present only when the caller resolved a verdict (sync-image path);
+      // absent ⇒ the schema default (PENDING) stands. NEVER on `update`.
+      ...(input.moderationStatus !== undefined && {
+        moderationStatus: input.moderationStatus,
+      }),
     },
     update: {
       uploadStatus: "COMPLETE",

@@ -13,12 +13,18 @@
  * `.send()` is issued.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SqsQueue } from "@de-otio/saas-foundation/queue";
 
 // ── env isolation ─────────────────────────────────────────────────────────────
 
-const MANAGED_KEYS = ["SESSION_SECRET", "DATABASE_URL"] as const;
+const MANAGED_KEYS = [
+  "SESSION_SECRET",
+  "DATABASE_URL",
+  "MEDIA_BUCKET_NAME",
+  "STAGE",
+  "APP_NAME",
+] as const;
 
 let savedEnv: Partial<Record<string, string>>;
 
@@ -80,5 +86,45 @@ describe("buildEnv — SQS queue wiring", () => {
     expect(
       typeof (env.MEDIA_RECONCILIATION_QUEUE as { send?: unknown }).send,
     ).toBe("function");
+  });
+});
+
+describe("buildEnv — MEDIA_BUCKET_NAME resolution (image-moderation ref bucket)", () => {
+  // Regression guard for the silent fail-closed bug: the staging WRITE goes to
+  // the MEDIA_BUCKET_R2 binding (which wraps the `${stage}-${appName}-media`
+  // fallback when MEDIA_BUCKET_NAME is unset), while the moderation READ ref
+  // must use the SAME resolved name. If the call site re-derived the name (or
+  // used `process.env.MEDIA_BUCKET_NAME ?? ""`), the ref would be "" when the
+  // env var is unset, every image would fail-closed to REVIEW, and nothing
+  // would serve. env.MEDIA_BUCKET_NAME must therefore expose the resolved
+  // fallback, never "".
+
+  it("falls back to ${stage}-${appName}-media when MEDIA_BUCKET_NAME is unset (NOT empty string)", async () => {
+    // Unset all three so the fallback is fully deterministic. STAGE is read into
+    // a module-level const at import time, so reset the module graph first.
+    delete process.env.MEDIA_BUCKET_NAME;
+    delete process.env.STAGE;
+    delete process.env.APP_NAME;
+    vi.resetModules();
+
+    const { buildEnv } = await import("../../src/env.js");
+    const env = await buildEnv();
+
+    // stage defaults to "dev", appName defaults to "trellis".
+    expect(env.MEDIA_BUCKET_NAME).toBe("dev-trellis-media");
+    // The load-bearing invariant: the resolved name is never the empty string
+    // (which is what `?? ""` would have produced and what fail-closes uploads).
+    expect(env.MEDIA_BUCKET_NAME).not.toBe("");
+    expect(env.MEDIA_BUCKET_NAME.length).toBeGreaterThan(0);
+  });
+
+  it("honours an explicit MEDIA_BUCKET_NAME", async () => {
+    process.env.MEDIA_BUCKET_NAME = "explicit-media-bucket";
+    vi.resetModules();
+
+    const { buildEnv } = await import("../../src/env.js");
+    const env = await buildEnv();
+
+    expect(env.MEDIA_BUCKET_NAME).toBe("explicit-media-bucket");
   });
 });

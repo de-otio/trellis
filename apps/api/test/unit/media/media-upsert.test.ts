@@ -15,6 +15,10 @@ import { describe, expect, it } from "vitest";
 import * as fc from "fast-check";
 import { buildMediaUpsertArgs } from "../../../src/lib/media/media-upsert.js";
 import { casKey, isCasKeyError } from "../../../src/lib/media/cas-keys.js";
+import {
+  ALL_MODERATION_STATUSES,
+  type ModerationStatus,
+} from "../../../src/lib/media/moderation-status.js";
 
 const FC_SEED = 0x09_5e27;
 
@@ -79,6 +83,44 @@ describe("buildMediaUpsertArgs (T9 dedup safety)", () => {
         },
       ),
       { seed: FC_SEED, numRuns: 300 },
+    );
+  });
+});
+
+describe("buildMediaUpsertArgs — moderationStatus passthrough (sync-image verdict)", () => {
+  const base = {
+    tenantId: TENANT,
+    contentHash: HASH,
+    originalKey: `cas/${TENANT}/${HASH}`,
+    mimeType: "image/jpeg",
+    size: 42,
+    uploadedBy: "cuser000000000000000000aa",
+  } as const;
+
+  it("sets create.moderationStatus when the verdict is provided (APPROVED)", () => {
+    const args = buildMediaUpsertArgs({ ...base, moderationStatus: "APPROVED" });
+    expect(args.create.moderationStatus).toBe("APPROVED");
+  });
+
+  it("omits create.moderationStatus when absent (Prisma @default(PENDING) stands)", () => {
+    const args = buildMediaUpsertArgs({ ...base });
+    expect("moderationStatus" in args.create).toBe(false);
+  });
+
+  it("property: every verdict flows into create but NEVER into update", () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom(...(ALL_MODERATION_STATUSES as ModerationStatus[])),
+        (status) => {
+          const args = buildMediaUpsertArgs({ ...base, moderationStatus: status });
+          // create carries the exact verdict...
+          expect(args.create.moderationStatus).toBe(status);
+          // ...and the dedup-no-takeover invariant holds: update carries neither.
+          expect("moderationStatus" in args.update).toBe(false);
+          expect("uploadedBy" in args.update).toBe(false);
+        },
+      ),
+      { seed: FC_SEED, numRuns: 200 },
     );
   });
 });
