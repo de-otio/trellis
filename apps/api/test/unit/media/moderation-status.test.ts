@@ -14,6 +14,7 @@ import * as fc from "fast-check";
 import {
   ALL_MODERATION_DECISIONS,
   ALL_MODERATION_STATUSES,
+  decisionToStatus,
   nextStatus,
   type ModerationDecision,
   type ModerationEvent,
@@ -315,5 +316,42 @@ describe("nextStatus — labeled edges", () => {
       decision: "bogus" as ModerationDecision,
     });
     expect(result).toEqual(ok("REVIEW"));
+  });
+});
+
+describe("decisionToStatus — sync-image verdict mapping (T4)", () => {
+  // The expected mapping is the same one statusForDecision applies inside the
+  // state machine; we anchor it here so a drift in either turns this test red.
+  const EXPECTED: Record<ModerationDecision, ModerationStatus> = {
+    approved: "APPROVED",
+    review: "REVIEW",
+    quarantine: "QUARANTINED",
+  };
+
+  it("maps each decision to its labeled status", () => {
+    expect(decisionToStatus("approved")).toBe("APPROVED");
+    expect(decisionToStatus("review")).toBe("REVIEW");
+    expect(decisionToStatus("quarantine")).toBe("QUARANTINED");
+  });
+
+  it("property: equals the status nextStatus drives a PENDING object into", () => {
+    fc.assert(
+      fc.property(decisionArb, (decision) => {
+        const viaMachine = nextStatus("PENDING", { kind: "decision", decision });
+        // The PENDING --decision--> transition is always legal.
+        expect(viaMachine.ok).toBe(true);
+        if (viaMachine.ok) {
+          expect(decisionToStatus(decision)).toBe(viaMachine.status);
+        }
+        expect(decisionToStatus(decision)).toBe(EXPECTED[decision]);
+      }),
+      FC,
+    );
+  });
+
+  it("fails closed to REVIEW for an unexpected (widened) decision value", () => {
+    // Mirrors the I/O-boundary widening: a provider string outside the union
+    // must degrade to human review, never to APPROVED.
+    expect(decisionToStatus("bogus" as ModerationDecision)).toBe("REVIEW");
   });
 });

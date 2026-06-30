@@ -13,10 +13,12 @@ import {
   withQueryTimeoutAndRetry,
 } from "../db-query-helper.js";
 import { getLogger, Logger } from "../logger.js";
-import { casKey, isCasKeyError, pendingKey, validateContentHash } from "../media/cas-keys.js";
+import { casKey, isCasKeyError, pendingKey, processingKey, validateContentHash } from "../media/cas-keys.js";
 import { buildMediaUpsertArgs } from "../media/media-upsert.js";
 import { checkUploadQuota } from "../media/quota-check.js";
+import { decisionToStatus } from "../media/moderation-status.js";
 import type { ModerationStatus } from "../media/moderation-status.js";
+import { getMediaModerationProvider } from "../media/request-moderation.js";
 import {
   canonicalContentType,
   isServable,
@@ -1137,26 +1139,31 @@ export const mediaRoutes: Route[] = [
           duration: extracted?.videoMetadata?.duration,
         };
 
-        // Use MediaUploadService for eventual consistency upload.
-        // Pass the re-encoded buffer (uploadBuffer) so the content hash is of
-        // the clean output bytes, not the raw upload. The service writes the
-        // bytes to the canonical CAS key `cas/{tenantId}/{hash}`.
-        const uploadService = new MediaUploadService(env);
-        const result = await uploadService.uploadSingle(
-          file,
-          session.userId,
-          tenantId,
-          metadata,
-          uploadBuffer,
-        );
+        // --- STAGE → MODERATE → PROMOTE-ON-APPROVE -----------------------------
+        // Synchronous image moderation. The cleaned (re-encoded) bytes are
+        // written to a STAGING key first, moderated, and only PROMOTED to the
+        // canonical `cas/` key when the verdict is APPROVED. `cas/` therefore
+        // only ever holds approved bytes; REVIEW/QUARANTINED bytes stay at
+        // staging out of the serve path (the gate is APPROVED-only). FAIL-CLOSED
+        // throughout — any uncertainty resolves to REVIEW, never APPROVED.
 
-        // T9: the DB originalKey stores the SAME canonical CAS key the bytes
-        // were written to, so the serve path reads exactly what upload wrote.
-        const uploadOriginalKey = casKey(tenantId, result.contentHash);
-        if (isCasKeyError(uploadOriginalKey)) {
-          logger.error("[Media Upload] Failed to build CAS key", {
+        // 1. Hash the CLEANED output bytes so the CAS key addresses clean bytes
+        //    (the same scheme MediaUploadService used: SHA-256 hex of the buffer).
+        const hashBuffer = await crypto.subtle.digest("SHA-256", uploadBuffer);
+        const contentHash = Array.from(new Uint8Array(hashBuffer))
+          .map((b) => b.toString(16).padStart(2, "0"))
+          .join("");
+
+        // 2. Build the canonical cas/ key (final serve location) and the
+        //    processing/ staging key (pre-promotion location).
+        const uploadOriginalKey = casKey(tenantId, contentHash);
+        const stagingKey = processingKey(tenantId, contentHash);
+        if (isCasKeyError(uploadOriginalKey) || isCasKeyError(stagingKey)) {
+          logger.error("[Media Upload] Failed to build CAS/staging key", {
             userId: session.userId,
-            kind: uploadOriginalKey.kind,
+            kind: isCasKeyError(uploadOriginalKey)
+              ? uploadOriginalKey.kind
+              : (stagingKey as { kind: string }).kind,
           });
           const errorResponse = securityHeaders.createSecureResponse(
             JSON.stringify({
@@ -1169,9 +1176,103 @@ export const mediaRoutes: Route[] = [
           return CorsHandler.addCorsHeaders(errorResponse, request, env);
         }
 
-        // Create MediaFile DB record synchronously so post creation can
-        // reference it immediately (reconciliation will enrich it later).
-        // Dedup is within-tenant via @@unique([tenantId, contentHash]) (D18).
+        const mediaBucket =
+          (env as any).MEDIA_BUCKET_R2 || (env as any).R2_BUCKET;
+        if (!mediaBucket) {
+          // No object store to stage into — fail closed (cannot moderate, must
+          // not serve). Mirrors the async-pending path's 503.
+          logger.error("[Media Upload] No media bucket configured for staging", {
+            userId: session.userId,
+          });
+          const errorResponse = securityHeaders.createSecureResponse(
+            JSON.stringify({ error: "Upload unavailable" }),
+            { status: 503, headers: { "content-type": "application/json" } },
+          );
+          return CorsHandler.addCorsHeaders(errorResponse, request, env);
+        }
+
+        // 3. Write the cleaned bytes to STAGING (NOT cas/). cas/ is written only
+        //    on APPROVED, below.
+        try {
+          await mediaBucket.put(stagingKey, uploadBuffer, {
+            httpMetadata: { contentType: mimeType },
+          });
+        } catch (stageError: any) {
+          logger.error("[Media Upload] Staging write failed", {
+            userId: session.userId,
+            error: stageError?.message,
+          });
+          const errorResponse = securityHeaders.createSecureResponse(
+            JSON.stringify({ error: "Upload failed" }),
+            { status: 500, headers: { "content-type": "application/json" } },
+          );
+          return CorsHandler.addCorsHeaders(errorResponse, request, env);
+        }
+
+        // 4. Moderate the STAGED object via the injected provider. FAIL-CLOSED:
+        //    any throw/timeout is treated as `review` (→ REVIEW, never promoted).
+        //    The provider owns all thresholds (threshold-secrecy); core passes no
+        //    numbers.
+        // The bucket handle the moderation ref carries is the configured media
+        // bucket name (same source buildEnv derives MEDIA_BUCKET_R2 from). The
+        // injected provider uses {bucket, key} to locate the STAGED object.
+        const moderationBucketName = process.env.MEDIA_BUCKET_NAME ?? "";
+        let decision: ModerationStatus;
+        try {
+          const verdict = await getMediaModerationProvider().moderateImage({
+            bucket: moderationBucketName,
+            key: stagingKey,
+          });
+          decision = decisionToStatus(verdict.decision);
+        } catch (moderationError: any) {
+          logger.warn(
+            "[Media Upload] Image moderation failed — failing closed to REVIEW",
+            {
+              userId: session.userId,
+              error: moderationError?.message,
+            },
+          );
+          decision = "REVIEW";
+        }
+
+        // 5. PROMOTE on APPROVED: copy staging → cas/ (the cleaned bytes we
+        //    already hold in memory), then best-effort delete the staging copy.
+        //    Anything else (REVIEW/QUARANTINED/REJECTED) leaves the bytes at
+        //    staging and NEVER writes cas/.
+        if (decision === "APPROVED") {
+          try {
+            await mediaBucket.put(uploadOriginalKey, uploadBuffer, {
+              httpMetadata: { contentType: mimeType },
+            });
+          } catch (promoteError: any) {
+            // Promotion failed — the bytes are still safely at staging and the
+            // row has not been written. Fail the upload so the client retries
+            // rather than recording an APPROVED row with no servable cas/ object.
+            logger.error("[Media Upload] CAS promotion failed", {
+              userId: session.userId,
+              error: promoteError?.message,
+            });
+            const errorResponse = securityHeaders.createSecureResponse(
+              JSON.stringify({ error: "Upload failed" }),
+              { status: 500, headers: { "content-type": "application/json" } },
+            );
+            return CorsHandler.addCorsHeaders(errorResponse, request, env);
+          }
+          // Best-effort staging cleanup — cas/ is what serves, so a leftover
+          // staging object is harmless (lifecycle-expired) and never fatal.
+          try {
+            await mediaBucket.delete(stagingKey);
+          } catch (deleteError: any) {
+            logger.warn("[Media Upload] Staging delete tolerated", {
+              userId: session.userId,
+              error: deleteError?.message,
+            });
+          }
+        }
+
+        // 6. Create the MediaFile DB record synchronously so post creation can
+        //    reference it immediately. Dedup is within-tenant via
+        //    @@unique([tenantId, contentHash]) (D18).
         try {
           await withQueryTimeoutAndRetry(
             sharedDatabaseConnectionManager,
@@ -1183,11 +1284,11 @@ export const mediaRoutes: Route[] = [
               // buildMediaUpsertArgs guarantees the `update` payload touches
               // neither uploadedBy nor moderationStatus — subsequent uploaders
               // get a reference (via the post→media relation), not a mutation
-              // of the shared row.
+              // of the shared row. The verdict applies to the `create` only.
               return await db.mediaFile.upsert(
                 buildMediaUpsertArgs({
                   tenantId,
-                  contentHash: result.contentHash,
+                  contentHash,
                   mimeType,
                   size: file.size,
                   originalKey: uploadOriginalKey,
@@ -1195,6 +1296,7 @@ export const mediaRoutes: Route[] = [
                   width: metadata?.width,
                   height: metadata?.height,
                   duration: metadata?.duration,
+                  moderationStatus: decision,
                 }),
               );
             },
@@ -1213,7 +1315,7 @@ export const mediaRoutes: Route[] = [
           logger.error(
             "[Media Upload] Synchronous DB record creation failed",
             {
-              contentHash: result.contentHash,
+              contentHash,
               error: dbError.message,
             },
           );
@@ -1232,9 +1334,10 @@ export const mediaRoutes: Route[] = [
         }
 
         logger.debug("[Media Upload] DB record created successfully", {
-          contentHash: result.contentHash,
+          contentHash,
           uploadedBy: session.userId,
           originalKey: uploadOriginalKey,
+          moderationStatus: decision,
           uploadRegion,
         });
 
@@ -1243,16 +1346,25 @@ export const mediaRoutes: Route[] = [
           fileName: file.name,
           fileSize: file.size,
           mimeType,
-          contentHash: result.contentHash,
-          status: result.status,
+          contentHash,
+          moderationStatus: decision,
         });
 
+        // Reconstruct the client serve URL (same scheme MediaUploadService
+        // used). This is the public API URL the client GETs by hash — NOT a
+        // storage key (the serve gate resolves the storage key from the DB row,
+        // never by interpolating the hash; see serve-maze-removed.test.ts).
+        const apiDomain =
+          env.ENVIRONMENT === "prod"
+            ? "https://api.example.com"
+            : "https://api.rkm1.de";
+        const serveUrl = `${apiDomain}/api/media/${encodeURIComponent(contentHash)}`;
         const response = securityHeaders.createSecureResponse(
           JSON.stringify({
-            url: result.url,
-            mediaKey: result.contentHash,
-            contentHash: result.contentHash,
-            status: result.status,
+            url: serveUrl,
+            mediaKey: contentHash,
+            contentHash,
+            status: decision === "APPROVED" ? "approved" : "pending",
           }),
           { status: 200, headers: { "content-type": "application/json" } },
         );

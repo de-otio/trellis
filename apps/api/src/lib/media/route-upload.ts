@@ -25,9 +25,10 @@
 /**
  * The three ingest routes for an uploaded object.
  *
- * - `sync-image`    — re-encode synchronously; the upload handler completes
- *                     the full pipeline inline and records the object as APPROVED
- *                     after the re-encode pass.
+ * - `sync-image`    — re-encode synchronously, then determine
+ *                     APPROVED/REVIEW/QUARANTINED via the injected
+ *                     moderateImage provider; the handler stages the cleaned
+ *                     bytes and promotes them to cas/ only on APPROVED.
  * - `async-pending` — store as-is, record as PENDING, fan out to the P0b
  *                     async processing worker.
  * - `reject`        — refuse the upload at the type-routing boundary (before

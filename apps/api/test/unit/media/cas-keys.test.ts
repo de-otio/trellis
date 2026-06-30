@@ -15,6 +15,7 @@ import * as fc from "fast-check";
 import {
   casKey,
   pendingKey,
+  processingKey,
   validateContentHash,
   allPresets,
   isCasKeyError,
@@ -495,6 +496,63 @@ describe("pendingKey", () => {
         if (isCasKeyError(result)) return true;
         const segments = (result as string).split("/");
         return segments.length === 3;
+      }),
+      { seed: FC_SEED, numRuns: 500 },
+    );
+  });
+});
+
+describe("processingKey (T3 — sync-image staging key)", () => {
+  it("returns the canonical processing path (content-addressed) for valid inputs", () => {
+    const result = processingKey(VALID_TENANT_A, VALID_HASH);
+    expect(result).toBe(`processing/${VALID_TENANT_A}/${VALID_HASH}`);
+  });
+
+  it("lowercase-normalizes the hash (single processing keyspace)", () => {
+    const result = processingKey(VALID_TENANT_A, "A".repeat(64));
+    expect(result).toBe(`processing/${VALID_TENANT_A}/${"a".repeat(64)}`);
+  });
+
+  it("rejects an invalid tenantId with a typed error", () => {
+    const result = processingKey("bad-tenant", VALID_HASH);
+    expect(isCasKeyError(result)).toBe(true);
+    expect((result as CasKeyError).kind).toBe("invalid_tenant_id");
+  });
+
+  it("rejects a non-hex / wrong-length hash with a typed error", () => {
+    const result = processingKey(VALID_TENANT_A, "short");
+    expect(isCasKeyError(result)).toBe(true);
+    expect((result as CasKeyError).kind).toBe("invalid_hash");
+  });
+
+  it("rejects a hash containing path-traversal characters", () => {
+    const result = processingKey(VALID_TENANT_A, "../" + "a".repeat(61));
+    expect(isCasKeyError(result)).toBe(true);
+    expect((result as CasKeyError).kind).toBe("invalid_hash");
+  });
+
+  it("property: valid inputs produce 3-segment keys under processing/", () => {
+    fc.assert(
+      fc.property(validCuidArb, validHashArb, (tenant, hash) => {
+        const result = processingKey(tenant, hash);
+        if (isCasKeyError(result)) return true;
+        const key = result as string;
+        return key.startsWith("processing/") && key.split("/").length === 3;
+      }),
+      { seed: FC_SEED, numRuns: 500 },
+    );
+  });
+
+  it("property: a tenant's processing key and cas key differ only by prefix", () => {
+    fc.assert(
+      fc.property(validCuidArb, validHashArb, (tenant, hash) => {
+        const proc = processingKey(tenant, hash);
+        const cas = casKey(tenant, hash);
+        if (isCasKeyError(proc) || isCasKeyError(cas)) return true;
+        return (
+          (proc as string) === `processing/${tenant}/${(hash as string).toLowerCase()}` &&
+          (cas as string) === `cas/${tenant}/${(hash as string).toLowerCase()}`
+        );
       }),
       { seed: FC_SEED, numRuns: 500 },
     );

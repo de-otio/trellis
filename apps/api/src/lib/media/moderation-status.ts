@@ -166,6 +166,24 @@ function illegal(
 }
 
 /**
+ * Map a classifier {@link ModerationDecision} to the {@link ModerationStatus} a
+ * freshly-uploaded (PENDING) object should land in — a thin shell over
+ * {@link nextStatus} for the synchronous image-upload path.
+ *
+ * Drives the transition `PENDING --decision <d>--> status` and returns the
+ * resulting status. The transition out of PENDING on a `decision` event is
+ * always legal, but should the machine ever report a not-ok transition we fail
+ * closed to `REVIEW` (never `APPROVED`): an unexpected refusal must degrade to
+ * human review, not to serving.
+ */
+export function decisionToStatus(
+  decision: ModerationDecision,
+): ModerationStatus {
+  const result = nextStatus("PENDING", { kind: "decision", decision });
+  return result.ok ? result.status : "REVIEW";
+}
+
+/**
  * Compile-time exhaustiveness guard for {@link ModerationStatus}.
  *
  * Keyed by the union, so adding a member to `ModerationStatus` without adding it

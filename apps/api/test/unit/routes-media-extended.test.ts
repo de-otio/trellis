@@ -65,6 +65,16 @@ vi.mock("../../src/lib/services/media-upload-service", () => ({
   },
 }));
 
+// Request-path moderation seam (T1): the sync-image upload now stages, moderates,
+// and promotes-on-approve. Default verdict = approved so the happy-path upload
+// reaches 200 with bytes in cas/.
+const mockModerateImage = vi.hoisted(() =>
+  vi.fn().mockResolvedValue({ decision: "approved", labels: [], provider: "mock" }),
+);
+vi.mock("../../src/lib/media/request-moderation", () => ({
+  getMediaModerationProvider: () => ({ moderateImage: mockModerateImage }),
+}));
+
 vi.mock("../../src/lib/media-handler", () => ({
   MediaHandler: {
     create: (...args: any[]) => {
@@ -177,6 +187,17 @@ const mockEnv = {
 };
 
 const mockSession = { userId: "user-1" };
+
+// A bucket-backed env for the sync-image upload tests: the stage→moderate→
+// promote path requires an object store to stage cleaned bytes into. The serve
+// tests deliberately keep MEDIA_BUCKET_R2 null (they exercise the no-bucket
+// deny), so this override is scoped to the upload tests only.
+const mockUploadPut = vi.fn().mockResolvedValue(undefined);
+const mockUploadDelete = vi.fn().mockResolvedValue(undefined);
+const uploadEnv = {
+  ...mockEnv,
+  MEDIA_BUCKET_R2: { put: mockUploadPut, delete: mockUploadDelete },
+};
 
 describe("Media Routes - Extended", () => {
   let mediaRoutes: any[];
@@ -333,22 +354,16 @@ describe("Media Routes - Extended", () => {
         body: formData,
       });
 
-      // T9: contentHash must be a valid 64-char hex digest so the canonical
-      // casKey can be built; the handler now rejects malformed hashes.
-      const hashA = "a".repeat(64);
-      mockUploadSingle.mockResolvedValue({
-        url: `https://cdn.example.com/api/media/${hashA}`,
-        contentHash: hashA,
-        status: "uploaded",
-      });
+      // Default verdict = approved → 200, staged bytes promoted to cas/.
+      await uploadRoute().handler(req, uploadEnv);
 
-      await uploadRoute().handler(req, mockEnv);
-
-      expect(mockUploadSingle).toHaveBeenCalled();
+      expect(mockModerateImage).toHaveBeenCalled();
       expect(mockCreateSecureResponse).toHaveBeenCalledWith(
-        expect.stringContaining(hashA),
+        expect.any(String),
         expect.objectContaining({ status: 200 }),
       );
+      const putKeys = mockUploadPut.mock.calls.map((c) => c[0] as string);
+      expect(putKeys.some((k) => k.startsWith("cas/"))).toBe(true);
     });
 
     it("should detect PNG from magic bytes even if declared type differs", async () => {
@@ -362,19 +377,13 @@ describe("Media Routes - Extended", () => {
         body: formData,
       });
 
-      mockUploadSingle.mockResolvedValue({
-        url: `https://cdn.example.com/api/media/${"b".repeat(64)}`,
-        contentHash: "b".repeat(64),
-        status: "uploaded",
-      });
+      await uploadRoute().handler(req, uploadEnv);
 
-      await uploadRoute().handler(req, mockEnv);
-
-      // Should log MIME type mismatch
-            expect(mockUploadSingle).toHaveBeenCalled();
+      // Detected as image and moderated on the sync path.
+      expect(mockModerateImage).toHaveBeenCalled();
     });
 
-    it("should handle upload service error", async () => {
+    it("should handle a staging-write failure with a 500", async () => {
       const jpegBytes = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46]);
       const formData = new FormData();
       const file = new File([jpegBytes], "photo.jpg", { type: "image/jpeg" });
@@ -384,12 +393,13 @@ describe("Media Routes - Extended", () => {
         body: formData,
       });
 
-      mockUploadSingle.mockRejectedValue(new Error("S3 upload failed"));
+      // Staging write throws → the upload fails (no moderation, no cas/).
+      mockUploadPut.mockRejectedValueOnce(new Error("S3 upload failed"));
 
-      await uploadRoute().handler(req, mockEnv);
+      await uploadRoute().handler(req, uploadEnv);
 
       expect(mockCreateSecureResponse).toHaveBeenCalledWith(
-        expect.stringContaining("Failed to upload media"),
+        expect.stringContaining("Upload failed"),
         expect.objectContaining({ status: 500 }),
       );
     });
