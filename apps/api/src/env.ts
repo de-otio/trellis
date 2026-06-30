@@ -247,6 +247,16 @@ export interface Env {
   // Storage (S3-backed, same interface as Cloudflare R2)
   MEDIA_BUCKET_R2: R2Bucket;
   EXPORT_FILES_R2: R2Bucket;
+  /**
+   * The RESOLVED media-bucket name that `MEDIA_BUCKET_R2` wraps (after the
+   * `${stage}-${appName}-media` fallback). Exposed as a first-class field so the
+   * moderation ref bucket (the `ImageRef.bucket` handed to `moderateImage`) is
+   * read from the SAME single source the storage binding uses — re-deriving the
+   * name (or the fallback) at a call site risks the staging WRITE and the
+   * moderation READ pointing at different buckets, which silently fail-closes
+   * every image to REVIEW. Source: same `mediaBucket` const as `MEDIA_BUCKET_R2`.
+   */
+  MEDIA_BUCKET_NAME: string;
 
   // --- Surveillance-hardening Phase 0 (P2): InteractionEvent capture ---------
   // Operational parameters are RUNTIME CONFIG, not compiled-in constants — the
@@ -1076,5 +1086,8 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     // S3 buckets (R2 interface)
     MEDIA_BUCKET_R2: new S3Storage(s3Client, mediaBucket),
     EXPORT_FILES_R2: new S3Storage(s3Client, exportsBucket),
+    // The resolved name MEDIA_BUCKET_R2 wraps — single source for the
+    // moderation ref bucket (see the Env field doc). Never re-derive elsewhere.
+    MEDIA_BUCKET_NAME: mediaBucket,
   };
 }

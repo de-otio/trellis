@@ -1213,10 +1213,15 @@ export const mediaRoutes: Route[] = [
         //    any throw/timeout is treated as `review` (→ REVIEW, never promoted).
         //    The provider owns all thresholds (threshold-secrecy); core passes no
         //    numbers.
-        // The bucket handle the moderation ref carries is the configured media
-        // bucket name (same source buildEnv derives MEDIA_BUCKET_R2 from). The
-        // injected provider uses {bucket, key} to locate the STAGED object.
-        const moderationBucketName = process.env.MEDIA_BUCKET_NAME ?? "";
+        // The bucket handle the moderation ref carries is the RESOLVED media
+        // bucket name from the env — identical to what MEDIA_BUCKET_R2 (the
+        // binding the staging write went to) wraps, including the
+        // `${stage}-${appName}-media` fallback. Reading it back from the env
+        // (never re-deriving the name or fallback here) guarantees the staging
+        // WRITE and the moderation READ point at the same bucket, so it is never
+        // empty. The injected provider uses {bucket, key} to locate the STAGED
+        // object.
+        const moderationBucketName = (env as any).MEDIA_BUCKET_NAME;
         let decision: ModerationStatus;
         try {
           const verdict = await getMediaModerationProvider().moderateImage({

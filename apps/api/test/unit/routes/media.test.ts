@@ -171,6 +171,9 @@ describe("Media Routes", () => {
       APP_DOMAIN: "https://api.rkm1.de",
       SESSION_SECRET: "test-secret",
       ENVIRONMENT: "dev",
+      // The resolved media-bucket name the binding wraps; the moderation ref
+      // bucket is read from this exact field (single source — see env.ts).
+      MEDIA_BUCKET_NAME: "dev-trellis-media",
       MEDIA_BUCKET_R2: {
         head: mockR2Head,
         put: mockR2Put,
@@ -949,6 +952,45 @@ describe("Media Routes", () => {
       const approvedRef = mockModerateImage.mock.calls[0][0];
       expect(approvedRef.key).toMatch(/^processing\//);
       expect(casWritten()).toBe(true);
+    });
+
+    it("moderateImage ref.bucket is the RESOLVED env bucket name (never empty), matching the staging write target", async () => {
+      // Regression guard for the silent fail-closed bug: the moderation READ
+      // ref must use the SAME resolved bucket name the staging WRITE binding
+      // wraps. The call site reads env.MEDIA_BUCKET_NAME (the single source),
+      // NOT `process.env.MEDIA_BUCKET_NAME ?? ""`. Prove the value comes from
+      // env by driving env.MEDIA_BUCKET_NAME to the resolved fallback while
+      // process.env.MEDIA_BUCKET_NAME is unset — reverting the call site to
+      // `?? ""` (or to process.env) would make ref.bucket "" / undefined and
+      // turn this red.
+      const savedProcEnv = process.env.MEDIA_BUCKET_NAME;
+      delete process.env.MEDIA_BUCKET_NAME;
+      try {
+        mockModerateImage.mockResolvedValue(verdictFor("approved"));
+
+        await runImageUpload();
+
+        const ref = mockModerateImage.mock.calls[0][0];
+        // The ref bucket equals the resolved env bucket name...
+        expect(ref.bucket).toBe(mockEnv.MEDIA_BUCKET_NAME);
+        expect(ref.bucket).toBe("dev-trellis-media");
+        // ...and is never the empty string (what `?? ""` produced on unset).
+        expect(ref.bucket).not.toBe("");
+        expect(typeof ref.bucket).toBe("string");
+        expect(ref.bucket.length).toBeGreaterThan(0);
+        // The staged object is moderated under that same bucket's processing/ key.
+        expect(ref.key).toMatch(/^processing\//);
+        const stagedPut = mockR2Put.mock.calls
+          .map((c) => c[0] as string)
+          .find((k) => k.startsWith("processing/"));
+        expect(stagedPut).toBe(ref.key);
+      } finally {
+        if (savedProcEnv === undefined) {
+          delete process.env.MEDIA_BUCKET_NAME;
+        } else {
+          process.env.MEDIA_BUCKET_NAME = savedProcEnv;
+        }
+      }
     });
   });
 

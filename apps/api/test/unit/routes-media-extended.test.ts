@@ -196,6 +196,8 @@ const mockUploadPut = vi.fn().mockResolvedValue(undefined);
 const mockUploadDelete = vi.fn().mockResolvedValue(undefined);
 const uploadEnv = {
   ...mockEnv,
+  // Resolved bucket name the moderation ref reads (single source — see env.ts).
+  MEDIA_BUCKET_NAME: "dev-trellis-media",
   MEDIA_BUCKET_R2: { put: mockUploadPut, delete: mockUploadDelete },
 };
 

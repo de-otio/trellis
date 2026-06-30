@@ -168,6 +168,7 @@ function makeEnv() {
   return {
     ENVIRONMENT: "dev",
     SESSION_SECRET: "test-secret-32-characters-long!!",
+    MEDIA_BUCKET_NAME: "dev-trellis-media",
     MEDIA_BUCKET_R2: { put: vi.fn(), get: vi.fn(), delete: vi.fn() },
     MEDIA_RECONCILIATION_QUEUE: { send: vi.fn() },
     media: {
