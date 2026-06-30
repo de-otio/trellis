@@ -15,6 +15,27 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-06-30
+
+### Added
+
+- **Synchronous image moderation wired into the upload path.** The sync-image
+  upload now follows **stage → moderate → promote-on-approve**: cleaned
+  (re-encoded) bytes are written to a `processing/` staging key, the staged
+  object is moderated via the injected `MediaModerationProvider.moderateImage`,
+  and the bytes are promoted to the canonical `cas/` key **only** when the
+  verdict is `approved`. A `review` or `quarantine` verdict leaves the bytes at
+  staging and records the row `REVIEW`/`QUARANTINED`, so `cas/` only ever holds
+  approved bytes and the APPROVED-only serve gate can serve them. Images now
+  reach `APPROVED` through the provider rather than being recorded approved by
+  default — the moderation seam was previously never called. The provider is
+  injected at startup via the new `setMediaModerationProvider` export (mirrors
+  `setRealtimeProvider`); when unset, the path degrades to a fail-closed Null
+  provider (every verdict `review`), never auto-approving and never 500-ing.
+  Moderation is **fail-closed throughout**: any provider throw or timeout is
+  treated as `review` (no `cas/` write), and the injected provider owns all
+  thresholds (none are compiled into the public tarball).
+
 ## [0.13.0] — 2026-06-29
 
 ### Fixed
