@@ -190,7 +190,13 @@ After the pre-token-generation trigger enriches the token, it carries:
 ```
 
 The auth middleware verifies the token and builds an auth context from these
-claims:
+claims. **The session/auth `userId` is the `custom:userId` claim — the Trellis
+`User.id` (a cuid) — not the Cognito `sub`.** The whole application looks the
+session user up via `where: { id: userId }`, which is cuid-keyed, so using the
+Cognito `sub` (a UUID) there would miss the row. Both JWT-Bearer auth paths
+(`SessionManager.getSession` and `getSessionFromRequest`) prefer
+`custom:userId`, falling back to `sub` only for legacy tokens minted before the
+claim existed:
 
 ```typescript
 import { CognitoJwtVerifier } from 'aws-jwt-verify';

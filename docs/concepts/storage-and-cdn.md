@@ -22,19 +22,22 @@ CORS:               Allowed origins for presigned URL uploads
 
 **Key structure:**
 
+All media keys are content-addressed and tenant-scoped, built only through the
+canonical key builder (`apps/api/src/lib/media/cas-keys.ts`):
+
 ```
-media/{sha256hash}.{ext}            # Original upload (written by the API upload service)
-thumbnails/{sha256hash}.webp        # Small thumbnail (written by the Lambda worker)
-optimized/{sha256hash}.webp         # Full-resolution optimized (written by the Lambda worker)
+cas/{tenantId}/{sha256}              # Approved, served bytes (the CDN-served prefix)
+cas/{tenantId}/{sha256}/{preset}     # Derivative preset (thumbnail | optimized)
+pending/{tenantId}/{uploadId}        # Raw video/audio awaiting processing (never served)
 ```
 
-> The API upload path (`MediaUploadService`) writes the original to
-> `media/{hash}.{ext}` and serves it via `/api/media/{hash}`. The
-> `media-processing-worker` Lambda, however, triggers on an `originals/` prefix
-> — a prefix the current upload path does not write. So in the shipped code the
-> Sharp derivative pipeline is **not actually triggered by API uploads**. This
-> is a wiring gap to reconcile (align the upload key prefix and the S3-event
-> trigger) before relying on async thumbnails.
+Only `cas/` is served, and only when the object is `APPROVED` (see
+[Media Moderation](media-moderation.md)). Images are re-encoded synchronously
+on upload and written straight to `cas/{tenantId}/{hash}`; video/audio are
+written to `pending/{tenantId}/{uploadId}` and promoted to `cas/` by the
+processing pipeline only after both moderation tracks approve. The completion
+worker writes the *cleaned, moderated* bytes to `cas/` — so the bytes served
+are always the bytes that were moderated.
 
 **Lifecycle rules:**
 - Incomplete multipart uploads: abort after 1 day
@@ -65,61 +68,52 @@ Public access:      Blocked (served via CloudFront OAC)
 
 Clients upload through the API: a `multipart/form-data` POST to
 `/api/media/upload` (or `/api/media/upload/batch`), authenticated by session.
-The handler validates the file (signature/MIME, rate limits — 10 uploads / 60s
-per user), then stores the object to the media bucket through the storage
-adapter (`MediaUploadService` → `MEDIA_BUCKET_R2`, an S3-backed,
-Cloudflare-R2-compatible interface from `@de-otio/saas-foundation/storage`).
+The handler validates the file (signature/MIME, per-user rate limits from
+`Env.media`), then routes the upload by content type.
+
+**Image uploads** are handled synchronously: the API re-encodes the image to a
+canonical raster format (stripping EXIF/GPS and any embedded payload), hashes
+the cleaned output, and writes it to `cas/{tenantId}/{hash}` through the storage
+adapter (`MediaUploadService`, an S3-backed, Cloudflare-R2-compatible interface
+from `@de-otio/saas-foundation/storage`).
+
+**Video and audio uploads** are stored to the `pending/{tenantId}/{uploadId}`
+prefix and processed asynchronously:
 
 ```
 1. Client app  →  POST /api/media/upload (multipart)  →  Fargate API
-2. Fargate     →  validate (signature, MIME, rate limit)
-3. Fargate     →  store object to media bucket (S3 via the storage adapter)
-4. S3          →  Event notification (originals/ prefix)  →  SQS (media-processing)
+2. Fargate     →  validate (signature, MIME, rate limit) + route by type
+3. Fargate     →  store raw bytes to pending/{tenant}/{upload}; row = PENDING
+4. S3          →  Event notification (pending/ prefix)  →  SQS (media-processing)
 5. SQS         →  triggers media-processing-worker Lambda
-6. Lambda      →  downloads from S3, processes with Sharp
-                   → uploads thumbnail + optimized to S3
+6. Lambda      →  transcode-and-discard, hash cleaned bytes,
+                   start VISUAL + AUDIO moderation tracks
+7. Completion  →  on both-tracks-approved, promote cleaned bytes to cas/
 ```
 
-> **Wiring gap.** Steps 4–6 are real code, but the upload service writes the
-> original under `media/{hash}.{ext}` while the worker triggers on the
-> `originals/` prefix — so today an API upload does not actually fire the Sharp
-> pipeline. See the key-structure note above.
+The S3 event notification fires on the `pending/` prefix (the prefix the upload
+path actually writes for video/audio), so the processing pipeline is triggered
+for every async upload.
 
 > **Note.** The codebase uploads **through the API**, not via presigned
 > direct-to-S3 PUT URLs. There is no `/api/media/upload-url` endpoint and no
-> `getSignedUrl`/presigned-POST path in the shipped code. The 10 MB request body
-> cap in `server.ts` (`MAX_BODY_SIZE`) therefore applies to uploads. Async
-> Sharp processing via the S3-event → `media-processing` SQS → Lambda pipeline
-> (`apps/api/src/lambda/media-processing-worker.ts`) is real and runs after the
-> object lands in the bucket.
+> `getSignedUrl`/presigned-POST path in the shipped code. The request body cap
+> in `server.ts` (`MAX_BODY_SIZE`) therefore applies to uploads.
 
 Properties of this flow:
-- File is validated at the API boundary before it is stored
-- Processing is async — a slow Sharp run never blocks the upload response
-- Failed processing doesn't lose the original
+- File is validated and re-encoded at the API boundary before it is stored
+- Video/audio processing is async — a slow transcode never blocks the response
+- Nothing is served until it is `APPROVED` (the fail-closed serve gate)
 
-## Image Processing (Sharp)
+## Media processing
 
-Sharp runs in Lambda with these operations:
-
-| Operation | Output | Resize | Format |
-|-----------|--------|--------|--------|
-| Thumbnail | `thumbnails/{hash}.webp` | 300×300, `fit: cover` | WebP q80 |
-| Optimized | `optimized/{hash}.webp` | 1200×1200, `fit: inside`, no enlargement | WebP q85 |
-
-As implemented in `media-processing-worker.ts`:
-
-```typescript
-const thumbnail = await sharp(buffer)
-  .resize(300, 300, { fit: 'cover' })
-  .webp({ quality: 80 })
-  .toBuffer();
-
-const optimized = await sharp(buffer)
-  .resize(1200, 1200, { fit: 'inside', withoutEnlargement: true })
-  .webp({ quality: 85 })
-  .toBuffer();
-```
+Image processing happens synchronously in the API handler (the canonical
+re-encode pass). Video/audio processing happens in the Lambda pipeline: the
+processing worker transcodes the upload to a clean form on a transient staging
+key, then starts the moderation tracks; the completion worker promotes the
+cleaned bytes to `cas/` only after approval. The moderation lifecycle, the
+dual-track model, and the fan-in semantics are described in
+[Media Moderation](media-moderation.md).
 
 ## CloudFront Distribution
 
@@ -129,11 +123,15 @@ A single CloudFront distribution serves both the web app and media.
 
 | Path Pattern | Origin | Cache Policy | Notes |
 |-------------|--------|-------------|-------|
-| `/api/*` | ALB (Fargate) | No cache | API requests |
+| `/api/*` | ALB (Fargate) | No cache (the media serve route caches its own approved responses) | API requests, including `GET /api/media/{hash}` |
 | `/.well-known/*` | ALB (Fargate) | No cache | ActivityPub WebFinger |
 | `/users/*` | ALB (Fargate) | No cache | ActivityPub actors |
-| `/media/*` | S3 (media bucket) | Long-lived (1 year) | Immutable content-addressed |
 | `/*` (default) | S3 (web bucket) | Short-lived (1 day) | Web app |
+
+Media is served through the API route `GET /api/media/{hash}`, **not** a direct
+`/media/*` S3 behavior. Routing the served bytes through the API is what lets
+the fail-closed serve gate run on every request: the S3 `cas/` bucket stays
+private (no public read behavior), and only an `APPROVED` object yields bytes.
 
 ### Configuration
 
@@ -159,7 +157,14 @@ The S3 bucket policy restricts `s3:GetObject` to only the specific CloudFront di
 
 ### Media Serving
 
-Since media keys are content-addressed (SHA-256), they are immutable and can be cached aggressively:
+Approved media is served by the API serve route, which reads the `MediaFile`
+row, applies the [fail-closed serve gate](media-moderation.md) (`APPROVED` and
+not hidden / soft-deleted), and streams the `cas/` object. Because the keys are
+content-addressed (SHA-256), an approved response is immutable and can be cached
+aggressively:
 
 - `Cache-Control: public, max-age=31536000, immutable`
-- CloudFront caches indefinitely; invalidation is never needed for media
+- Caches indefinitely; invalidation is never needed for an approved object
+
+A non-`APPROVED` object returns a uniform "not found" response (see the serve
+gate), so it is never cached as servable bytes.
