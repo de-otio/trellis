@@ -1,10 +1,18 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mockClient } from "aws-sdk-client-mock";
+import { KMSClient, GenerateMacCommand } from "@aws-sdk/client-kms";
 import {
   PSEUDONYM_DOMAIN,
   computeAnonymousId,
   setMacComputer,
   _resetMacComputerForTest,
 } from "../../src/lib/pseudonym.js";
+
+const kms = mockClient(KMSClient);
+
+beforeEach(() => {
+  kms.reset();
+});
 
 afterEach(() => {
   _resetMacComputerForTest();
@@ -62,5 +70,51 @@ describe("computeAnonymousId", () => {
     await expect(
       computeAnonymousId("", { PSEUDONYM_HMAC_KMS_KEY_ID: "k" }),
     ).rejects.toThrow(/non-empty string/);
+  });
+});
+
+describe("computeAnonymousId (default AWS-SDK-backed macComputer)", () => {
+  beforeEach(() => {
+    _resetMacComputerForTest();
+  });
+
+  it("calls KMS GenerateMac with the domain-separated message and returns base64(Mac)", async () => {
+    const macBytes = new Uint8Array([1, 2, 3, 4]);
+    kms.on(GenerateMacCommand).resolves({ Mac: macBytes });
+
+    const out = await computeAnonymousId("user_cuid_123", {
+      PSEUDONYM_HMAC_KMS_KEY_ID: "alias/pseudonym",
+      AWS_REGION: "eu-central-1",
+    });
+
+    const call = kms.commandCalls(GenerateMacCommand)[0]!;
+    expect(call.args[0].input.KeyId).toBe("alias/pseudonym");
+    expect(call.args[0].input.MacAlgorithm).toBe("HMAC_SHA_256");
+    expect(
+      new TextDecoder().decode(call.args[0].input.Message as Uint8Array),
+    ).toBe(`${PSEUDONYM_DOMAIN}user_cuid_123`);
+    expect(out).toBe(Buffer.from(macBytes).toString("base64"));
+  });
+
+  it("defaults region to us-east-1 when AWS_REGION is not set", async () => {
+    kms.on(GenerateMacCommand).resolves({ Mac: new Uint8Array([9]) });
+    await computeAnonymousId("u1", { PSEUDONYM_HMAC_KMS_KEY_ID: "k" });
+    expect(kms.commandCalls(GenerateMacCommand)).toHaveLength(1);
+  });
+
+  it("throws when KMS GenerateMac returns no Mac", async () => {
+    kms.on(GenerateMacCommand).resolves({});
+    await expect(
+      computeAnonymousId("u1", { PSEUDONYM_HMAC_KMS_KEY_ID: "k" }),
+    ).rejects.toThrow();
+  });
+
+  it("propagates KMS errors (e.g. access denied)", async () => {
+    kms.on(GenerateMacCommand).rejects(
+      Object.assign(new Error("denied"), { name: "AccessDeniedException" }),
+    );
+    await expect(
+      computeAnonymousId("u1", { PSEUDONYM_HMAC_KMS_KEY_ID: "k" }),
+    ).rejects.toThrow(/denied/);
   });
 });
