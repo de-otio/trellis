@@ -46,6 +46,9 @@ const MATRIX: Record<CapabilityValue, RoleCell> = {
 
   [Capability.AuditView]:       { OWNER: true,  ADMIN: true,  MEMBER: false, GUEST: false },
 
+  [Capability.ClassificationEdit]: { OWNER: true, ADMIN: true, MEMBER: false, GUEST: false },
+  [Capability.DirectoryEdit]:      { OWNER: true, ADMIN: true, MEMBER: false, GUEST: false },
+
   [Capability.ManageAgentSessions]: { OWNER: true, ADMIN: true, MEMBER: false, GUEST: false },
 };
 
@@ -84,7 +87,7 @@ describe("Capability catalog completeness", () => {
     expect(Object.keys(MATRIX).sort()).toEqual([...ALL_CAPABILITIES].sort());
   });
 
-  it("ALL_CAPABILITIES has 26 entries (snapshot of MVP catalog)", () => {
-    expect(ALL_CAPABILITIES.length).toBe(26);
+  it("ALL_CAPABILITIES has 28 entries (snapshot of MVP catalog)", () => {
+    expect(ALL_CAPABILITIES.length).toBe(28);
   });
 });

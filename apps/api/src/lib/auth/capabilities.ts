@@ -40,6 +40,14 @@ export const Capability = {
 
   AuditView: "audit.view",
 
+  // Org classification + public directory (org-classification-and-discovery).
+  // Both gate `TenantRole >= ADMIN` (wired in role-grants.ts AdminGrants).
+  // ClassificationEdit: declare/change a tenant's PlatformCategory + tags.
+  // DirectoryEdit: create/update the tenant's public directory listing,
+  // including discoverability and location precision.
+  ClassificationEdit: "classification.edit",
+  DirectoryEdit: "directory.edit",
+
   // Agent session management (T9b-d) — approve, list, revoke device-auth
   // sessions on behalf of the tenant. Granted to ADMIN/OWNER.
   ManageAgentSessions: "manage:agent_sessions",
