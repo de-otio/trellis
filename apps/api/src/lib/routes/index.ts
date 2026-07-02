@@ -75,6 +75,10 @@ import { tenantDomainRoutes } from "./tenant-domains.js";
 import { tenantIdpRoutes } from "./tenant-idp.js";
 import { tenantMemberRoutes } from "./tenant-members.js";
 import { tenantRoleMappingRoutes } from "./tenant-role-mappings.js";
+import { tenantClassificationRoutes } from "./tenant-classification.js";
+import { tenantDirectoryProfileRoutes } from "./tenant-directory-profile.js";
+import { tenantDirectorySearchRoutes } from "./tenant-directory-search.js";
+import { platformCategoryAdminRoutes } from "./platform-category-admin.js";
 import { userRoutes } from "./user.js";
 import { oauthRoutes } from "./oauth.js";
 import { agentAuthorizeRoutes } from "./agent-authorize.js";
@@ -148,6 +152,18 @@ const coreRoutes: Route[] = [
 
   // Tenant role mappings (CRUD)
   ...markPublicSpec(tenantRoleMappingRoutes),
+
+  // Tenant classification (org-category self-declaration) — T1
+  ...tenantClassificationRoutes,
+
+  // Tenant directory profile (discoverability + location precision) — T3
+  ...tenantDirectoryProfileRoutes,
+
+  // Directory search (name/category/location, triangulation-safe) — T4
+  ...tenantDirectorySearchRoutes,
+
+  // Platform category admin (SUPER_ADMIN-only taxonomy management) — T5
+  ...platformCategoryAdminRoutes,
 
   // Tenant audit log
   ...markPublicSpec(tenantAuditRoutes),
