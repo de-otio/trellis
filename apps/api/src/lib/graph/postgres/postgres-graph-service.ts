@@ -11,7 +11,11 @@
  * not need editing as the groups land.
  */
 import type { PrismaClient } from "@prisma/client";
-import type { GraphConnection, GraphService } from "../graph-service.js";
+import type {
+  GraphConnection,
+  GraphService,
+  OrgCategoryFeedFilter,
+} from "../graph-service.js";
 import type { EntityGeoLookup } from "../../geo/entity-geo-repository.js";
 import type {
   CircleTier,
@@ -136,11 +140,17 @@ export class PostgresGraphService implements GraphService, GraphConnection {
     tier: CircleTier,
     since: Date,
     pagination: PaginationInput,
+    orgFilter?: OrgCategoryFeedFilter,
   ) {
-    return this.circles.getVisiblePostIds(userId, tier, since, pagination);
+    return this.circles.getVisiblePostIds(userId, tier, since, pagination, orgFilter);
   }
-  getGlanceItems(userId: string, tier: CircleTier, limit: number) {
-    return this.circles.getGlanceItems(userId, tier, limit);
+  getGlanceItems(
+    userId: string,
+    tier: CircleTier,
+    limit: number,
+    orgFilter?: OrgCategoryFeedFilter,
+  ) {
+    return this.circles.getGlanceItems(userId, tier, limit, orgFilter);
   }
   getDepthPostIds(
     userId: string,
