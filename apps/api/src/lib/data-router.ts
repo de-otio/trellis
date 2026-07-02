@@ -857,6 +857,45 @@ export class DataRouter {
         .map((item) => String(item));
     }
 
+    // Feed-declutter denormalization: resolve the authoring tenant's root
+    // PlatformCategory code (if it has declared a classification) and stamp it
+    // onto the post so circle/glance feeds can filter by org category without a
+    // join on the hot path. Resolved HERE — outside the transaction, at the
+    // point tenantId is known — so only a plain string ever enters the
+    // allowlist below (never a Prisma proxy that would trip the transaction
+    // callback's Symbol serialization). Best-effort: this denormalized filter
+    // column is non-essential, so a lookup failure must never block the post
+    // write — mirror the audit-log "don't fail the operation" policy and leave
+    // the column null (it can be backfilled) rather than throwing.
+    try {
+      const classification = await db.tenantClassification.findUnique({
+        where: { tenantId: String(postData.tenantId) },
+        select: { categoryId: true },
+      });
+      if (classification?.categoryId) {
+        const categories = await db.platformCategory.findMany({
+          select: { id: true, code: true, parentCategoryId: true },
+        });
+        const { resolveRootCategoryCode } = await import(
+          "./org-category/tree.js"
+        );
+        const rootCode = resolveRootCategoryCode(
+          classification.categoryId,
+          categories,
+        );
+        if (rootCode !== null) {
+          // Add to the allowlist as a plain string (same pattern as geoData /
+          // contentWarnings above) — createData copies it below.
+          sanitizedPostData.authorOrgRootCategoryCode = String(rootCode);
+        }
+      }
+    } catch (orgCodeError) {
+      getLogger().warn(
+        "[DataRouter] Failed to resolve authorOrgRootCategoryCode (non-fatal, leaving null):",
+        orgCodeError,
+      );
+    }
+
     // Extract only the values needed from env before transaction
     // This prevents Symbol serialization issues when Prisma serializes the transaction callback
     const envForValidation = (env as any).CACHE_KV
@@ -909,6 +948,13 @@ export class DataRouter {
         }
         if (sanitizedPostData.contentWarnings !== undefined) {
           createData.contentWarnings = sanitizedPostData.contentWarnings;
+        }
+        // Feed-declutter denorm column — added via the same known-safe-field
+        // allowlist as geoData/contentWarnings (never by spreading postData), so
+        // no Prisma proxy/Symbol can enter the transaction callback's data.
+        if (sanitizedPostData.authorOrgRootCategoryCode !== undefined) {
+          createData.authorOrgRootCategoryCode =
+            sanitizedPostData.authorOrgRootCategoryCode;
         }
 
         const post = await (tx.post.create({

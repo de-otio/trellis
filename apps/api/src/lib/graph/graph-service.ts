@@ -79,6 +79,35 @@ export interface GraphConnection {
 }
 
 // ---------------------------------------------------------------------------
+// Feed org-category declutter filter
+// ---------------------------------------------------------------------------
+
+/**
+ * Optional feed-declutter filter over a post's denormalized
+ * `Post.authorOrgRootCategoryCode` (the `PlatformCategory.code` of the root
+ * ancestor of the authoring tenant's classification, stamped at post-creation
+ * time — see `DataRouter.createPost`).
+ *
+ * Semantics (a post's code may be `null` when the authoring tenant has no
+ * classification — the common case for a personal tenant):
+ *   - `exclude`: blacklist. A post is omitted when its code is one of these
+ *     values. Posts with a `null` code are KEPT (they are not "one of" the
+ *     excluded org categories).
+ *   - `include`: whitelist. When non-empty, ONLY posts whose code is one of
+ *     these values appear; posts with a `null` code are omitted (they belong to
+ *     no listed org category).
+ *
+ * Both may be combined (a post must survive the exclude blacklist AND match the
+ * include whitelist). An absent/empty filter changes nothing.
+ */
+export interface OrgCategoryFeedFilter {
+  /** Root category codes to exclude from the feed (blacklist). */
+  exclude?: string[];
+  /** Root category codes to restrict the feed to (whitelist). */
+  include?: string[];
+}
+
+// ---------------------------------------------------------------------------
 // GraphService — the main interface
 // ---------------------------------------------------------------------------
 
@@ -244,6 +273,8 @@ export interface GraphService {
    * @param tier - Circle tier to query
    * @param since - Only return posts created after this timestamp
    * @param pagination - Pagination parameters
+   * @param orgFilter - Optional org-category feed-declutter filter (see
+   *   {@link OrgCategoryFeedFilter}). Omitted/undefined = no org filtering.
    * @returns Paginated post IDs with creation timestamps and resolved tiers
    */
   getVisiblePostIds(
@@ -251,6 +282,7 @@ export interface GraphService {
     tier: CircleTier,
     since: Date,
     pagination: PaginationInput,
+    orgFilter?: OrgCategoryFeedFilter,
   ): Promise<PaginatedResult<VisiblePostResult>>;
 
   /**
@@ -263,12 +295,15 @@ export interface GraphService {
    * @param userId - The viewer's user ID
    * @param tier - Circle tier
    * @param limit - Maximum number of glance items (one per entity/user)
+   * @param orgFilter - Optional org-category feed-declutter filter (see
+   *   {@link OrgCategoryFeedFilter}). Omitted/undefined = no org filtering.
    * @returns List of glance items, one per member with new content
    */
   getGlanceItems(
     userId: string,
     tier: CircleTier,
     limit: number,
+    orgFilter?: OrgCategoryFeedFilter,
   ): Promise<GlanceItem[]>;
 
   /**
