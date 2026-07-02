@@ -128,15 +128,17 @@ describe("buildMediaUpsertArgs — moderationStatus passthrough (sync-image verd
 describe("T9 key round-trip (write == read)", () => {
   // Arbitraries matching the validated charsets (CUID tenant, 64-hex hash).
   const tenantArb = fc
-    .stringOf(fc.constantFrom(..."0123456789abcdefghijklmnopqrstuvwxyz".split("")), {
+    .string({
+      unit: fc.constantFrom(..."0123456789abcdefghijklmnopqrstuvwxyz".split("")),
       minLength: 24,
       maxLength: 24,
     })
     .map((s) => `c${s}`);
-  const hashArb = fc.stringOf(
-    fc.constantFrom(..."0123456789abcdef".split("")),
-    { minLength: 64, maxLength: 64 },
-  );
+  const hashArb = fc.string({
+    unit: fc.constantFrom(..."0123456789abcdef".split("")),
+    minLength: 64,
+    maxLength: 64,
+  });
 
   it("property: the key the upload writes equals the key the serve path reads", () => {
     fc.assert(

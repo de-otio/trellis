@@ -52,17 +52,19 @@ function makeHex(len: number): string {
 const VALID_HASH_64 = makeHex(64);
 
 // Arbitrary: valid 64-char hex string (lowercase)
-const validHashArb = fc.stringOf(
-  fc.constantFrom(...("0123456789abcdef".split(""))),
-  { minLength: 64, maxLength: 64 },
-);
+const validHashArb = fc.string({
+  unit: fc.constantFrom(...("0123456789abcdef".split(""))),
+  minLength: 64,
+  maxLength: 64,
+});
 
 // Arbitrary: valid CUID string (c + 24 lowercase alphanum)
 const validCuidArb = fc
-  .stringOf(
-    fc.constantFrom(...("0123456789abcdefghijklmnopqrstuvwxyz".split(""))),
-    { minLength: 24, maxLength: 24 },
-  )
+  .string({
+    unit: fc.constantFrom(...("0123456789abcdefghijklmnopqrstuvwxyz".split(""))),
+    minLength: 24,
+    maxLength: 24,
+  })
   .map((s) => `c${s}`);
 
 // ---------------------------------------------------------------------------
@@ -167,7 +169,7 @@ describe("validateContentHash", () => {
 
   it("property: any input with a non-[0-9a-f] byte (post-lowercase) yields an error", () => {
     // Generate strings that include at least one non-hex character
-    const nonHexCharArb = fc.char().filter(
+    const nonHexCharArb = fc.string({ unit: "grapheme-ascii", minLength: 1, maxLength: 1 }).filter(
       (c) => !/^[0-9a-fA-F]$/.test(c),
     );
     const stringWithNonHexArb = fc.tuple(
@@ -312,7 +314,7 @@ describe("casKey (no preset)", () => {
   });
 
   it("property: a non-hex byte in the hash always yields an error", () => {
-    const nonHexCharArb = fc.char().filter((c) => !/^[0-9a-fA-F]$/.test(c));
+    const nonHexCharArb = fc.string({ unit: "grapheme-ascii", minLength: 1, maxLength: 1 }).filter((c) => !/^[0-9a-fA-F]$/.test(c));
     const badHashArb = fc.tuple(
       nonHexCharArb,
       fc.string({ minLength: 0, maxLength: 100 }),
