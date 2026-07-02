@@ -8,7 +8,9 @@
  * integration lane with DATABASE_URL pointing at the local Postgres.
  */
 
+import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
+import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { PrismaEncryptedSettingsStore } from "../../src/lib/encrypted-settings/encrypted-settings-store.js";
 import { EncryptedSettingsHandler } from "../../src/lib/encrypted-settings/encrypted-settings-handler.js";
@@ -25,13 +27,16 @@ const config: SettingsConfig = {
   maxSettingBytes: 65536,
 };
 
+let pool: Pool;
 let prisma: PrismaClient;
 let store: PrismaEncryptedSettingsStore;
 
 async function makeUser(tag: string): Promise<string> {
+  const unique = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const u = await prisma.user.create({
     data: {
-      email: `es-itest-${tag}-${Date.now()}-${Math.random()}@test.example.com`,
+      email: `es-itest-${tag}-${unique}@test.example.com`,
+      handle: `esitest-${tag}-${unique}`.slice(0, 32),
       role: "END_USER",
     },
   });
@@ -39,13 +44,15 @@ async function makeUser(tag: string): Promise<string> {
 }
 
 beforeAll(async () => {
-  prisma = new PrismaClient({ datasources: { db: { url: TEST_DB_URL } } });
+  pool = new Pool({ connectionString: TEST_DB_URL });
+  prisma = new PrismaClient({ adapter: new PrismaPg(pool) });
   await prisma.$connect();
   store = new PrismaEncryptedSettingsStore(prisma);
 });
 
 afterAll(async () => {
   await prisma.$disconnect();
+  await pool.end();
 });
 
 describe("PrismaEncryptedSettingsStore (real Postgres)", () => {

@@ -19,6 +19,9 @@ const PHASE0_INTEGRATION = [
   "test/integration/interaction-events.integration.test.ts",
   // P4 — report model adoption
   "test/integration/report-migration.integration.test.ts",
+  // Encrypted-settings CAS + If-None-Match/304 — needs a real DATABASE_URL,
+  // which vitest.config.ts's test/setup.ts overrides to a fake hyperdrive URL.
+  "test/integration/encrypted-settings.integration.test.ts",
 ];
 
 export default defineConfig({

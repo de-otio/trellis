@@ -15,6 +15,9 @@ export default defineConfig({
       "test/integration/postdeployment/**/*.test.ts", // Exclude postdeployment tests - they require deployed infrastructure
       // Exclude integration tests that require live infrastructure (DB + running API)
       "test/integration/encryption-key-service.integration.test.ts",
+      // encrypted-settings needs a real DATABASE_URL (this config's test/setup.ts
+      // overrides it to a fake hyperdrive URL) — runs in the Phase0 integration
+      // lane instead (vitest.integration-ci.config.ts / test:integration:ci).
       "test/integration/encrypted-settings.integration.test.ts",
       "test/integration/example-authenticated.test.ts",
       "test/integration/feed-media-e2e.integration.test.ts",
