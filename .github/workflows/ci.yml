@@ -102,6 +102,23 @@ jobs:
           AWS_ACCESS_KEY_ID: test
           AWS_SECRET_ACCESS_KEY: test
 
+      # Repo-wide coverage floor. Full-suite coverage clears vitest.config.ts's
+      # thresholds (verified 2026-07-02: ~87.2% stmts / 80.9% branches / 88.2%
+      # funcs / 87.7% lines) — wire it in directly instead of leaving it
+      # aspirational-only.
+      - name: Coverage gate (repo-wide floor)
+        run: npm run test:coverage -w @de-otio/trellis
+        env:
+          DATABASE_URL: postgresql://trellis:test-ci-password@localhost:5432/trellis_test
+          DYNAMODB_ENDPOINT: http://localhost:8000
+          DYNAMODB_TABLE: test-trellis
+          STAGE: test
+          NODE_ENV: test
+          SESSION_SECRET: test-session-secret-must-be-32chars!!
+          AWS_REGION: us-east-1
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test
+
       # Consumer-install smoke: pack, install with --omit=dev into a fresh
       # project, require every published entry point. Catches runtime
       # imports of devDeps and unshipped relative imports — gaps the
