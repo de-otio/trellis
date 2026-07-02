@@ -156,6 +156,26 @@ export const UNSCOPED_MODELS: ReadonlyMap<string, string> = new Map([
   // explicitly from the graph context. Not auto-scoped — same posture as the
   // other audit-nullable event tables (RLS backstop, retention-bound).
   ["InteractionEvent", "audit-nullable"],
+  // Org classification + directory (org-classification-and-discovery T1).
+  // PlatformCategory: no tenantId column — a platform-global curated
+  // taxonomy table, written only by platform admins and read everywhere.
+  ["PlatformCategory", "global"],
+  // TenantClassification / TenantDirectoryProfile: each carries
+  // tenantId @unique (1:1 with Tenant). Classified as tenant-admin for
+  // the same reasons as TenantDomain / TenantIdentityProvider: the
+  // platform-admin handler (platform-category-admin-handler) issues
+  // cross-tenant `count` and `updateMany` to reclassify affected tenants
+  // on category deactivation / reparent, and the directory-search path
+  // queries TenantDirectoryProfile across ALL tenants. Auto-scoping by
+  // the active tenant would silently break both. Authz (requireActiveTenant
+  // / requireOwnTenant / admin role guard) enforces isolation at the
+  // handler boundary; RLS backstop (WS3) is the second line.
+  ["TenantClassification", "tenant-admin"],
+  ["TenantDirectoryProfile", "tenant-admin"],
+  // TenantClassificationTag: child of TenantClassification; carries a
+  // denormalized tenantId for the index, but isolation flows through the
+  // parent (same posture as EntityTaxonomyTag, PostTaxonomyTag).
+  ["TenantClassificationTag", "by-relation"],
 ]);
 
 // Operations whose `where` can safely have `{ tenantId }` AND-merged in.
