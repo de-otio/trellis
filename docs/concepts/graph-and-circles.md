@@ -54,6 +54,16 @@ On a multi-subject post the **closest relationship wins** — a post tagged with
 - **Depth mode** — per-entity drill-in (`/circles/depth/:entityId`), returns all that entity's recent posts for marking caught-up.
 - **Circle status** — unseen counts per entity within a tier, computed from the relationship/post tables and stored in `circle_read_states` on mark-as-read.
 
+### Filtering by organization category
+
+Circle tier answers "how close is this author to me" and deliberately has
+nothing to do with what *kind* of author it is. A second, independent filter
+predicate — the author's organization category, denormalized onto
+`Post.authorOrgRootCategoryCode` — lets a circle view additionally exclude or
+isolate posts by organization type (e.g. "no business posts," "non-profits
+only"), combinable with tier but not derived from it. See
+[Organization Classification & Directory](./org-classification-and-directory.md).
+
 ## One Database: the Graph Lives in Postgres
 
 The social graph is **not** a separate graph database. It is served from the same PostgreSQL instance that holds everything else, through a `GraphService` interface implemented by `PostgresGraphService`. The "edges" are ordinary relational tables; traversals are SQL joins and recursive CTEs.

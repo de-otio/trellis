@@ -8,4 +8,5 @@ order: 2
 # Guides
 
 Step-by-step instructions for specific tasks: running migrations, using
-feature flags, configuring an identity provider, and operating the service.
+feature flags, configuring an identity provider, classifying and listing your
+organization, and operating the service.

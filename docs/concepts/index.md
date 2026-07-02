@@ -8,5 +8,5 @@ order: 3
 # Concepts
 
 Background and design: the system architecture, the multi-tenancy and identity
-model, profiles, and the graph. Read these to understand *why* Trellis works
-the way it does.
+model, profiles, the graph, and organization classification. Read these to
+understand *why* Trellis works the way it does.

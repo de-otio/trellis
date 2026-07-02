@@ -80,6 +80,10 @@ export const Capability = {
   // Audit
   AuditView:        'audit.view',
 
+  // Organization classification & directory
+  ClassificationEdit: 'classification.edit',
+  DirectoryEdit:       'directory.edit',
+
   // Agent sessions — approve, list, and revoke device-auth sessions on
   // behalf of the tenant. Granted to ADMIN and OWNER.
   ManageAgentSessions: 'manage:agent_sessions',
@@ -126,6 +130,8 @@ Conventions:
 | `post.moderate` | ✅ | ✅ | | |
 | `post.view` | ✅ | ✅ | ✅ | ✅ |
 | `audit.view` | ✅ | ✅ | | |
+| `classification.edit` | ✅ | ✅ | | |
+| `directory.edit` | ✅ | ✅ | | |
 | `manage:agent_sessions` | ✅ | ✅ | | |
 
 ¹ ADMIN cannot promote anyone to OWNER. Only the current OWNER can transfer
@@ -290,3 +296,4 @@ never modified.
 ## Related
 
 - [Tenancy Model](./tenancy-model.md)
+- [Organization Classification & Directory](./org-classification-and-directory.md)
