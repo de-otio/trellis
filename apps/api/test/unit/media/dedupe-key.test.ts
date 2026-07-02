@@ -15,7 +15,11 @@ const trackArb: fc.Arbitrary<Track> = fc.constantFrom("VISUAL", "AUDIO");
 
 // A realistic contentHash: 64 lowercase hex chars (SHA-256).
 const contentHashArb: fc.Arbitrary<string> = fc
-  .hexaString({ minLength: 64, maxLength: 64 })
+  .string({
+    unit: fc.constantFrom(...("0123456789abcdef".split(""))),
+    minLength: 64,
+    maxLength: 64,
+  })
   .map((s) => s.toLowerCase());
 
 // jobId is provider-controlled — can be any non-empty string including

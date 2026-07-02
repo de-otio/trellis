@@ -277,7 +277,7 @@ describe("property — total: never throws", () => {
 
   it("handles ascii strings with arbitrary punctuation", () => {
     fc.assert(
-      fc.property(fc.asciiString(), (ct) => {
+      fc.property(fc.string({ unit: "grapheme-ascii" }), (ct) => {
         let result: IngestRoute;
         try {
           result = routeUpload(ct);

@@ -24,8 +24,8 @@
     "test:agents": "STAGE=dev AWS_REGION=eu-central-1 AWS_PROFILE=dot-dev npx vitest run --config apps/api/vitest.agents.config.ts"
   },
   "devDependencies": {
-    "@types/node": "^25.9.3",
-    "prettier": "^3.8.4",
+    "@types/node": "^26.1.0",
+    "prettier": "^3.9.4",
     "typescript": "^6.0.3"
   },
   "dependencies": {},
