@@ -21,9 +21,15 @@ permissions:
   contents: write
   pull-requests: write
 
-# Cancel superseded runs when Dependabot rebases/synchronizes a PR.
+# Scoped by PR number, not github.ref: for pull_request_target, github.ref
+# resolves to the BASE branch for every PR against it, not the PR's head —
+# grouping on it cancels every open Dependabot PR's run whenever another one
+# lands close together (same bug found and fixed in skybber's
+# dependabot-handler.yml and dependabot-auto-merge.yml, 2026-07-02; this repo's
+# copy had the identical pattern, unexercised until now because trellis rarely
+# has multiple Dependabot PRs land simultaneously).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
   cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
 
 jobs:
