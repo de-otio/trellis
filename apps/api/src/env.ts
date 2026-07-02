@@ -29,6 +29,10 @@ import {
   CalmDeliveryResolver,
   resolveRealtimeTransport,
 } from "./lib/realtime/index.js";
+import type { DirectoryProfileConfig } from "./lib/org-category/directory-profile-config.js";
+import { resolveDirectoryProfileConfig } from "./lib/org-category/directory-profile-config.js";
+import type { DirectorySearchConfig } from "./lib/org-category/directory-search-config.js";
+import { resolveDirectorySearchEnv } from "./lib/org-category/directory-search-config.js";
 
 const stage = process.env.STAGE || "dev";
 
@@ -419,6 +423,19 @@ export interface Env {
     };
   };
   // --- end Media config seam -------------------------------------------------
+
+  // --- Directory config seams (org-classification-and-discovery) --------------
+  // Both are threshold-secrecy seams (CLAUDE.md rule 8): every operational value
+  // is env-injected via its standalone resolver; no compiled default reaches the
+  // published tarball beyond conservative dev fallbacks. Handlers/routes read
+  // these slots — never construct them.
+  //
+  // NEIGHBORHOOD fuzz radius (T3). Parsed by resolveDirectoryProfileConfig().
+  directoryProfile: DirectoryProfileConfig;
+  // Directory-search pagination/rate-limit/timeout bounds (T4). Parsed by
+  // resolveDirectorySearchEnv().
+  directorySearch: DirectorySearchConfig;
+  // --- end Directory config seams --------------------------------------------
 }
 
 /**
@@ -935,6 +952,13 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     // Media config seam: resolveMediaEnv() reads all MEDIA_* vars; no compiled
     // threshold values ship in the tarball (threshold-secrecy invariant).
     ...resolveMediaEnv(),
+    // Directory-profile config seam (T3): NEIGHBORHOOD fuzz radius from
+    // NEIGHBORHOOD_FUZZ_RADIUS_METERS. Namespaced to match the media/realtime
+    // pattern (the resolver returns a bare config, unlike resolveMediaEnv()).
+    directoryProfile: resolveDirectoryProfileConfig(),
+    // Directory-search config seam (T4): pagination/rate-limit/timeout bounds
+    // from DIRECTORY_SEARCH_* vars. Resolver already returns { directorySearch }.
+    ...resolveDirectorySearchEnv(),
     DATABASE_URL: databaseUrl,
     DATABASE_URL_CN: process.env.DATABASE_URL_CN,
     DIRECT_URL: process.env.DIRECT_URL,

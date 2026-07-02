@@ -48,6 +48,8 @@ const AdminGrants: ReadonlySet<CapabilityValue> = new Set<CapabilityValue>([
   Capability.DomainRemove,
   Capability.PostModerate,
   Capability.AuditView,
+  Capability.ClassificationEdit,
+  Capability.DirectoryEdit,
   Capability.ManageAgentSessions,
 ]);
 

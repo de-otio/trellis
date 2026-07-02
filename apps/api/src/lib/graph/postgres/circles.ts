@@ -41,6 +41,7 @@
 import type { PrismaClient } from "@prisma/client";
 import { Prisma } from "@prisma/client";
 import { getCurrentTenantId } from "@de-otio/saas-foundation/tenant";
+import type { OrgCategoryFeedFilter } from "../graph-service.js";
 import type {
   CircleEntityStatus,
   CircleMember,
@@ -149,6 +150,36 @@ END`;
 /** Effective score column: COALESCE(manual_score, computed_score). */
 const EFFECTIVE_SCORE_SQL = Prisma.sql`COALESCE(r.manual_score, r.computed_score)`;
 
+/**
+ * Org-category feed-declutter predicate over the denormalized
+ * `posts.author_org_root_category_code` column. Returns a SQL fragment that
+ * ANDs cleanly onto an existing `WHERE`/tier filter (or {@link Prisma.empty}
+ * when there is nothing to filter). All codes are bound parameters via
+ * {@link Prisma.join} — never interpolated as raw SQL.
+ *
+ * Null-code handling matches {@link OrgCategoryFeedFilter}'s documented
+ * semantics: an `exclude` list keeps null-code posts (a null is not "one of"
+ * the excluded categories), while an `include` whitelist drops them (a null
+ * post belongs to no listed org category — `NULL IN (...)` is never true).
+ */
+function orgCategoryFilterSql(filter?: OrgCategoryFeedFilter): Prisma.Sql {
+  if (!filter) return Prisma.empty;
+  const clauses: Prisma.Sql[] = [];
+  if (filter.exclude && filter.exclude.length > 0) {
+    clauses.push(
+      Prisma.sql`AND (p.author_org_root_category_code IS NULL
+        OR p.author_org_root_category_code NOT IN (${Prisma.join(filter.exclude)}))`,
+    );
+  }
+  if (filter.include && filter.include.length > 0) {
+    clauses.push(
+      Prisma.sql`AND p.author_org_root_category_code IN (${Prisma.join(filter.include)})`,
+    );
+  }
+  if (clauses.length === 0) return Prisma.empty;
+  return Prisma.join(clauses, " ");
+}
+
 export class CircleOps {
   constructor(private readonly prisma: PrismaClient) {}
 
@@ -256,12 +287,14 @@ export class CircleOps {
     tier: CircleTier,
     since: Date,
     pagination: PaginationInput,
+    orgFilter?: OrgCategoryFeedFilter,
   ): Promise<PaginatedResult<VisiblePostResult>> {
     const thresholds = await this.loadThresholds(userId);
     const bounds = getCircleTierBounds(tier, thresholds);
     const upper = bounds.upper === Infinity ? 1e9 : bounds.upper;
     const tenantR = this.tenantFilter();
     const tenantP = this.postTenantFilter();
+    const orgP = orgCategoryFilterSql(orgFilter);
     const cursor = decodeCircleCursor(pagination.cursor ?? undefined);
     const tierExpr = tierCaseSql(EFFECTIVE_SCORE_SQL, thresholds);
     // Fetch (limit+1) per branch to detect hasMore after the app-side merge.
@@ -291,6 +324,7 @@ export class CircleOps {
         AND p.deleted_at IS NULL
         AND p.created_at > ${since}
         AND ${RADIUS_INT_SQL} >= ${tier}
+        ${orgP}
         ${cursorClause}
       GROUP BY p.id, p.created_at
       ORDER BY p.created_at DESC, p.id DESC
@@ -314,6 +348,7 @@ export class CircleOps {
         AND p.deleted_at IS NULL
         AND p.created_at > ${since}
         AND ${RADIUS_INT_SQL} >= ${tier}
+        ${orgP}
         ${cursorClause}
       GROUP BY p.id, p.created_at
       ORDER BY p.created_at DESC, p.id DESC
@@ -366,12 +401,14 @@ export class CircleOps {
     userId: string,
     tier: CircleTier,
     limit: number,
+    orgFilter?: OrgCategoryFeedFilter,
   ): Promise<GlanceItem[]> {
     const thresholds = await this.loadThresholds(userId);
     const bounds = getCircleTierBounds(tier, thresholds);
     const upper = bounds.upper === Infinity ? 1e9 : bounds.upper;
     const tenantR = this.tenantFilter();
     const tenantP = this.postTenantFilter();
+    const orgP = orgCategoryFilterSql(orgFilter);
 
     // Step 1: tier members (matches circle-queries.md two-step variant).
     const members = await this.prisma.$queryRaw<
@@ -425,6 +462,7 @@ export class CircleOps {
           AND p.deleted_at IS NULL
           AND ${RADIUS_INT_SQL} >= ${tier}
           ${tenantP}
+          ${orgP}
         ORDER BY ps.entity_id, p.created_at DESC, p.id DESC
       `);
       for (const row of rows) {
@@ -457,6 +495,7 @@ export class CircleOps {
           AND p.deleted_at IS NULL
           AND ${RADIUS_INT_SQL} >= ${tier}
           ${tenantP}
+          ${orgP}
         ORDER BY p.author_id, p.created_at DESC, p.id DESC
       `);
       for (const row of rows) {

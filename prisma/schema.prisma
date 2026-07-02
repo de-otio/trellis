@@ -598,6 +598,17 @@ model Post {
   // Content category (optional classification)
   contentCategory String? @map("content_category")
 
+  // Feed-declutter denormalization (org classification). Resolved by walking
+  // PlatformCategory.parentCategoryId to the root at write time, from the
+  // author's active tenant's TenantClassification. Null when the author's
+  // tenant has no declared classification. Deliberately coarser than the
+  // tenant's actual categoryId — feed decluttering only needs the root
+  // ("is this a business/nonprofit/etc. post"), not the leaf. Fine-grained
+  // category browsing is a directory concern, not a feed one. Staleness is
+  // accepted the same way contentCategory already accepts it: already-written
+  // posts keep their old value unless explicitly backfilled.
+  authorOrgRootCategoryCode String? @map("author_org_root_category_code") // PlatformCategory.code of the root ancestor
+
   @@index([tenantId, createdAt])
   @@index([authorId, createdAt])
   @@index([authorId, radius, createdAt])
@@ -614,6 +625,7 @@ model Post {
   @@index([ownerContext]) // Index for context queries
   @@index([screeningRiskLevel]) // Index for risk level queries
   @@index([editedAt]) // Index for querying edited posts
+  @@index([authorOrgRootCategoryCode, createdAt]) // Feed-declutter predicate (org classification)
   @@map("posts")
 }
 
@@ -1844,6 +1856,10 @@ model Tenant {
   // Personal-tenant owner back-relation (uses @relation name to disambiguate)
   personalOwner User? @relation("PersonalTenantOwner", fields: [personalOwnerUserId], references: [id])
 
+  // Org classification + public directory (opt-in, orthogonal to TenantType)
+  classification   TenantClassification?
+  directoryProfile TenantDirectoryProfile?
+
   @@index([slug])
   @@index([type, status])
   @@map("tenants")
@@ -2011,6 +2027,141 @@ model TenantInvitation {
   @@index([email])
   @@index([expiresAt])
   @@map("tenant_invitations")
+}
+
+// ============================================================================
+// Org classification, directory & discovery (MVP / Phase 1)
+// See analysis/org-classification-and-discovery/05-schema-changes.md.
+// PlatformCategorySuggestion + its AI-curation pipeline are Phase 2 — NOT here.
+// ============================================================================
+
+// Platform-curated, NOT tenant-scoped — the single shared vocabulary every
+// tenant's classification and every directory search draws from. Mirrors
+// TaxonomyTaxon's hierarchical/synonym/translation shape but with no tenantId —
+// curated by platform operators (SUPER_ADMIN), not tenants.
+model PlatformCategory {
+  id          String  @id @default(cuid())
+  code        String  @unique // e.g. "nonprofit", "nonprofit:animal-welfare"
+  displayName String  @map("display_name")
+  description String? @db.Text
+  order       Int     @default(0)
+  isActive    Boolean @default(true) @map("is_active")
+
+  synonyms     Json? // alternative search terms, e.g. ["charity", "NGO"]
+  translations Json? // { "en": {...}, "de": {...} }
+
+  parentCategoryId String?            @map("parent_category_id")
+  parentCategory   PlatformCategory?  @relation("PlatformCategoryHierarchy", fields: [parentCategoryId], references: [id])
+  childCategories  PlatformCategory[] @relation("PlatformCategoryHierarchy")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  classifications    TenantClassification[]
+  classificationTags TenantClassificationTag[] @relation("ClassificationTagCategory")
+
+  @@index([parentCategoryId])
+  @@index([isActive])
+  @@map("platform_categories")
+}
+
+// Named, not boolean — a verification badge with no visible source is exactly
+// what the classification model's Q1 resolution rules out. Only SELF_DECLARED
+// is ever set in MVP; the other values exist for Phase 2 verifier integrations.
+enum VerificationSource {
+  SELF_DECLARED
+  TECHSOUP
+  HAUS_DES_STIFTENS
+  PLATFORM_MANUAL_REVIEW
+}
+
+// One row per tenant that has declared a classification. Absent = unclassified
+// (the common case for a PERSONAL tenant with no business activity).
+model TenantClassification {
+  id         String @id @default(cuid())
+  tenantId   String @unique @map("tenant_id")
+  categoryId String @map("category_id") // may point anywhere in the PlatformCategory tree, not just a root
+
+  verificationSource VerificationSource @default(SELF_DECLARED) @map("verification_source")
+  verifiedAt         DateTime?          @map("verified_at")
+  // Case/record id at the verifying authority, when applicable — lets an admin
+  // trace a TECHSOUP/HAUS_DES_STIFTENS claim back to its source record without
+  // storing the verifier's full response body here.
+  verifiedByRef      String?            @map("verified_by_ref")
+  // Verification isn't only additive: a verifier can delist an org after the
+  // fact. Set when a previously-verified classification's status is revoked, so
+  // a stale "Verified via X" badge never survives a delisting.
+  verificationRevokedAt DateTime?       @map("verification_revoked_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant   Tenant                    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  category PlatformCategory          @relation(fields: [categoryId], references: [id])
+  tags     TenantClassificationTag[]
+
+  @@index([categoryId])
+  @@index([verificationSource])
+  @@map("tenant_classifications")
+}
+
+// Optional secondary tags for directory search only (never joined on the feed
+// hot path). Tags are references into the SAME curated PlatformCategory tree as
+// the primary category, not free text.
+model TenantClassificationTag {
+  id               String @id @default(cuid())
+  tenantId         String @map("tenant_id")
+  classificationId String @map("classification_id")
+  categoryId       String @map("category_id")
+
+  classification TenantClassification @relation(fields: [classificationId], references: [id], onDelete: Cascade)
+  category       PlatformCategory     @relation("ClassificationTagCategory", fields: [categoryId], references: [id])
+
+  @@unique([classificationId, categoryId])
+  @@index([tenantId])
+  @@index([categoryId])
+  @@map("tenant_classification_tags")
+}
+
+// Location precision is a named level, not a boolean. The true coordinate is
+// always stored (needed for correct proximity ranking); what varies by level is
+// what the response exposes AND which query paths a row participates in.
+enum LocationPrecision {
+  EXACT // raw lat/lng + full address; participates in distance-sorted "near me" search
+  NEIGHBORHOOD // coarsened pin + neighborhood label; participates in distance-sorted "near me" search
+  CITY // city-level label only, no pin; EXCLUDED from distance-sorted/radius search — findable by name/category/explicit-city-match only
+  HIDDEN // excluded from every geo query path — findable by name/category only
+}
+
+// Public directory profile (opt-in, separate from classification). Reuses the
+// entity-geo storage shape. `lat`/`lng` are the true coordinates; ST_DWithin /
+// distance ranking uses them ONLY when locationPrecision is EXACT or
+// NEIGHBORHOOD — CITY/HIDDEN rows are excluded from radius/distance queries
+// entirely, not just from the response payload (distance-sort order alone leaks
+// the true coordinate via triangulation). `displayLat`/`displayLng` are a
+// fuzzed/snapped coordinate safe to return for NEIGHBORHOOD-level map display;
+// the fuzz radius is runtime config, not a hardcoded constant.
+model TenantDirectoryProfile {
+  id       String @id @default(cuid())
+  tenantId String @unique @map("tenant_id")
+
+  isDiscoverable   Boolean @default(false) @map("is_discoverable")
+  shortDescription String? @db.Text @map("short_description")
+
+  lat               Float?
+  lng               Float?
+  displayLat        Float?
+  displayLng        Float?
+  locationLabel     String?           @map("location_label") // e.g. "Berlin, Germany" or "Prenzlauer Berg, Berlin"
+  locationPrecision LocationPrecision @default(CITY) @map("location_precision")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([isDiscoverable])
+  @@map("tenant_directory_profiles")
 }
 
 // ============================================================================

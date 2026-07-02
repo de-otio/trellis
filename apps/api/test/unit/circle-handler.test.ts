@@ -257,6 +257,7 @@ describe("CircleHandler", () => {
         2,
         expect.any(Date),
         { limit: 20, cursor: undefined },
+        undefined, // orgFilter (T2): no org-category params on this request
       );
     });
 
@@ -280,6 +281,7 @@ describe("CircleHandler", () => {
         0,
         new Date("2025-01-01T00:00:00.000Z"),
         { limit: 10, cursor: "tok-123" },
+        undefined, // orgFilter (T2): no org-category params on this request
       );
     });
 
@@ -298,6 +300,7 @@ describe("CircleHandler", () => {
         1,
         expect.any(Date),
         { limit: 50, cursor: undefined },
+        undefined, // orgFilter (T2): no org-category params on this request
       );
     });
 
@@ -316,6 +319,7 @@ describe("CircleHandler", () => {
         1,
         expect.any(Date),
         { limit: 1, cursor: undefined },
+        undefined, // orgFilter (T2): no org-category params on this request
       );
     });
 
@@ -420,7 +424,7 @@ describe("CircleHandler", () => {
       expect(response.status).toBe(200);
       const body = await response.json();
       expect(body).toEqual({ items });
-      expect(mockGraphService.getGlanceItems).toHaveBeenCalledWith("user-123", 3, 20);
+      expect(mockGraphService.getGlanceItems).toHaveBeenCalledWith("user-123", 3, 20, undefined);
     });
 
     it("passes custom limit", async () => {
@@ -433,7 +437,7 @@ describe("CircleHandler", () => {
         mockRequestContext,
       );
 
-      expect(mockGraphService.getGlanceItems).toHaveBeenCalledWith("user-123", 1, 5);
+      expect(mockGraphService.getGlanceItems).toHaveBeenCalledWith("user-123", 1, 5, undefined);
     });
 
     it("clamps limit to max 50", async () => {
@@ -446,7 +450,7 @@ describe("CircleHandler", () => {
         mockRequestContext,
       );
 
-      expect(mockGraphService.getGlanceItems).toHaveBeenCalledWith("user-123", 1, 50);
+      expect(mockGraphService.getGlanceItems).toHaveBeenCalledWith("user-123", 1, 50, undefined);
     });
 
     it("returns 400 when tier is missing", async () => {

@@ -77,6 +77,30 @@ export const FEATURE_TOGGLE_CHANGED: AuditAction = "feature_toggle.changed";
 // by the consent-management layer (another agent owns the emit sites).
 export const CONSENT_CHANGED: AuditAction = "consent.changed";
 
+// ── Org classification / directory / platform-category actions ────────
+//
+// Every mutable surface in the org-classification + directory feature is
+// auditable — each changes something another user's experience depends on
+// (a feed-filter result, a directory listing's visibility, or the shared
+// taxonomy every tenant's classification resolves against). The
+// `.discoverable_changed` / `.precision_changed` transitions matter
+// specifically because they INCREASE what's exposed about a tenant
+// (private → searchable, CITY → EXACT location).
+export const TENANT_CLASSIFICATION_CREATED: AuditAction = "tenant_classification.created";
+export const TENANT_CLASSIFICATION_CATEGORY_CHANGED: AuditAction = "tenant_classification.category_changed";
+export const TENANT_CLASSIFICATION_VERIFIED: AuditAction = "tenant_classification.verified";
+export const TENANT_CLASSIFICATION_VERIFICATION_REVOKED: AuditAction = "tenant_classification.verification_revoked";
+export const TENANT_CLASSIFICATION_TAG_ADDED: AuditAction = "tenant_classification.tag_added";
+export const TENANT_CLASSIFICATION_TAG_REMOVED: AuditAction = "tenant_classification.tag_removed";
+
+export const TENANT_DIRECTORY_PROFILE_CREATED: AuditAction = "tenant_directory_profile.created";
+export const TENANT_DIRECTORY_PROFILE_DISCOVERABLE_CHANGED: AuditAction = "tenant_directory_profile.discoverable_changed";
+export const TENANT_DIRECTORY_PROFILE_PRECISION_CHANGED: AuditAction = "tenant_directory_profile.precision_changed";
+
+export const PLATFORM_CATEGORY_CREATED: AuditAction = "platform_category.created";
+export const PLATFORM_CATEGORY_DEACTIVATED: AuditAction = "platform_category.deactivated";
+export const PLATFORM_CATEGORY_REPARENTED: AuditAction = "platform_category.reparented";
+
 /**
  * Old tenant/IdP `AuditEventType` string -> `AuditAction` constant.
  * The values are identical (preserved verbatim), so this is an identity
