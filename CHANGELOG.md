@@ -41,6 +41,29 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ### Added
 
+- **Boot-time environment validation (fail fast on misconfig).** `startServer()`
+  now validates the raw `process.env` against a Zod schema
+  (`apps/api/src/env-schema.ts`) before constructing any AWS client or
+  resolving any secret, and refuses to start with a message naming each
+  missing or invalid key — misconfiguration that previously surfaced only as
+  runtime 500s found via post-deploy e2e now fails the deploy at boot.
+  Required in every stage: database config (`DATABASE_URL`, `DB_SECRET_ARN`,
+  or the legacy `DB_SECRET_USERNAME/PASSWORD/HOST` triple), the session secret
+  (`SESSION_SECRET` ≥ 32 chars or `SESSION_SECRET_ARN`), and the Cognito
+  pool/client ids. Required in prod only (dev-only-overridable):
+  `SESSION_SALT` and `MEDIA_THRESHOLDS_JSON` (the media-moderation gate —
+  absent in dev it safely fail-closes every category to review, but a prod
+  deploy without it is operator error). Optional keys are format-checked when
+  set (numeric `MEDIA_*` caps, the `MEDIA_*_JSON` allowlists/presets,
+  `MEDIA_CANONICAL_FORMAT`/`_QUALITY`, `ACTIVITYPUB_ENABLED` must be exactly
+  `"true"`/`"false"`) — a malformed value that the runtime resolvers would
+  silently replace with a dev default (or fail-close) is now a boot failure;
+  the runtime fallbacks themselves are unchanged (defense in depth). A
+  correctly configured environment boots exactly as before, and the public
+  package API is unchanged. The larger `Env`-slicing refactor remains a filed
+  follow-up (architecture-review §7.1); the Cloudflare-shim retirement stays
+  deferred until the legacy router is gone.
+
 - **Organization classification, feed decluttering by org category, and a public organization directory.** Tenants can self-declare what kind of organization they are (business, non-profit, community group, government, educational, or other — via a platform-curated category tree, `PlatformCategory`) independently of `TenantType`, which only ever described membership structure, not commercial nature. Feed views gain a second, independent filter axis alongside circle tier: viewers can exclude or isolate posts by an author's organization category (e.g. "no business posts," or "non-profits only"), denormalized onto `Post.authorOrgRootCategoryCode` for the same cheap, indexed filtering already used for region/sensitivity/content-category. A new opt-in directory (`TenantDirectoryProfile`) lets a classified tenant become searchable by name, category, and location; location precision is a named level (`EXACT`/`NEIGHBORHOOD`/`CITY`/`HIDDEN`), not a boolean — `CITY`/`HIDDEN` listings are structurally excluded from distance-sorted search (not just response-shaped) to close a triangulation vector where ranking order alone could otherwise leak an intentionally-imprecise location. See [Organization Classification & Directory](docs/concepts/org-classification-and-directory.md) and [Classify and List Your Organization](docs/guides/classify-and-list-your-organization.md). Self-declared only in this release — third-party verification (TechSoup, Haus des Stiftens) and AI-assisted category-suggestion are planned follow-ups; org-to-org relationships (membership/subsidiary) and cross-tenant resource-sharing grants are designed but deliberately out of scope for this release.
 
 ## [0.14.0] — 2026-06-30

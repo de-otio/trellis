@@ -11,6 +11,7 @@
 
 import http from "node:http";
 import { buildEnv, validateEnv } from "./env.js";
+import { validateBootEnv } from "./env-schema.js";
 import { buildHonoApp } from "./lib/app.js";
 import { getLogger, Logger } from "./lib/logger.js";
 import { TrellisRequestContextManager } from "./lib/request-context.js";
@@ -41,6 +42,20 @@ async function readBody(req: http.IncomingMessage): Promise<Buffer> {
 
 export async function startServer(): Promise<http.Server> {
   const PORT = parseInt(process.env.PORT || "3000", 10);
+
+  // AR12 — boot-time env validation (Zod, src/env-schema.ts): fail fast,
+  // naming the missing/invalid key, BEFORE any AWS client is constructed or
+  // secret resolution is attempted. Dev-only-overridable keys (SESSION_SALT,
+  // MEDIA_THRESHOLDS_JSON) are enforced only when STAGE === "prod".
+  const bootIssues = validateBootEnv(process.env);
+  if (bootIssues.length > 0) {
+    console.error("Environment validation failed at boot:");
+    for (const issue of bootIssues) {
+      console.error(`  - ${issue}`);
+    }
+    process.exit(1);
+  }
+
   const env = await buildEnv();
 
   // S1.4 — Validate critical environment variables at startup
