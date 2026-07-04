@@ -7,6 +7,18 @@
 
 import type { ZodSchema } from "zod";
 import type { Route } from "./route-types";
+import type {
+  ExtensionCircleEntityStatus,
+  ExtensionCircleMember,
+  ExtensionCircleTierStatus,
+  ExtensionEntity,
+  ExtensionEntityRelationship,
+  ExtensionGlanceItem,
+  ExtensionPaginatedResult,
+  ExtensionPost,
+  ExtensionRelationship,
+  ExtensionVisiblePost,
+} from "./dto";
 
 // ---------------------------------------------------------------------------
 // Extension Context — the restricted runtime environment extensions receive
@@ -46,27 +58,31 @@ export interface ExtensionDb {
  * reserved for core and are not exposed here.
  */
 export interface ExtensionGraphService {
-  // Relationships (read)
+  // Relationships (read) — result shapes are the versioned DTOs in ./dto
   getRelationship(
     userId: string,
     targetType: string,
     targetId: string,
-  ): Promise<unknown | null>;
+  ): Promise<ExtensionRelationship | null>;
   getRelationships(
     userId: string,
     options?: { tier?: number; targetType?: string; pagination?: unknown },
-  ): Promise<unknown>;
+  ): Promise<ExtensionPaginatedResult<ExtensionRelationship>>;
   getRelationshipGraph(userId: string): Promise<unknown>;
 
   // Circles (read)
-  getCircleMembers(userId: string, tier: number): Promise<unknown[]>;
+  getCircleMembers(userId: string, tier: number): Promise<ExtensionCircleMember[]>;
   getVisiblePostIds(
     userId: string,
     tier: number,
     since: Date,
     pagination: unknown,
-  ): Promise<unknown>;
-  getGlanceItems(userId: string, tier: number, limit: number): Promise<unknown[]>;
+  ): Promise<ExtensionPaginatedResult<ExtensionVisiblePost>>;
+  getGlanceItems(
+    userId: string,
+    tier: number,
+    limit: number,
+  ): Promise<ExtensionGlanceItem[]>;
   getDepthPostIds(
     userId: string,
     targetType: string,
@@ -74,15 +90,20 @@ export interface ExtensionGraphService {
     since: Date,
     limit: number,
   ): Promise<string[]>;
-  getCircleStatus(userId: string): Promise<unknown[]>;
-  getCircleEntityStatus(userId: string, tier: number): Promise<unknown[]>;
+  getCircleStatus(userId: string): Promise<ExtensionCircleTierStatus[]>;
+  getCircleEntityStatus(
+    userId: string,
+    tier: number,
+  ): Promise<ExtensionCircleEntityStatus[]>;
 
   // Entity relationships (read)
   getEntityRelationships(
     entityId: string,
     options?: { type?: string; status?: string },
-  ): Promise<unknown[]>;
-  getPendingEntityRelationships(userId: string): Promise<unknown[]>;
+  ): Promise<ExtensionEntityRelationship[]>;
+  getPendingEntityRelationships(
+    userId: string,
+  ): Promise<ExtensionEntityRelationship[]>;
 
   // Discovery
   discoverByGraph(
@@ -153,10 +174,13 @@ export interface ExtensionContext {
  */
 export interface ExtensionHooks {
   /** Called after a post is created */
-  onPostCreated?: (post: any, ctx: ExtensionContext) => Promise<void>;
+  onPostCreated?: (post: ExtensionPost, ctx: ExtensionContext) => Promise<void>;
 
   /** Called after an entity is created */
-  onEntityCreated?: (entity: any, ctx: ExtensionContext) => Promise<void>;
+  onEntityCreated?: (
+    entity: ExtensionEntity,
+    ctx: ExtensionContext,
+  ) => Promise<void>;
 
   /** Called after a relationship is created between users/entities */
   onRelationshipCreated?: (
@@ -196,7 +220,7 @@ export interface ExtensionHooks {
  *   - Bump alongside every `package.json` version change.
  *   - Never change one without changing the other.
  */
-export const EXTENSION_API_VERSION = "0.3.0" as const;
+export const EXTENSION_API_VERSION = "0.4.0" as const;
 
 // ---------------------------------------------------------------------------
 // Strategy Interfaces — pluggable domain-specific behavior

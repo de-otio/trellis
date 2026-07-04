@@ -33,3 +33,22 @@ export type {
   Middleware,
   MiddlewareContext,
 } from "./route-types";
+
+// Structural DTOs — the versioned shapes of core data that extensions
+// consume (hook payloads, graph query results). Core asserts it satisfies
+// these at compile time; extensions type against them.
+export type {
+  ExtensionNodeType,
+  ExtensionCircleTier,
+  ExtensionConnectionMethod,
+  ExtensionPaginatedResult,
+  ExtensionEntity,
+  ExtensionPost,
+  ExtensionRelationship,
+  ExtensionCircleMember,
+  ExtensionCircleTierStatus,
+  ExtensionCircleEntityStatus,
+  ExtensionGlanceItem,
+  ExtensionVisiblePost,
+  ExtensionEntityRelationship,
+} from "./dto";
