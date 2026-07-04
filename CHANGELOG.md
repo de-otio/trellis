@@ -127,6 +127,23 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   `createFriendshipFromInvitation`/`addToFriendsList` private helpers from the
   invitation handler (friendship from an invitation is user-confirmed via the
   friends handler).
+- **Stale-media reapers no longer delete in-flight video uploads.** Async video
+  uploads are born `uploadStatus: "PENDING"`, and the two stale-upload reapers
+  (the hourly cron and the scheduled media-stale-cleanup job) hard-deleted
+  `PENDING`/`FAILED` rows older than one hour — deleting rows (and, in one
+  reaper, the stored object) that were still inside, or had just cleared, the
+  moderation pipeline. Both reapers now share a single reap scope
+  (`lib/media/stale-media-reap.ts`): a row with **any** `MediaModerationJob` is
+  never reaped, the abandonment window is far larger than the moderation
+  pipeline's worst-case latency (env-overridable via
+  `MEDIA_STALE_REAP_WINDOW_MS`), the scope is re-asserted atomically at delete
+  time so a reaper cannot race the pipeline, and the object-store delete now
+  skips rows whose storage key is not yet set. The consuming application's
+  persistence adapters are expected to advance `uploadStatus` to its terminal
+  `COMPLETE` when processing + moderation resolve (the reference adapters do so
+  as of this fix). The broader consolidation of
+  `moderationStatus`/`uploadStatus`/orphan flags into one lifecycle state
+  machine is intentionally deferred to the presigned-upload rework.
 
 ### Added
 

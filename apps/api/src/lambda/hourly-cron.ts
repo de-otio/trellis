@@ -8,6 +8,10 @@ import {
   batchedPruneExpired,
   resolveInteractionEventConfig,
 } from "../lib/graph/postgres/interaction-events.js";
+import {
+  staleMediaReapCutoff,
+  staleMediaReapWhere,
+} from "../lib/media/stale-media-reap.js";
 
 // AWS Lambda Powertools: structured logging (auto request-id/cold-start
 // context), EMF metrics (no PutMetricData API call), and cached + KMS-decrypted
@@ -48,21 +52,27 @@ export const handler = async (): Promise<void> => {
 
   const db = await getPrisma();
 
-  // 1. Clean up stale PENDING/FAILED media records (older than 1 hour)
+  // 1. Reap genuinely-abandoned PENDING/FAILED media records (AR4-scoped:
+  //    never a row the moderation pipeline has engaged with, never younger
+  //    than the reap window ≫ the moderation SLA — see
+  //    ../lib/media/stale-media-reap.ts for the invariant).
   try {
-    const oneHourAgo = new Date(Date.now() - 3600000);
+    const cutoff = staleMediaReapCutoff();
     const staleMedia = await db.mediaFile.findMany({
-      where: {
-        uploadStatus: { in: ["PENDING", "FAILED"] },
-        createdAt: { lt: oneHourAgo },
-      },
+      where: staleMediaReapWhere(cutoff),
       take: 100,
       select: { id: true },
     });
 
     if (staleMedia.length > 0) {
       const result = await db.mediaFile.deleteMany({
-        where: { id: { in: staleMedia.map((m) => m.id) } },
+        // Re-assert the full reap scope (not id-only): a row that acquired a
+        // moderation job between the findMany and this delete is re-excluded
+        // atomically at delete time (no reap race with the pipeline).
+        where: {
+          id: { in: staleMedia.map((m) => m.id) },
+          ...staleMediaReapWhere(cutoff),
+        },
       });
       logger.info("Stale media cleaned", { deleted: result.count });
     }
