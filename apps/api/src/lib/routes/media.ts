@@ -34,7 +34,6 @@ import {
   REENCODABLE_IMAGE_TYPES,
   reencodeImage,
 } from "../services/image-normalizer.js";
-import { MediaUploadService } from "../services/media-upload-service.js";
 import type { Route } from "./types.js";
 
 /**
@@ -1147,7 +1146,7 @@ export const mediaRoutes: Route[] = [
         // throughout — any uncertainty resolves to REVIEW, never APPROVED.
 
         // 1. Hash the CLEANED output bytes so the CAS key addresses clean bytes
-        //    (the same scheme MediaUploadService used: SHA-256 hex of the buffer).
+        //    (SHA-256 hex of the buffer).
         const hashBuffer = await crypto.subtle.digest("SHA-256", uploadBuffer);
         const contentHash = Array.from(new Uint8Array(hashBuffer))
           .map((b) => b.toString(16).padStart(2, "0"))
@@ -1354,10 +1353,10 @@ export const mediaRoutes: Route[] = [
           moderationStatus: decision,
         });
 
-        // Reconstruct the client serve URL (same scheme MediaUploadService
-        // used). This is the public API URL the client GETs by hash — NOT a
-        // storage key (the serve gate resolves the storage key from the DB row,
-        // never by interpolating the hash; see serve-maze-removed.test.ts).
+        // Reconstruct the client serve URL. This is the public API URL the
+        // client GETs by hash — NOT a storage key (the serve gate resolves the
+        // storage key from the DB row, never by interpolating the hash; see
+        // serve-maze-removed.test.ts).
         const apiDomain =
           env.ENVIRONMENT === "prod"
             ? "https://api.example.com"
@@ -1391,261 +1390,35 @@ export const mediaRoutes: Route[] = [
       "Upload media file (image or video) with content-addressed storage",
   },
   {
+    // AR16: the legacy batch-upload path is intentionally NOT implemented.
+    //
+    // It used to write bytes straight to the approved `cas/{tenant}/{hash}`
+    // prefix via MediaUploadService with NO moderation and NO video re-encode,
+    // then enqueued to the (stub) media-reconciliation worker — violating the
+    // core media-safety invariant that `cas/` holds only approved, cleaned
+    // bytes that came through the moderated pipeline (stage → moderate →
+    // promote-on-APPROVED; see the single-upload route above).
+    //
+    // If batch semantics are wanted post-beta, they get rebuilt on the
+    // presigned direct-to-S3 upload flow — not patched onto a direct-write
+    // path. Until then this route fails loudly instead of smuggling bytes.
     path: "/api/media/upload/batch",
     method: "POST",
     handler: async (request, env) => {
-      const sessionManager = new SessionManager();
       const securityHeaders = new SecurityHeaders(env);
-      const logger = getLogger();
-      const rateLimiter = new RateLimiter();
-
-      // Check authentication
-      const session = await sessionManager.getSession(
-        request,
-        env.SESSION_SECRET,
-        env,
+      const response = securityHeaders.createSecureResponse(
+        JSON.stringify({
+          error: "Not implemented",
+          message:
+            "Batch upload is not available. Upload files individually via /api/media/upload.",
+        }),
+        { status: 501, headers: { "content-type": "application/json" } },
       );
-
-      if (!session) {
-        logger.warn("[Media Batch Upload] Unauthorized");
-        const errorResponse = securityHeaders.createSecureResponse(
-          JSON.stringify({ error: "Unauthorized" }),
-          { status: 401, headers: { "content-type": "application/json" } },
-        );
-        return CorsHandler.addCorsHeaders(errorResponse, request, env);
-      }
-
-      // Apply rate limiting: batch uploads per minute per user (from env.media.rateLimits)
-      const rateLimitResponse = await rateLimiter.applyRateLimitKV(
-        env as any,
-        request,
-        "/api/media/upload/batch",
-        env.media.rateLimits.batchPerMin,
-        60,
-        session.userId,
-      );
-      if (rateLimitResponse) {
-        return securityHeaders.addSecurityHeaders(rateLimitResponse);
-      }
-
-      try {
-        // Parse multipart form data
-        const formData = await request.formData();
-        const files: File[] = [];
-
-        // Collect all files from form data
-        for (const [key, value] of formData.entries()) {
-          if (
-            key.startsWith("files[") &&
-            value &&
-            typeof value === "object" &&
-            "name" in value
-          ) {
-            files.push(value as File);
-          } else if (
-            key === "file" &&
-            value &&
-            typeof value === "object" &&
-            "name" in value
-          ) {
-            // Also support single 'file' field for compatibility
-            files.push(value as File);
-          }
-        }
-
-        if (files.length === 0) {
-          logger.warn("[Media Batch Upload] No files provided", {
-            userId: session.userId,
-            formDataKeys: Array.from(formData.keys()),
-          });
-          const errorResponse = securityHeaders.createSecureResponse(
-            JSON.stringify({
-              error: "No files provided",
-              message: "At least one file is required",
-            }),
-            { status: 400, headers: { "content-type": "application/json" } },
-          );
-          return CorsHandler.addCorsHeaders(errorResponse, request, env);
-        }
-
-        if (files.length > 20) {
-          logger.warn("[Media Batch Upload] Too many files", {
-            userId: session.userId,
-            fileCount: files.length,
-          });
-          const errorResponse = securityHeaders.createSecureResponse(
-            JSON.stringify({
-              error: "Too many files",
-              message: "Maximum 20 files per batch",
-            }),
-            { status: 400, headers: { "content-type": "application/json" } },
-          );
-          return CorsHandler.addCorsHeaders(errorResponse, request, env);
-        }
-
-        logger.info("[Media Batch Upload] Processing batch", {
-          userId: session.userId,
-          fileCount: files.length,
-        });
-
-        // Validate and re-encode each file before uploading (T7/T6).
-        // The batch path applies the same pipeline as the single-upload path:
-        // size check → type check → magic-number check → suspicious-content check
-        // → re-encode images → upload with re-encoded buffer.
-        const batchAllowedImageTypes = new Set(REENCODABLE_IMAGE_TYPES);
-        const batchAllowedVideoTypes = new Set(
-          env.media.allowlist.video.length > 0
-            ? env.media.allowlist.video
-            : ["video/mp4", "video/webm", "video/quicktime"],
-        );
-
-        interface ProcessedFile {
-          file: File;
-          buffer: ArrayBuffer;
-          mimeType: string;
-        }
-        const processed: Array<ProcessedFile | { error: string }> = [];
-
-        for (const batchFile of files) {
-          // Size check
-          const batchFileBuffer = await batchFile.arrayBuffer();
-          const batchIsImage = batchAllowedImageTypes.has(batchFile.type) ||
-            // detect from magic bytes for images
-            (() => {
-              const b = new Uint8Array(batchFileBuffer);
-              if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return true; // JPEG
-              if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return true; // PNG
-              if (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x38) return true; // GIF
-              if (b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 &&
-                  b.length >= 12 && b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return true; // WebP
-              return false;
-            })();
-          const batchIsVideo = batchAllowedVideoTypes.has(batchFile.type);
-
-          if (!batchIsImage && !batchIsVideo) {
-            processed.push({ error: `Unsupported file type: ${batchFile.type || "unknown"}` });
-            continue;
-          }
-
-          const maxSize = batchIsImage ? env.media.maxBytes.image : env.media.maxBytes.video;
-          if (batchFile.size > maxSize) {
-            processed.push({ error: `File too large: ${batchFile.name}` });
-            continue;
-          }
-
-          const batchBytes = new Uint8Array(batchFileBuffer);
-
-          // Suspicious content check — reject the file
-          const batchSuspicious = checkSuspiciousContent(batchBytes, batchFile.type || "application/octet-stream");
-          if (batchSuspicious.length > 0) {
-            logger.warn("[Media Batch Upload] Suspicious file detected — skipping", {
-              userId: session.userId,
-              fileName: batchFile.name,
-              suspicious: batchSuspicious,
-            });
-            processed.push({ error: "Suspicious content detected" });
-            continue;
-          }
-
-          // Re-encode images (T7)
-          if (batchIsImage) {
-            try {
-              const reencoded = await reencodeImage(batchFileBuffer, env);
-              // Buffer is a Uint8Array subclass — cast is safe for all consumers.
-              processed.push({ file: batchFile, buffer: reencoded.buffer as unknown as ArrayBuffer, mimeType: reencoded.canonicalMimeType });
-            } catch (reencodeErr: any) {
-              logger.warn("[Media Batch Upload] Re-encode failed — skipping file", {
-                userId: session.userId,
-                fileName: batchFile.name,
-                error: reencodeErr.message,
-              });
-              processed.push({ error: "Image processing failed" });
-            }
-          } else {
-            processed.push({ file: batchFile, buffer: batchFileBuffer, mimeType: batchFile.type });
-          }
-        }
-
-        // Resolve the tenant that scopes these uploads (T9 / D18) — same
-        // canonical CAS scheme as the single-upload path.
-        const batchTenantId = await resolveUploadTenantId(
-          session.userId,
-          "US",
-          env,
-        );
-        if (!batchTenantId) {
-          logger.error("[Media Batch Upload] No tenant context for upload", {
-            userId: session.userId,
-          });
-          const errorResponse = securityHeaders.createSecureResponse(
-            JSON.stringify({
-              error: "Tenant resolution failed",
-              message: "Could not resolve a tenant for this upload.",
-            }),
-            { status: 500, headers: { "content-type": "application/json" } },
-          );
-          return CorsHandler.addCorsHeaders(errorResponse, request, env);
-        }
-
-        // Upload each successfully processed file individually (preserves re-encoded buffer)
-        const uploadService = new MediaUploadService(env);
-        const results = await Promise.all(
-          processed.map(async (item): Promise<{ success: boolean; contentHash: string; url: string; status: string; warning?: string }> => {
-            if ("error" in item) {
-              return { success: false, contentHash: "", url: "", status: "failed", warning: item.error };
-            }
-            try {
-              const uploadResult = await uploadService.uploadSingle(
-                item.file,
-                session.userId,
-                batchTenantId,
-                undefined,
-                item.buffer,
-              );
-              return uploadResult;
-            } catch (err: any) {
-              return { success: false, contentHash: "", url: "", status: "failed", warning: `Upload failed: ${err.message}` };
-            }
-          }),
-        );
-
-        const successCount = results.filter((r) => r.success).length;
-        const failureCount = results.filter((r) => !r.success).length;
-
-        logger.info("[Media Batch Upload] Batch complete", {
-          userId: session.userId,
-          total: files.length,
-          successful: successCount,
-          failed: failureCount,
-        });
-
-        const response = securityHeaders.createSecureResponse(
-          JSON.stringify({
-            results,
-            summary: {
-              total: files.length,
-              successful: successCount,
-              failed: failureCount,
-            },
-          }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
-        return CorsHandler.addCorsHeaders(response, request, env);
-      } catch (error: any) {
-        logger.error("[Media Batch Upload] Error:", error);
-
-        const errorResponse = securityHeaders.createSecureResponse(
-          JSON.stringify({
-            error: "Failed to upload media batch",
-            message: error.message || "An unexpected error occurred",
-          }),
-          { status: 500, headers: { "content-type": "application/json" } },
-        );
-        return CorsHandler.addCorsHeaders(errorResponse, request, env);
-      }
+      return CorsHandler.addCorsHeaders(response, request, env);
     },
     middleware: [corsMiddleware(), csrfMiddleware()],
-    description: "Upload multiple media files in a single batch request",
+    description:
+      "Batch media upload (not implemented — removed: bypassed moderation)",
   },
   {
     path: "/api/media/grouped",

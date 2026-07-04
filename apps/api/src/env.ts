@@ -246,7 +246,6 @@ export interface Env {
   FOLLOWERS_EVENTS_QUEUE: CloudflareQueue;
   LINK_CHECK_QUEUE: CloudflareQueue;
   MEDIA_PROCESSING_QUEUE: CloudflareQueue;
-  MEDIA_RECONCILIATION_QUEUE: CloudflareQueue;
 
   // Storage (S3-backed, same interface as Cloudflare R2)
   MEDIA_BUCKET_R2: R2Bucket;
@@ -1105,7 +1104,6 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     FOLLOWERS_EVENTS_QUEUE: new SqsQueue(sqsClient, sqsUrl("followers-events")),
     LINK_CHECK_QUEUE: new SqsQueue(sqsClient, sqsUrl("link-check")),
     MEDIA_PROCESSING_QUEUE: new SqsQueue(sqsClient, sqsUrl("media-processing")),
-    MEDIA_RECONCILIATION_QUEUE: new SqsQueue(sqsClient, sqsUrl("media-reconciliation")),
 
     // S3 buckets (R2 interface)
     MEDIA_BUCKET_R2: new S3Storage(s3Client, mediaBucket),

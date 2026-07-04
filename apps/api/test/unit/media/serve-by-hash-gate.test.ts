@@ -113,9 +113,6 @@ vi.mock("../../../src/lib/services/image-normalizer", () => ({
 vi.mock("../../../src/lib/media-handler", () => ({
   MediaHandler: { create: vi.fn() },
 }));
-vi.mock("../../../src/lib/services/media-upload-service", () => ({
-  MediaUploadService: class {},
-}));
 
 // Ambient tenant present so serveMediaByHash's tenant resolution succeeds and
 // the GATE logic (the subject of this suite) is exercised. resolveMediaTenantId

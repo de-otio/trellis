@@ -15,6 +15,30 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ## [Unreleased]
 
+### Removed
+
+- **Batch upload no longer bypasses moderation — the legacy direct-to-`cas/`
+  upload path is deleted (breaking, internal).** `POST /api/media/upload/batch`
+  used to write bytes straight to the approved `cas/{tenant}/{hash}` prefix via
+  `MediaUploadService` with **no moderation verdict and no video re-encode**,
+  then enqueued to the stub media-reconciliation worker (which silently acked) —
+  violating the core media-safety invariant that `cas/` holds only approved,
+  cleaned bytes produced by the moderated pipeline (stage → moderate →
+  promote-on-APPROVED). The serve gate kept those bytes unservable, so this was
+  a latent landmine rather than an active leak, but the invariant was false and
+  batch uploads never became visible anyway. The route now returns
+  `501 Not Implemented`; `MediaUploadService`, the media-reconciliation queue
+  producer/consumer/service/types, the stub `media-reconciliation-worker`
+  Lambda entry, and the `MEDIA_RECONCILIATION_QUEUE` env binding are deleted.
+  Every remaining `cas/` write is gated on an APPROVED verdict (sync-image
+  promote, completion-worker promote). Batch semantics, if wanted post-beta,
+  will be rebuilt on the presigned direct-to-S3 upload flow. **Internal
+  breaking notes for deployers:** the `dist/lambda/media-reconciliation-worker`
+  bundle entry no longer exists (remove the worker + queue from infra and
+  reclaim its reserved concurrency), and `Env` no longer has
+  `MEDIA_RECONCILIATION_QUEUE`. Nothing on the public package API
+  (`startServer`, `registerExtension`, provider seams) changed.
+
 ### Added
 
 - **Organization classification, feed decluttering by org category, and a public organization directory.** Tenants can self-declare what kind of organization they are (business, non-profit, community group, government, educational, or other — via a platform-curated category tree, `PlatformCategory`) independently of `TenantType`, which only ever described membership structure, not commercial nature. Feed views gain a second, independent filter axis alongside circle tier: viewers can exclude or isolate posts by an author's organization category (e.g. "no business posts," or "non-profits only"), denormalized onto `Post.authorOrgRootCategoryCode` for the same cheap, indexed filtering already used for region/sensitivity/content-category. A new opt-in directory (`TenantDirectoryProfile`) lets a classified tenant become searchable by name, category, and location; location precision is a named level (`EXACT`/`NEIGHBORHOOD`/`CITY`/`HIDDEN`), not a boolean — `CITY`/`HIDDEN` listings are structurally excluded from distance-sorted search (not just response-shaped) to close a triangulation vector where ranking order alone could otherwise leak an intentionally-imprecise location. See [Organization Classification & Directory](docs/concepts/org-classification-and-directory.md) and [Classify and List Your Organization](docs/guides/classify-and-list-your-organization.md). Self-declared only in this release — third-party verification (TechSoup, Haus des Stiftens) and AI-assisted category-suggestion are planned follow-ups; org-to-org relationships (membership/subsidiary) and cross-tenant resource-sharing grants are designed but deliberately out of scope for this release.

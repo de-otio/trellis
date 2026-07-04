@@ -10,7 +10,6 @@ const STAGE = process.env.STAGE!;
 const QUEUE_NAMES = [
   "delete-account",
   "media-processing",
-  "media-reconciliation",
   "link-check",
   "followers-events",
 ];
