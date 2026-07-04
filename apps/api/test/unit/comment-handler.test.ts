@@ -44,14 +44,14 @@ vi.mock("../../src/lib/data-router", () => ({
   },
 }));
 
-// Mock ModerationHandler
+// Mock the text-moderation seam (fail-closed provider injection point).
+// The mock returns canonical ModerationVerdicts; the real gate logic
+// (text-moderation-gate.ts) still runs on top of it.
 const mockModerateText = vi
   .fn()
-  .mockResolvedValue({ approved: true, score: 0.1 });
-vi.mock("../../src/lib/moderation-handler", () => ({
-  ModerationHandler: class ModerationHandler {
-    moderateText = mockModerateText;
-  },
+  .mockResolvedValue({ decision: "approved", labels: [], provider: "mock-text" });
+vi.mock("../../src/lib/media/request-text-moderation", () => ({
+  getTextModerationProvider: () => ({ moderateText: mockModerateText }),
 }));
 
 // Mock InputSanitizer
@@ -198,7 +198,7 @@ describe("CommentHandler", () => {
       dataRegion: "US",
     });
 
-    mockModerateText.mockResolvedValue({ approved: true, score: 0.1 });
+    mockModerateText.mockResolvedValue({ decision: "approved", labels: [], provider: "mock-text" });
   });
 
   describe("createComment", () => {
@@ -278,9 +278,9 @@ describe("CommentHandler", () => {
       mockDb.post.findUnique.mockResolvedValue({ deletedAt: null });
       mockIsEnabled.mockResolvedValue(true); // Enable moderation for this test
       mockModerateText.mockResolvedValue({
-        approved: false,
-        score: 0.9,
-        details: "Toxic content",
+        decision: "quarantine",
+        labels: [{ category: "category_a", confidence: 0.9 }],
+        provider: "mock-text",
       });
 
       const request = new Request("http://test.com/comments", {
@@ -369,7 +369,7 @@ describe("CommentHandler", () => {
       // Mock successful post fetch
       mockGetPost.mockResolvedValue({ id: "post-123" });
       mockDb.post.findUnique.mockResolvedValue({ deletedAt: null });
-      mockModerateText.mockResolvedValue({ approved: true, score: 0 });
+      mockModerateText.mockResolvedValue({ decision: "approved", labels: [], provider: "mock-text" });
 
       // Add domainReputation and linkCheck to mockDb
       mockDb.domainReputation = {
@@ -407,7 +407,7 @@ describe("CommentHandler", () => {
       // Mock successful post fetch
       mockGetPost.mockResolvedValue({ id: "post-123" });
       mockDb.post.findUnique.mockResolvedValue({ deletedAt: null });
-      mockModerateText.mockResolvedValue({ approved: true, score: 0 });
+      mockModerateText.mockResolvedValue({ decision: "approved", labels: [], provider: "mock-text" });
 
       // Add domainReputation and linkCheck to mockDb
       mockDb.domainReputation = {
@@ -460,7 +460,7 @@ describe("CommentHandler", () => {
       // Mock successful post fetch
       mockGetPost.mockResolvedValue({ id: "post-123" });
       mockDb.post.findUnique.mockResolvedValue({ deletedAt: null });
-      mockModerateText.mockResolvedValue({ approved: true, score: 0 });
+      mockModerateText.mockResolvedValue({ decision: "approved", labels: [], provider: "mock-text" });
 
       // Add domainReputation and linkCheck to mockDb
       mockDb.domainReputation = {

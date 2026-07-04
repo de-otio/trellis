@@ -37,20 +37,15 @@ vi.mock("../../src/lib/region-detection", () => {
   };
 });
 
-// Mock ModerationHandler
+// Mock the text-moderation seam (fail-closed provider injection point).
+// The mock returns canonical ModerationVerdicts; the real gate logic
+// (text-moderation-gate.ts) still runs on top of it.
 const mockModerateText = vi
   .fn()
-  .mockResolvedValue({ approved: true, score: 0.1 });
-vi.mock("../../src/lib/moderation-handler", () => {
-  // Create a mock class inside the factory function (required for hoisting)
-  class MockModerationHandler {
-    moderateText = mockModerateText;
-  }
-
-  return {
-    ModerationHandler: MockModerationHandler,
-  };
-});
+  .mockResolvedValue({ decision: "approved", labels: [], provider: "mock-text" });
+vi.mock("../../src/lib/media/request-text-moderation", () => ({
+  getTextModerationProvider: () => ({ moderateText: mockModerateText }),
+}));
 
 // Mock FeatureToggleService
 const mockIsEnabled = vi.fn().mockResolvedValue(true);
@@ -380,9 +375,9 @@ describe("PostHandler", () => {
     it("should reject content that fails moderation", async () => {
       mockIsEnabled.mockResolvedValueOnce(true); // Allow public posting
       mockModerateText.mockResolvedValueOnce({
-        approved: false,
-        score: 0.9,
-        details: { toxicity: 0.9 },
+        decision: "quarantine",
+        labels: [{ category: "category_a", confidence: 0.9 }],
+        provider: "mock-text",
       });
 
       const request = new Request("http://test.com/posts", {
@@ -1301,7 +1296,7 @@ describe("PostHandler", () => {
         email: mockSession.email,
       });
       mockIsEnabled.mockResolvedValue(true);
-      mockModerateText.mockResolvedValue({ approved: true, score: 0.1 });
+      mockModerateText.mockResolvedValue({ decision: "approved", labels: [], provider: "mock-text" });
       mockExtractUrls.mockReturnValue([]);
       mockValidateUrlSync.mockReturnValue({
         status: "safe",
@@ -2435,7 +2430,7 @@ describe("PostHandler", () => {
         data: { text: "Updated text" },
       });
       mockGetPost.mockResolvedValueOnce(mockPost);
-      mockModerateText.mockResolvedValueOnce({ approved: true, score: 0.1 });
+      mockModerateText.mockResolvedValueOnce({ decision: "approved", labels: [], provider: "mock-text" });
       mockExtractUrls.mockReturnValue([]);
 
       // Mock the database update to return the full updated post
@@ -2502,7 +2497,7 @@ describe("PostHandler", () => {
         data: { text: "Updated text" },
       });
       mockGetPost.mockResolvedValueOnce(mockPost);
-      mockModerateText.mockResolvedValueOnce({ approved: true, score: 0.1 });
+      mockModerateText.mockResolvedValueOnce({ decision: "approved", labels: [], provider: "mock-text" });
       mockExtractUrls.mockReturnValue([]);
 
       // Mock the database update to return the full updated post
@@ -2562,7 +2557,7 @@ describe("PostHandler", () => {
         data: { text: "Updated text" },
       });
       mockGetPost.mockResolvedValueOnce(mockPost);
-      mockModerateText.mockResolvedValueOnce({ approved: true, score: 0.1 });
+      mockModerateText.mockResolvedValueOnce({ decision: "approved", labels: [], provider: "mock-text" });
       mockExtractUrls.mockReturnValue([]);
 
       // Mock the database update to return the full updated post

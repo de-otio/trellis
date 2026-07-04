@@ -13,3 +13,9 @@ export { setRealtimeProvider } from "./lib/realtime/index.js";
 // provider before serving; core ships a fail-closed Null default (every verdict
 // = "review", so un-wired deploys never auto-approve).
 export { setMediaModerationProvider } from "./lib/media/request-moderation.js";
+// Text moderation seam: a consuming app injects a concrete text-moderation
+// provider (an adapter over the hosted moderation API) before serving; core
+// ships a fail-closed Null default (every verdict = "review", so un-wired
+// deploys hold text for review and never auto-approve). Gates post/comment
+// create + edit text.
+export { setTextModerationProvider } from "./lib/media/request-text-moderation.js";

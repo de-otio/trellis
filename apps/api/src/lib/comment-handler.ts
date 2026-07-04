@@ -11,7 +11,6 @@ import type { KVNamespace, R2Bucket, CloudflareQueue } from "../types/cloudflare
 import { DataRouter } from "./data-router.js";
 import { FeedHandler } from "./feed-handler.js";
 import { getLogger, Logger, generateRequestId } from "./logger.js";
-import { ModerationHandler } from "./moderation-handler.js";
 import type { TrellisRequestContext } from "./request-context.js";
 import type { Session } from "./session-cookie.js";
 
@@ -38,12 +37,9 @@ export interface CreateCommentRequest {
 }
 
 export class CommentHandler {
-  private moderationHandler: ModerationHandler;
   // No need to create FeedHandler instance - use static methods to avoid circular dependency
 
-  constructor() {
-    this.moderationHandler = new ModerationHandler();
-  }
+  constructor() {}
 
   /**
    * Create a comment on a post
@@ -163,22 +159,17 @@ export class CommentHandler {
         "content_moderation_enabled",
       );
 
-      // Moderate text content (if moderation is enabled)
+      // Moderate text content (if moderation is enabled) through the
+      // fail-closed TextModerationProvider seam (quarantine → 400,
+      // review/fault → 503; only affirmative approval proceeds).
       if (moderationEnabled) {
-        const moderationResult = await this.moderationHandler.moderateText(
+        const { gateTextOrRespond } = await import("./text-moderation-gate.js");
+        const gateResponse = await gateTextOrRespond(
           body.text,
-          env as any,
+          "Your comment contains inappropriate content. Please be more constructive.",
         );
-        if (!moderationResult.approved) {
-          return new Response(
-            JSON.stringify({
-              error: "CONTENT_REJECTED",
-              message:
-                "Your comment contains inappropriate content. Please be more constructive.",
-              details: moderationResult.details,
-            }),
-            { status: 400, headers: { "content-type": "application/json" } },
-          );
+        if (gateResponse) {
+          return gateResponse;
         }
       } else {
         getLogger().debug(
@@ -1152,23 +1143,17 @@ export class CommentHandler {
         "content_moderation_enabled",
       );
 
-      // Re-run moderation if enabled
+      // Re-run moderation if enabled, through the fail-closed
+      // TextModerationProvider seam (quarantine → 400, review/fault → 503;
+      // only affirmative approval proceeds).
       if (moderationEnabled) {
-        const moderationResult = await this.moderationHandler.moderateText(
+        const { gateTextOrRespond } = await import("./text-moderation-gate.js");
+        const gateResponse = await gateTextOrRespond(
           sanitizedText,
-          env as any,
+          "Your comment contains inappropriate content. Please be more constructive.",
         );
-
-        if (!moderationResult.approved) {
-          return new Response(
-            JSON.stringify({
-              error: "CONTENT_REJECTED",
-              message:
-                "Your comment contains inappropriate content. Please be more constructive.",
-              details: moderationResult.details,
-            }),
-            { status: 400, headers: { "content-type": "application/json" } },
-          );
+        if (gateResponse) {
+          return gateResponse;
         }
       }
 

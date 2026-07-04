@@ -1,32 +1,21 @@
 // CONTRACT: stable — coordinate changes. Shared P0b text-moderation seam.
 //
-// A-TEXTMOD decision: NO clean injectable text-moderation seam exists today.
+// A-TEXTMOD decision: this is THE injectable text-moderation seam. The legacy
+// `ModerationHandler` (apps/api/src/lib/moderation-handler.ts) was removed in
+// T4: it performed network I/O directly (not injectable), spoke a different,
+// real-category-named result vocabulary, and — critically — FAILED OPEN: on a
+// moderation error / spent budget / missing API key it returned
+// `{ approved: true }`, the exact opposite of the media pipeline's fail-closed
+// invariant.
 //
-// The repo already has apps/api/src/lib/moderation-handler.ts
-// (`ModerationHandler.moderateText(text, env): Promise<ModerationResult>`), but
-// it is NOT usable as the media-pipeline seam, for three reasons:
+// The seam returns the canonical `ModerationVerdict` (./moderation-provider.ts).
+// The imperative shell (the consuming app, e.g. Skybber) wires the concrete
+// adapter via setTextModerationProvider (./request-text-moderation.ts); that
+// adapter wraps the hosted moderation call and MUST map its outcome fail-closed:
 //
-//   1. It is a concrete class that performs network I/O directly (fetches the
-//      hosted moderation API), not an injectable interface — it cannot live in
-//      the functional core, and it cannot be swapped for a Mock in property
-//      tests without monkey-patching the network.
-//   2. Its result shape (`ModerationResult { approved, score, details, ... }`)
-//      is a different, real-category-named vocabulary — it is NOT the opaque
-//      `ModerationVerdict` the media seam standardizes on.
-//   3. CRITICALLY, it FAILS OPEN: on a moderation error it returns
-//      `{ approved: true }` (and likewise `{ approved: true, budgetExceeded }`
-//      when the budget is spent). That is the exact opposite of the media
-//      pipeline's fail-closed invariant — a faulted text moderation must
-//      degrade to `review`, never to a decision that can serve bytes.
-//
-// Therefore B0 defines a thin, fail-closed `TextModerationProvider` seam that
-// returns the canonical `ModerationVerdict` (./moderation-provider.ts). The
-// imperative shell wires the concrete adapter; that adapter MUST map the legacy
-// `ModerationResult` into a verdict WITHOUT inheriting the fail-open behavior:
-//
-//   approved === true                  -> decision "approved"
-//   approved === false                 -> decision "quarantine" (a positive flag)
-//   error / budgetExceeded / timeout   -> decision "review"   (FAIL CLOSED)
+//   clean, affirmatively scored below thresholds -> decision "approved"
+//   positively flagged                           -> decision "quarantine"
+//   error / budgetExceeded / timeout / no config -> decision "review" (FAIL CLOSED)
 //
 // (The shell, not this file, owns that adapter — keeping core SDK-free.)
 //
@@ -35,11 +24,13 @@
 // secrets, or real-category vocabulary here — labels carry opaque tokens.
 
 import type { ModerationVerdict } from "./moderation-provider.js";
+import type { WarnSink } from "./moderation-provider.js";
 
 /**
  * The text-moderation capability seam used by the AUDIO track (over a
- * transcript) and by any caller needing to classify free text into the
- * canonical 3-value verdict.
+ * transcript), by the POST/COMMENT text gate (see ../text-moderation-gate.ts),
+ * and by any caller needing to classify free text into the canonical 3-value
+ * verdict.
  *
  * Binding rule (same as MediaModerationProvider): absence of signal, an
  * internal fault, a spent budget, or ANY uncertainty MUST fail closed to
@@ -48,6 +39,38 @@ import type { ModerationVerdict } from "./moderation-provider.js";
  */
 export interface TextModerationProvider {
   moderateText(text: string): Promise<ModerationVerdict>;
+}
+
+const NULL_PROVIDER_NAME = "null-text";
+const NULL_PROVIDER_WARNING =
+  "[NullTextModerationProvider] No text-moderation backend injected — failing" +
+  ' closed to decision="review". Text will NOT auto-approve. Inject a real' +
+  " provider (setTextModerationProvider) in any non-dev environment.";
+
+/**
+ * A verdict that fails closed: every call resolves to `review` with no labels.
+ * Nothing this provider returns can ever auto-approve text. Used as the safe
+ * default before a concrete provider is injected (mirrors the image seam's
+ * NullModerationProvider).
+ */
+export class NullTextModerationProvider implements TextModerationProvider {
+  private readonly warn: WarnSink;
+
+  constructor(warn: WarnSink = (msg, data) => console.warn(msg, data)) {
+    this.warn = warn;
+  }
+
+  async moderateText(_text: string): Promise<ModerationVerdict> {
+    this.warn(NULL_PROVIDER_WARNING);
+    return { decision: "review", labels: [], provider: NULL_PROVIDER_NAME };
+  }
+}
+
+/** Returns true for the fail-closed Null text provider. */
+export function isNullTextModerationProvider(
+  provider: TextModerationProvider,
+): boolean {
+  return provider instanceof NullTextModerationProvider;
 }
 
 const MOCK_PROVIDER_NAME = "mock-text";

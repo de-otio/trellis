@@ -10,7 +10,6 @@ import type { KVNamespace, R2Bucket, CloudflareQueue } from "../types/cloudflare
 
 import { DataRouter } from "./data-router.js";
 import { getLogger, generateRequestId, Logger, type LoggerEnv } from "./logger.js";
-import { ModerationHandler } from "./moderation-handler.js";
 import type { TrellisRequestContext } from "./request-context.js";
 import type { Session } from "./session-cookie.js";
 
@@ -52,11 +51,9 @@ export interface CreatePostRequest {
 }
 
 export class PostHandler {
-  private moderationHandler: ModerationHandler;
   private logger: Logger;
 
   constructor(env?: LoggerEnv) {
-    this.moderationHandler = new ModerationHandler();
     this.logger = getLogger();
   }
 
@@ -120,47 +117,17 @@ export class PostHandler {
         "content_moderation_enabled",
       );
 
-      // Moderate text content (if moderation is enabled)
+      // Moderate text content (if moderation is enabled) through the
+      // fail-closed TextModerationProvider seam: only an affirmative
+      // `approved` verdict proceeds; quarantine → 400, review/fault → 503.
       if (moderationEnabled) {
-        const moderationResult = await this.moderationHandler.moderateText(
+        const { gateTextOrRespond } = await import("./text-moderation-gate.js");
+        const gateResponse = await gateTextOrRespond(
           body.text,
-          env as any,
+          "Your post contains inappropriate content. Please be more constructive.",
         );
-
-        // Debug: Log Perspective API result (safely handle serialization)
-        try {
-          const debugData = {
-            approved: moderationResult.approved,
-            details: moderationResult.details,
-            error: moderationResult.error,
-            text: body.text.substring(0, 100), // First 100 chars for context
-          };
-          getLogger().debug(
-            "[PostHandler] Moderation API result:",
-            JSON.stringify(debugData),
-          );
-        } catch (debugError) {
-          // If serialization fails, log a simpler version
-          getLogger().debug(
-            "[PostHandler] Moderation API result (simplified):",
-            {
-              approved: moderationResult.approved,
-              hasDetails: !!moderationResult.details,
-              hasError: !!moderationResult.error,
-            },
-          );
-        }
-
-        if (!moderationResult.approved) {
-          return new Response(
-            JSON.stringify({
-              error: "CONTENT_REJECTED",
-              message:
-                "Your post contains inappropriate content. Please be more constructive.",
-              details: moderationResult.details,
-            }),
-            { status: 400, headers: { "content-type": "application/json" } },
-          );
+        if (gateResponse) {
+          return gateResponse;
         }
       } else {
         getLogger().debug(
@@ -1323,23 +1290,17 @@ export class PostHandler {
         "content_moderation_enabled",
       );
 
-      // Content moderation on edited text (if moderation is enabled)
+      // Content moderation on edited text (if moderation is enabled) through
+      // the fail-closed TextModerationProvider seam (quarantine → 400,
+      // review/fault → 503; only affirmative approval proceeds).
       if (moderationEnabled) {
-        const moderationResult = await this.moderationHandler.moderateText(
+        const { gateTextOrRespond } = await import("./text-moderation-gate.js");
+        const gateResponse = await gateTextOrRespond(
           body.text,
-          env as any,
+          "Your edited post contains inappropriate content. Please be more constructive.",
         );
-
-        if (!moderationResult.approved) {
-          return new Response(
-            JSON.stringify({
-              error: "CONTENT_REJECTED",
-              message:
-                "Your edited post contains inappropriate content. Please be more constructive.",
-              details: moderationResult.details,
-            }),
-            { status: 400, headers: { "content-type": "application/json" } },
-          );
+        if (gateResponse) {
+          return gateResponse;
         }
       } else {
         getLogger().debug(

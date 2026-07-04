@@ -15,6 +15,33 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ## [Unreleased]
 
+### Security
+
+- **Posting-flow text moderation is now fail-closed (T4).** Post and comment
+  text (create **and** edit) is routed through the injectable
+  `TextModerationProvider` seam instead of the legacy `ModerationHandler`,
+  which failed **open**: on a moderation-API error, timeout, spent budget, or
+  missing API key it returned `{ approved: true }` and let the content
+  through. The new gate (`text-moderation-gate.ts`) enforces the media
+  pipeline's invariant — only an affirmative `approved` verdict lets text
+  persist: a positive flag (`quarantine`) rejects with `400 CONTENT_REJECTED`;
+  `review`, an unknown decision, a provider throw, or an un-wired seam yields
+  `503 MODERATION_UNAVAILABLE` and the content is **not** persisted (and
+  therefore never served). Consuming apps inject their concrete hosted-API
+  adapter at startup via the new **`setTextModerationProvider`** export
+  (mirrors `setMediaModerationProvider`); when unset, core degrades to a
+  fail-closed `NullTextModerationProvider` (every verdict `review`) — an
+  un-wired deploy holds text for review, never auto-approves, never 500s.
+
+### Removed
+
+- **`ModerationHandler` (`lib/moderation-handler.ts`).** The fail-open hosted
+  moderation wrapper is deleted outright (pre-launch, no consumers): its
+  error/budget/missing-key paths all manufactured `approved: true`. The hosted
+  moderation call now lives in the consuming app's adapter behind the
+  fail-closed seam above. (`OpenAiBudget` and the health/admin budget
+  endpoints are unaffected.)
+
 ### Added
 
 - **Organization classification, feed decluttering by org category, and a public organization directory.** Tenants can self-declare what kind of organization they are (business, non-profit, community group, government, educational, or other — via a platform-curated category tree, `PlatformCategory`) independently of `TenantType`, which only ever described membership structure, not commercial nature. Feed views gain a second, independent filter axis alongside circle tier: viewers can exclude or isolate posts by an author's organization category (e.g. "no business posts," or "non-profits only"), denormalized onto `Post.authorOrgRootCategoryCode` for the same cheap, indexed filtering already used for region/sensitivity/content-category. A new opt-in directory (`TenantDirectoryProfile`) lets a classified tenant become searchable by name, category, and location; location precision is a named level (`EXACT`/`NEIGHBORHOOD`/`CITY`/`HIDDEN`), not a boolean — `CITY`/`HIDDEN` listings are structurally excluded from distance-sorted search (not just response-shaped) to close a triangulation vector where ranking order alone could otherwise leak an intentionally-imprecise location. See [Organization Classification & Directory](docs/concepts/org-classification-and-directory.md) and [Classify and List Your Organization](docs/guides/classify-and-list-your-organization.md). Self-declared only in this release — third-party verification (TechSoup, Haus des Stiftens) and AI-assisted category-suggestion are planned follow-ups; org-to-org relationships (membership/subsidiary) and cross-tenant resource-sharing grants are designed but deliberately out of scope for this release.

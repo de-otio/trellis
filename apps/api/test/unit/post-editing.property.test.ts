@@ -27,11 +27,13 @@ vi.mock("../../src/lib/data-router", () => ({
   },
 }));
 
-// Mock ModerationHandler
-vi.mock("../../src/lib/moderation-handler", () => ({
-  ModerationHandler: class {
-    moderateText = vi.fn().mockResolvedValue({ approved: true, score: 0.1 });
-  },
+// Mock the text-moderation seam (always approves in these property tests)
+vi.mock("../../src/lib/media/request-text-moderation", () => ({
+  getTextModerationProvider: () => ({
+    moderateText: vi
+      .fn()
+      .mockResolvedValue({ decision: "approved", labels: [], provider: "mock-text" }),
+  }),
 }));
 
 // Mock FeatureToggleService
@@ -447,10 +449,12 @@ describe("Property 6: Non-owners cannot edit posts", () => {
             editPostSchema: {},
           }));
 
-          vi.doMock("../../src/lib/moderation-handler", () => ({
-            ModerationHandler: class {
-              moderateText = vi.fn().mockResolvedValue({ approved: true });
-            },
+          vi.doMock("../../src/lib/media/request-text-moderation", () => ({
+            getTextModerationProvider: () => ({
+              moderateText: vi
+                .fn()
+                .mockResolvedValue({ decision: "approved", labels: [], provider: "mock-text" }),
+            }),
           }));
 
           const { PostHandler } = await import("../../src/lib/post-handler.js");
@@ -588,10 +592,12 @@ describe("Property 5: Successful edit updates post and sets editedAt", () => {
 
           vi.doMock("../../src/lib/schemas", () => ({ editPostSchema: {} }));
 
-          vi.doMock("../../src/lib/moderation-handler", () => ({
-            ModerationHandler: class {
-              moderateText = vi.fn().mockResolvedValue({ approved: true });
-            },
+          vi.doMock("../../src/lib/media/request-text-moderation", () => ({
+            getTextModerationProvider: () => ({
+              moderateText: vi
+                .fn()
+                .mockResolvedValue({ decision: "approved", labels: [], provider: "mock-text" }),
+            }),
           }));
 
           vi.doMock("../../src/lib/link-security-handler", () => ({
@@ -748,10 +754,12 @@ describe("Property 8: ActivityPub sync only for public posts", () => {
 
           vi.doMock("../../src/lib/schemas", () => ({ editPostSchema: {} }));
 
-          vi.doMock("../../src/lib/moderation-handler", () => ({
-            ModerationHandler: class {
-              moderateText = vi.fn().mockResolvedValue({ approved: true });
-            },
+          vi.doMock("../../src/lib/media/request-text-moderation", () => ({
+            getTextModerationProvider: () => ({
+              moderateText: vi
+                .fn()
+                .mockResolvedValue({ decision: "approved", labels: [], provider: "mock-text" }),
+            }),
           }));
 
           vi.doMock("../../src/lib/link-security-handler", () => ({
