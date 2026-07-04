@@ -306,6 +306,12 @@ describe("DatabaseConnectionManager", () => {
       vi.useFakeTimers();
     });
 
+    // TRIAGE(AR14): fix — documented flaky-with-real-timers skip, not dead;
+    // behavior is asserted by the sibling "should timeout query execution"
+    // test below and covered by production monitoring per the comment, but
+    // this specific path (client-creation timeout) should get its own
+    // reliable fake-timer-based assertion rather than staying permanently
+    // skipped.
     it.skip("should timeout client creation after 4 seconds", async () => {
       // Skip this test - it's difficult to test reliably with real timers
       // The timeout mechanism works in production but is hard to test in unit tests

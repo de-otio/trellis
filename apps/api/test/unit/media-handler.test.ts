@@ -2592,6 +2592,12 @@ describe("MediaHandler", () => {
       ).rejects.toThrow("Media is already deleted");
     });
 
+    // TRIAGE(AR14): fix — no reason was documented for this skip (undocumented
+    // at introduction, see git blame). The mock is a real, detailed call-count
+    // sequence, not a stub — looks like it broke under a prior refactor of the
+    // delete-media query path. Needs owner investigation: either repair the
+    // mock sequence or confirm audit-log-failure-during-delete is covered
+    // another way before deleting.
     it.skip("should handle audit logging failure gracefully when deleting shared media", async () => {
       // Mock audit logging to fail
       mockAuditLoggerLog.mockRejectedValueOnce(

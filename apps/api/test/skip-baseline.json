@@ -1,0 +1,90 @@
+{
+  "$schema": "n/a — read by scripts/check-new-skips.mjs",
+  "_comment": [
+    "Baseline of accepted UNCONDITIONAL `.skip(`/`.only(` sites (it.skip(, ",
+    "test.skip(, describe.skip(, *.only(). Produced by the AR14 skip-suite ",
+    "triage (2026-07). Every entry here is a documented FIX or ",
+    "needs-infra-run-nightly item with an inline `// TRIAGE(AR14): ...` ",
+    "comment at the site — see that comment for the reason.",
+    "",
+    "The env-guarded pattern (`describe.skipIf(...)`, `it.skipIf(...)`, and ",
+    "`const suite = TEST_DB_URL ? describe : describe.skip;`) is a LEGITIMATE ",
+    "guard, not a dead skip, and is intentionally invisible to this baseline ",
+    "and to scripts/check-new-skips.mjs (it only matches the `(skip|only)(` ",
+    "call form, never `skipIf`/`runIf`, and the ternary form never has a ",
+    "trailing `(` so it can't match either).",
+    "",
+    "`.only(` entries are NEVER accepted regardless of this file's contents — ",
+    "the checker treats any `.only(` as an automatic failure. Do not add one ",
+    "here to work around that.",
+    "",
+    "Adding a NEW entry here is a deliberate, reviewable act: a PR that adds ",
+    "an unconditional skip must also add its baseline entry (with a reason) ",
+    "in the same diff, so the reviewer sees both together.",
+    "Removing an entry (because the test was fixed or deleted) is welcome ",
+    "and requires no extra ceremony — the checker never fails on an entry ",
+    "that's disappeared."
+  ],
+  "accepted": [
+    {
+      "file": "test/e2e/deployment.test.ts",
+      "kind": "skip",
+      "name": "serves the public site at ${CUSTOM_DOMAIN}",
+      "reason": "needs-infra-run-nightly — blocked on Flutter web build being deployed to the S3 web bucket"
+    },
+    {
+      "file": "test/standalone/entity-crud.test.ts",
+      "kind": "skip",
+      "name": "creates an example entity with valid metadata (201) — BLOCKED: handler missing tenantId",
+      "reason": "fix — EntityHandler.createEntityProfile does not stamp tenantId (identity-federation migration gap)"
+    },
+    {
+      "file": "test/standalone/entity-crud.test.ts",
+      "kind": "skip",
+      "name": "create then read-back returns the entity — BLOCKED: handler missing tenantId",
+      "reason": "fix — same missing-tenantId bug as the 201 create test above"
+    },
+    {
+      "file": "test/unit/activitypub/activity-processor.test.ts",
+      "kind": "skip",
+      "name": "[T6] should process group Follow activity (mock needs tenantId)",
+      "reason": "fix — mock fixture predates the tenantId migration"
+    },
+    {
+      "file": "test/unit/activitypub/group-service.test.ts",
+      "kind": "skip",
+      "name": "[T6] should create a new group with ActivityPub actor (mock needs tenantId)",
+      "reason": "fix — mock fixture predates the tenantId migration"
+    },
+    {
+      "file": "test/unit/activitypub/group-service.test.ts",
+      "kind": "skip",
+      "name": "[T6] should add member to group (mock needs tenantId)",
+      "reason": "fix — mock fixture predates the tenantId migration"
+    },
+    {
+      "file": "test/unit/database-connection-manager.test.ts",
+      "kind": "skip",
+      "name": "should timeout client creation after 4 seconds",
+      "reason": "fix — documented flaky-with-real-timers skip; behavior covered by a sibling test + production monitoring, but should get its own reliable fake-timer assertion"
+    },
+    {
+      "file": "test/unit/media-handler.test.ts",
+      "kind": "skip",
+      "name": "should handle audit logging failure gracefully when deleting shared media",
+      "reason": "fix — undocumented skip with a real (not stub) mock sequence; needs owner investigation"
+    },
+    {
+      "file": "test/unit/security-monitor.test.ts",
+      "kind": "skip",
+      "name": "[T7] should store security event in database (replace partnerId mock with tenantId)",
+      "reason": "fix — mock fixture still keyed on the old partnerId field"
+    },
+    {
+      "file": "test/unit/security-monitor.test.ts",
+      "kind": "skip",
+      "name": "[T7] should include partnerId in security event (rename to tenantId)",
+      "reason": "fix — same partnerId→tenantId rename debt as above"
+    }
+  ]
+}

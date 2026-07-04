@@ -55,6 +55,20 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   never served), and the cache is bounded (FIFO, 32 entries). No public API
   change; no crypto parameter (iteration count, cipher, key size) changed.
 
+- **`@prisma/client` is now a `peerDependency` (was a regular `dependency`).**
+  `@de-otio/trellis` ships `dist` compiled against its own Prisma client, but
+  a consuming application generates its own client from the schema shipped in
+  the tarball with the consumer's own `@prisma/client`/`prisma` pins — the two
+  can silently drift apart with no install-time signal. Declaring the peer
+  range (`^7.8.0`) makes npm enforce alignment at install time instead. **This
+  is a semver-relevant, consumer-facing change**: an application that was
+  relying on `@de-otio/trellis` to pull in `@prisma/client` transitively must
+  now depend on a compatible `@prisma/client` version itself (most consumers
+  already do, since they run their own `prisma generate` against the shipped
+  schema). The consumer-install smoke test (`apps/api/scripts/smoke-pack.sh`)
+  now asserts the installed `@prisma/client` version satisfies this peer
+  range as part of its tarball verification.
+
 ### Added
 
 - **Boot-time environment validation (fail fast on misconfig).** `startServer()`

@@ -23,7 +23,9 @@ export default defineConfig({
       "test/integration/feed-media-e2e.integration.test.ts",
       "test/integration/media-handler.integration.test.ts",
       "test/integration/media-id-mapping.test.ts",
-      // Exclude Neo4j graph integration tests — require a live local Neo4j instance
+      // Exclude graph integration tests — require a live local Postgres instance
+      // (the graph runs in the primary Postgres via edge tables + recursive
+      // CTEs; there is no separate graph DB).
       // Run separately: npm run test:graph -w @de-otio/trellis
       "test/integration/graph/**/*.test.ts",
       // Exclude schema-shape integration tests — require a live local Postgres with migrations applied.
