@@ -18,6 +18,38 @@ This file provides guidance to Claude Code when working with this repository.
 
 End-to-end verification of code that touches infrastructure (e.g., the graph layer, RDS migrations) happens in **the consuming application's** environment, not here.
 
+## Related repos
+
+Trellis is developed alongside two sibling repos:
+
+| Repo | Path | Role |
+|------|------|------|
+| **trellis** (this repo) | — | Domain-agnostic API core (see Project Overview above) |
+| **skybber** | `~/repos/dot/skybber` | The primary consuming vertical application today: Flutter frontend, the `@skybber/ext-dogs` extension, CDK infra, and the live AWS deployment (dev + prod). Owns the AWS environment this repo has none of (see Deployment Status above). |
+| **trellis-internal** | `~/repos/dot/trellis-internal` | Internal-only docs, plans, and platform-level analyses; canonical generic (non-neutral) test content and its standalone dummy-target lane. Not published to npm; scrubbed/neutral subsets get mirrored into this repo before release. |
+
+### Testing a trellis change from skybber
+
+If you're validating a change here against a live consumer, use skybber's link
+loop (`scripts/dev-link.sh` / `scripts/dev-unlink.sh` in the skybber repo):
+link → rebuild trellis after every edit (`npm run build`, since `npm link`
+symlinks the package but does not rebuild it for you) → run skybber's unit
+and e2e tests against the linked package → `dev-unlink.sh` to restore the
+published npm version when done. Full mechanics are documented in skybber's
+`CLAUDE.md` under the same heading.
+
+**This does not cover Prisma schema changes.** `prisma/schema.prisma` ships
+**inside the published npm tarball**: `apps/api/package.json`'s `files` field
+includes `prisma`, and its `prepack`/`postpack` scripts copy `../../prisma`
+into `apps/api/prisma` only during `npm pack`/`npm publish` (removed
+immediately after). Consumers resolve the schema at
+`node_modules/@de-otio/trellis/prisma/schema.prisma`. Under `npm link` that
+path resolves to this repo's `apps/api/` directory directly, which has no
+`prisma/` subdirectory outside of a pack/publish run — so a linked schema
+change will not resolve for a consumer's `prisma generate`/`migrate`. Verify
+schema changes by publishing a pre-release version and bumping the
+consumer's `package.json` + lockfile, not through the link loop.
+
 ## Workspace Structure
 
 ```
@@ -54,7 +86,7 @@ npm run seed:feature-toggles   # Seed feature toggles
 
 This describes the architecture Trellis is **designed for** when deployed (currently realised by Trellis, which embeds Trellis):
 
-- **API**: Node.js HTTP server (Express), designed to run in ECS Fargate on port 3000
+- **API**: Node.js HTTP server (Hono), designed to run in ECS Fargate on port 3000
 - **Entry point**: `apps/api/src/server.ts`
 - **Routes**: `apps/api/src/lib/routes.ts`
 - **Env**: `apps/api/src/env.ts` (all config from process.env + AWS clients)
@@ -73,7 +105,17 @@ npm test -- path/to/test.test.ts         # Specific test
 npm run test:coverage                    # Coverage report
 ```
 
-**CRITICAL: Never run tests in the background.** Each process can consume 4GB+ RAM.
+**Run tests in parallel, up to the machine's resource budget — not "never in
+the background."** Test processes are RAM-heavy (each can consume 4GB+), so
+parallelism is bounded by memory, not CPU or a blanket foreground-only rule.
+On a 32 GB / 12-core machine: reserve ~8 GB for the OS/editor/build tooling,
+leaving ~24 GB for tests. Stay under that budget — **≤4 concurrent heavy
+runs** (full suite, `--coverage`) **or ~8–10 concurrent scoped runs** (a
+handful of files), or any mix whose summed peak stays within budget. Prefer
+scoped runs; background them when it keeps you within budget (that's how you
+run several lanes at once); back off (drop concurrency / serialize) under
+memory pressure or if runs start getting OOM-killed. This converges with
+skybber's `CLAUDE.md` "Testing" section — same rule, same numbers.
 
 Test setup: Docker Compose must be running for integration tests.
 
@@ -95,7 +137,7 @@ See `apps/api/src/env.ts` for the full environment schema.
 2. **Minimal changes** — don't refactor or "improve" surrounding code
 3. **Use Prisma types** — leverage type safety for database operations
 4. **Security first** — review for injection, OWASP issues
-5. **Run tests in foreground** — never background test processes
+5. **Run tests in parallel within the RAM budget** — see the Testing section (≤4 heavy or ~8–10 scoped concurrent runs on a 32 GB machine); back off under memory pressure
 6. **Database efficiency** — use indexes, limit query complexity, paginate
 7. **Client-metadata storage rule** — IP, User-Agent, and device identifiers
    are stored **only** through a path that enforces anonymization or an
