@@ -15,6 +15,26 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Stale-media reapers no longer delete in-flight video uploads.** Async video
+  uploads are born `uploadStatus: "PENDING"`, and the two stale-upload reapers
+  (the hourly cron and the scheduled media-stale-cleanup job) hard-deleted
+  `PENDING`/`FAILED` rows older than one hour — deleting rows (and, in one
+  reaper, the stored object) that were still inside, or had just cleared, the
+  moderation pipeline. Both reapers now share a single reap scope
+  (`lib/media/stale-media-reap.ts`): a row with **any** `MediaModerationJob` is
+  never reaped, the abandonment window is far larger than the moderation
+  pipeline's worst-case latency (env-overridable via
+  `MEDIA_STALE_REAP_WINDOW_MS`), the scope is re-asserted atomically at delete
+  time so a reaper cannot race the pipeline, and the object-store delete now
+  skips rows whose storage key is not yet set. The consuming application's
+  persistence adapters are expected to advance `uploadStatus` to its terminal
+  `COMPLETE` when processing + moderation resolve (the reference adapters do so
+  as of this fix). The broader consolidation of
+  `moderationStatus`/`uploadStatus`/orphan flags into one lifecycle state
+  machine is intentionally deferred to the presigned-upload rework.
+
 ### Added
 
 - **Organization classification, feed decluttering by org category, and a public organization directory.** Tenants can self-declare what kind of organization they are (business, non-profit, community group, government, educational, or other — via a platform-curated category tree, `PlatformCategory`) independently of `TenantType`, which only ever described membership structure, not commercial nature. Feed views gain a second, independent filter axis alongside circle tier: viewers can exclude or isolate posts by an author's organization category (e.g. "no business posts," or "non-profits only"), denormalized onto `Post.authorOrgRootCategoryCode` for the same cheap, indexed filtering already used for region/sensitivity/content-category. A new opt-in directory (`TenantDirectoryProfile`) lets a classified tenant become searchable by name, category, and location; location precision is a named level (`EXACT`/`NEIGHBORHOOD`/`CITY`/`HIDDEN`), not a boolean — `CITY`/`HIDDEN` listings are structurally excluded from distance-sorted search (not just response-shaped) to close a triangulation vector where ranking order alone could otherwise leak an intentionally-imprecise location. See [Organization Classification & Directory](docs/concepts/org-classification-and-directory.md) and [Classify and List Your Organization](docs/guides/classify-and-list-your-organization.md). Self-declared only in this release — third-party verification (TechSoup, Haus des Stiftens) and AI-assisted category-suggestion are planned follow-ups; org-to-org relationships (membership/subsidiary) and cross-tenant resource-sharing grants are designed but deliberately out of scope for this release.

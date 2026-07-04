@@ -1,12 +1,21 @@
 /**
  * Media Stale Cleanup Job
  *
- * Cleans up stale PENDING/FAILED media records older than 1 hour
- * Runs hourly via cron schedule
+ * Reaps genuinely-abandoned PENDING/FAILED media records (and their staged
+ * S3/R2 objects). Runs hourly via cron schedule.
+ *
+ * AR4: the reap scope is shared with the hourly Lambda cron via
+ * `../media/stale-media-reap.ts` — a row the moderation pipeline has engaged
+ * with (any MediaModerationJob), or one younger than the reap window
+ * (≫ moderation SLA), is NEVER deleted. See that module for the invariant.
  */
 
 import { sharedDatabaseConnectionManager } from "../database-connection-manager.js";
 import { getLogger, Logger } from "../logger.js";
+import {
+  staleMediaReapCutoff,
+  staleMediaReapWhere,
+} from "../media/stale-media-reap.js";
 
 export async function cleanupStaleMedia(env: any): Promise<{
   deleted: number;
@@ -23,13 +32,12 @@ export async function cleanupStaleMedia(env: any): Promise<{
     const managed = sharedDatabaseConnectionManager.acquireClient(region, env);
     const db = managed.client;
 
-    // Find stale records (>1 hour old, PENDING or FAILED status)
-    const oneHourAgo = new Date(Date.now() - 3600000);
+    // Find abandoned records: PENDING/FAILED, older than the reap window,
+    // and NEVER inside the moderation pipeline (AR4 scope, shared with the
+    // hourly Lambda cron).
+    const cutoff = staleMediaReapCutoff();
     const staleRecords = await (db as any).mediaFile.findMany({
-      where: {
-        uploadStatus: { in: ["PENDING", "FAILED"] },
-        createdAt: { lt: oneHourAgo },
-      },
+      where: staleMediaReapWhere(cutoff),
       take: 100, // Process in batches
       select: {
         id: true,
@@ -49,23 +57,29 @@ export async function cleanupStaleMedia(env: any): Promise<{
       count: staleRecords.length,
     });
 
-    // Delete from R2 in parallel
+    // Delete staged objects from R2 in parallel. Async-pending rows are born
+    // with a NULL originalKey (the processing worker fills it post-transcode)
+    // — skip those; there is no object to delete.
+    const withKey = staleRecords.filter((r: any) => r.originalKey != null);
     const r2Results = await Promise.allSettled(
-      staleRecords.map((record: any) => r2Bucket.delete(record.originalKey)),
+      withKey.map((record: any) => r2Bucket.delete(record.originalKey)),
     );
 
     const r2Errors = r2Results.filter((r) => r.status === "rejected").length;
     if (r2Errors > 0) {
       logger.warn("[MediaCleanup] Some R2 deletions failed", {
         failedCount: r2Errors,
-        totalCount: staleRecords.length,
+        totalCount: withKey.length,
       });
     }
 
-    // Delete database records in batch
+    // Delete database records in batch, RE-ASSERTING the full reap scope
+    // (not id-only): a row that acquired a moderation job between the
+    // findMany and this delete is re-excluded atomically at delete time.
     const deleteResult = await (db as any).mediaFile.deleteMany({
       where: {
         id: { in: staleRecords.map((r: any) => r.id) },
+        ...staleMediaReapWhere(cutoff),
       },
     });
 
