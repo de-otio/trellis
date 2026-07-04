@@ -72,6 +72,8 @@ describe("Post-deployment smoke", () => {
   const timeoutMs = Number(process.env.TEST_TIMEOUT_MS || 20000);
 
   // Skip until Flutter web build is deployed to S3 web bucket
+  // TRIAGE(AR14): needs-infra-run-nightly — un-skip once the Flutter web build
+  // is deployed to the S3 web bucket; not a dead skip, blocked on real infra.
   it.skip(
     `serves the public site at ${CUSTOM_DOMAIN}`,
     async () => {

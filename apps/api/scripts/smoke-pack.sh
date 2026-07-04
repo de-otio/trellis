@@ -81,6 +81,12 @@ npm init -y >/dev/null
 echo "==> installing tarballs with --omit=dev (mimics container build)"
 # --no-fund / --no-audit keep output tight in CI logs. Install the local
 # extension-api tarball first so it satisfies trellis's dependency on it.
+# @prisma/client is a peerDependency (not a regular dependency) of
+# @de-otio/trellis (see finding: trellis ships dist compiled against its own
+# Prisma client while a consumer regenerates from the tarball schema with its
+# own Prisma pins — a silent runtime-skew trap if the two drift). npm >=7
+# auto-installs a satisfying peer by default, which is what we're verifying
+# below actually happened.
 npm install "${EXTAPI_TARBALL}" "${TARBALL_PATH}" --omit=dev --no-fund --no-audit --silent
 
 # Prisma 7's bare @prisma/client exports nothing until a client is generated
@@ -91,6 +97,41 @@ npm install "${EXTAPI_TARBALL}" "${TARBALL_PATH}" --omit=dev --no-fund --no-audi
 # hits. `prisma generate` reads only the schema; it needs no datasource/DB.
 echo "==> generating Prisma client from the shipped schema (mimics consumer build)"
 npx -y prisma@7 generate --schema node_modules/@de-otio/trellis/prisma/schema.prisma >/dev/null
+
+# Assert the installed @prisma/client version actually satisfies the peer
+# range @de-otio/trellis declares in its own package.json. This is the crux
+# of the peer-dep fix: catch, in CI, the exact skew that used to be silent —
+# a consumer whose own @prisma/client pin has drifted from what trellis's
+# compiled dist expects.
+echo "==> asserting installed @prisma/client version satisfies trellis's peerDependencies range"
+node -e "
+const requiredRange = require('@de-otio/trellis/package.json').peerDependencies && require('@de-otio/trellis/package.json').peerDependencies['@prisma/client'];
+if (!requiredRange) {
+  console.error('::error::@de-otio/trellis package.json has no peerDependencies[\"@prisma/client\"] entry');
+  process.exit(1);
+}
+const installed = require('@prisma/client/package.json').version;
+console.log('  trellis peerDependencies[\"@prisma/client\"]:', requiredRange);
+console.log('  installed @prisma/client version:           ', installed);
+
+// Minimal caret-range check — deliberately dependency-free (no 'semver'
+// import) since this is a smoke test over a fresh consumer install. Only
+// needs to handle the '^X.Y.Z' shape trellis actually declares.
+const reqMatch = requiredRange.match(/^\^(\d+)\.(\d+)\.(\d+)$/);
+const insMatch = installed.match(/^(\d+)\.(\d+)\.(\d+)/);
+if (!reqMatch || !insMatch) {
+  console.error('::error::could not parse version range/installed version for caret comparison:', requiredRange, installed);
+  process.exit(1);
+}
+const [reqMajor, reqMinor, reqPatch] = reqMatch.slice(1).map(Number);
+const [insMajor, insMinor, insPatch] = insMatch.slice(1).map(Number);
+const satisfies = insMajor === reqMajor && (insMinor > reqMinor || (insMinor === reqMinor && insPatch >= reqPatch));
+if (!satisfies) {
+  console.error('::error::installed @prisma/client ' + installed + ' does not satisfy trellis peerDependencies range ' + requiredRange);
+  process.exit(1);
+}
+console.log('  OK: installed @prisma/client satisfies trellis peerDependencies range');
+"
 
 echo "==> requiring every published runtime entry point"
 # We require:

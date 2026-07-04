@@ -150,6 +150,8 @@ describe("SecurityMonitor", () => {
   });
 
   describe("logSecurityEvent", () => {
+    // TRIAGE(AR14): fix — mock fixture predates the tenantId migration (still
+    // keyed on the old partnerId field); not a dead skip.
     it.skip("[T7] should store security event in database (replace partnerId mock with tenantId)", async () => {
       await monitor.logSecurityEvent(
         {
@@ -531,6 +533,7 @@ describe("SecurityMonitor", () => {
       expect(global.fetch).not.toHaveBeenCalled();
     });
 
+    // TRIAGE(AR14): fix — same partnerId→tenantId rename debt as above.
     it.skip("[T7] should include partnerId in security event (rename to tenantId)", async () => {
       await monitor.logSecurityEvent(
         {

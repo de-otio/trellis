@@ -70,6 +70,14 @@ jobs:
       - name: Lint (TypeScript)
         run: npm run lint -w @de-otio/trellis
 
+      # AR14: fail the build if a new UNCONDITIONAL `it.skip`/`describe.skip`/
+      # `.only` shows up that isn't in the annotated baseline. The legitimate
+      # `describe.skipIf(cond)` / `TEST_DB_URL ? describe : describe.skip`
+      # env-guard patterns are intentionally invisible to this check — see
+      # apps/api/scripts/check-new-skips.mjs and apps/api/test/skip-baseline.json.
+      - name: No new unconditional test skips/only
+        run: node apps/api/scripts/check-new-skips.mjs
+
       - name: Run tests
         run: npm test -w @de-otio/trellis
         env:

@@ -52,6 +52,9 @@ describe("standalone: entity CRUD (example extension)", () => {
   // updated to include tenantId"), create 500s with `Argument 'tenant' is missing`.
   // Unskip once the handler stamps the active tenant. See
   // doc/02-technical/identity-federation/09-implementation-plan.md.
+  // TRIAGE(AR14): fix — real bug in EntityHandler.createEntityProfile, not a
+  // dead skip. (Note: the doc path above does not currently resolve in this
+  // checkout; re-link or re-write it when this handler gets fixed.)
   it.skip("creates an example entity with valid metadata (201) — BLOCKED: handler missing tenantId", async () => {
     const { res } = await postJson(sessionToken, "/api/entities", {
       name: "Test Widget",
@@ -89,6 +92,7 @@ describe("standalone: entity CRUD (example extension)", () => {
   });
 
   // Blocked by the same missing-tenantId bug as the 201 create above.
+  // TRIAGE(AR14): fix — same root cause as above, not a dead skip.
   it.skip("create then read-back returns the entity — BLOCKED: handler missing tenantId", async () => {
     const { res: createRes } = await postJson(sessionToken, "/api/entities", {
       name: "Readable Widget",
