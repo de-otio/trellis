@@ -79,6 +79,15 @@ export interface DeletionResult {
    *  (Surveillance-hardening Phase 0, P4 / GDPR Art. 17). Reports filed BY the
    *  user cascade via the reporter FK. */
   accountReportsPseudonymized: number;
+  /** MediaFile rows soft-deleted into the nightly GC purge (AR7 / GDPR
+   *  Art. 17 — media erasure via the shared storage-accounting invariant). */
+  mediaFilesErased: number;
+  /** MediaFile rows RETAINED because another user's content still references
+   *  them (within-tenant dedup); only the personal link was scrubbed. */
+  mediaFilesRetainedShared: number;
+  /** User-scoped staging S3 keys (`pending/…`, `processing/…`) the CALLER must
+   *  delete — this service is DB-only (see the "Does NOT delete" contract). */
+  mediaStagingKeys: string[];
 }
 
 /**
@@ -86,7 +95,11 @@ export interface DeletionResult {
  *
  * Does NOT delete:
  * - Cognito identity (caller's responsibility)
- * - S3 media files (caller's responsibility)
+ * - S3 objects (caller's responsibility). The user's MediaFile ROWS are
+ *   erased here (AR7 / GDPR Art. 17): unreferenced rows are soft-deleted into
+ *   the nightly GC purge, which reclaims their CAS bytes; the user-scoped
+ *   STAGING keys the purge does not cover are returned as
+ *   `mediaStagingKeys` for the caller to delete from S3.
  * - DynamoDB cache entries (caller's responsibility)
  *
  * Does NOT check authorization — caller must verify permissions.
@@ -145,6 +158,16 @@ export async function deleteUserData(
   const posts = await db.post.deleteMany({
     where: { authorId: userId },
   });
+
+  // 6b. Erase the user's media (AR7 / GDPR Art. 17). MUST run after the user's
+  //     own posts/comments and their PostMedia/PostCommentMedia junction rows
+  //     are gone (steps 3–6) — the erasure service treats any surviving
+  //     reference as "another user's content" and retains the row. Unreferenced
+  //     rows are soft-deleted, which enqueues their CAS bytes for the existing
+  //     GC path (nightly soft-deleted-media purge). Staging S3 keys are
+  //     returned to the caller — S3 remains the caller's responsibility.
+  const { eraseUserMedia } = await import("./user-media-erasure.js");
+  const mediaErasure = await eraseUserMedia(db, userId);
 
   // 7. Delete entity-related records
   const userEntities = await db.entity.findMany({
@@ -239,5 +262,8 @@ export async function deleteUserData(
     invitations: invitations.count,
     interactionEventsAsTarget: interactionEventsAsTarget.count,
     accountReportsPseudonymized: accountReports.count,
+    mediaFilesErased: mediaErasure.erased,
+    mediaFilesRetainedShared: mediaErasure.retainedShared,
+    mediaStagingKeys: mediaErasure.stagingKeys,
   };
 }

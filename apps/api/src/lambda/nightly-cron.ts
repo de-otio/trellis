@@ -1,5 +1,5 @@
 import { DynamoDBClient, PutItemCommand, DeleteItemCommand } from "@aws-sdk/client-dynamodb";
-import { S3Client, DeleteObjectsCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
+import { S3Client, DeleteObjectsCommand } from "@aws-sdk/client-s3";
 import { CognitoIdentityProviderClient, AdminDeleteUserCommand } from "@aws-sdk/client-cognito-identity-provider";
 import { SESClient, SendEmailCommand } from "@aws-sdk/client-ses";
 import { marshall } from "@aws-sdk/util-dynamodb";
@@ -116,34 +116,25 @@ export const handler = async (): Promise<void> => {
 
     for (const user of usersToDelete) {
       try {
-        // 4a. Delete all database records
+        // 4a. Delete all database records. Media erasure happens inside
+        //     deleteUserData (AR7 / GDPR Art. 17): the user's MediaFile rows
+        //     are soft-deleted into step 1's soft-deleted-media purge, which
+        //     reclaims their CAS bytes (`cas/{tenantId}/{contentHash}`) within
+        //     its bounded window. The old 4b here enumerated the obsolete
+        //     `originals/user-{id}/` prefix and therefore deleted zero bytes.
         const result = await deleteUserData(db, user.id);
 
-        // 4b. Delete S3 media files
+        // 4b. Delete the user-scoped STAGING objects (`pending/…`,
+        //     `processing/…`) reported by the erasure — step 1's purge does
+        //     not cover staging keys. Never touches `cas/*`.
         try {
-          const prefix = `originals/user-${user.id}/`;
-          let continuationToken: string | undefined;
-          let pages = 0;
-          const MAX_PAGES = 100;
-          do {
-            if (pages >= MAX_PAGES) {
-              logger.warn("S3 pagination circuit breaker hit", { userId: user.id, pages: MAX_PAGES });
-              break;
-            }
-            const list = await s3.send(new ListObjectsV2Command({
-              Bucket: MEDIA_BUCKET, Prefix: prefix, ContinuationToken: continuationToken,
-            }));
-            if (list.Contents?.length) {
-              await s3.send(new DeleteObjectsCommand({
-                Bucket: MEDIA_BUCKET,
-                Delete: { Objects: list.Contents.map((o) => ({ Key: o.Key! })) },
-              }));
-            }
-            continuationToken = list.NextContinuationToken;
-            pages++;
-          } while (continuationToken);
+          const { deleteStagingObjects } = await import("../lib/media/staging-object-cleanup.js");
+          const staging = await deleteStagingObjects(s3, MEDIA_BUCKET, result.mediaStagingKeys);
+          if (staging.failedBatches > 0 || staging.truncated) {
+            logger.warn("Staging object cleanup incomplete", { userId: user.id, ...staging });
+          }
         } catch (s3Err) {
-          logger.error("S3 media deletion failed", { userId: user.id, error: s3Err });
+          logger.error("S3 staging deletion failed", { userId: user.id, error: s3Err });
         }
 
         // 4c. Delete Cognito identity
@@ -178,7 +169,8 @@ export const handler = async (): Promise<void> => {
               email: user.email,
               requestedAt: user.deletionRequestedAt!,
               confirmedAt: user.deletionConfirmedAt,
-              itemsDeleted: result as any,
+              // Audit rows carry counts, not raw storage keys.
+              itemsDeleted: { ...result, mediaStagingKeys: result.mediaStagingKeys.length } as any,
             },
           });
         } catch (auditErr) {
@@ -207,7 +199,10 @@ export const handler = async (): Promise<void> => {
         }
 
         deletedCount++;
-        logger.info("Account deleted", { userId: user.id, itemsDeleted: result });
+        logger.info("Account deleted", {
+          userId: user.id,
+          itemsDeleted: { ...result, mediaStagingKeys: result.mediaStagingKeys.length },
+        });
       } catch (err) {
         failedCount++;
         logger.error("Account deletion failed", { userId: user.id, error: err });
