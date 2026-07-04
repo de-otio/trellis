@@ -859,6 +859,16 @@ export function validateEnv(env: Env): string[] {
     errors.push("COGNITO_APP_CLIENT_ID is required");
   }
 
+  // SECURITY (T17): the invitation gate fails closed without this binding —
+  // refuse to start rather than serve with invitation validation/redemption
+  // silently rejecting everything. buildEnv() always constructs it (DynamoKv
+  // over DYNAMODB_TABLE), so this only fires for a hand-built/miswired Env.
+  if (!env.INVITATIONS_KV) {
+    errors.push(
+      "INVITATIONS_KV binding is missing — the invitation gate would fail closed (all invitation validation/redemption rejected). Check DYNAMODB_TABLE / buildEnv wiring.",
+    );
+  }
+
   return errors;
 }
 

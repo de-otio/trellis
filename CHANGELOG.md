@@ -90,6 +90,25 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   does not track, are deleted directly by the calling worker via a new chunked
   batch-delete helper that structurally refuses `cas/*` keys. `DeletionResult`
   gains `mediaFilesErased`, `mediaFilesRetainedShared`, and `mediaStagingKeys`.
+### Security
+
+- **Invitation gate now fails closed when the `INVITATIONS_KV` binding is
+  absent or erroring.** Previously, invitation session-token validation
+  returned `valid: true` when the KV binding was missing ("backward
+  compatibility"), so a misconfigured deployment silently disabled the
+  invite-only gate — a fail-open on the front door. Now: a missing binding
+  rejects session-token validation and invitation validation (generic
+  `Invalid or unavailable invitation code`, no internals leaked, and without
+  claiming/burning the code), a KV read error during token verification also
+  rejects, and `storeSessionToken` throws instead of silently issuing a token
+  that could never be verified. The failure mode is **visible-closed, not
+  silent-closed**: every rejection logs a loud `SECURITY:`-prefixed error, and
+  `validateEnv()` now refuses startup when `INVITATIONS_KV` is missing (it is
+  always constructed by `buildEnv()`, so this only fires for a hand-built or
+  miswired `Env`). Also removed the dead, never-called
+  `createFriendshipFromInvitation`/`addToFriendsList` private helpers from the
+  invitation handler (friendship from an invitation is user-confirmed via the
+  friends handler).
 
 ### Added
 
