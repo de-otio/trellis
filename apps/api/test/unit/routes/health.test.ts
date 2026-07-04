@@ -56,6 +56,10 @@ describe("Health Routes", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // Pin build provenance: /health reads process.env.BUILD_SHA (CI-stamped
+    // into the image); ensure it is unset so assertions see buildSha: null
+    // regardless of the runner's environment.
+    delete process.env.BUILD_SHA;
 
     mockEnv = {
       DATABASE_URL: "postgresql://test",
@@ -101,7 +105,14 @@ describe("Health Routes", () => {
       });
 
       expect(mockCreateSecureResponse).toHaveBeenCalledWith(
-        JSON.stringify({ ok: true, region: "us-east-1", costAlert: false }),
+        // buildSha is null: BUILD_SHA is not set in the unit-test env
+        // (dedicated coverage in ../health-buildsha.test.ts)
+        JSON.stringify({
+          ok: true,
+          region: "us-east-1",
+          costAlert: false,
+          buildSha: null,
+        }),
         {
           status: 200,
           headers: { "content-type": "application/json" },
@@ -120,7 +131,7 @@ describe("Health Routes", () => {
       });
 
       expect(mockCreateSecureResponse).toHaveBeenCalledWith(
-        JSON.stringify({ ok: true, costAlert: false }),
+        JSON.stringify({ ok: true, costAlert: false, buildSha: null }),
         {
           status: 200,
           headers: { "content-type": "application/json" },

@@ -33,8 +33,20 @@ export const healthRoutes: Route[] = [
         // Fail-open: if cost check fails, don't flag
       }
 
+      // Build provenance: BUILD_SHA is stamped into the container image by
+      // the consuming app's CI (a Docker build arg set to the image tag).
+      // Deploy pipelines assert this equals the tag they just built, making
+      // "the new code is actually serving" machine-checkable. null when not
+      // built by CI (local dev).
+      const buildSha = process.env.BUILD_SHA || null;
+
       const response = securityHeaders.createSecureResponse(
-        JSON.stringify({ ok: true, region: requestContext?.region, costAlert }),
+        JSON.stringify({
+          ok: true,
+          region: requestContext?.region,
+          costAlert,
+          buildSha,
+        }),
         {
           status: 200,
           headers: { "content-type": "application/json" },
