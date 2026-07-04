@@ -189,6 +189,45 @@ export class FeatureToggleService {
   }
 
   /**
+   * Moderation-safe toggle read — FAIL-CLOSED-TO-ENABLED (AR-SEC T4 / F1).
+   *
+   * {@link isEnabled} is fail-SOFT: a MISSING row and any read ERROR both
+   * resolve to `false` (a briefly-unavailable toggle DB shouldn't fail every
+   * request). That default is wrong for a SAFETY gate: if we cannot confirm
+   * that content moderation is switched off, we must MODERATE, not wave the
+   * content through. This method inverts the default for exactly that class of
+   * flag:
+   *
+   *   - row absent (unseeded DB)  -> true  (moderate)
+   *   - read error (DB outage)    -> true  (moderate)
+   *   - explicit `enabled: false` -> false (skip — deliberate dev/test escape
+   *                                          hatch; fail-closed-to-ENABLED,
+   *                                          NOT force-on)
+   *   - explicit `enabled: true`  -> true  (moderate)
+   *
+   * Scope this to safety gates only. Do NOT use it for ordinary feature flags,
+   * and do NOT change {@link isEnabled} / foundation's fail-soft semantics —
+   * every other flag still relies on default-off.
+   */
+  async isEnabledFailClosed(key: string, tenantId?: string): Promise<boolean> {
+    try {
+      // getToggle resolves a MISSING row and (via foundation's fail-soft `get`
+      // / resolveScoped) a read ERROR both to `null`; only a real row carries
+      // an explicit boolean. `?? true` turns "couldn't confirm" into "moderate".
+      const toggle = await this.getToggle(key, tenantId);
+      return toggle?.enabled ?? true;
+    } catch (err) {
+      // Belt-and-suspenders: even if the read path ever throws instead of
+      // fail-soft-returning null, a safety gate must still fail CLOSED.
+      getLogger().error(
+        "[FeatureToggle] fail-closed read errored; defaulting to ENABLED",
+        { key, tenantId, err },
+      );
+      return true;
+    }
+  }
+
+  /**
    * Get feature toggle with full details.
    * Maps foundation's `changedAt` → trellis's `lastChanged`.
    *

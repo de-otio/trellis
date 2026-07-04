@@ -154,7 +154,10 @@ export class PostHandler {
       const { createPrisma } = await import("../db.js");
       const db = createPrisma(env);
       const toggleService = new FeatureToggleService(db);
-      const moderationEnabled = await toggleService.isEnabled(
+      // Fail-closed-to-ENABLED (AR-SEC T4 / F1): a missing/unseeded row or a
+      // toggle-read error must MODERATE, never silently skip the gate. Only an
+      // explicit `content_moderation_enabled = false` disables (escape hatch).
+      const moderationEnabled = await toggleService.isEnabledFailClosed(
         "content_moderation_enabled",
       );
 
@@ -1326,7 +1329,10 @@ export class PostHandler {
       const { createPrisma } = await import("../db.js");
       const db = createPrisma(env);
       const toggleService = new FeatureToggleService(db);
-      const moderationEnabled = await toggleService.isEnabled(
+      // Fail-closed-to-ENABLED (AR-SEC T4 / F1): a missing/unseeded row or a
+      // toggle-read error must MODERATE, never silently skip the gate. Only an
+      // explicit `content_moderation_enabled = false` disables (escape hatch).
+      const moderationEnabled = await toggleService.isEnabledFailClosed(
         "content_moderation_enabled",
       );
 

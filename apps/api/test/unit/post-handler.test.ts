@@ -52,6 +52,9 @@ const mockIsEnabled = vi.fn().mockResolvedValue(true);
 vi.mock("../../src/lib/feature-toggle-service", () => {
   class MockFeatureToggleService {
     isEnabled = mockIsEnabled;
+    // Moderation gate now reads through the fail-closed variant; route it to the
+    // same control fn so these tests keep steering moderation via mockIsEnabled.
+    isEnabledFailClosed = mockIsEnabled;
   }
   return {
     FeatureToggleService: MockFeatureToggleService,

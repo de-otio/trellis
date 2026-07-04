@@ -112,6 +112,77 @@ describe("FeatureToggleService.isEnabled", () => {
 });
 
 // ---------------------------------------------------------------------------
+// isEnabledFailClosed — safety-gate read: MISSING row / read ERROR → true,
+// only an explicit `enabled: false` disables (AR-SEC T4 / F1).
+// ---------------------------------------------------------------------------
+
+describe("FeatureToggleService.isEnabledFailClosed", () => {
+  it("returns true when the toggle is explicitly enabled", async () => {
+    const prisma = makeMockPrisma();
+    prisma.featureToggle.findFirst.mockResolvedValue(
+      makeRow({ key: "content_moderation_enabled", enabled: true }),
+    );
+    const svc = new FeatureToggleService(prisma as any);
+    expect(await svc.isEnabledFailClosed("content_moderation_enabled")).toBe(true);
+  });
+
+  it("returns FALSE only when the toggle is EXPLICITLY disabled (escape hatch)", async () => {
+    const prisma = makeMockPrisma();
+    prisma.featureToggle.findFirst.mockResolvedValue(
+      makeRow({ key: "content_moderation_enabled", enabled: false }),
+    );
+    const svc = new FeatureToggleService(prisma as any);
+    expect(await svc.isEnabledFailClosed("content_moderation_enabled")).toBe(false);
+  });
+
+  it("returns TRUE (fail-closed) when the row is MISSING", async () => {
+    const prisma = makeMockPrisma();
+    prisma.featureToggle.findFirst.mockResolvedValue(null);
+    const svc = new FeatureToggleService(prisma as any);
+    expect(await svc.isEnabledFailClosed("content_moderation_enabled")).toBe(true);
+  });
+
+  it("returns TRUE (fail-closed) when the DB read THROWS", async () => {
+    const prisma = makeMockPrisma();
+    prisma.featureToggle.findFirst.mockRejectedValue(
+      new Error("DB connection failed"),
+    );
+    const svc = new FeatureToggleService(prisma as any);
+    expect(await svc.isEnabledFailClosed("content_moderation_enabled")).toBe(true);
+  });
+
+  it("returns TRUE (fail-closed) when the table is missing (P2021)", async () => {
+    const prisma = makeMockPrisma();
+    const err = Object.assign(new Error("table does not exist"), { code: "P2021" });
+    prisma.featureToggle.findFirst.mockRejectedValue(err);
+    const svc = new FeatureToggleService(prisma as any);
+    expect(await svc.isEnabledFailClosed("content_moderation_enabled")).toBe(true);
+  });
+
+  it("fail-closes on the tenant-scoped path too (missing tenant override + global)", async () => {
+    const prisma = makeMockPrisma();
+    // resolveScoped uses findFirst; null = neither a tenant override nor a
+    // global row exists → moderate.
+    prisma.featureToggle.findFirst.mockResolvedValue(null);
+    const svc = new FeatureToggleService(prisma as any);
+    expect(
+      await svc.isEnabledFailClosed("content_moderation_enabled", "tenant-1"),
+    ).toBe(true);
+  });
+
+  it("honours an explicit tenant-scoped disable (escape hatch, tenant path)", async () => {
+    const prisma = makeMockPrisma();
+    prisma.featureToggle.findFirst.mockResolvedValue(
+      makeRow({ key: "content_moderation_enabled", enabled: false }),
+    );
+    const svc = new FeatureToggleService(prisma as any);
+    expect(
+      await svc.isEnabledFailClosed("content_moderation_enabled", "tenant-1"),
+    ).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // getToggle — maps changedAt → lastChanged
 // ---------------------------------------------------------------------------
 
