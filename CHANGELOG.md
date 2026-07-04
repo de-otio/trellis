@@ -39,6 +39,22 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   `MEDIA_RECONCILIATION_QUEUE`. Nothing on the public package API
   (`startServer`, `registerExtension`, provider seams) changed.
 
+### Changed
+
+- **Session key derivation is now cached at module scope (AR9 perf fix).**
+  `SessionManager` is constructed per request (~160 call sites), so its
+  previous instance-level `SessionCookie` cache never got a warm hit and every
+  cookie-authenticated `getSession`/`encryptSession` re-paid the full
+  600,000-iteration PBKDF2 (~65 ms locally, ~100–250 ms on Fargate vCPU; twice
+  on the primary+fallback rotation path). The derived-key cache now lives at
+  module scope keyed by the exact (secret, fallback-secret, salt) triple, so
+  the KDF runs once per distinct secret per process instead of once per
+  request (~1,200× faster warm `getSession` in the micro-benchmark). Rotation
+  semantics are unchanged and covered by new tests: a rotated config is a new
+  cache key (both new keys derived and cached; a stale pre-rotation key is
+  never served), and the cache is bounded (FIFO, 32 entries). No public API
+  change; no crypto parameter (iteration count, cipher, key size) changed.
+
 ### Added
 
 - **Boot-time environment validation (fail fast on misconfig).** `startServer()`
