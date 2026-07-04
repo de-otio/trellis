@@ -213,7 +213,13 @@ async function seedFeatureToggles() {
     },
     {
       key: "content_moderation_enabled",
-      enabled: getEnabled("content_moderation_enabled", false), // Disabled by default
+      // Fail-closed-to-ENABLED by default (AR-SEC T4 / F1): text moderation is a
+      // safety gate, so it must be ON unless an environment deliberately opts
+      // out via config.yaml (the dev/test escape hatch). The handlers ALSO
+      // fail-closed on a missing/erroring row (isEnabledFailClosed), so an
+      // unseeded DB still moderates; seeding `true` makes the intended state
+      // explicit and auditable.
+      enabled: getEnabled("content_moderation_enabled", true), // Enabled by default (safety gate)
       description:
         "Enable automatic content moderation for posts and comments using OpenAI Moderation API",
     },

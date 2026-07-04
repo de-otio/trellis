@@ -17,6 +17,24 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ### Fixed
 
+- **Text moderation now fails closed to ENABLED (AR-SEC T4 / F1).** The text
+  moderation gate on post/comment create+edit was only invoked inside
+  `if (moderationEnabled)`, where `moderationEnabled` came from
+  `FeatureToggleService.isEnabled("content_moderation_enabled")`. That read is
+  fail-*soft*: a missing/unseeded toggle row **and** any `feature_toggles`
+  read error both resolve to `false`, so an unseeded environment — or a brief
+  toggle-DB outage — silently skipped moderation per request while posts still
+  wrote. Combined with the seed defaulting the flag to `false`, the whole
+  fail-closed gate was dead until someone flipped it. The four moderated call
+  sites now read the flag through a new
+  `FeatureToggleService.isEnabledFailClosed(...)`, which resolves a missing row
+  or a read error to `true` (moderate); only an explicit `enabled: false` row
+  disables — the deliberate dev/test escape hatch. The seed default for
+  `content_moderation_enabled` is flipped to `true`. `isEnabled` and
+  foundation's fail-soft semantics are unchanged — every other (default-off)
+  flag is unaffected. (Image/video media moderation was already unconditional —
+  it is not feature-toggle gated — so it never shared this gap.)
+
 - **Un-implemented queue workers now fail closed instead of silently acking.**
   The stub SQS workers (`link-check`, `followers-events`, `federation-outbox`)
   previously logged each record and returned successfully, deleting real
