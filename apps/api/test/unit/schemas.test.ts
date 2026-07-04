@@ -355,13 +355,6 @@ describe("deleteAccountConfirmationSchema", () => {
 });
 
 describe("feedQuerySchema", () => {
-  it("should validate with entityRef (backward compatibility)", () => {
-    const valid = { limit: 20, entityRef: "entity123" };
-    const result = feedQuerySchema.parse(valid);
-    expect(result.limit).toBe(20);
-    expect(result.entityRef).toBe("entity123");
-  });
-
   it("should validate with entityRefs", () => {
     const valid = { limit: 20, entityRefs: ["entity1", "entity2"] };
     const result = feedQuerySchema.parse(valid);
@@ -373,7 +366,6 @@ describe("feedQuerySchema", () => {
     const valid = { limit: 50 };
     const result = feedQuerySchema.parse(valid);
     expect(result.limit).toBe(50);
-    expect(result.entityRef).toBeUndefined();
     expect(result.entityRefs).toBeUndefined();
   });
 

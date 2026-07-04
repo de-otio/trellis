@@ -659,19 +659,6 @@ describe("validateQueryParams", () => {
   });
 
   describe("feedQuerySchema", () => {
-    it("should validate feed query with entityRef", () => {
-      const url = new URL(
-        "https://example.com/feeds?limit=20&entityRef=clx123abc456def789",
-      );
-      const result = validateQueryParams(url, feedQuerySchema);
-
-      expect(result.success).toBe(true);
-      if (result.success) {
-        expect(result.data.limit).toBe(20);
-        expect(result.data.entityRef).toBe("clx123abc456def789");
-      }
-    });
-
     it("should validate feed query without dogRef", () => {
       const url = new URL("https://example.com/feeds?limit=50");
       const result = validateQueryParams(url, feedQuerySchema);

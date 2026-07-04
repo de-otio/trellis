@@ -153,7 +153,6 @@ export class FeedHandler {
     options: {
       limit?: number;
       cursor?: string;
-      entityRef?: string; // For backward compatibility
       entityRefs?: string[]; // Filter by multiple entities
       taxonomyTags?: string[]; // Filter by taxonomy tags (taxonIds)
       personalized?: boolean; // Enable personalization based on user's entity tags
@@ -175,8 +174,7 @@ export class FeedHandler {
       const region = requestContext.region;
       const cacheVersion = await FeedHandler.getCacheVersion(env);
       // Include entityRefs in cache key for proper cache invalidation
-      const entityRefsKey =
-        options.entityRefs?.sort().join(",") || options.entityRef || "";
+      const entityRefsKey = options.entityRefs?.sort().join(",") || "";
       const cacheKey = `feed:home:${region}:v${cacheVersion}:${session.userId}:${entityRefsKey}:${options.cursor || "initial"}:${limit}`;
 
       // PREPARATORY: Check aggressive caching feature flag
@@ -235,15 +233,6 @@ export class FeedHandler {
           subjectEntities: {
             some: {
               entityId: { in: options.entityRefs },
-            },
-          },
-        };
-      } else if (options.entityRef) {
-        // Backward compatibility: filter by single entity
-        entityFilter = {
-          subjectEntities: {
-            some: {
-              entityId: options.entityRef,
             },
           },
         };
@@ -528,39 +517,6 @@ export class FeedHandler {
         { status: 500, headers: { "content-type": "application/json" } },
       );
     }
-  }
-
-  /**
-   * Get feed for a specific entity
-   *
-   * PREPARATORY: Uses DataRouter for region-aware queries.
-   *
-   * @deprecated Use getHomeFeed with entityRefs filter instead
-   */
-  async getEntityFeed(
-    session: Session,
-    entityRef: string,
-    env: Env,
-    options: {
-      limit?: number;
-      cursor?: string;
-    },
-    requestContext: TrellisRequestContext,
-    activeTenantId: string,
-  ): Promise<Response> {
-    // Delegate to getHomeFeed with entityRef filter for consistency
-    return this.getHomeFeed(
-      session,
-      new Request("http://localhost/feeds/home"), // Dummy request for compatibility
-      env,
-      {
-        limit: options.limit,
-        cursor: options.cursor,
-        entityRef, // Use single entity filter
-      },
-      requestContext,
-      activeTenantId,
-    );
   }
 
   /**

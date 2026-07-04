@@ -76,7 +76,9 @@ describe("ModerationHandler", () => {
       );
 
       expect(result.approved).toBe(true);
-      expect(result.score).toBeLessThan(0.7);
+      expect(
+        Math.max(...Object.values(result.details!.categoryScores)),
+      ).toBeLessThan(0.7);
       expect(result.details?.categories.harassment).toBe(false);
     });
 
@@ -121,7 +123,9 @@ describe("ModerationHandler", () => {
       const result = await handler.moderateText("You are terrible!", mockEnv);
 
       expect(result.approved).toBe(false);
-      expect(result.score).toBeGreaterThan(0.7);
+      expect(
+        Math.max(...Object.values(result.details!.categoryScores)),
+      ).toBeGreaterThan(0.7);
       expect(result.details?.categories.harassment).toBe(true);
     });
 

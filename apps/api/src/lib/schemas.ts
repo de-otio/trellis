@@ -194,7 +194,6 @@ export const emailRequestSchema = z.object({
  * Feed query parameters (extends pagination)
  */
 export const feedQuerySchema = paginationSchema.extend({
-  entityRef: z.string().optional(), // Filter by single entity (for backward compatibility with existing queries)
   entityRefs: z.array(z.string()).max(20).optional(), // Filter by multiple entities
   taxonomyTags: z
     .array(

@@ -226,35 +226,6 @@ describe("FeedHandler", () => {
       );
     });
 
-    it("should filter by single entityRef (backward compatibility)", async () => {
-      const request = new Request("http://test.com/feeds/home");
-      const response = await handler.getHomeFeed(
-        mockSession,
-        request,
-        mockEnv,
-        { limit: 20, entityRef: "entity-1" },
-        mockRequestContext,
-        TEST_TENANT_ID,
-      );
-
-      expect(response.status).toBe(200);
-      expect(mockDb.post.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: expect.objectContaining({
-            AND: expect.arrayContaining([
-              expect.objectContaining({
-                subjectEntities: {
-                  some: {
-                    entityId: "entity-1",
-                  },
-                },
-              }),
-            ]),
-          }),
-        }),
-      );
-    });
-
     it("should filter by multiple entityRefs", async () => {
       mockDb.post.findMany.mockResolvedValue([
         {
@@ -841,40 +812,6 @@ describe("FeedHandler", () => {
         // Database should be queried when cache read fails
         expect(mockDb.post.findMany).toHaveBeenCalled();
       });
-    });
-  });
-
-  describe("getEntityFeed", () => {
-    it("should delegate to getHomeFeed with entityRef filter", async () => {
-      const getHomeFeedSpy = vi.spyOn(handler, "getHomeFeed").mockResolvedValue(
-        new Response(
-          JSON.stringify({ posts: [], cursor: undefined, hasMore: false }),
-          {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          },
-        ),
-      );
-
-      const response = await handler.getEntityFeed(
-        mockSession,
-        "entity-1",
-        mockEnv,
-        { limit: 20 },
-        mockRequestContext,
-        TEST_TENANT_ID,
-      );
-
-      expect(getHomeFeedSpy).toHaveBeenCalledWith(
-        mockSession,
-        expect.any(Request),
-        mockEnv,
-        { limit: 20, cursor: undefined, entityRef: "entity-1" },
-        mockRequestContext,
-        TEST_TENANT_ID,
-      );
-
-      getHomeFeedSpy.mockRestore();
     });
   });
 

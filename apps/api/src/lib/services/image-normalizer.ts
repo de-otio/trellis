@@ -111,19 +111,3 @@ export async function reencodeImage(
 
   return { buffer: outputBuffer, canonicalMimeType };
 }
-
-/**
- * Legacy class kept so the existing import in `media.ts` continues to compile
- * until T9 removes it. The class is now a thin shim over `reencodeImage`.
- *
- * @deprecated Use `reencodeImage` directly. This class will be removed in T9.
- */
-export class ImageNormalizer {
-  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
-  constructor(_images: unknown, _mediaBucket: unknown) {}
-
-  /** No-op — the re-encode is now done inline in the upload handler. */
-  async normalize(_originalKey: string, _contentHash: string): Promise<string | null> {
-    return null;
-  }
-}

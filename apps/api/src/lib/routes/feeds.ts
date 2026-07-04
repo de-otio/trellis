@@ -77,11 +77,11 @@ export const feedsRoutes: Route[] = [
         }
         const { limit, cursor } = queryValidation.data;
 
-        const response = await feedHandler.getEntityFeed(
+        const response = await feedHandler.getHomeFeed(
           session,
-          entityRef,
+          request,
           env as any,
-          { limit, cursor },
+          { limit, cursor, entityRefs: [entityRef] },
           requestContext,
           auth.activeTenantId,
         );
@@ -164,7 +164,6 @@ export const feedsRoutes: Route[] = [
         const {
           limit,
           cursor,
-          entityRef,
           entityRefs,
           taxonomyTags,
           personalized,
@@ -178,7 +177,6 @@ export const feedsRoutes: Route[] = [
           {
             limit,
             cursor,
-            entityRef,
             entityRefs,
             taxonomyTags,
             personalized,

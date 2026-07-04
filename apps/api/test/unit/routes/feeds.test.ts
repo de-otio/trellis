@@ -30,11 +30,9 @@ vi.mock("../../../src/lib/security-headers", () => ({
 }));
 
 // Mock FeedHandler
-const mockGetEntityFeed = vi.fn();
 const mockGetHomeFeed = vi.fn();
 vi.mock("../../../src/lib/feed-handler", () => ({
   FeedHandler: class {
-    getEntityFeed = mockGetEntityFeed;
     getHomeFeed = mockGetHomeFeed;
   },
 }));
@@ -130,7 +128,7 @@ describe("Feeds Routes", () => {
         JSON.stringify({ posts: [], cursor: null }),
         { status: 200 },
       );
-      mockGetEntityFeed.mockResolvedValue(mockResponse);
+      mockGetHomeFeed.mockResolvedValue(mockResponse);
       mockValidateQueryParams.mockReturnValue({
         success: true,
         data: { limit: 20, cursor: null },
@@ -149,11 +147,11 @@ describe("Feeds Routes", () => {
         mockEnv,
       );
       expect(mockValidateQueryParams).toHaveBeenCalled();
-      expect(mockGetEntityFeed).toHaveBeenCalledWith(
+      expect(mockGetHomeFeed).toHaveBeenCalledWith(
         mockSession,
-        "dog-123",
+        mockRequest,
         mockEnv,
-        { limit: 20, cursor: null },
+        { limit: 20, cursor: null, entityRefs: ["dog-123"] },
         mockRequestContext,
         TEST_TENANT_ID,
       );
@@ -163,7 +161,7 @@ describe("Feeds Routes", () => {
 
     it("should decode URL-encoded dog reference", async () => {
       const mockResponse = new Response(JSON.stringify({}), { status: 200 });
-      mockGetEntityFeed.mockResolvedValue(mockResponse);
+      mockGetHomeFeed.mockResolvedValue(mockResponse);
       mockValidateQueryParams.mockReturnValue({
         success: true,
         data: { limit: 20, cursor: null },
@@ -177,11 +175,11 @@ describe("Feeds Routes", () => {
         requestContext: mockRequestContext,
       });
 
-      expect(mockGetEntityFeed).toHaveBeenCalledWith(
-        expect.anything(),
-        "dog@example.com",
+      expect(mockGetHomeFeed).toHaveBeenCalledWith(
         expect.anything(),
         expect.anything(),
+        expect.anything(),
+        expect.objectContaining({ entityRefs: ["dog@example.com"] }),
         expect.anything(),
         expect.anything(),
       );
@@ -201,7 +199,7 @@ describe("Feeds Routes", () => {
         JSON.stringify({ error: "Unauthorized" }),
         { status: 401, headers: { "content-type": "application/json" } },
       );
-      expect(mockGetEntityFeed).not.toHaveBeenCalled();
+      expect(mockGetHomeFeed).not.toHaveBeenCalled();
     });
 
     it("should return 500 when request context is missing", async () => {
@@ -216,7 +214,7 @@ describe("Feeds Routes", () => {
         JSON.stringify({ error: "Request context not available" }),
         { status: 500, headers: { "content-type": "application/json" } },
       );
-      expect(mockGetEntityFeed).not.toHaveBeenCalled();
+      expect(mockGetHomeFeed).not.toHaveBeenCalled();
     });
 
     it("should handle query validation errors", async () => {
@@ -239,12 +237,12 @@ describe("Feeds Routes", () => {
       });
 
       expect(mockAddSecurityHeaders).toHaveBeenCalledWith(errorResponse);
-      expect(mockGetEntityFeed).not.toHaveBeenCalled();
+      expect(mockGetHomeFeed).not.toHaveBeenCalled();
     });
 
     it("should handle errors from FeedHandler", async () => {
       const error = new Error("Database error");
-      mockGetEntityFeed.mockRejectedValue(error);
+      mockGetHomeFeed.mockRejectedValue(error);
       mockValidateQueryParams.mockReturnValue({
         success: true,
         data: { limit: 20, cursor: null },
@@ -281,7 +279,6 @@ describe("Feeds Routes", () => {
         data: {
           limit: 20,
           cursor: null,
-          entityRef: null,
           entityRefs: null,
           taxonomyTags: null,
           personalized: false,
@@ -308,7 +305,6 @@ describe("Feeds Routes", () => {
         {
           limit: 20,
           cursor: null,
-          entityRef: null,
           entityRefs: null,
           taxonomyTags: null,
           personalized: false,
@@ -384,7 +380,6 @@ describe("Feeds Routes", () => {
         data: {
           limit: 20,
           cursor: null,
-          entityRef: null,
           entityRefs: null,
           taxonomyTags: null,
           personalized: false,

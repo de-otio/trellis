@@ -31,7 +31,6 @@ import { RateLimiter } from "../rate-limit.js";
 import { SecurityHeaders } from "../security-headers.js";
 import { SessionManager } from "../session-cookie.js";
 import {
-  ImageNormalizer,
   REENCODABLE_IMAGE_TYPES,
   reencodeImage,
 } from "../services/image-normalizer.js";

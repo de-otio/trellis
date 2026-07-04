@@ -242,31 +242,4 @@ describe("DatabaseRateLimiter", () => {
       expect(result.retryAfter).toBeLessThanOrEqual(50000);
     });
   });
-
-  describe("recordOperation", () => {
-    it("should be a no-op (for API consistency)", async () => {
-      const mockRequest = new Request("https://example.com/api");
-
-      await rateLimiter.recordOperation(mockRequest, "user-123", "create");
-
-      // Should not throw and should not call any rate limiter methods
-      expect(mockCheckRateLimit).not.toHaveBeenCalled();
-    });
-
-    it("should work without userId", async () => {
-      const mockRequest = new Request("https://example.com/api");
-
-      await expect(
-        rateLimiter.recordOperation(mockRequest, undefined, "create"),
-      ).resolves.toBeUndefined();
-    });
-
-    it("should work without operation", async () => {
-      const mockRequest = new Request("https://example.com/api");
-
-      await expect(
-        rateLimiter.recordOperation(mockRequest, "user-123"),
-      ).resolves.toBeUndefined();
-    });
-  });
 });

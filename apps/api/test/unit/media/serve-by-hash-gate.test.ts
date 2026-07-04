@@ -107,7 +107,6 @@ vi.mock("../../../src/lib/database-connection-manager", () => ({
 
 // Heavy/irrelevant module-level imports of media.ts — stub to keep the import graph light.
 vi.mock("../../../src/lib/services/image-normalizer", () => ({
-  ImageNormalizer: class {},
   REENCODABLE_IMAGE_TYPES: new Set<string>(),
   reencodeImage: vi.fn(),
 }));

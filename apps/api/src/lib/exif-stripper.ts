@@ -7,9 +7,7 @@
  * actually happened — used defensively at runtime and as the verification
  * contract in tests.
  *
- * The old placeholder `stripEXIF()` is preserved below with a narrowed
- * signature so existing callers compile; it delegates to the re-encode and is
- * deprecated. New code must call `assertNoExif` after `reencodeImage`.
+ * New code must call `assertNoExif` after `reencodeImage`.
  *
  * GPS coordinates are NOT persisted: `gpsLatitude`/`gpsLongitude` columns
  * were removed in T8's schema migration. Nothing in this file or the upload
@@ -117,38 +115,4 @@ export async function assertNoExif(
         "Ensure reencodeImage is called without .withMetadata().",
     );
   }
-}
-
-// ---------------------------------------------------------------------------
-// Legacy API — kept for backwards compatibility with the existing test suite.
-// The old tests import `stripEXIF` and `EXIFStripperConfig`; they continue to
-// compile and run against the no-op below. New EXIF tests use `assertNoExif`.
-// ---------------------------------------------------------------------------
-
-/** @deprecated Legacy config interface — no longer has any effect. */
-export interface EXIFStripperConfig {
-  enabled: boolean;
-  removeLocation: boolean;
-  removeDeviceInfo: boolean;
-  removeTimestamp: boolean;
-}
-
-/**
- * @deprecated The strip now happens as a side-effect of `reencodeImage`
- * (T7). This function is a no-op passthrough kept solely so the existing
- * test suite compiles without change. Do not call in new code.
- */
-export async function stripEXIF(
-  imageBuffer: ArrayBuffer,
-  config: EXIFStripperConfig = {
-    enabled: true,
-    removeLocation: true,
-    removeDeviceInfo: true,
-    removeTimestamp: false,
-  },
-): Promise<ArrayBuffer> {
-  // Pass-through: the strip is done by reencodeImage (T7). The config
-  // parameter is accepted to keep the call-site signature stable.
-  void config;
-  return imageBuffer;
 }

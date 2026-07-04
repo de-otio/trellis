@@ -582,10 +582,6 @@ export class EntityHandler {
           if (user?.dataRegion) {
             entityRegion = user.dataRegion;
             break;
-          } else if (user?.region) {
-            // Fallback to region if dataRegion not set (backward compatibility)
-            entityRegion = user.region;
-            break;
           }
         }
       } catch (error: any) {

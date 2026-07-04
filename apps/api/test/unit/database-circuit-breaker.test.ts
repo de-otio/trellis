@@ -51,7 +51,6 @@ describe("DatabaseCircuitBreaker", () => {
       circuitBreaker = new DatabaseCircuitBreaker({
         failureThreshold: 5,
         cooldownMs: 60000,
-        halfOpenTimeoutMs: 120000,
       });
       expect(circuitBreaker.getState()).toBe("CLOSED");
     });

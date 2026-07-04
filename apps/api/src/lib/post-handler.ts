@@ -115,7 +115,7 @@ export class PostHandler {
       const { FeatureToggleService } = await import("./feature-toggle-service.js");
       const { createPrisma } = await import("../db.js");
       const db = createPrisma(env);
-      const toggleService = new FeatureToggleService(db, env as any);
+      const toggleService = new FeatureToggleService(db);
       const moderationEnabled = await toggleService.isEnabled(
         "content_moderation_enabled",
       );
@@ -131,7 +131,6 @@ export class PostHandler {
         try {
           const debugData = {
             approved: moderationResult.approved,
-            score: moderationResult.score,
             details: moderationResult.details,
             error: moderationResult.error,
             text: body.text.substring(0, 100), // First 100 chars for context
@@ -146,7 +145,6 @@ export class PostHandler {
             "[PostHandler] Moderation API result (simplified):",
             {
               approved: moderationResult.approved,
-              score: moderationResult.score,
               hasDetails: !!moderationResult.details,
               hasError: !!moderationResult.error,
             },
@@ -159,7 +157,6 @@ export class PostHandler {
               error: "CONTENT_REJECTED",
               message:
                 "Your post contains inappropriate content. Please be more constructive.",
-              score: moderationResult.score,
               details: moderationResult.details,
             }),
             { status: 400, headers: { "content-type": "application/json" } },
@@ -1321,7 +1318,7 @@ export class PostHandler {
       const { FeatureToggleService } = await import("./feature-toggle-service.js");
       const { createPrisma } = await import("../db.js");
       const db = createPrisma(env);
-      const toggleService = new FeatureToggleService(db, env as any);
+      const toggleService = new FeatureToggleService(db);
       const moderationEnabled = await toggleService.isEnabled(
         "content_moderation_enabled",
       );
@@ -1339,7 +1336,6 @@ export class PostHandler {
               error: "CONTENT_REJECTED",
               message:
                 "Your edited post contains inappropriate content. Please be more constructive.",
-              score: moderationResult.score,
               details: moderationResult.details,
             }),
             { status: 400, headers: { "content-type": "application/json" } },

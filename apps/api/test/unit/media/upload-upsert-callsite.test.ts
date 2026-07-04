@@ -69,7 +69,6 @@ vi.mock("@de-otio/saas-foundation/tenant", () => ({
 // Image re-encode: identity passthrough that keeps the JPEG bytes valid and
 // declares the canonical mime. (Real sharp is not exercised here.)
 vi.mock("../../../src/lib/services/image-normalizer", () => ({
-  ImageNormalizer: class {},
   REENCODABLE_IMAGE_TYPES: new Set(["image/jpeg", "image/png", "image/webp"]),
   reencodeImage: vi.fn(async (buf: ArrayBuffer) => ({
     buffer: Buffer.from(new Uint8Array(buf)),

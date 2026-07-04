@@ -16,21 +16,6 @@ import { AuthHandler } from "../../src/lib/auth-handler.js";
 import type { TrellisRequestContext } from "../../src/lib/request-context.js";
 
 // Mock dependencies
-vi.mock("../../src/lib/sso-auth-handler", () => {
-  const mockInitiateSSO = vi.fn();
-  const mockHandleSSOCallback = vi.fn();
-  const mockHandleSSOExchange = vi.fn();
-  const mockHandleTokenExchange = vi.fn();
-  return {
-    SSOAuthHandler: class {
-      initiateSSO = mockInitiateSSO;
-      handleSSOCallback = mockHandleSSOCallback;
-      handleSSOExchange = mockHandleSSOExchange;
-      handleTokenExchange = mockHandleTokenExchange;
-    },
-  };
-});
-
 vi.mock("../../src/lib/rate-limit", () => {
   const mockApplyRateLimitKV = vi.fn();
   return {
@@ -66,7 +51,6 @@ vi.mock("../../src/lib/security-headers", () => {
 import { CorsHandler } from "../../src/lib/cors-handler.js";
 import { RateLimiter } from "../../src/lib/rate-limit.js";
 import { SecurityHeaders } from "../../src/lib/security-headers.js";
-import { SSOAuthHandler } from "../../src/lib/sso-auth-handler.js";
 
 describe("AuthHandler", () => {
   let mockEnv: Env;
@@ -98,32 +82,6 @@ describe("AuthHandler", () => {
     } as TrellisRequestContext;
 
     // Setup default mock responses
-    const ssoHandler = new SSOAuthHandler();
-    (ssoHandler.initiateSSO as any).mockResolvedValue(
-      new Response(null, {
-        status: 302,
-        headers: { Location: "https://sso-provider.com/auth" },
-      }),
-    );
-    (ssoHandler.handleSSOCallback as any).mockResolvedValue(
-      new Response(null, {
-        status: 302,
-        headers: { Location: "https://app.com/callback" },
-      }),
-    );
-    (ssoHandler.handleSSOExchange as any).mockResolvedValue(
-      new Response(JSON.stringify({ success: true }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
-    );
-    (ssoHandler.handleTokenExchange as any).mockResolvedValue(
-      new Response(JSON.stringify({ success: true }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
-    );
-
     (mockRateLimiter.applyRateLimitKV as any).mockResolvedValue(null);
     (CorsHandler.getAllowedOrigin as any).mockReturnValue(
       "https://example.com",

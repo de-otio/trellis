@@ -7,7 +7,6 @@
  * - addQueryParam: URL parsing failure fallback
  * - isPermanentFailure: various Prisma error codes and PostgreSQL constraint violations
  * - executeWithRetry: connection errors, memory errors, permanent failures, pool invalidation
- * - createClientSync: returns PrismaClient with no-op release helper
  * - cleanup: no-op behavior
  * - shutdown: disconnects clients and ends pools
  * - clearPools: drains and clears cached pools
@@ -480,24 +479,6 @@ describe("DatabaseConnectionManager - Extended", () => {
       await expect(
         manager.executeWithRetry("US", envBad, async () => "never"),
       ).rejects.toThrow("DATABASE_URL is required");
-    });
-  });
-
-  describe("createClientSync", () => {
-    it("should return PrismaClient with no-op release helper attached", () => {
-      const client = manager.createClientSync("US", baseEnv);
-
-      expect(client).toBeDefined();
-      expect((client as any).release).toBeTypeOf("function");
-    });
-
-    it("should not call pool.end when release is called (no-op)", async () => {
-      const client = manager.createClientSync("US", baseEnv);
-
-      await (client as any).release();
-
-      // Release is a no-op — pool lifecycle managed by shutdown()
-      expect(mockPoolInstances[0].end).not.toHaveBeenCalled();
     });
   });
 

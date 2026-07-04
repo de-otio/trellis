@@ -133,13 +133,10 @@ export function securityHeadersMiddleware(env: Env): Middleware {
  *
  * @param options.maxRequests - Token-bucket capacity / window limit (default: 20)
  * @param options.windowMs - Window in ms; sets the refill rate (default: 60000)
- * @param options.keyPrefix - Accepted for backward compatibility; no longer
- *   used (keys are composed by `RateLimiter` as `ratelimit:<endpoint>:<id>`).
  */
 export function rateLimitMiddleware(options?: {
   maxRequests?: number;
   windowMs?: number;
-  keyPrefix?: string;
 }): Middleware {
   const maxRequests = options?.maxRequests ?? 20;
   const windowMs = options?.windowMs ?? 60000; // 1 minute default

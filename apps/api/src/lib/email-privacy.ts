@@ -25,8 +25,3 @@ export async function hashEmail(email: string): Promise<string> {
 
   return createHash("sha256").update(normalized, "utf8").digest("hex");
 }
-
-/** @deprecated Use hashEmail() directly — this wrapper exists for compat. */
-export async function hashEmailSync(email: string): Promise<string> {
-  return hashEmail(email);
-}

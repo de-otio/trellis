@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import { routes } from "../../src/lib/routes.js";
+import { routes } from "../../src/lib/routes/index.js";
 import type { Env } from "../../src/env.js";
 
 // Mock dependencies

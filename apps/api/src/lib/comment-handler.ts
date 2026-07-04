@@ -158,7 +158,7 @@ export class CommentHandler {
       const { FeatureToggleService } = await import("./feature-toggle-service.js");
       const { createPrisma } = await import("../db.js");
       const db = createPrisma(env);
-      const toggleService = new FeatureToggleService(db, env as any);
+      const toggleService = new FeatureToggleService(db);
       const moderationEnabled = await toggleService.isEnabled(
         "content_moderation_enabled",
       );
@@ -175,7 +175,6 @@ export class CommentHandler {
               error: "CONTENT_REJECTED",
               message:
                 "Your comment contains inappropriate content. Please be more constructive.",
-              score: moderationResult.score,
               details: moderationResult.details,
             }),
             { status: 400, headers: { "content-type": "application/json" } },
@@ -1148,7 +1147,7 @@ export class CommentHandler {
       const { FeatureToggleService } = await import("./feature-toggle-service.js");
       const { createPrisma } = await import("../db.js");
       const db = createPrisma(env);
-      const toggleService = new FeatureToggleService(db, env as any);
+      const toggleService = new FeatureToggleService(db);
       const moderationEnabled = await toggleService.isEnabled(
         "content_moderation_enabled",
       );
@@ -1166,7 +1165,6 @@ export class CommentHandler {
               error: "CONTENT_REJECTED",
               message:
                 "Your comment contains inappropriate content. Please be more constructive.",
-              score: moderationResult.score,
               details: moderationResult.details,
             }),
             { status: 400, headers: { "content-type": "application/json" } },

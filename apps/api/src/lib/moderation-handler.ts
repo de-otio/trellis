@@ -20,7 +20,6 @@ export interface Env {
 
 export interface ModerationResult {
   approved: boolean;
-  score?: number; // Max category score for backwards compatibility
   details?: {
     categories: {
       hate: boolean;
@@ -196,12 +195,8 @@ export class ModerationHandler {
         violence_graphic: result.category_scores["violence/graphic"],
       };
 
-      // Calculate max score for backwards compatibility
-      const maxScore = Math.max(...Object.values(categoryScores));
-
       const moderationResult: ModerationResult = {
         approved,
-        score: maxScore,
         details: {
           categories,
           categoryScores,

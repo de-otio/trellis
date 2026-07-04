@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { routes } from "../../src/lib/routes.js";
+import { routes } from "../../src/lib/routes/index.js";
 
 describe("CSRF Token Endpoint", () => {
   it("should have CSRF token endpoint route", () => {

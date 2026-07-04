@@ -826,18 +826,11 @@ export class DatabaseConnectionManager {
   }
 
   /**
-   * Backward-compatible creation helpers.
-   * These return a managed client and should be paired with release() in callers.
+   * Backward-compatible creation helper.
+   * Returns a managed client that should be paired with release() in callers.
    */
   async createClient(region: string, env: EnvWithDb): Promise<ManagedClient> {
     return this.acquireClient(region, env);
-  }
-
-  createClientSync(region: string, env: EnvWithDb): PrismaClient {
-    const managed = this.acquireClient(region, env);
-    // No-op release — pool lifecycle managed by shutdown()
-    (managed.client as any).release = async () => {};
-    return managed.client;
   }
 }
 

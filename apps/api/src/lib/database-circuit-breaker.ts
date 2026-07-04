@@ -18,7 +18,8 @@
  *              Note: in cockatiel HALF_OPEN is transient — it is only
  *              observable *during* the probe execution, not as a resting
  *              state between calls (unlike the previous hand-rolled
- *              implementation). See `halfOpenTimeoutMs` below.
+ *              implementation). cockatiel governs half-open probing itself:
+ *              a single probe is permitted once `cooldownMs` has elapsed.
  */
 
 import {
@@ -46,19 +47,6 @@ export interface CircuitBreakerOptions {
    * Default: 30000 (30 seconds). Maps to cockatiel `halfOpenAfter`.
    */
   cooldownMs?: number;
-
-  /**
-   * Retained for source-compatibility with the previous implementation.
-   *
-   * cockatiel governs half-open probing itself: a single probe call is
-   * permitted once `cooldownMs` has elapsed, and its outcome decides
-   * whether the circuit closes (success) or re-opens (failure). There is
-   * therefore no separate half-open timeout to configure — this option is
-   * accepted and ignored, kept only so existing callers do not break.
-   *
-   * @deprecated cockatiel governs half-open probing; this value is ignored.
-   */
-  halfOpenTimeoutMs?: number;
 }
 
 function toState(state: CircuitState): CircuitBreakerState {
@@ -79,7 +67,6 @@ export class DatabaseCircuitBreaker {
   private policy: CircuitBreakerPolicy;
   private readonly failureThreshold: number;
   private readonly cooldownMs: number;
-  private readonly halfOpenTimeoutMs: number;
   private logger?: Logger;
 
   /**
@@ -92,7 +79,6 @@ export class DatabaseCircuitBreaker {
   constructor(options: CircuitBreakerOptions = {}, logger?: Logger) {
     this.failureThreshold = options.failureThreshold ?? 3;
     this.cooldownMs = options.cooldownMs ?? 30000; // 30 seconds
-    this.halfOpenTimeoutMs = options.halfOpenTimeoutMs ?? 60000; // ignored; see option docs
     this.logger = logger;
     this.policy = this.buildPolicy();
   }

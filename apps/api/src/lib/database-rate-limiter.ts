@@ -132,23 +132,4 @@ export class DatabaseRateLimiter {
 
     return { allowed: true };
   }
-
-  /**
-   * Record a database operation (increment counters)
-   * Note: RateLimiter automatically records on checkRateLimit, so this is a no-op
-   * but kept for API consistency
-   *
-   * @param request - Request object
-   * @param userId - User ID (optional)
-   * @param operation - Database operation name (optional)
-   */
-  async recordOperation(
-    request: Request,
-    userId?: string,
-    operation?: string,
-  ): Promise<void> {
-    // RateLimiter automatically records on checkRateLimit
-    // This method is kept for API consistency but is effectively a no-op
-    // The actual recording happens in checkLimit()
-  }
 }

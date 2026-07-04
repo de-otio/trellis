@@ -1,5 +1,4 @@
 import { PrismaFeatureToggleStore } from "@de-otio/saas-foundation/feature-toggles/prisma";
-import type { LoggerEnv } from "./logger.js";
 import type { PrismaClient } from "@prisma/client";
 import { globalScopedFeatureToggleClient } from "./feature-toggle-global-client.js";
 import type { TrellisAuditLoggerEnv } from "./audit-composer.js";
@@ -30,10 +29,6 @@ export interface ToggleAuditContext {
  * unchanged:
  *   - getToggle / setToggle / getAllToggles return `lastChanged` (trellis shape)
  *   - foundation internally uses `changedAt`; this adapter maps between them
- *
- * The `env` constructor parameter is kept for source-compatibility but is
- * no longer used — foundation's PrismaFeatureToggleStore calls getLogger()
- * internally.
  *
  * For a full feature toggle system with regions, targeting, etc., see
  * doc/requirements/feature-toggle/RECOMMENDED_IMPLEMENTATION.md
@@ -127,12 +122,7 @@ export class FeatureToggleService {
   // including foundation's per-instance read cache.
   private readonly prisma: PrismaClient;
 
-  constructor(
-    prisma: PrismaClient,
-    // env is accepted for source-compatibility but unused — foundation
-    // acquires its logger via getLogger() internally.
-    _env?: LoggerEnv,
-  ) {
+  constructor(prisma: PrismaClient) {
     // P1: `key` is no longer a standalone unique column (now [key, tenantId]),
     // so foundation's store can't query `where: { key }` directly. Scope every
     // operation to global rows (tenant_id IS NULL) — identical to pre-P1
