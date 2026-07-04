@@ -77,11 +77,15 @@ export class InvitationHandler {
     env: Env,
   ): Promise<void> {
     if (!env.INVITATIONS_KV) {
-      // If KV not available, we can't store tokens - this is a fallback scenario
-      this.logger.warn(
-        "[InvitationHandler] INVITATIONS_KV not available, cannot store session token",
+      // SECURITY: FAIL CLOSED. Silently returning here would issue a session
+      // token that can never be validated (and burn the invitation code).
+      // Throw so the caller surfaces an error instead of half-succeeding.
+      this.logger.error(
+        "[InvitationHandler] SECURITY: INVITATIONS_KV binding is missing — cannot store invitation session token. Deployment misconfiguration (check DYNAMODB_TABLE / buildEnv wiring); the invitation gate fails closed.",
       );
-      return;
+      throw new Error(
+        "INVITATIONS_KV binding is missing — invitation gate fails closed",
+      );
     }
 
     const expiresAt = new Date(Date.now() + 3600 * 1000); // 1 hour from now
@@ -107,15 +111,32 @@ export class InvitationHandler {
     env: Env,
   ): Promise<{ valid: boolean; email?: string | null }> {
     if (!env.INVITATIONS_KV) {
-      // If KV not available, we can't validate tokens - allow for backward compatibility
-      this.logger.warn(
-        "[InvitationHandler] INVITATIONS_KV not available, cannot validate session token",
+      // SECURITY: FAIL CLOSED. Without the KV binding we cannot verify the
+      // session token, so the invitation gate must reject — never accept.
+      // Loud error (not warn) so a misconfigured deploy is visible in ops
+      // logs/alarms, not silently closed. (This binding is always present
+      // when Env comes from buildEnv(); see also validateEnv(), which refuses
+      // startup without it.)
+      this.logger.error(
+        "[InvitationHandler] SECURITY: INVITATIONS_KV binding is missing — failing closed: rejecting invitation session-token validation. Deployment misconfiguration (check DYNAMODB_TABLE / buildEnv wiring).",
       );
-      return { valid: true }; // Allow for backward compatibility
+      return { valid: false };
     }
 
     const key = `invitation-session:${code.toUpperCase()}`;
-    const stored = await env.INVITATIONS_KV.get(key);
+    let stored: string | null;
+    try {
+      stored = await env.INVITATIONS_KV.get(key);
+    } catch (error) {
+      // SECURITY: FAIL CLOSED on an erroring binding (table missing, IAM
+      // denied, Dynamo outage) — reject rather than accept unverifiable
+      // tokens. Loud error so the misconfiguration/outage is ops-visible.
+      this.logger.error(
+        "[InvitationHandler] SECURITY: INVITATIONS_KV read failed — failing closed: rejecting invitation session-token validation.",
+        error,
+      );
+      return { valid: false };
+    }
 
     if (!stored) {
       return { valid: false };
@@ -1246,6 +1267,24 @@ export class InvitationHandler {
 
       // Code is already validated and sanitized by Zod schema (trimmed, uppercase, max 100 chars)
 
+      // SECURITY: FAIL CLOSED — without the INVITATIONS_KV binding we can
+      // neither store nor later verify the session token, so validation must
+      // not proceed (and must not claim/burn the code by setting scannedAt).
+      // Reject with the generic message (no internals leaked) and log a loud
+      // error so the misconfigured deploy is visible, not silently closed.
+      if (!env.INVITATIONS_KV) {
+        this.logger.error(
+          "[InvitationHandler] SECURITY: INVITATIONS_KV binding is missing — failing closed: rejecting invitation validation. Deployment misconfiguration (check DYNAMODB_TABLE / buildEnv wiring).",
+        );
+        return this.securityHeaders.createSecureResponse(
+          JSON.stringify({
+            valid: false,
+            error: "Invalid or unavailable invitation code",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+
       const db = createPrisma(env);
 
       this.logger.info(
@@ -1752,102 +1791,8 @@ export class InvitationHandler {
     }
   }
 
-  /**
-   * Create a friendship between the inviter and the new user
-   * This is called automatically when an invitation is used
-   */
-  private async createFriendshipFromInvitation(
-    inviterId: string,
-    inviterEmail: string,
-    newUserId: string,
-    newUserEmail: string,
-    env: Env,
-  ): Promise<void> {
-    if (!env.FRIENDS_KV) {
-      this.logger.warn(
-        "[InvitationHandler] FRIENDS_KV not available, skipping friendship creation",
-      );
-      return;
-    }
-
-    try {
-      // Generate friendship ID
-      const friendshipId = `friend_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-      const now = new Date().toISOString();
-
-      // Create friendship object
-      const friendship = {
-        id: friendshipId,
-        requesterId: newUserId,
-        requesterEmail: newUserEmail,
-        addresseeId: inviterId,
-        addresseeEmail: inviterEmail,
-        status: "ACCEPTED", // Automatically accepted since invitation was used
-        createdAt: now,
-        acceptedAt: now,
-      };
-
-      // Store bidirectional friendships in KV
-      const requesterKey = `friendship:${newUserId}:${inviterId}`;
-      const addresseeKey = `friendship:${inviterId}:${newUserId}`;
-
-      await env.FRIENDS_KV.put(requesterKey, JSON.stringify(friendship));
-      await env.FRIENDS_KV.put(
-        addresseeKey,
-        JSON.stringify({
-          ...friendship,
-          requesterId: inviterId,
-          requesterEmail: inviterEmail,
-          addresseeId: newUserId,
-          addresseeEmail: newUserEmail,
-        }),
-      );
-
-      // Add to friends lists (with MAX_FRIENDS check)
-      await this.addToFriendsList(newUserId, inviterId, env);
-      await this.addToFriendsList(inviterId, newUserId, env);
-
-      this.logger.info(
-        `[InvitationHandler] Created friendship between ${newUserId} and ${inviterId} from invitation`,
-      );
-    } catch (error: any) {
-      // Log error but don't throw - friendship creation failure shouldn't prevent invitation from being marked as used
-      this.logger.error(
-        "[InvitationHandler] Error creating friendship from invitation:",
-        error,
-      );
-      if (error.message?.includes("Maximum number of friends")) {
-        this.logger.warn(
-          `[InvitationHandler] Could not create friendship: ${error.message}`,
-        );
-      }
-    }
-  }
-
-  /**
-   * Add friend to user's friends list (helper for maintaining list)
-   * Throws error if MAX_FRIENDS limit is reached
-   */
-  private async addToFriendsList(
-    userId: string,
-    friendId: string,
-    env: Env,
-  ): Promise<void> {
-    if (!env.FRIENDS_KV) return;
-
-    const MAX_FRIENDS = 500; // Same limit as FriendsHandler
-    const friendsListKey = `friends-list:${userId}`;
-    const friendsListStr = await env.FRIENDS_KV.get(friendsListKey);
-    const friendsList = friendsListStr ? JSON.parse(friendsListStr) : [];
-
-    if (!friendsList.includes(friendId)) {
-      // Check if user has reached the maximum number of friends
-      if (friendsList.length >= MAX_FRIENDS) {
-        throw new Error(`Maximum number of friends (${MAX_FRIENDS}) reached`);
-      }
-
-      friendsList.push(friendId);
-      await env.FRIENDS_KV.put(friendsListKey, JSON.stringify(friendsList));
-    }
-  }
+  // NOTE: the former private createFriendshipFromInvitation/addToFriendsList
+  // helpers were dead code (never called — friendship creation from an
+  // invitation is confirmed by the user via FriendsHandler instead) and were
+  // removed (T17 cleanup, pre-launch dead-path deletion).
 }

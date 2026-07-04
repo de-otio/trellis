@@ -446,8 +446,23 @@ describe("S1.4 — validateEnv", () => {
       SESSION_SECRET: "a".repeat(32),
       COGNITO_USER_POOL_ID: "us-east-1_abc",
       COGNITO_APP_CLIENT_ID: "client-id",
+      INVITATIONS_KV: {},
     } as any);
     expect(errors).toEqual([]);
+  });
+
+  // SECURITY (T17): a missing INVITATIONS_KV binding makes the invitation
+  // gate fail closed — startup must refuse loudly instead of serving a
+  // silently-closed gate.
+  it("should return an error when INVITATIONS_KV binding is missing", async () => {
+    const { validateEnv } = await import("../../src/env.js");
+    const errors = validateEnv({
+      SESSION_SECRET: "a".repeat(32),
+      COGNITO_USER_POOL_ID: "us-east-1_abc",
+      COGNITO_APP_CLIENT_ID: "client-id",
+      INVITATIONS_KV: undefined,
+    } as any);
+    expect(errors.some((e) => e.includes("INVITATIONS_KV"))).toBe(true);
   });
 
   it("should return multiple errors when multiple vars are missing", async () => {
@@ -457,7 +472,8 @@ describe("S1.4 — validateEnv", () => {
       COGNITO_USER_POOL_ID: "",
       COGNITO_APP_CLIENT_ID: "",
     } as any);
-    expect(errors.length).toBe(3);
+    // 3 missing vars + the missing INVITATIONS_KV binding (T17)
+    expect(errors.length).toBe(4);
   });
 });
 

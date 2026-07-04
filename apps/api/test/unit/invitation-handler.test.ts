@@ -1511,6 +1511,432 @@ describe("InvitationHandler", () => {
     });
   });
 
+  describe("fail-closed invitation gate (T17)", () => {
+    // SECURITY: the invite gate must FAIL CLOSED when the INVITATIONS_KV
+    // binding is absent or erroring. A missing binding is a deployment
+    // misconfiguration — it must reject (visibly, via loud error logs),
+    // never silently accept.
+
+    it("markInvitationAsUsed rejects a session token when INVITATIONS_KV is absent (fail-closed)", async () => {
+      const envWithoutKv = { ...mockEnv, INVITATIONS_KV: undefined };
+
+      // Full happy-path DB state: if the gate failed open, the redemption
+      // would succeed end-to-end.
+      mockDb.$transaction.mockImplementation(async (callback: any) => {
+        const txDb = {
+          ...mockDb,
+          invitation: {
+            findUnique: vi.fn().mockResolvedValue({
+              id: "inv-123",
+              createdBy: "inviter-123",
+              expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+              used: false,
+              email: null,
+            }),
+            update: vi.fn().mockResolvedValue({
+              id: "inv-123",
+              used: true,
+              usedBy: "user-123",
+              usedAt: new Date(),
+            }),
+          },
+          user: {
+            findUnique: vi.fn().mockResolvedValue({
+              id: "inviter-123",
+              email: "inviter@example.com",
+            }),
+          },
+        };
+        return await callback(txDb);
+      });
+
+      const result = await handler.markInvitationAsUsed(
+        "ABC12345",
+        "user-123",
+        "inv_sometoken",
+        "newuser@example.com",
+        envWithoutKv,
+      );
+
+      // FAIL CLOSED: without the KV binding the token cannot be verified,
+      // so redemption must be rejected.
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("Invalid or expired invitation session");
+    });
+
+    it("markInvitationAsUsed rejects a session token when INVITATIONS_KV errors (fail-closed)", async () => {
+      mockEnv.INVITATIONS_KV.get.mockRejectedValue(
+        new Error("Dynamo unavailable"),
+      );
+
+      const result = await handler.markInvitationAsUsed(
+        "ABC12345",
+        "user-123",
+        "inv_sometoken",
+        "newuser@example.com",
+        mockEnv,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("Invalid or expired invitation session");
+    });
+
+    it("handleValidateInvitation rejects (valid:false) when INVITATIONS_KV is absent, without claiming the code", async () => {
+      const envWithoutKv = { ...mockEnv, INVITATIONS_KV: undefined };
+
+      // Valid, unclaimed invitation — would validate fine with the binding.
+      mockDb.invitation.findUnique.mockResolvedValue({
+        id: "inv-123",
+        code: "ABC12345",
+        email: null,
+        used: false,
+        scannedAt: null,
+        scannedBy: null,
+        expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+      });
+
+      const request = new Request(
+        "https://api.test.example.com/api/invitations/validate",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ code: "ABC12345" }),
+        },
+      );
+
+      const response = await handler.handleValidateInvitation(
+        request,
+        envWithoutKv,
+      );
+      const data = await response.json();
+
+      expect(response.status).toBe(200);
+      // FAIL CLOSED: no binding → no token storage possible → reject with the
+      // generic message (no internals leaked).
+      expect(data.valid).toBe(false);
+      expect(data.error).toBe("Invalid or unavailable invitation code");
+      // Must NOT claim (burn) the code when the gate is unavailable.
+      expect(mockDb.$transaction).not.toHaveBeenCalled();
+      expect(mockDb.invitation.update).not.toHaveBeenCalled();
+    });
+
+    it("storeSessionToken throws when INVITATIONS_KV is absent (no silently unstorable tokens)", async () => {
+      const envWithoutKv = { ...mockEnv, INVITATIONS_KV: undefined };
+      await expect(
+        (handler as any).storeSessionToken(
+          "ABC12345",
+          "inv_sometoken",
+          undefined,
+          envWithoutKv,
+        ),
+      ).rejects.toThrow(/INVITATIONS_KV/);
+    });
+
+    it("handleGetInviterInfo returns nulls when INVITATIONS_KV is absent", async () => {
+      const envWithoutKv = { ...mockEnv, INVITATIONS_KV: undefined };
+      const response = await handler.handleGetInviterInfo(
+        mockRequest,
+        envWithoutKv,
+      );
+      const data = await response.json();
+      expect(response.status).toBe(200);
+      expect(data.inviterId).toBeNull();
+      expect(data.inviterEmail).toBeNull();
+    });
+  });
+
+  describe("handleValidateInvitation — branch coverage (T17)", () => {
+    const validateRequest = (body: Record<string, unknown>) =>
+      new Request("https://api.test.example.com/api/invitations/validate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+    it("returns the existing token when an already-scanned code still has a valid stored token", async () => {
+      mockDb.invitation.findUnique.mockResolvedValue({
+        id: "inv-123",
+        code: "ABC12345",
+        email: null,
+        used: false,
+        scannedAt: new Date(),
+        expiresAt: null,
+      });
+      mockEnv.INVITATIONS_KV.get.mockResolvedValue(
+        JSON.stringify({
+          token: "inv_existingtoken",
+          email: null,
+          expiresAt: new Date(Date.now() + 3600 * 1000).toISOString(),
+        }),
+      );
+
+      const response = await handler.handleValidateInvitation(
+        validateRequest({ code: "ABC12345" }),
+        mockEnv,
+      );
+      const data = await response.json();
+
+      expect(data.valid).toBe(true);
+      expect(data.token).toBe("inv_existingtoken");
+      expect(data.emailRestricted).toBe(false);
+      // Must not re-claim the code.
+      expect(mockDb.$transaction).not.toHaveBeenCalled();
+    });
+
+    it("rejects an already-scanned code whose stored token has expired", async () => {
+      mockDb.invitation.findUnique.mockResolvedValue({
+        id: "inv-123",
+        code: "ABC12345",
+        email: null,
+        used: false,
+        scannedAt: new Date(),
+        expiresAt: null,
+      });
+      mockEnv.INVITATIONS_KV.get.mockResolvedValue(
+        JSON.stringify({
+          token: "inv_expiredtoken",
+          email: null,
+          expiresAt: new Date(Date.now() - 1000).toISOString(),
+        }),
+      );
+
+      const response = await handler.handleValidateInvitation(
+        validateRequest({ code: "ABC12345" }),
+        mockEnv,
+      );
+      const data = await response.json();
+
+      expect(data.valid).toBe(false);
+      expect(data.error).toBe("Invalid or unavailable invitation code");
+    });
+
+    it("rejects an already-scanned code whose stored token data is corrupt", async () => {
+      mockDb.invitation.findUnique.mockResolvedValue({
+        id: "inv-123",
+        code: "ABC12345",
+        email: null,
+        used: false,
+        scannedAt: new Date(),
+        expiresAt: null,
+      });
+      mockEnv.INVITATIONS_KV.get.mockResolvedValue("not-json{{{");
+
+      const response = await handler.handleValidateInvitation(
+        validateRequest({ code: "ABC12345" }),
+        mockEnv,
+      );
+      const data = await response.json();
+
+      expect(data.valid).toBe(false);
+      expect(data.error).toBe("Invalid or unavailable invitation code");
+    });
+
+    it("validates an email-restricted invitation end-to-end when the email matches", async () => {
+      const invitation = {
+        id: "inv-123",
+        code: "ABC12345",
+        email: "friend@example.com",
+        used: false,
+        scannedAt: null,
+        scannedBy: null,
+        expiresAt: new Date(Date.now() + 24 * 3600 * 1000),
+      };
+      mockDb.invitation.findUnique.mockResolvedValue(invitation);
+      mockDb.invitation.update.mockResolvedValue({
+        ...invitation,
+        scannedAt: new Date(),
+      });
+      mockEnv.INVITATIONS_KV.put.mockResolvedValue(undefined);
+
+      const response = await handler.handleValidateInvitation(
+        validateRequest({ code: "ABC12345", email: "friend@example.com" }),
+        mockEnv,
+      );
+      const data = await response.json();
+
+      expect(data.valid).toBe(true);
+      expect(data.emailRestricted).toBe(true);
+      expect(data.requiredEmail).toBe("friend@example.com");
+      expect(mockEnv.INVITATIONS_KV.put).toHaveBeenCalled();
+    });
+
+    it("rejects an email-restricted invitation when the email does not match", async () => {
+      mockDb.invitation.findUnique.mockResolvedValue({
+        id: "inv-123",
+        code: "ABC12345",
+        email: "friend@example.com",
+        used: false,
+        scannedAt: null,
+        expiresAt: null,
+      });
+
+      const response = await handler.handleValidateInvitation(
+        validateRequest({ code: "ABC12345", email: "attacker@example.com" }),
+        mockEnv,
+      );
+      const data = await response.json();
+
+      expect(data.valid).toBe(false);
+      // Generic message — must not reveal the restricted email.
+      expect(data.error).toBe("Invalid or unavailable invitation code");
+    });
+
+    it("requires an email for an email-restricted invitation", async () => {
+      mockDb.invitation.findUnique.mockResolvedValue({
+        id: "inv-123",
+        code: "ABC12345",
+        email: "friend@example.com",
+        used: false,
+        scannedAt: null,
+        expiresAt: null,
+      });
+
+      const response = await handler.handleValidateInvitation(
+        validateRequest({ code: "ABC12345" }),
+        mockEnv,
+      );
+      const data = await response.json();
+
+      expect(data.valid).toBe(false);
+      expect(data.emailRequired).toBe(true);
+    });
+
+    it("rejects when the claim transaction loses the race (already scanned by another request)", async () => {
+      // Outer quick check: clean and unclaimed…
+      mockDb.invitation.findUnique
+        .mockResolvedValueOnce({
+          id: "inv-123",
+          code: "ABC12345",
+          email: null,
+          used: false,
+          scannedAt: null,
+          expiresAt: null,
+        })
+        // …but inside the transaction another request already claimed it.
+        .mockResolvedValueOnce({
+          id: "inv-123",
+          scannedAt: new Date(),
+          scannedBy: "inv_othertoken",
+          used: false,
+          expiresAt: null,
+          email: null,
+        });
+
+      const response = await handler.handleValidateInvitation(
+        validateRequest({ code: "ABC12345" }),
+        mockEnv,
+      );
+      const data = await response.json();
+
+      expect(data.valid).toBe(false);
+      expect(data.error).toBe("Invalid or unavailable invitation code");
+    });
+
+    it("rejects when the invitation was used between check and claim", async () => {
+      mockDb.invitation.findUnique
+        .mockResolvedValueOnce({
+          id: "inv-123",
+          code: "ABC12345",
+          email: null,
+          used: false,
+          scannedAt: null,
+          expiresAt: null,
+        })
+        .mockResolvedValueOnce({
+          id: "inv-123",
+          scannedAt: null,
+          scannedBy: null,
+          used: true,
+          expiresAt: null,
+          email: null,
+        });
+
+      const response = await handler.handleValidateInvitation(
+        validateRequest({ code: "ABC12345" }),
+        mockEnv,
+      );
+      const data = await response.json();
+
+      expect(data.valid).toBe(false);
+    });
+
+    it("rejects when the invitation expired between check and claim", async () => {
+      mockDb.invitation.findUnique
+        .mockResolvedValueOnce({
+          id: "inv-123",
+          code: "ABC12345",
+          email: null,
+          used: false,
+          scannedAt: null,
+          expiresAt: new Date(Date.now() + 60 * 1000),
+        })
+        .mockResolvedValueOnce({
+          id: "inv-123",
+          scannedAt: null,
+          scannedBy: null,
+          used: false,
+          expiresAt: new Date(Date.now() - 60 * 1000),
+          email: null,
+        });
+
+      const response = await handler.handleValidateInvitation(
+        validateRequest({ code: "ABC12345" }),
+        mockEnv,
+      );
+      const data = await response.json();
+
+      expect(data.valid).toBe(false);
+    });
+
+    it("rejects when the invitation disappears inside the claim transaction", async () => {
+      mockDb.invitation.findUnique
+        .mockResolvedValueOnce({
+          id: "inv-123",
+          code: "ABC12345",
+          email: null,
+          used: false,
+          scannedAt: null,
+          expiresAt: null,
+        })
+        .mockResolvedValueOnce(null);
+
+      const response = await handler.handleValidateInvitation(
+        validateRequest({ code: "ABC12345" }),
+        mockEnv,
+      );
+      const data = await response.json();
+
+      expect(data.valid).toBe(false);
+    });
+
+    it("rejects when the claim update fails inside the transaction", async () => {
+      const cleanInvitation = {
+        id: "inv-123",
+        code: "ABC12345",
+        email: null,
+        used: false,
+        scannedAt: null,
+        scannedBy: null,
+        expiresAt: null,
+      };
+      mockDb.invitation.findUnique.mockResolvedValue(cleanInvitation);
+      mockDb.invitation.update.mockRejectedValue(
+        Object.assign(new Error("Record to update not found"), {
+          code: "P2025",
+        }),
+      );
+
+      const response = await handler.handleValidateInvitation(
+        validateRequest({ code: "ABC12345" }),
+        mockEnv,
+      );
+      const data = await response.json();
+
+      expect(data.valid).toBe(false);
+      expect(data.error).toBe("Invalid or unavailable invitation code");
+    });
+  });
+
   describe("Security", () => {
     it("should use cryptographically secure random code generation with 10 characters", () => {
       // Test that generateInvitationCode uses crypto.getRandomValues
