@@ -144,6 +144,32 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   as of this fix). The broader consolidation of
   `moderationStatus`/`uploadStatus`/orphan flags into one lifecycle state
   machine is intentionally deferred to the presigned-upload rework.
+### Security
+
+- **Posting-flow text moderation is now fail-closed (T4).** Post and comment
+  text (create **and** edit) is routed through the injectable
+  `TextModerationProvider` seam instead of the legacy `ModerationHandler`,
+  which failed **open**: on a moderation-API error, timeout, spent budget, or
+  missing API key it returned `{ approved: true }` and let the content
+  through. The new gate (`text-moderation-gate.ts`) enforces the media
+  pipeline's invariant — only an affirmative `approved` verdict lets text
+  persist: a positive flag (`quarantine`) rejects with `400 CONTENT_REJECTED`;
+  `review`, an unknown decision, a provider throw, or an un-wired seam yields
+  `503 MODERATION_UNAVAILABLE` and the content is **not** persisted (and
+  therefore never served). Consuming apps inject their concrete hosted-API
+  adapter at startup via the new **`setTextModerationProvider`** export
+  (mirrors `setMediaModerationProvider`); when unset, core degrades to a
+  fail-closed `NullTextModerationProvider` (every verdict `review`) — an
+  un-wired deploy holds text for review, never auto-approves, never 500s.
+
+### Removed
+
+- **`ModerationHandler` (`lib/moderation-handler.ts`).** The fail-open hosted
+  moderation wrapper is deleted outright (pre-launch, no consumers): its
+  error/budget/missing-key paths all manufactured `approved: true`. The hosted
+  moderation call now lives in the consuming app's adapter behind the
+  fail-closed seam above. (`OpenAiBudget` and the health/admin budget
+  endpoints are unaffected.)
 
 ### Added
 

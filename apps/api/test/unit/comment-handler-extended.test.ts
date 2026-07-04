@@ -45,12 +45,12 @@ vi.mock("../../src/lib/data-router", () => ({
   },
 }));
 
-// Mock ModerationHandler
-const mockModerateText = vi.fn().mockResolvedValue({ approved: true, score: 0.1 });
-vi.mock("../../src/lib/moderation-handler", () => ({
-  ModerationHandler: class {
-    moderateText = mockModerateText;
-  },
+// Mock the text-moderation seam (fail-closed provider injection point).
+// The mock returns canonical ModerationVerdicts; the real gate logic
+// (text-moderation-gate.ts) still runs on top of it.
+const mockModerateText = vi.fn().mockResolvedValue({ decision: "approved", labels: [], provider: "mock-text" });
+vi.mock("../../src/lib/media/request-text-moderation", () => ({
+  getTextModerationProvider: () => ({ moderateText: mockModerateText }),
 }));
 
 // Mock InputSanitizer
@@ -211,7 +211,7 @@ describe("CommentHandler - Extended", () => {
       dataRegion: "US",
     });
 
-    mockModerateText.mockResolvedValue({ approved: true, score: 0.1 });
+    mockModerateText.mockResolvedValue({ decision: "approved", labels: [], provider: "mock-text" });
     mockCommentRateLimit.mockResolvedValue({ allowed: true });
     mockExtractUrls.mockReturnValue([]);
     mockValidateUrlSync.mockReturnValue({ status: "safe" });
@@ -535,7 +535,7 @@ describe("CommentHandler - Extended", () => {
 
     it("should reject edited comment with moderation failure", async () => {
       mockIsEnabled.mockResolvedValue(true);
-      mockModerateText.mockResolvedValue({ approved: false, score: 0.9, details: "Toxic" });
+      mockModerateText.mockResolvedValue({ decision: "quarantine", labels: [], provider: "mock-text" });
       mockDb.postComment.findFirst.mockResolvedValue({
         id: "comment-123",
         authorId: "user-123",

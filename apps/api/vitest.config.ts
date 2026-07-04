@@ -19,6 +19,9 @@ export default defineConfig({
       // overrides it to a fake hyperdrive URL) — runs in the Phase0 integration
       // lane instead (vitest.integration-ci.config.ts / test:integration:ci).
       "test/integration/encrypted-settings.integration.test.ts",
+      // T4 text-moderation fail-closed needs a real DATABASE_URL (same reason
+      // as encrypted-settings) — runs in the Phase0 integration lane instead.
+      "test/integration/text-moderation-fail-closed.integration.test.ts",
       "test/integration/example-authenticated.test.ts",
       "test/integration/feed-media-e2e.integration.test.ts",
       "test/integration/media-handler.integration.test.ts",

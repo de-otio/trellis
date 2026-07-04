@@ -37,12 +37,12 @@ vi.mock("../../src/lib/region-detection", () => ({
   },
 }));
 
-// Mock ModerationHandler
-const mockModerateText = vi.fn().mockResolvedValue({ approved: true, score: 0.1 });
-vi.mock("../../src/lib/moderation-handler", () => ({
-  ModerationHandler: class {
-    moderateText = mockModerateText;
-  },
+// Mock the text-moderation seam (fail-closed provider injection point).
+// The mock returns canonical ModerationVerdicts; the real gate logic
+// (text-moderation-gate.ts) still runs on top of it.
+const mockModerateText = vi.fn().mockResolvedValue({ decision: "approved", labels: [], provider: "mock-text" });
+vi.mock("../../src/lib/media/request-text-moderation", () => ({
+  getTextModerationProvider: () => ({ moderateText: mockModerateText }),
 }));
 
 // Mock FeatureToggleService
@@ -237,7 +237,7 @@ describe("PostHandler - Extended", () => {
     });
     mockExtractUrls.mockReturnValue([]);
     mockValidateUrlSync.mockReturnValue({ status: "safe", normalizedUrl: null });
-    mockModerateText.mockResolvedValue({ approved: true, score: 0.1 });
+    mockModerateText.mockResolvedValue({ decision: "approved", labels: [], provider: "mock-text" });
   });
 
   describe("deletePost - soft delete behavior", () => {
@@ -413,7 +413,7 @@ describe("PostHandler - Extended", () => {
     });
 
     it("should reject edit with content moderation failure", async () => {
-      mockModerateText.mockResolvedValue({ approved: false, score: 0.9, details: "Toxic" });
+      mockModerateText.mockResolvedValue({ decision: "quarantine", labels: [], provider: "mock-text" });
 
       const request = new Request("http://test.com/posts/post-123", {
         method: "PATCH",
