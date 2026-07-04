@@ -441,7 +441,9 @@ describe("PostHandler", () => {
         expect.objectContaining({
           authorId: mockSession.userId,
           text: "Test post",
-          visibility: "PUBLIC",
+          // Legacy visibility "public" maps to radius SHOUT — the Post model
+          // has no visibility column.
+          radius: "SHOUT",
         }),
         "US",
         mockEnv,

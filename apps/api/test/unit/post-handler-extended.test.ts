@@ -514,22 +514,22 @@ describe("PostHandler - Extended", () => {
       });
     });
 
-    it("should convert friends_only to FRIENDS visibility", async () => {
+    it("should map legacy visibility friends-only to radius NORMAL", async () => {
       mockValidateRequest.mockResolvedValue({
         success: true,
-        data: { text: "Test post", visibility: "friends_only" },
+        data: { text: "Test post", visibility: "friends-only" },
       });
 
       const request = new Request("http://test.com/posts", {
         method: "POST",
-        body: JSON.stringify({ text: "Test", visibility: "friends_only" }),
+        body: JSON.stringify({ text: "Test", visibility: "friends-only" }),
       });
       const response = await handler.createPost(request, mockSession, mockEnv, mockRequestContext);
 
       expect(response.status).toBe(201);
-      // Verify createPost was called with FRIENDS visibility
+      // Post model stores `radius`, not a visibility column: friends-only → NORMAL.
       expect(mockCreatePost).toHaveBeenCalledWith(
-        expect.objectContaining({ visibility: "FRIENDS" }),
+        expect.objectContaining({ radius: "NORMAL" }),
         expect.anything(),
         expect.anything(),
         expect.anything(),

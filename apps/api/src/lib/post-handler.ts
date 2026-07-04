@@ -12,6 +12,7 @@ import { DataRouter } from "./data-router.js";
 import { getLogger, generateRequestId, Logger, type LoggerEnv } from "./logger.js";
 import type { TrellisRequestContext } from "./request-context.js";
 import type { Session } from "./session-cookie.js";
+import type { PostRadius } from "./graph/types.js";
 
 export interface Env {
   DATABASE_URL: string;
@@ -50,6 +51,40 @@ export interface CreatePostRequest {
   }>;
 }
 
+/**
+ * Legacy API visibility → PostRadius mapping.
+ *
+ * The Post model stores a posting radius (`radius PostRadius` — how far
+ * content radiates on the author's social graph); it has NO visibility
+ * column. The legacy request vocabulary maps onto radius, grounded in the
+ * read paths that already interpret radius:
+ *   - feed-handler: SHOUT visible to everyone, NORMAL to friends
+ *   - ActivityPub audience: SHOUT → public collection, NORMAL → followers,
+ *     WHISPER → bto (private)
+ *   - editPost federates only radius === "SHOUT" (public)
+ */
+const LEGACY_VISIBILITY_TO_RADIUS: Record<LegacyVisibility, PostRadius> = {
+  public: "SHOUT",
+  "friends-only": "NORMAL",
+  private: "WHISPER",
+};
+
+type LegacyVisibility = "public" | "friends-only" | "private";
+
+/**
+ * Resolve the effective PostRadius for a create request: the `radius` field
+ * wins; the legacy `visibility` field maps onto it; otherwise NORMAL (the
+ * schema default — fail-closed w.r.t. the public-posting toggle).
+ */
+function resolvePostRadius(body: {
+  radius?: PostRadius;
+  visibility?: LegacyVisibility;
+}): PostRadius {
+  if (body.radius) return body.radius;
+  if (body.visibility) return LEGACY_VISIBILITY_TO_RADIUS[body.visibility];
+  return "NORMAL";
+}
+
 export class PostHandler {
   private logger: Logger;
 
@@ -84,8 +119,14 @@ export class PostHandler {
       }
       const body = validation.data;
 
-      // Check if public posting is enabled globally
-      if (body.visibility === "public") {
+      // Resolve the posting radius up front: `radius` wins, legacy
+      // `visibility` maps onto it, default NORMAL (see resolvePostRadius).
+      const radius = resolvePostRadius(body);
+
+      // Check if public posting is enabled globally. radius SHOUT is the
+      // legacy visibility "public" — gate both spellings identically
+      // (fail-closed: SHOUT must not bypass the toggle).
+      if (radius === "SHOUT") {
         const { FeatureToggleService } = await import(
           "./feature-toggle-service.js"
         );
@@ -364,21 +405,15 @@ export class PostHandler {
         }));
       }
 
-      // Convert visibility to Prisma enum format
-      // API accepts: "public", "friends-only", "private"
-      // Prisma expects: "PUBLIC", "FRIENDS", "PRIVATE"
-      let visibility = (body.visibility || "public").toUpperCase();
-      if (visibility === "FRIENDS-ONLY" || visibility === "FRIENDS_ONLY") {
-        visibility = "FRIENDS";
-      }
-
-      // Create post using DataRouter (enforces dataRegion)
+      // Create post using DataRouter (enforces dataRegion). `radius` was
+      // resolved above (radius field | legacy visibility | NORMAL default) and
+      // is what the Post model actually stores — there is no visibility column.
       // Note: Entity tagging validation happens within transaction in DataRouter
       const post = await DataRouter.createPost(
         {
           authorId: session.userId,
           text: sanitizedText.trim(),
-          visibility,
+          radius,
           tenantId: activeTenantId,
           entityRefs: entityRefs.length > 0 ? entityRefs : undefined,
           geoData: body.geoData,
@@ -491,7 +526,9 @@ export class PostHandler {
         await graphService.syncPost({
           id: post.id,
           authorId: session.userId,
-          radius: body.radius || "NORMAL",
+          // Same resolved radius that was persisted (radius | legacy
+          // visibility | NORMAL) so the graph mirrors the row.
+          radius,
           createdAt: (post as any).createdAt || new Date(),
         });
 
@@ -922,7 +959,10 @@ export class PostHandler {
         id: post.id,
         uri: postUri, // PostModel requires uri to be a non-null string
         text: body.text.trim(),
-        visibility: body.visibility,
+        // Output the persisted radius, lowercased — same shape the read paths
+        // (getPost / editPost) return. Derived from the resolved radius so a
+        // radius-only request still gets a populated field.
+        visibility: radius.toLowerCase(),
         createdAt, // ISO 8601 string format
         author: author
           ? {
@@ -1290,6 +1330,30 @@ export class PostHandler {
         "content_moderation_enabled",
       );
 
+      // Resolve the target radius from the legacy visibility field (the edit
+      // schema only exposes `visibility`). Undefined ⇒ radius unchanged.
+      const targetRadius = body.visibility
+        ? LEGACY_VISIBILITY_TO_RADIUS[body.visibility]
+        : undefined;
+
+      // Gate an edit that makes the post public (radius SHOUT) behind the same
+      // global toggle create uses — fail-closed, nothing persisted if disabled.
+      if (targetRadius === "SHOUT") {
+        const publicPostingEnabled = await toggleService.isEnabled(
+          "global_public_posting_enabled",
+        );
+        if (!publicPostingEnabled) {
+          return new Response(
+            JSON.stringify({
+              error: "PUBLIC_POSTING_DISABLED",
+              message:
+                'Public posting is currently disabled. Please use "Friends Only" or "Private" visibility.',
+            }),
+            { status: 403, headers: { "content-type": "application/json" } },
+          );
+        }
+      }
+
       // Content moderation on edited text (if moderation is enabled) through
       // the fail-closed TextModerationProvider seam (quarantine → 400,
       // review/fault → 503; only affirmative approval proceeds).
@@ -1361,19 +1425,11 @@ export class PostHandler {
             hasBlockedLinks: false, // Reset since we validated
           };
 
-          // Update visibility if provided
-          if (body.visibility) {
-            // Convert visibility to Prisma enum format
-            // API accepts: "public", "friends-only", "private"
-            // Prisma expects: "PUBLIC", "FRIENDS", "PRIVATE"
-            let visibility = body.visibility.toUpperCase();
-            if (
-              visibility === "FRIENDS-ONLY" ||
-              visibility === "FRIENDS_ONLY"
-            ) {
-              visibility = "FRIENDS";
-            }
-            updateData.visibility = visibility;
+          // Update radius if a (legacy) visibility was provided. The Post
+          // model stores `radius PostRadius`, not a visibility column, so we
+          // write the mapped radius (resolved above as targetRadius).
+          if (targetRadius) {
+            updateData.radius = targetRadius;
           }
 
           return await db.post.update({

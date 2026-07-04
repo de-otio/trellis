@@ -25,6 +25,10 @@ const PHASE0_INTEGRATION = [
   // T4 — text-moderation fail-closed: flagged/unverifiable post text is not
   // persisted (and therefore never served). Postgres-only, setup-free.
   "test/integration/text-moderation-fail-closed.integration.test.ts",
+  // P0 — post create/edit must write the real `radius` column (no phantom
+  // `visibility` column); pins the legacy visibility→radius mapping and the
+  // public-posting gate on radius=SHOUT.
+  "test/integration/post-create-radius.integration.test.ts",
 ];
 
 export default defineConfig({

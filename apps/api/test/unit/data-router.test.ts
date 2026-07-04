@@ -457,7 +457,7 @@ describe("Data Router", () => {
       const postData = {
         authorId: "user-123",
         text: "Test post",
-        visibility: "PUBLIC",
+        radius: "SHOUT",
         tenantId: "tenant-x",
       };
 
@@ -473,7 +473,7 @@ describe("Data Router", () => {
       const postData = {
         authorId: "user-123",
         text: "Test post",
-        visibility: "PUBLIC",
+        radius: "SHOUT",
         tenantId: "tenant-x",
         geoData: { lat: 40.7128, lng: -74.006 },
       };
@@ -496,7 +496,7 @@ describe("Data Router", () => {
           dataRegion: "US",
           success: true,
           metadata: expect.objectContaining({
-            visibility: "PUBLIC",
+            radius: "SHOUT",
             hasGeoData: true,
           }),
         }),
@@ -509,7 +509,7 @@ describe("Data Router", () => {
       const postData = {
         authorId: "user-123",
         text: "Test post",
-        visibility: "PUBLIC",
+        radius: "SHOUT",
         tenantId: "tenant-x",
       };
 
@@ -522,7 +522,7 @@ describe("Data Router", () => {
       const postData = {
         authorId: "user-123",
         text: "Test post",
-        visibility: "PUBLIC",
+        radius: "SHOUT",
         tenantId: "tenant-x",
       };
 
@@ -536,7 +536,7 @@ describe("Data Router", () => {
       const postData = {
         authorId: "user-123",
         text: "Post with image",
-        visibility: "PUBLIC",
+        radius: "SHOUT",
         tenantId: "tenant-x",
         media: [
           { id: "media-1", alt: "A photo" },
@@ -567,7 +567,7 @@ describe("Data Router", () => {
       const postData = {
         authorId: "user-123",
         text: "Post reclaiming orphaned image",
-        visibility: "PUBLIC",
+        radius: "SHOUT",
         tenantId: "tenant-x",
         media: [{ id: "media-orphaned", alt: "" }],
       };
@@ -587,7 +587,7 @@ describe("Data Router", () => {
       const postData = {
         authorId: "user-123",
         text: "Text-only post",
-        visibility: "PUBLIC",
+        radius: "SHOUT",
         tenantId: "tenant-x",
       };
 

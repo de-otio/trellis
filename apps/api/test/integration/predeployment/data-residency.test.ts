@@ -163,7 +163,7 @@ describe("Data Residency Integration", () => {
         {
           authorId: "user123",
           text: "Test post",
-          visibility: "PUBLIC",
+          radius: "SHOUT",
         },
         "CN",
         mockEnv,

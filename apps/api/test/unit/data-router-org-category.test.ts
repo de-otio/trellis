@@ -97,7 +97,7 @@ function basePostData(overrides: Record<string, unknown> = {}) {
   return {
     authorId: "user-123",
     text: "Test post",
-    visibility: "PUBLIC",
+    radius: "SHOUT",
     tenantId: "tenant-x",
     ...overrides,
   };
