@@ -782,7 +782,7 @@ export class DataRouter {
     postData: {
       authorId: string;
       text: string;
-      visibility: string;
+      radius?: string; // PostRadius: WHISPER | NORMAL | LOUD | SHOUT (schema default NORMAL). NOT a visibility column.
       tenantId: string; // Tenancy: active tenant the post belongs to (NON-NULL in schema)
       entityRefs?: string[];
       geoData?: unknown;
@@ -830,8 +830,14 @@ export class DataRouter {
     const sanitizedPostData: Record<string, any> = {
       authorId: String(postData.authorId),
       text: String(postData.text),
-      visibility: String(postData.visibility),
     };
+
+    // Posting radius (how far content radiates on the social graph). Optional:
+    // when omitted, the create is left to the schema default (NORMAL). Only a
+    // provided value enters the allowlist, as a plain string.
+    if (postData.radius !== undefined && postData.radius !== null) {
+      sanitizedPostData.radius = String(postData.radius);
+    }
 
     // Only include optional fields if they exist and are serializable
     if (postData.geoData !== undefined && postData.geoData !== null) {
@@ -937,10 +943,15 @@ export class DataRouter {
         const createData: Record<string, any> = {
           authorId: sanitizedPostData.authorId,
           text: sanitizedPostData.text,
-          visibility: sanitizedPostData.visibility,
           tenantId: String(postData.tenantId), // Tenancy: stamp active tenant (NON-NULL)
           dataRegion: region, // CRITICAL: Must match region
         };
+
+        // Posting radius — only set when provided; otherwise the column takes
+        // its schema default (NORMAL). There is no `visibility` column.
+        if (sanitizedPostData.radius !== undefined) {
+          createData.radius = sanitizedPostData.radius;
+        }
 
         // Only add optional fields if they exist
         if (sanitizedPostData.geoData !== undefined) {
@@ -1032,7 +1043,7 @@ export class DataRouter {
           ipAddress: request ? getIPAddress(request) : undefined,
           userAgent: request?.headers.get("User-Agent") || undefined,
           metadata: {
-            visibility: postData.visibility,
+            radius: postData.radius ?? "NORMAL",
             hasGeoData: !!postData.geoData,
             entityCount: entityRefs.length,
           },
