@@ -15,6 +15,24 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Un-implemented queue workers now fail closed instead of silently acking.**
+  The stub SQS workers (`link-check`, `followers-events`, `federation-outbox`)
+  previously logged each record and returned successfully, deleting real
+  messages from their queues with zero operational signal — for `link-check`
+  this silently disabled a live security control (async link threat-intel
+  checks enqueued on post/comment creation). Each stub now throws, so batches
+  retry and dead-letter onto the DLQ where the consumer's DLQ alarm pages. The
+  `federation-outbox` worker is feature-guarded: it throws only when
+  `ACTIVITYPUB_ENABLED === "true"` and stays inert (warn + drop) when
+  federation is disabled, matching the platform's fail-closed federation
+  default. Deployments that enable federation must set
+  `ACTIVITYPUB_ENABLED=true` on the federation-outbox worker's environment.
+  (The fourth stub, `media-reconciliation`, is removed entirely together with
+  its only producer — see the batch-upload cas/-bypass entry below — so
+  deployers must also drop its queue/worker wiring.)
+
 ### Removed
 
 - **Batch upload no longer bypasses moderation — the legacy direct-to-`cas/`
