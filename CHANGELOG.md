@@ -224,6 +224,40 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 - **Organization classification, feed decluttering by org category, and a public organization directory.** Tenants can self-declare what kind of organization they are (business, non-profit, community group, government, educational, or other — via a platform-curated category tree, `PlatformCategory`) independently of `TenantType`, which only ever described membership structure, not commercial nature. Feed views gain a second, independent filter axis alongside circle tier: viewers can exclude or isolate posts by an author's organization category (e.g. "no business posts," or "non-profits only"), denormalized onto `Post.authorOrgRootCategoryCode` for the same cheap, indexed filtering already used for region/sensitivity/content-category. A new opt-in directory (`TenantDirectoryProfile`) lets a classified tenant become searchable by name, category, and location; location precision is a named level (`EXACT`/`NEIGHBORHOOD`/`CITY`/`HIDDEN`), not a boolean — `CITY`/`HIDDEN` listings are structurally excluded from distance-sorted search (not just response-shaped) to close a triangulation vector where ranking order alone could otherwise leak an intentionally-imprecise location. See [Organization Classification & Directory](docs/concepts/org-classification-and-directory.md) and [Classify and List Your Organization](docs/guides/classify-and-list-your-organization.md). Self-declared only in this release — third-party verification (TechSoup, Haus des Stiftens) and AI-assisted category-suggestion are planned follow-ups; org-to-org relationships (membership/subsidiary) and cross-tenant resource-sharing grants are designed but deliberately out of scope for this release.
 
+## [0.15.1] — 2026-07-04
+
+### Fixed
+
+- **Declared five runtime dependencies the shipped code imports but
+  `package.json` never listed — one of which broke API-container boot on
+  0.15.0.** `dist/lib/cognito/issuer-probe.js` imports `undici` (the
+  DNS-rebinding-pinned dispatcher for the OIDC issuer probe); until 0.14.0
+  the package resolved only because another dependency happened to pull
+  `undici` in transitively, and 0.15.0's `@fedify/fedify` 2.3.1 update pruned
+  that transitive edge — so a consumer's fresh `npm install` produced a tree
+  where the server fails at startup with
+  `ERR_MODULE_NOT_FOUND: Cannot find package 'undici'`. Now declared
+  (`undici@^8.5.0`), along with the other phantom imports found by a scan of
+  the published `dist`/`src/lambda`: `@js-temporal/polyfill@^0.5.1`
+  (`post-service-fedify`/`dm-service-fedify` — fedify 2 vocab objects take
+  `Temporal.Instant`), and — moved from `devDependencies`, where they were
+  invisible to consumers — `@aws-sdk/client-cost-explorer@^3.1078.0`
+  (`lambda/tools/get-cost-report`), `@aws-sdk/client-ecs@^3.1078.0`
+  (`lambda/tools/describe-services`), and
+  `@aws-sdk/client-bedrock-agent-runtime@^3.1078.0`
+  (`lambda/diagnostics-proxy`), since `dist` and `src/lambda` ship in the
+  tarball and consumers bundle those Lambda entrypoints from
+  `node_modules`. `@prisma/client` remains an intentionally undeclared
+  *runtime* dependency — it is a `peerDependency` by design (AR14). No API
+  changes; the public export surface is untouched.
+
+  (A local scan had also flagged `neo4j-driver`/`@smithy/*`/`@aws-crypto/*`
+  imports in `dist/lib/graph/neo4j-graph-service.js` + `neptune-auth.js` —
+  those were stale incremental-`tsc` outputs of sources deleted in the
+  Postgres graph migration, present only in unclean local checkouts. The
+  published tarball is built from a clean CI checkout and never contained
+  them; nothing ships or imports Neo4j/Neptune code.)
+
 ## [0.14.0] — 2026-06-30
 
 ### Added
