@@ -232,6 +232,7 @@ describe("Admin Routes", () => {
       },
       postCommentMedia: {
         deleteMany: vi.fn(),
+        groupBy: vi.fn().mockResolvedValue([]),
       },
       postSubject: {
         deleteMany: vi.fn(),
@@ -241,9 +242,17 @@ describe("Admin Routes", () => {
       },
       postMedia: {
         deleteMany: vi.fn(),
+        groupBy: vi.fn().mockResolvedValue([]),
       },
       entityTaxonomyTag: {
         deleteMany: vi.fn(),
+      },
+      // AR7 (GDPR media erasure): deleteUserData erases the user's MediaFile
+      // rows and consults the PostMedia/PostCommentMedia reference lookups.
+      mediaFile: {
+        findMany: vi.fn().mockResolvedValue([]),
+        updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+        count: vi.fn().mockResolvedValue(0),
       },
       // Surveillance-hardening Phase 0 (P2): deleteUserData erases target-side
       // InteractionEvent rows.

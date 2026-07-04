@@ -1,7 +1,23 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+
+const { mockGetParameter, mockResolveSecret } = vi.hoisted(() => ({
+  mockGetParameter: vi.fn(),
+  mockResolveSecret: vi.fn(),
+}));
+
+vi.mock("@aws-lambda-powertools/parameters/ssm", () => ({
+  getParameter: mockGetParameter,
+}));
+
+vi.mock("@de-otio/saas-foundation/secrets", () => ({
+  resolveSecret: mockResolveSecret,
+  secretRef: vi.fn((arn: string) => ({ arn })),
+}));
+
 import {
   deleteUserData,
   pseudonymizeUserId,
+  resolvePseudonymSecret,
 } from "../../../src/lib/services/user-data-deletion.js";
 
 describe("deleteUserData", () => {
@@ -41,7 +57,15 @@ describe("deleteUserData", () => {
       // Surveillance-hardening Phase 0 (P4): ACCOUNT-report pseudonymization.
       report: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
       user: { delete: vi.fn().mockResolvedValue({ id: "user-123" }) },
+      // AR7 — GDPR media erasure: MediaFile rows + reference lookups.
+      mediaFile: {
+        findMany: vi.fn().mockResolvedValue([]),
+        updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+        count: vi.fn().mockResolvedValue(0),
+      },
     };
+    mockDb.postMedia.groupBy = vi.fn().mockResolvedValue([]);
+    mockDb.postCommentMedia.groupBy = vi.fn().mockResolvedValue([]);
   });
 
   it("should delete all user data in correct order and return counts", async () => {
@@ -62,6 +86,9 @@ describe("deleteUserData", () => {
       invitations: 0,
       interactionEventsAsTarget: 5,
       accountReportsPseudonymized: 0,
+      mediaFilesErased: 0,
+      mediaFilesRetainedShared: 0,
+      mediaStagingKeys: [],
     });
 
     // Verify deletion order: sentiments before comments, comments before posts, posts before entities
@@ -157,6 +184,103 @@ describe("deleteUserData", () => {
 
     await expect(deleteUserData(mockDb, "user-123")).rejects.toThrow("DB connection lost");
   });
+
+  // ── AR7: GDPR media erasure ────────────────────────────────────────────────
+  // The user's MediaFile rows must be erased on account deletion. The account-
+  // deletion path previously never touched media_files at all (the S3 half
+  // targeted the obsolete `originals/user-{id}/` prefix), so account deletion
+  // removed ZERO media bytes — a GDPR Art. 17 erasure gap.
+  describe("GDPR media erasure (AR7)", () => {
+    const TENANT = "cabcdefghijklmnopqrstuvwx"; // valid CUID shape for key builders
+    const HASH = "a".repeat(64);
+    const UPLOAD_ID = "cupload00000000000000001x";
+
+    it("erases the user's MediaFile rows: unreferenced rows are soft-deleted into the existing GC purge and staging keys are returned", async () => {
+      mockDb.mediaFile.findMany
+        .mockResolvedValueOnce([
+          {
+            id: "media-1",
+            tenantId: TENANT,
+            contentHash: HASH,
+            uploadId: UPLOAD_ID,
+            deletedAt: null,
+          },
+        ])
+        .mockResolvedValue([]);
+
+      const result = await deleteUserData(mockDb, "user-123");
+
+      // The row is soft-deleted (deletedAt set) + the personal link scrubbed —
+      // this is what hands the CAS object to the existing nightly GC purge.
+      expect(mockDb.mediaFile.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ id: { in: ["media-1"] } }),
+          data: expect.objectContaining({
+            deletedAt: expect.any(Date),
+            uploadedBy: null,
+          }),
+        }),
+      );
+      expect(result.mediaFilesErased).toBe(1);
+      expect(result.mediaFilesRetainedShared).toBe(0);
+      // The worker can delete the user-scoped staging objects directly.
+      expect(result.mediaStagingKeys).toEqual(
+        expect.arrayContaining([
+          `pending/${TENANT}/${UPLOAD_ID}`,
+          `processing/${TENANT}/${HASH}`,
+        ]),
+      );
+    });
+
+    it("retains a media row still referenced by another user's content, scrubbing only the personal link", async () => {
+      mockDb.mediaFile.findMany
+        .mockResolvedValueOnce([
+          {
+            id: "media-shared",
+            tenantId: TENANT,
+            contentHash: HASH,
+            uploadId: null,
+            deletedAt: null,
+          },
+        ])
+        .mockResolvedValue([]);
+      // Another user's post still references the row (dedup reference).
+      mockDb.postMedia.groupBy.mockResolvedValue([{ mediaId: "media-shared" }]);
+
+      const result = await deleteUserData(mockDb, "user-123");
+
+      // Retained: uploadedBy scrubbed, NOT soft-deleted (no deletedAt write).
+      expect(mockDb.mediaFile.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ id: { in: ["media-shared"] } }),
+          data: { uploadedBy: null },
+        }),
+      );
+      const softDeleteCalls = mockDb.mediaFile.updateMany.mock.calls.filter(
+        (c: any[]) => c[0]?.data?.deletedAt,
+      );
+      expect(softDeleteCalls).toHaveLength(0);
+      expect(result.mediaFilesErased).toBe(0);
+      expect(result.mediaFilesRetainedShared).toBe(1);
+      expect(result.mediaStagingKeys).toEqual([]);
+    });
+
+    it("runs media erasure after the user's own posts/comments (and their junction rows) are deleted", async () => {
+      mockDb.mediaFile.findMany
+        .mockResolvedValueOnce([
+          { id: "media-1", tenantId: TENANT, contentHash: HASH, uploadId: null, deletedAt: null },
+        ])
+        .mockResolvedValue([]);
+
+      await deleteUserData(mockDb, "user-123");
+
+      const postMediaOrder = vi.mocked(mockDb.postMedia.deleteMany).mock.invocationCallOrder[0];
+      const mediaScanOrder = vi.mocked(mockDb.mediaFile.findMany).mock.invocationCallOrder[0];
+      const userDeleteOrder = vi.mocked(mockDb.user.delete).mock.invocationCallOrder[0];
+      expect(postMediaOrder).toBeLessThan(mediaScanOrder);
+      expect(mediaScanOrder).toBeLessThan(userDeleteOrder);
+    });
+  });
 });
 
 describe("pseudonymizeUserId", () => {
@@ -178,5 +302,60 @@ describe("pseudonymizeUserId", () => {
     expect(pseudonymizeUserId("user-123", KEY)).not.toBe(
       pseudonymizeUserId("user-123", "a-different-key-32-characters-long!"),
     );
+  });
+});
+
+describe("resolvePseudonymSecret", () => {
+  const ENV_KEYS = [
+    "REPORT_PSEUDONYM_SECRET",
+    "REPORT_PSEUDONYM_SECRET_PARAM",
+    "SESSION_SECRET",
+    "SESSION_SECRET_ARN",
+  ] as const;
+  const saved: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    for (const k of ENV_KEYS) {
+      saved[k] = process.env[k];
+      delete process.env[k];
+    }
+  });
+
+  afterEach(() => {
+    for (const k of ENV_KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  it("prefers the plaintext REPORT_PSEUDONYM_SECRET (local/dev/CI)", async () => {
+    process.env.REPORT_PSEUDONYM_SECRET = "plain-secret";
+    await expect(resolvePseudonymSecret()).resolves.toBe("plain-secret");
+    expect(mockGetParameter).not.toHaveBeenCalled();
+  });
+
+  it("resolves the SSM SecureString when REPORT_PSEUDONYM_SECRET_PARAM is set (production path)", async () => {
+    process.env.REPORT_PSEUDONYM_SECRET_PARAM = "/app/dev/report-pseudonym-key";
+    mockGetParameter.mockResolvedValue("ssm-secret");
+    await expect(resolvePseudonymSecret()).resolves.toBe("ssm-secret");
+    expect(mockGetParameter).toHaveBeenCalledWith("/app/dev/report-pseudonym-key", { decrypt: true });
+  });
+
+  it("falls back to SESSION_SECRET when the SSM parameter resolves empty", async () => {
+    process.env.REPORT_PSEUDONYM_SECRET_PARAM = "/app/dev/report-pseudonym-key";
+    process.env.SESSION_SECRET = "session-secret";
+    mockGetParameter.mockResolvedValue("");
+    await expect(resolvePseudonymSecret()).resolves.toBe("session-secret");
+  });
+
+  it("falls back to the Secrets Manager session secret via SESSION_SECRET_ARN", async () => {
+    process.env.SESSION_SECRET_ARN = "arn:aws:secretsmanager:eu-central-1:123:secret:session";
+    mockResolveSecret.mockResolvedValue(Buffer.from("sm-secret", "utf-8"));
+    await expect(resolvePseudonymSecret()).resolves.toBe("sm-secret");
+  });
+
+  it("returns an empty string when nothing is configured", async () => {
+    await expect(resolvePseudonymSecret()).resolves.toBe("");
   });
 });

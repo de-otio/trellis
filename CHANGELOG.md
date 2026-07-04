@@ -15,6 +15,29 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ## [Unreleased]
 
+### Fixed
+
+- **GDPR account deletion now actually erases the user's media** (AR7). Both
+  account-deletion paths (the delete-account worker and the nightly scheduled
+  cron) deleted the S3 prefix `originals/user-{id}/` — a scheme that no longer
+  exists under tenant-scoped content-addressed storage
+  (`cas/{tenantId}/{contentHash}`), so account deletion removed **zero media
+  bytes**, a GDPR Art. 17 erasure gap. Media erasure now happens inside
+  `deleteUserData`: every `MediaFile` row uploaded by the user is either
+  **soft-deleted into the existing nightly GC purge** (which hard-deletes the
+  row and its CAS bytes within its bounded 7-day window) when nothing else
+  references it, or **retained with the personal link (`uploadedBy`) scrubbed**
+  when another user's post/comment still references the deduplicated row — so
+  erasure can never destroy another user's published content. The
+  "still-referenced?" determination uses the single shared storage-accounting
+  object-state predicate (`lib/media/storage-accounting.ts`: a CAS object is
+  unreferenced iff no live `(tenantId, contentHash)` row remains; live =
+  `deletedAt IS NULL`, the same predicate the upload quota counts). The
+  user-scoped staging objects (`pending/…`, `processing/…`), which the GC purge
+  does not track, are deleted directly by the calling worker via a new chunked
+  batch-delete helper that structurally refuses `cas/*` keys. `DeletionResult`
+  gains `mediaFilesErased`, `mediaFilesRetainedShared`, and `mediaStagingKeys`.
+
 ### Added
 
 - **Organization classification, feed decluttering by org category, and a public organization directory.** Tenants can self-declare what kind of organization they are (business, non-profit, community group, government, educational, or other — via a platform-curated category tree, `PlatformCategory`) independently of `TenantType`, which only ever described membership structure, not commercial nature. Feed views gain a second, independent filter axis alongside circle tier: viewers can exclude or isolate posts by an author's organization category (e.g. "no business posts," or "non-profits only"), denormalized onto `Post.authorOrgRootCategoryCode` for the same cheap, indexed filtering already used for region/sensitivity/content-category. A new opt-in directory (`TenantDirectoryProfile`) lets a classified tenant become searchable by name, category, and location; location precision is a named level (`EXACT`/`NEIGHBORHOOD`/`CITY`/`HIDDEN`), not a boolean — `CITY`/`HIDDEN` listings are structurally excluded from distance-sorted search (not just response-shaped) to close a triangulation vector where ranking order alone could otherwise leak an intentionally-imprecise location. See [Organization Classification & Directory](docs/concepts/org-classification-and-directory.md) and [Classify and List Your Organization](docs/guides/classify-and-list-your-organization.md). Self-declared only in this release — third-party verification (TechSoup, Haus des Stiftens) and AI-assisted category-suggestion are planned follow-ups; org-to-org relationships (membership/subsidiary) and cross-tenant resource-sharing grants are designed but deliberately out of scope for this release.
