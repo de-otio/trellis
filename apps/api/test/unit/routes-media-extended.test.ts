@@ -13,15 +13,13 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 // --- Hoisted mocks ---
-const { mockGetSession, mockApplyRateLimitKV, mockCreateSecureResponse, mockAddSecurityHeaders, mockAddCorsHeaders, mockUploadSingle, mockUploadBatch, mockListUserMediaGrouped, mockGetUserMediaStats, mockNormalize, mockMediaHandlerCreate } = vi.hoisted(() => {
+const { mockGetSession, mockApplyRateLimitKV, mockCreateSecureResponse, mockAddSecurityHeaders, mockAddCorsHeaders, mockListUserMediaGrouped, mockGetUserMediaStats, mockNormalize, mockMediaHandlerCreate } = vi.hoisted(() => {
   return {
     mockGetSession: vi.fn(),
     mockApplyRateLimitKV: vi.fn().mockResolvedValue(null),
     mockCreateSecureResponse: vi.fn().mockImplementation((body, init) => new Response(body, init)),
     mockAddSecurityHeaders: vi.fn().mockImplementation((r) => r),
     mockAddCorsHeaders: vi.fn().mockImplementation((r) => r),
-    mockUploadSingle: vi.fn(),
-    mockUploadBatch: vi.fn(),
     mockListUserMediaGrouped: vi.fn(),
     mockGetUserMediaStats: vi.fn(),
     mockNormalize: vi.fn().mockResolvedValue(null),
@@ -56,13 +54,6 @@ vi.mock("../../src/lib/cors-handler", () => ({
 vi.mock("../../src/lib/middleware", () => ({
   corsMiddleware: () => vi.fn(),
   csrfMiddleware: () => vi.fn(),
-}));
-
-vi.mock("../../src/lib/services/media-upload-service", () => ({
-  MediaUploadService: class {
-    uploadSingle = mockUploadSingle;
-    uploadBatch = mockUploadBatch;
-  },
 }));
 
 // Request-path moderation seam (T1): the sync-image upload now stages, moderates,
@@ -407,24 +398,12 @@ describe("Media Routes - Extended", () => {
     });
   });
 
-  describe("POST /api/media/upload/batch", () => {
+  describe("POST /api/media/upload/batch (AR16: intentionally not implemented)", () => {
     const batchRoute = () => findRoute("POST", "/api/media/upload/batch");
 
-    it("should return 401 when not authenticated", async () => {
-      mockGetSession.mockResolvedValue(null);
-      const req = new Request("https://example.com/api/media/upload/batch", { method: "POST" });
-
-      await batchRoute().handler(req, mockEnv);
-
-      expect(mockCreateSecureResponse).toHaveBeenCalledWith(
-        expect.stringContaining("Unauthorized"),
-        expect.objectContaining({ status: 401 }),
-      );
-    });
-
-    it("should return 400 when no files provided", async () => {
+    it("returns 501 Not Implemented (legacy path bypassed moderation and was removed)", async () => {
       const formData = new FormData();
-      formData.append("notfile", "value");
+      formData.append("file", new Blob([new Uint8Array([0xff, 0xd8, 0xff, 0xe0])], { type: "image/jpeg" }), "a.jpg");
       const req = new Request("https://example.com/api/media/upload/batch", {
         method: "POST",
         body: formData,
@@ -433,8 +412,8 @@ describe("Media Routes - Extended", () => {
       await batchRoute().handler(req, mockEnv);
 
       expect(mockCreateSecureResponse).toHaveBeenCalledWith(
-        expect.stringContaining("No files"),
-        expect.objectContaining({ status: 400 }),
+        expect.stringContaining("Not implemented"),
+        expect.objectContaining({ status: 501 }),
       );
     });
   });

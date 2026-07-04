@@ -1,11 +1,10 @@
 /**
  * Unit Tests: env.ts SQS queue wiring
  *
- * Regression guard for the media-upload 500. `MediaUploadService` reads
- * `env.MEDIA_RECONCILIATION_QUEUE` in its constructor and calls `.send()` on it
- * during `uploadSingle()`. If `buildEnv()` does not produce that field the queue
- * is `undefined`, and the upload throws "Cannot read properties of undefined
- * (reading 'send')" after the R2 put succeeds — surfaced as a generic 500.
+ * Regression guard against a queue field on the built env being `undefined`:
+ * a service that does `this.queue = env.SOME_QUEUE` and later
+ * `await this.queue.send(...)` throws "Cannot read properties of undefined
+ * (reading 'send')" — surfaced as a generic 500.
  *
  * These tests assert every SQS-backed queue field on the built env is defined
  * and is a real `SqsQueue` adapter (the same path production uses), with no AWS
@@ -60,7 +59,6 @@ describe("buildEnv — SQS queue wiring", () => {
     ["FOLLOWERS_EVENTS_QUEUE", "followers-events"],
     ["LINK_CHECK_QUEUE", "link-check"],
     ["MEDIA_PROCESSING_QUEUE", "media-processing"],
-    ["MEDIA_RECONCILIATION_QUEUE", "media-reconciliation"],
   ] as const;
 
   it.each(QUEUE_FIELDS)(
@@ -74,19 +72,6 @@ describe("buildEnv — SQS queue wiring", () => {
       expect(queue).toBeInstanceOf(SqsQueue);
     },
   );
-
-  it("MEDIA_RECONCILIATION_QUEUE is present — the exact field MediaUploadService.send() depends on", async () => {
-    const { buildEnv } = await import("../../src/env.js");
-    const env = await buildEnv();
-
-    // The constructor does `this.queue = env.MEDIA_RECONCILIATION_QUEUE`, then
-    // `uploadSingle()` does `await this.queue.send(message)`. A defined queue
-    // exposing a `send` function is what keeps that call from throwing.
-    expect(env.MEDIA_RECONCILIATION_QUEUE).toBeInstanceOf(SqsQueue);
-    expect(
-      typeof (env.MEDIA_RECONCILIATION_QUEUE as { send?: unknown }).send,
-    ).toBe("function");
-  });
 });
 
 describe("buildEnv — MEDIA_BUCKET_NAME resolution (image-moderation ref bucket)", () => {

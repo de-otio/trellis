@@ -39,12 +39,11 @@ describe("get-queue-status handler", () => {
   const QUEUE_NAMES = [
     "delete-account",
     "media-processing",
-    "media-reconciliation",
     "link-check",
     "followers-events",
   ];
 
-  it("returns status for all 5 queues with DLQ depth", async () => {
+  it("returns status for all 4 queues with DLQ depth", async () => {
     mockSend.mockImplementation((cmd: any) => {
       if (cmd._type === "GetQueueUrlCommand") {
         return Promise.resolve({
@@ -65,7 +64,7 @@ describe("get-queue-status handler", () => {
 
     const result = await handler();
 
-    expect(result.queues).toHaveLength(5);
+    expect(result.queues).toHaveLength(4);
 
     for (const q of result.queues) {
       expect(QUEUE_NAMES).toContain(q.name);
@@ -83,5 +82,25 @@ describe("get-queue-status handler", () => {
     );
 
     await expect(handler()).rejects.toThrow("Queue not found");
+  });
+
+  it("defaults visible/inFlight to 0 when queue attributes are absent", async () => {
+    mockSend.mockImplementation((cmd: any) => {
+      if (cmd._type === "GetQueueUrlCommand") {
+        return Promise.resolve({
+          QueueUrl: `https://sqs.us-east-1.amazonaws.com/123/${cmd.input.QueueName}`,
+        });
+      }
+      // No Attributes at all → the `?? "0"` fallbacks must engage.
+      return Promise.resolve({});
+    });
+
+    const result = await handler();
+
+    for (const q of result.queues) {
+      expect(q.visible).toBe(0);
+      expect(q.inFlight).toBe(0);
+      expect(q.dlqDepth).toBe(0);
+    }
   });
 });

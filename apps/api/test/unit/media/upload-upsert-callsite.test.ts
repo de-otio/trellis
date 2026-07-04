@@ -26,9 +26,8 @@ const TENANT = "ctenant0000000000000000aa";
 const USER_ID = "cuser000000000000000000aa";
 
 // --- hoisted capture handles ---------------------------------------------
-const { upsertMock, uploadSingleMock } = vi.hoisted(() => ({
+const { upsertMock } = vi.hoisted(() => ({
   upsertMock: vi.fn(async (_args: any) => ({ id: "mediafile-1" })),
-  uploadSingleMock: vi.fn(),
 }));
 
 // Session: always authenticated.
@@ -76,13 +75,6 @@ vi.mock("../../../src/lib/services/image-normalizer", () => ({
   })),
 }));
 
-// Upload service: still mocked (used by the batch path); the sync-image path no
-// longer calls it (it stages + moderates + promotes via the storage port).
-vi.mock("../../../src/lib/services/media-upload-service", () => ({
-  MediaUploadService: class {
-    uploadSingle = uploadSingleMock;
-  },
-}));
 
 // Request-path moderation seam (T1): default verdict = approved so the
 // sync-image path promotes to cas/ and records APPROVED on the create.
@@ -169,7 +161,6 @@ function makeEnv() {
     SESSION_SECRET: "test-secret-32-characters-long!!",
     MEDIA_BUCKET_NAME: "dev-trellis-media",
     MEDIA_BUCKET_R2: { put: vi.fn(), get: vi.fn(), delete: vi.fn() },
-    MEDIA_RECONCILIATION_QUEUE: { send: vi.fn() },
     media: {
       canonicalFormat: "jpeg" as const,
       maxBytes: { image: 10_000_000, video: 100_000_000 },

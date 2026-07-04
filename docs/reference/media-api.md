@@ -150,7 +150,8 @@ validated to exactly these two boolean keys; sending neither returns
 For completeness, the media routes also include:
 
 - `POST /api/media/upload` — single upload (multipart `file` field).
-- `POST /api/media/upload/batch` — up to 20 files.
+- `POST /api/media/upload/batch` — `501 Not Implemented` (the legacy batch
+  path bypassed moderation and was removed; upload files individually).
 - `GET /api/media` — list the caller's media (paginated, filterable).
 - `GET /api/media/grouped` — list grouped by month or year.
 - `GET /api/media/stats` — collection statistics.

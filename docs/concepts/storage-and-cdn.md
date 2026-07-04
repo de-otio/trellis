@@ -67,15 +67,18 @@ Public access:      Blocked (served via CloudFront OAC)
 ## Media Upload Flow
 
 Clients upload through the API: a `multipart/form-data` POST to
-`/api/media/upload` (or `/api/media/upload/batch`), authenticated by session.
-The handler validates the file (signature/MIME, per-user rate limits from
-`Env.media`), then routes the upload by content type.
+`/api/media/upload`, authenticated by session. (`/api/media/upload/batch`
+returns `501 Not Implemented` — the legacy batch path wrote to `cas/` without
+moderation and was removed; batch semantics will be rebuilt on a presigned
+direct-to-S3 flow.) The handler validates the file (signature/MIME, per-user
+rate limits from `Env.media`), then routes the upload by content type.
 
 **Image uploads** are handled synchronously: the API re-encodes the image to a
 canonical raster format (stripping EXIF/GPS and any embedded payload), hashes
-the cleaned output, and writes it to `cas/{tenantId}/{hash}` through the storage
-adapter (`MediaUploadService`, an S3-backed, Cloudflare-R2-compatible interface
-from `@de-otio/saas-foundation/storage`).
+the cleaned output, stages it, moderates the staged object, and only on an
+`APPROVED` verdict promotes it to `cas/{tenantId}/{hash}` through the storage
+adapter (an S3-backed, Cloudflare-R2-compatible interface from
+`@de-otio/saas-foundation/storage`).
 
 **Video and audio uploads** are stored to the `pending/{tenantId}/{uploadId}`
 prefix and processed asynchronously:
