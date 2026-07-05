@@ -70,11 +70,32 @@ export interface TranscodePort {
 // ---------------------------------------------------------------------------
 
 export interface StoragePort {
-  getObject(key: string): Promise<Buffer>;
+  /** Read an object. `options.versionId` pins the read to that EXACT stored
+   * version (AR-SEC F3) — S3 `GetObject` with `VersionId`. */
+  getObject(key: string, options?: { versionId?: string }): Promise<Buffer>;
   putObject(key: string, body: Buffer, contentType: string): Promise<void>;
-  copyObject(fromKey: string, toKey: string): Promise<void>;
+  /** Copy an object. `options.fromVersionId` pins the SOURCE to that exact
+   * version (AR-SEC F3) — on S3 a versioned `CopySource`; without it the
+   * CURRENT bytes at `fromKey` are copied (TOCTOU-prone for moderated media —
+   * the media pipeline always pins). */
+  copyObject(
+    fromKey: string,
+    toKey: string,
+    options?: { fromVersionId?: string },
+  ): Promise<void>;
   deleteObject(key: string): Promise<void>;
-  headObject(key: string): Promise<{ exists: boolean }>;
+  /**
+   * Existence check. Without options: reports the CURRENT object, and — when
+   * the backing store is versioned (S3 bucket versioning, REQUIRED on the
+   * media bucket for the moderation pipeline's version pinning, AR-SEC F3) —
+   * its current `versionId`; `versionId` is `undefined` on an unversioned
+   * store (the pipeline fails closed on that). With `options.versionId`:
+   * whether that exact version exists.
+   */
+  headObject(
+    key: string,
+    options?: { versionId?: string },
+  ): Promise<{ exists: boolean; versionId?: string }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -162,21 +183,69 @@ export class MockTranscodePort implements TranscodePort {
 }
 
 /**
- * In-memory StoragePort backed by a Map. `headObject` reports existence from the
- * map; `getObject` throws on a miss (callers must handle the miss explicitly —
- * a silent empty buffer would mask bugs).
+ * In-memory StoragePort backed by a Map, modelling a VERSIONED bucket
+ * (AR-SEC F3): every put appends a new deterministic version
+ * (`mock-version-N`), reads/copies may pin a version, and a delete hides the
+ * current object behind a delete marker while prior versions stay resolvable
+ * by versionId — mirroring S3 bucket-versioning semantics, which the media
+ * pipeline's version pinning requires. `getObject` throws on a miss (callers
+ * must handle the miss explicitly — a silent empty buffer would mask bugs).
  */
 export class MockStoragePort implements StoragePort {
-  private readonly objects = new Map<string, { body: Buffer; contentType: string }>();
+  private readonly objects = new Map<
+    string,
+    {
+      versions: Array<{ versionId: string; body: Buffer; contentType: string }>;
+      deleteMarker: boolean;
+    }
+  >();
+  private versionSeq = 0;
 
   constructor(seed: Record<string, Buffer> = {}) {
     for (const [key, body] of Object.entries(seed)) {
-      this.objects.set(key, { body, contentType: "application/octet-stream" });
+      this.appendVersion(key, body, "application/octet-stream");
     }
   }
 
-  async getObject(key: string): Promise<Buffer> {
-    const obj = this.objects.get(key);
+  private appendVersion(key: string, body: Buffer, contentType: string): void {
+    this.versionSeq += 1;
+    const versionId = `mock-version-${this.versionSeq}`;
+    const entry = this.objects.get(key) ?? {
+      versions: [],
+      deleteMarker: false,
+    };
+    entry.versions.push({ versionId, body, contentType });
+    entry.deleteMarker = false;
+    this.objects.set(key, entry);
+  }
+
+  /** The CURRENT (latest, non-delete-marked) version of a key, if any. */
+  private current(
+    key: string,
+  ): { versionId: string; body: Buffer; contentType: string } | undefined {
+    const entry = this.objects.get(key);
+    if (!entry || entry.deleteMarker || entry.versions.length === 0) {
+      return undefined;
+    }
+    return entry.versions[entry.versions.length - 1];
+  }
+
+  async getObject(
+    key: string,
+    options?: { versionId?: string },
+  ): Promise<Buffer> {
+    if (options?.versionId !== undefined) {
+      const v = this.objects
+        .get(key)
+        ?.versions.find((x) => x.versionId === options.versionId);
+      if (!v) {
+        throw new Error(
+          `MockStoragePort: no version "${options.versionId}" at key "${key}"`,
+        );
+      }
+      return v.body;
+    }
+    const obj = this.current(key);
     if (!obj) {
       throw new Error(`MockStoragePort: no object at key "${key}"`);
     }
@@ -184,28 +253,54 @@ export class MockStoragePort implements StoragePort {
   }
 
   async putObject(key: string, body: Buffer, contentType: string): Promise<void> {
-    this.objects.set(key, { body, contentType });
+    this.appendVersion(key, body, contentType);
   }
 
-  async copyObject(fromKey: string, toKey: string): Promise<void> {
-    const obj = this.objects.get(fromKey);
-    if (!obj) {
+  async copyObject(
+    fromKey: string,
+    toKey: string,
+    options?: { fromVersionId?: string },
+  ): Promise<void> {
+    const source =
+      options?.fromVersionId !== undefined
+        ? this.objects
+            .get(fromKey)
+            ?.versions.find((x) => x.versionId === options.fromVersionId)
+        : this.current(fromKey);
+    if (!source) {
       throw new Error(`MockStoragePort: no object at key "${fromKey}" to copy`);
     }
-    this.objects.set(toKey, { body: obj.body, contentType: obj.contentType });
+    this.appendVersion(toKey, source.body, source.contentType);
   }
 
   async deleteObject(key: string): Promise<void> {
-    this.objects.delete(key);
+    // Versioned-bucket semantics: a non-versioned delete places a delete
+    // marker (the current object disappears; prior versions stay pinnable).
+    const entry = this.objects.get(key);
+    if (entry) {
+      entry.deleteMarker = true;
+    }
   }
 
-  async headObject(key: string): Promise<{ exists: boolean }> {
-    return { exists: this.objects.has(key) };
+  async headObject(
+    key: string,
+    options?: { versionId?: string },
+  ): Promise<{ exists: boolean; versionId?: string }> {
+    if (options?.versionId !== undefined) {
+      const found = this.objects
+        .get(key)
+        ?.versions.some((x) => x.versionId === options.versionId);
+      return found
+        ? { exists: true, versionId: options.versionId }
+        : { exists: false };
+    }
+    const obj = this.current(key);
+    return obj ? { exists: true, versionId: obj.versionId } : { exists: false };
   }
 
   /** Test helper: read the content-type a key was stored with. */
   contentTypeOf(key: string): string | undefined {
-    return this.objects.get(key)?.contentType;
+    return this.current(key)?.contentType;
   }
 }
 

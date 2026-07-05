@@ -36,6 +36,13 @@ export interface ImageRef {
 export interface S3Ref {
   readonly bucket: string;
   readonly key: string;
+  /**
+   * Pin the reference to an EXACT stored object version (AR-SEC F3). When set,
+   * the provider adapter must moderate that specific version (Rekognition:
+   * `Video.S3Object.Version`), so a later overwrite of the same key can never
+   * change what a started job actually scanned.
+   */
+  readonly versionId?: string;
 }
 
 /** A single classifier label. `category` is an OPAQUE token, never a real-category string. */

@@ -121,10 +121,21 @@ export interface MediaPersistencePort {
    * completion worker derives the promote target (`cas/{tenant}/{hash}`) from
    * this persisted `contentHash`, so this write MUST happen before moderation
    * fans in — otherwise the object can never promote.
+   *
+   * `stagingVersionId` (AR-SEC F3) is the S3 versionId of the cleaned STAGING
+   * object this worker hashed and started moderation on. The adapter must
+   * persist it retrievably for the completion store (no schema change needed —
+   * e.g. inside the existing `MediaFile.videoMetadata` JSON column) and
+   * surface it back as `MediaCoords.stagingVersionId`, so the promote copy can
+   * pin the EXACT moderated version.
    */
   persistCleanedContent(
     mediaId: string,
-    content: { contentHash: string; originalKey: string },
+    content: {
+      contentHash: string;
+      originalKey: string;
+      stagingVersionId: string;
+    },
   ): Promise<void>;
   /** Drive a media object's lifecycle to REVIEW (poison path). */
   markMediaForReview(mediaId: string): Promise<void>;
@@ -267,6 +278,23 @@ class KeyTenantMismatchError extends Error {
   constructor() {
     // The name is in classify-worker-error's poison fragment set ("validation").
     super("media key/tenant validation mismatch: triggering key does not match the row");
+    this.name = "ValidationError";
+  }
+}
+
+/**
+ * AR-SEC F3: the cleaned staging object's S3 version could not be resolved —
+ * bucket versioning missing/disabled, or the object vanished after transcode.
+ * Permanent w.r.t. these bytes: without a pinned version the approve→promote
+ * path cannot certify WHAT it would serve, so fail CLOSED to human review
+ * (poison → REVIEW + ack), never run an unpinned pipeline.
+ */
+class StagingVersionUnresolvableError extends Error {
+  constructor() {
+    // The name is in classify-worker-error's poison fragment set ("validation").
+    super(
+      "media staging version validation failed: cleaned object version unresolvable (is bucket versioning enabled on the media bucket?)",
+    );
     this.name = "ValidationError";
   }
 }
@@ -424,7 +452,22 @@ export async function processObjectKey(
       maxDurationSeconds: deps.config.maxDurationSeconds,
     });
     const cleanedStagingKeyOut = transcodeResult.cleanedPath;
-    const cleanedBytes = await deps.storage.getObject(cleanedStagingKeyOut);
+
+    // --- 4b. AR-SEC F3 (TOCTOU): pin the EXACT staging object version we ---
+    // are about to hash and moderate. Everything downstream — the content
+    // hash, the started moderation jobs, and the completion worker's promote
+    // copy — references THIS version, so bytes swapped at the same key after
+    // this point can never ride an earlier approval into cas/. Requires S3
+    // bucket versioning on the media bucket; an unresolvable version fails
+    // CLOSED (poison → REVIEW), never an unpinned pipeline.
+    const cleanedHead = await deps.storage.headObject(cleanedStagingKeyOut);
+    if (!cleanedHead.exists || cleanedHead.versionId === undefined) {
+      throw new StagingVersionUnresolvableError();
+    }
+    const stagingVersionId = cleanedHead.versionId;
+    const cleanedBytes = await deps.storage.getObject(cleanedStagingKeyOut, {
+      versionId: stagingVersionId,
+    });
 
     // --- 5. Hash the CLEANED bytes ⇒ real content identity; persist it. ---
     // We do NOT write the cleaned bytes to cas/ here: they already live at the
@@ -440,15 +483,25 @@ export async function processObjectKey(
       throw new KeyTenantMismatchError();
     }
     // Replace the upload-time uploadId placeholder contentHash with the REAL
-    // hash and record the future serve key (cas/{tenant}/{hash}).
+    // hash and record the future serve key (cas/{tenant}/{hash}) plus the
+    // pinned staging version the completion worker's promote copy must use.
     await deps.persistence.persistCleanedContent(row.id, {
       contentHash,
       originalKey: cleanedCasKey,
+      stagingVersionId,
     });
 
     // --- 6. START moderation on the CLEANED STAGING object (the exact bytes ---
     // that will be served), NOT the raw pending upload and NOT a cas/ key.
-    const stagingRef: S3Ref = { bucket: deps.bucket, key: cleanedStagingKeyOut };
+    // The ref is version-pinned (AR-SEC F3) so the provider scans EXACTLY the
+    // bytes we hashed. (Transcription cannot pin a version — Transcribe's
+    // MediaFileUri is unversioned — but the promote copy still pins, so the
+    // bytes that can ever serve remain exactly the hashed/pinned version.)
+    const stagingRef: S3Ref = {
+      bucket: deps.bucket,
+      key: cleanedStagingKeyOut,
+      versionId: stagingVersionId,
+    };
 
     const visual = await deps.moderation.startVideoModeration(stagingRef);
     await deps.persistence.createModerationJob({
@@ -517,6 +570,7 @@ export async function processObjectKey(
     deps.logger.info("Started per-track moderation jobs", {
       mediaId: row.id,
       stagingKey: cleanedStagingKeyOut,
+      stagingVersionId,
       casKey: cleanedCasKey,
       visualJobId: visual.jobId,
       audioJobId,

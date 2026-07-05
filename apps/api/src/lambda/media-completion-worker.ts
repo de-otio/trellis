@@ -155,6 +155,16 @@ export interface MediaCoords {
   readonly uploadId: string;
   /** 64-char lowercase SHA-256 of the CLEANED bytes (addresses the cas/ key). */
   readonly contentHash: string;
+  /**
+   * The S3 versionId of the cleaned STAGING object the processing worker
+   * hashed and moderated (AR-SEC F3; persisted via persistCleanedContent).
+   * The promote copy pins its source to EXACTLY this version — never "the
+   * current bytes at the staging key" (TOCTOU). `null` on legacy/unpinned
+   * rows: those can never promote from staging (fail-closed REVIEW hold);
+   * only an already-present cas/ object (a prior pinned promote) satisfies
+   * them.
+   */
+  readonly stagingVersionId: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -446,12 +456,40 @@ export async function processCompletion(
   // The cleaned bytes live at the STAGING key until promoted to cas/.
   const stagingK = `processing/${media.tenantId}/${media.uploadId}`;
 
-  // 4. Decide (pure). Promotion is gated on the cleaned bytes being available to
-  //    serve: present in cas/ (after a prior promote) OR at the staging key
-  //    (before promote). Either satisfies casObjectPresent.
-  const casPresent =
-    (await deps.storage.headObject(casK)).exists ||
-    (await deps.storage.headObject(stagingK)).exists;
+  // 4. Resolve the promote SOURCE, version-pinned (AR-SEC F3), then decide
+  //    (pure). Promotion may only ever copy the EXACT staging object version
+  //    the processing worker hashed and moderated — never "whatever bytes
+  //    currently sit at the staging key" (TOCTOU: a swap between moderation
+  //    and promote must not ride the approval into cas/). A cas/ object from
+  //    a prior promote also satisfies presence: those bytes were themselves
+  //    pin-copied.
+  type PromoteSource =
+    | { readonly kind: "staging"; readonly versionId: string }
+    | { readonly kind: "cas" }
+    | { readonly kind: "none" };
+  let promoteSource: PromoteSource = { kind: "none" };
+  // Normalize fail-closed: only a non-empty string is a usable pin. An
+  // undefined/empty value (legacy row, adapter gap) must NOT degrade into an
+  // unpinned head/copy of the current staging bytes.
+  const pinnedVersion =
+    typeof media.stagingVersionId === "string" &&
+    media.stagingVersionId.length > 0
+      ? media.stagingVersionId
+      : null;
+  if (pinnedVersion !== null) {
+    const pinnedHead = await deps.storage.headObject(stagingK, {
+      versionId: pinnedVersion,
+    });
+    if (pinnedHead.exists) {
+      promoteSource = { kind: "staging", versionId: pinnedVersion };
+    }
+  }
+  if (promoteSource.kind === "none") {
+    if ((await deps.storage.headObject(casK)).exists) {
+      promoteSource = { kind: "cas" };
+    }
+  }
+  const casPresent = promoteSource.kind !== "none";
   const action = decidePromotion({
     visual,
     audio,
@@ -471,15 +509,38 @@ export async function processCompletion(
 
   const nextStatusValue = action.transition.status;
 
+  // AR-SEC F3 fail-closed hold: both tracks approved but the version-pinned
+  // moderated bytes cannot be resolved (unpinned legacy row, pinned version
+  // gone, and no prior cas/ promote). Do NOT persist APPROVED — an APPROVED
+  // row without certified bytes would emit "ready" with nothing safe to
+  // serve, and could later be satisfied by unmoderated bytes. Hold in REVIEW
+  // instead: a human (or a pipeline re-run) resolves it; doubt never serves.
+  if (nextStatusValue === "APPROVED" && promoteSource.kind === "none") {
+    deps.log?.error?.(
+      "completion: approved but pinned moderated bytes unresolvable — holding REVIEW",
+      { mediaId: job.mediaId },
+    );
+    await deps.store.persistMediaStatus(job.mediaId, "REVIEW");
+    await deps.emitResolved(moderationResolvedPayload(job.mediaId, "REVIEW"));
+    return { kind: "applied", status: "REVIEW" };
+  }
+
   // 5. APPLY in fixed order: promote -> persist -> emit.
 
-  // 5a. PROMOTE: copy the CLEANED STAGING bytes (the exact bytes that were
-  //     moderated) to cas/ so they can serve — NEVER the raw pending upload.
-  //     copyObject is idempotent (content-derived target key). Then best-effort
-  //     remove BOTH the raw original (pending/) and the staging copy. cas/ thus
-  //     only ever holds APPROVED cleaned bytes.
+  // 5a. PROMOTE: copy the CLEANED STAGING bytes — pinned to the EXACT version
+  //     that was hashed and moderated (AR-SEC F3) — to cas/ so they can serve;
+  //     NEVER the raw pending upload and NEVER the unpinned "current" staging
+  //     bytes. copyObject is idempotent (content-derived target key). When the
+  //     cas/ object already exists (a prior pinned promote; replay), the copy
+  //     is skipped — re-copying from staging could adopt post-moderation
+  //     bytes. Then best-effort remove BOTH the raw original (pending/) and
+  //     the staging copy. cas/ thus only ever holds APPROVED cleaned bytes.
   if (action.shouldPromote) {
-    await deps.storage.copyObject(stagingK, casK);
+    if (promoteSource.kind === "staging") {
+      await deps.storage.copyObject(stagingK, casK, {
+        fromVersionId: promoteSource.versionId,
+      });
+    }
     // Best-effort raw-original cleanup. Tolerate already-deleted (a prior
     // delivery or lifecycle expiry) — the cas/ copy is what matters.
     try {

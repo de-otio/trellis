@@ -99,8 +99,14 @@ interface PersistenceFake {
     thresholdSnapshot: ThresholdSnapshot;
     initialDecision?: string;
   }>;
-  /** persistCleanedContent calls: the real hash + serve key written per media. */
-  cleaned: Array<{ mediaId: string; contentHash: string; originalKey: string }>;
+  /** persistCleanedContent calls: the real hash + serve key + pinned staging
+   * version (AR-SEC F3) written per media. */
+  cleaned: Array<{
+    mediaId: string;
+    contentHash: string;
+    originalKey: string;
+    stagingVersionId: string;
+  }>;
   reviewed: string[]; // mediaIds marked for REVIEW
   uploaded: string[]; // mediaIds driven through bytes-arrived (T14)
   rejected: string[]; // mediaIds driven to REJECTED (T14 over-duration)
@@ -144,7 +150,11 @@ function makeDeps(opts: {
     },
     async persistCleanedContent(
       mediaId: string,
-      content: { contentHash: string; originalKey: string },
+      content: {
+        contentHash: string;
+        originalKey: string;
+        stagingVersionId: string;
+      },
     ): Promise<void> {
       fake.cleaned.push({ mediaId, ...content });
     },
@@ -310,12 +320,25 @@ describe("processObjectKey — tenant-from-row + key mismatch", () => {
     const expectedCas = casKey(TENANT_A, createHashHex(cleaned));
     if (isCasKeyError(expectedCas)) throw new Error("expected valid cas key");
     const stagingKey = `processing/${TENANT_A}/${UPLOAD_1}`;
-    // Moderation started on the STAGING key (the exact bytes that will serve).
+    const stagingVersion = (await storage.headObject(stagingKey)).versionId;
+    expect(stagingVersion).toBeDefined();
+    // Moderation started on the STAGING key, PINNED to the exact version that
+    // was hashed (AR-SEC F3 — the exact bytes that will serve).
     expect(startSpy).toHaveBeenCalledTimes(1);
-    expect(startSpy.mock.calls[0][0]).toEqual({ bucket: BUCKET, key: stagingKey });
-    // The real cas key (derived from rowTenant + the cleaned hash) was PERSISTED.
+    expect(startSpy.mock.calls[0][0]).toEqual({
+      bucket: BUCKET,
+      key: stagingKey,
+      versionId: stagingVersion,
+    });
+    // The real cas key (derived from rowTenant + the cleaned hash) was
+    // PERSISTED, along with the pinned staging version (AR-SEC F3).
     expect(fake.cleaned).toEqual([
-      { mediaId: "media1", contentHash: createHashHex(cleaned), originalKey: expectedCas },
+      {
+        mediaId: "media1",
+        contentHash: createHashHex(cleaned),
+        originalKey: expectedCas,
+        stagingVersionId: stagingVersion,
+      },
     ]);
   });
 
@@ -459,9 +482,17 @@ describe("processObjectKey — happy path", () => {
       { key: stagingKey, jobName: `jobname-${stagingKey}` },
     ]);
 
-    // The real content identity was PERSISTED (replacing the uploadId placeholder).
+    // The real content identity was PERSISTED (replacing the uploadId
+    // placeholder), pinned to the staging version that was hashed (AR-SEC F3).
+    const stagingVersion = (await storage.headObject(stagingKey)).versionId;
+    expect(stagingVersion).toBeDefined();
     expect(fake.cleaned).toEqual([
-      { mediaId: "media1", contentHash: createHashHex(cleaned), originalKey: expectedCas },
+      {
+        mediaId: "media1",
+        contentHash: createHashHex(cleaned),
+        originalKey: expectedCas,
+        stagingVersionId: stagingVersion,
+      },
     ]);
 
     // The cleaned bytes are NOT written to cas/ here — cas/ stays empty until the
@@ -886,3 +917,64 @@ import { createHash } from "node:crypto";
 function createHashHex(buf: Buffer): string {
   return createHash("sha256").update(buf).digest("hex");
 }
+
+// ---------------------------------------------------------------------------
+// AR-SEC F3 — staging version pinning
+// ---------------------------------------------------------------------------
+
+describe("processObjectKey — AR-SEC F3 staging version pinning", () => {
+  it("fails closed (poison => REVIEW) when the staging version is unresolvable (unversioned bucket)", async () => {
+    const cleaned = Buffer.from("cleaned-bytes");
+    const storage = happyStorage(TENANT_A, UPLOAD_1, cleaned);
+    // Model an UNVERSIONED bucket: heads resolve but carry no versionId, so
+    // the worker cannot pin what it is about to hash/moderate.
+    const origHead = storage.headObject.bind(storage);
+    storage.headObject = async (headKey, options) => {
+      const res = await origHead(headKey, options);
+      return { exists: res.exists };
+    };
+    const { deps, fake } = makeDeps({
+      storage,
+      rows: [{ id: "media1", tenantId: TENANT_A, uploadId: UPLOAD_1 }],
+    });
+
+    const out = await processObjectKey(key(TENANT_A, UPLOAD_1), deps);
+
+    expect(out.disposition).toBe("ack");
+    expect(poisonOf(out)).toBe(true);
+    expect(fake.reviewed).toEqual(["media1"]);
+    // No moderation jobs were started on unpinnable bytes; nothing persisted.
+    expect(fake.jobs).toHaveLength(0);
+    expect(fake.cleaned).toHaveLength(0);
+  });
+
+  it("hashes the PINNED bytes: a concurrent overwrite between head and read cannot change the persisted identity", async () => {
+    const cleaned = Buffer.from("cleaned-bytes-v1");
+    const swapped = Buffer.from("swapped-bytes-v2");
+    const stagingKey = `processing/${TENANT_A}/${UPLOAD_1}`;
+    const storage = happyStorage(TENANT_A, UPLOAD_1, cleaned);
+    // Race: overwrite the staging key right after the worker pins the head.
+    const origHead = storage.headObject.bind(storage);
+    let overwritten = false;
+    storage.headObject = async (headKey, options) => {
+      const res = await origHead(headKey, options);
+      if (!overwritten && headKey === stagingKey && options === undefined) {
+        overwritten = true;
+        await storage.putObject(stagingKey, swapped, "video/mp4");
+      }
+      return res;
+    };
+    const { deps, fake } = makeDeps({
+      storage,
+      rows: [{ id: "media1", tenantId: TENANT_A, uploadId: UPLOAD_1 }],
+    });
+
+    const out = await processObjectKey(key(TENANT_A, UPLOAD_1), deps);
+
+    expect(out.disposition).toBe("ack");
+    expect(out.reason).toBe("started-moderation");
+    // The persisted identity is the hash of the PINNED (pre-swap) bytes.
+    expect(fake.cleaned).toHaveLength(1);
+    expect(fake.cleaned[0].contentHash).toBe(createHashHex(cleaned));
+  });
+});
