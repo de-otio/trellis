@@ -196,10 +196,11 @@ jobs:
     # The graph layer runs in Postgres (graph-db revisit 2026-06). This lane
     # exercises the SQL that mocked unit tests cannot verify: the recursive
     # discovery CTE and the dual-gated visibility query (a privacy control),
-    # against a real PostGIS-enabled Postgres. The postgis/postgis image
-    # enables the extension in POSTGRES_DB at init; the schema is
-    # materialized with `prisma db push` (the graph edge tables ship without
-    # migration files).
+    # against a real PostGIS-enabled Postgres. The schema is materialized
+    # with `prisma migrate deploy` — since the pre-launch init migration the
+    # graph edge tables ship IN the migrations (the old `db push` here was
+    # papering over their absence), so this lane now also proves a fresh
+    # deploy produces a working graph.
     services:
       postgres:
         image: postgis/postgis:16-3.4
@@ -232,12 +233,8 @@ jobs:
       - name: Generate Prisma client
         run: npm run prisma:generate
 
-      - name: Push schema
-        # Run from apps/api so Prisma 7 discovers prisma.config.ts (which holds
-        # the datasource url since the Prisma 6→7 move); from the repo root, db
-        # push loads the bare schema and errors "datasource.url is required".
-        working-directory: apps/api
-        run: npx prisma db push
+      - name: Run migrations
+        run: npm run prisma:migrate:deploy
         env:
           DATABASE_URL: postgresql://trellis:trellis_test_password@localhost:5432/trellis_test
           DIRECT_DATABASE_URL: postgresql://trellis:trellis_test_password@localhost:5432/trellis_test
@@ -248,6 +245,56 @@ jobs:
           DATABASE_URL: postgresql://trellis:trellis_test_password@localhost:5432/trellis_test
           DIRECT_DATABASE_URL: postgresql://trellis:trellis_test_password@localhost:5432/trellis_test
           STAGE: test
+
+  schema-drift:
+    name: Schema-drift guard
+    # Pre-launch schema end-state pass: after the single clean init migration,
+    # schema.prisma and prisma/migrations/ must move in lockstep. This job
+    # applies the migrations to a scratch Postgres and diffs the result
+    # against schema.prisma (apps/api/scripts/check-schema-drift.sh) — it
+    # FAILS when the schema was edited without generating a migration. The
+    # hand-written migration objects (partial uniques, GIN/GiST indexes) are
+    # allowlisted in the script.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_DB: trellis_drift
+          POSTGRES_USER: trellis
+          POSTGRES_PASSWORD: trellis_test_password
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U trellis -d trellis_drift"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run migrations
+        timeout-minutes: 5
+        run: npm run prisma:migrate:deploy
+        env:
+          DATABASE_URL: postgresql://trellis:trellis_test_password@localhost:5432/trellis_drift
+          DIRECT_DATABASE_URL: postgresql://trellis:trellis_test_password@localhost:5432/trellis_drift
+
+      - name: Check schema drift (schema.prisma vs migrations)
+        timeout-minutes: 5
+        run: bash apps/api/scripts/check-schema-drift.sh
+        env:
+          DATABASE_URL: postgresql://trellis:trellis_test_password@localhost:5432/trellis_drift
 
   schema:
     name: Schema-shape lane (Postgres)

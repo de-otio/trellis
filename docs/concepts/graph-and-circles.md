@@ -114,8 +114,8 @@ Node data (users, entities, posts) lives in its own tables; the graph layer refe
 
 The edge tables are indexed for both forward and reverse traversal, for example on `relationships`:
 
-- `(userId)` — a user's relationships (forward)
-- `(targetType, targetId)` and `(targetId)` — who relates to X (reverse: friends-of-friends, recompute)
+- `(userId, targetType, targetId)` — the composite unique; its `userId` prefix serves forward "a user's relationships" reads
+- `(targetType, targetId)` — who relates to X (reverse: friends-of-friends, recompute; reverse lookups are always type-qualified)
 - `(userId, tier)` — circle-tier membership
 
 `entity_relationships` is indexed on `(entityId, type, status)` and `(relatedEntityId, type, status)` for list-by-entity and pending-by-owner queries. All edge tables carry a `tenantId` index for tenant scoping.

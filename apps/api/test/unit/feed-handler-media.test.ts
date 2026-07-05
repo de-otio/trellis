@@ -55,13 +55,12 @@ vi.mock("../../src/lib/region-detection", () => {
   };
 });
 
-// Mock FriendsHandler
-const mockGetFriends = vi.fn();
-vi.mock("../../src/lib/friends-handler", () => {
+// Mock friend-set resolution (relationship edges — see lib/friend-ids.ts)
+const mockGetFriendUserIds = vi.fn();
+vi.mock("../../src/lib/friend-ids", () => {
   return {
-    FriendsHandler: class {
-      getFriends = mockGetFriends;
-    },
+    FRIEND_TIER_MAX: 1,
+    getFriendUserIds: (...args: unknown[]) => mockGetFriendUserIds(...args),
   };
 });
 
@@ -163,7 +162,7 @@ describe("FeedHandler - Media Support", () => {
       session: mockSession,
     };
 
-    mockGetFriends.mockResolvedValue([]);
+    mockGetFriendUserIds.mockResolvedValue([]);
 
     // Mock executeWithRetry to call the query function with mockDb
     mockExecuteWithRetry.mockImplementation(

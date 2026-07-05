@@ -38,7 +38,6 @@ import { entitiesRoutes } from "./entities.js";
 import { exportRoutes } from "./export.js";
 import { featureFlagsRoutes } from "./feature-flags.js";
 import { feedsRoutes } from "./feeds.js";
-import { friendsRoutes as apiFriendsRoutes } from "./friends.js";
 import { relationshipRoutes } from "./relationships.js";
 import { circleRoutes } from "./circles.js";
 import { discoveryRoutes } from "./discovery.js";
@@ -252,10 +251,9 @@ const coreRoutes: Route[] = [
   // Account deletion
   ...deletionRoutes,
 
-  // Friends (API endpoints)
-  ...apiFriendsRoutes,
-
-  // Relationships (circles model — replaces followers)
+  // Relationships (circles model — replaces followers and the legacy
+  // KV-backed friends endpoints, which were removed in the pre-launch
+  // schema end-state pass; see lib/friend-ids.ts)
   ...relationshipRoutes,
 
   // Circles (content views)

@@ -226,8 +226,6 @@ export interface Env {
   // KV Namespaces (DynamoDB-backed, same interface as Cloudflare KV)
   RATE_LIMIT_KV: KVNamespace;
   PRIVACY_PREFERENCES_KV: KVNamespace;
-  FRIENDS_KV: KVNamespace;
-  CONNECTION_CODES_KV: KVNamespace;
   FEED_CACHE_KV: KVNamespace;
   MODERATION_CACHE_KV: KVNamespace;
   COMMENTS_KV: KVNamespace;
@@ -1094,8 +1092,6 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     // DynamoDB-backed KV namespaces
     RATE_LIMIT_KV: kv("ratelimit"),
     PRIVACY_PREFERENCES_KV: kv("privacy"),
-    FRIENDS_KV: kv("friends"),
-    CONNECTION_CODES_KV: kv("connections"),
     FEED_CACHE_KV: kv("feed"),
     MODERATION_CACHE_KV: kv("moderation"),
     COMMENTS_KV: kv("comments"),

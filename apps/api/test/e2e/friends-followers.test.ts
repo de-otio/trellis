@@ -1,8 +1,12 @@
 /**
- * Friends & Followers E2E Tests
+ * Connections & Followers E2E Tests
  *
- * Tests social graph endpoints: friend connections, follow/unfollow, counts.
+ * Tests social graph endpoints: connection codes, follow/unfollow, counts.
  * Requires 2 test users for cross-user interactions.
+ *
+ * The legacy /api/friends endpoints were removed in the pre-launch schema
+ * end-state pass — connections are established via /api/connection-codes
+ * and recorded as relationship edges (see lib/friend-ids.ts).
  */
 
 import { describe, expect, it } from "vitest";
@@ -11,13 +15,13 @@ import { getShardUser } from "./utils/shard-user-pool.js";
 
 const API_URL = getApiUrl();
 
-describe("Friends & Followers", () => {
+describe("Connections & Followers", () => {
   const userA = getShardUser(0);
   const userB = getShardUser(1);
 
   describe("Auth guards", () => {
-    it("friends list rejects unauthenticated", async () => {
-      const res = await fetch(`${API_URL}/api/friends`);
+    it("connection-code listing rejects unauthenticated", async () => {
+      const res = await fetch(`${API_URL}/api/connection-codes`);
       expect(res.status).toBe(401);
     });
 
@@ -28,8 +32,8 @@ describe("Friends & Followers", () => {
   });
 
   describe("Read endpoints", () => {
-    it("friends list returns valid structure", async () => {
-      const res = await userA.authFetch(`${API_URL}/api/friends`);
+    it("connection-code list returns valid structure", async () => {
+      const res = await userA.authFetch(`${API_URL}/api/connection-codes`);
       expect(res.status).not.toBe(401);
       expect(res.status).toBeLessThan(500);
     });
@@ -75,12 +79,13 @@ describe("Friends & Followers", () => {
     });
   });
 
-  describe("Friend connection flow", () => {
-    it("userA generates connection code and userB connects", async () => {
-      // Generate code
-      const codeRes = await userA.authFetch(`${API_URL}/api/friends/connection-code`, {
+  describe("Connection-code flow", () => {
+    it("userA creates a connection code and userB redeems it", async () => {
+      // Create code
+      const codeRes = await userA.authFetch(`${API_URL}/api/connection-codes`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
       });
       expect(codeRes.status).not.toBe(401);
       expect(codeRes.status).toBeLessThan(500);
@@ -89,14 +94,17 @@ describe("Friends & Followers", () => {
         const codeBody = await codeRes.json();
         const code = codeBody.code || codeBody.connectionCode;
         if (code) {
-          // Connect
-          const connectRes = await userB.authFetch(`${API_URL}/api/friends/connect`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ code }),
-          });
-          expect(connectRes.status).not.toBe(401);
-          expect(connectRes.status).toBeLessThan(500);
+          // Redeem
+          const redeemRes = await userB.authFetch(
+            `${API_URL}/api/connection-codes/redeem`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ code }),
+            },
+          );
+          expect(redeemRes.status).not.toBe(401);
+          expect(redeemRes.status).toBeLessThan(500);
         }
       }
     });

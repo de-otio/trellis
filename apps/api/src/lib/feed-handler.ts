@@ -19,7 +19,7 @@ const { PostRadius } = prismaPkg;
 import { getLogger } from "./logger.js";
 
 import { DataRouter } from "./data-router.js";
-import { FriendsHandler } from "./friends-handler.js";
+import { getFriendUserIds } from "./friend-ids.js";
 import { Logger, type LoggerEnv } from "./logger.js";
 import type { TrellisRequestContext } from "./request-context.js";
 import { getSentimentDisplayMode, SentimentDisplayMode } from "./sentiment-display.js";
@@ -102,11 +102,9 @@ export interface FeedResponse {
 }
 
 export class FeedHandler {
-  private friendsHandler: FriendsHandler;
   private logger: Logger;
 
   constructor(env?: LoggerEnv) {
-    this.friendsHandler = new FriendsHandler();
     this.logger = getLogger();
   }
 
@@ -204,13 +202,9 @@ export class FeedHandler {
         session?.userId,
       );
 
-      // Get friends list for visibility filtering
-      const friends = await this.friendsHandler.getFriends(
-        session,
-        "ACCEPTED",
-        env,
-      );
-      const friendIds = friends.map((f) => f.id);
+      // Get friend user IDs for visibility filtering (relationship edges,
+      // tier ≤ 1 — see lib/friend-ids.ts for the convergence definition)
+      const friendIds = await getFriendUserIds(db, session.userId);
 
       // Build visibility filter
       // Note: This OR condition is at the top level, not nested
