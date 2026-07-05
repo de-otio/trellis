@@ -322,6 +322,9 @@ model User {
   // MFA enrollment relation
   mfaEnrollment MfaEnrollment?
 
+  // Push device registrations (T8)
+  pushDevices PushDevice[]
+
   // Safer Social Design: Age verification (Phase 1)
   dateOfBirth DateTime? @map("date_of_birth")
   ageTier     AgeTier   @default(ADULT) @map("age_tier")
@@ -391,6 +394,37 @@ model MfaEnrollment {
   lastUsedAt      DateTime? @map("last_used_at")
 
   @@map("mfa_enrollments")
+}
+
+// Push notification platform a device token belongs to (T8).
+enum PushPlatform {
+  APNS
+  FCM
+  WEB
+}
+
+// T8 — registered push device tokens (frozen contract:
+// apps/api/src/lib/doc/push-device-contract.md).
+//
+// The raw platform token is stored AES-GCM encrypted (the MfaEnrollment
+// encryptedSecret pattern, SESSION_SECRET-keyed); `tokenHash` (SHA-256 hex of
+// the raw token) is the deterministic dedupe/upsert key. `tokenHash` is
+// GLOBALLY unique — one token identifies one physical device, which belongs to
+// exactly one account at a time; re-registering an existing token reassigns
+// the row (last registration wins, the account-switch case).
+model PushDevice {
+  id              String       @id @default(cuid())
+  userId          String       @map("user_id")
+  platform        PushPlatform
+  tokenHash       String       @unique @map("token_hash") // SHA-256 hex of the raw token
+  tokenCiphertext String       @map("token_ciphertext") @db.Text // AES-GCM at rest
+  createdAt       DateTime     @default(now()) @map("created_at")
+  lastSeenAt      DateTime     @default(now()) @map("last_seen_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId]) // dispatcher lookup path
+  @@map("push_devices")
 }
 
 // Purpose discriminator for the unified Consent model.
