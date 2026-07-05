@@ -20,7 +20,11 @@ export const paginationSchema = z.object({
  * Create post request body
  */
 export const createPostSchema = z.object({
-  text: z.string().min(1).max(3000).trim(),
+  // .trim() runs BEFORE .min()/.max() so whitespace-only text (e.g. "   ")
+  // fails length validation instead of passing min(1) and then trimming to
+  // "" downstream (fail-closed: reject at the schema boundary, never accept
+  // and silently persist empty content).
+  text: z.string().trim().min(1).max(3000),
   visibility: z.enum(["public", "friends-only", "private"]).optional(),
   radius: z.enum(["SHOUT", "LOUD", "NORMAL", "WHISPER"]).optional(),
   entityRefs: z
@@ -71,11 +75,15 @@ export const createPostSchema = z.object({
  * Allows editing text, media, and visibility.
  */
 export const editPostSchema = z.object({
+  // .trim() runs BEFORE .min()/.max() so whitespace-only text (e.g. "   ")
+  // fails length validation instead of passing min(1) and then trimming to
+  // "" downstream (fail-closed: reject at the schema boundary, never accept
+  // and silently persist empty content).
   text: z
     .string()
+    .trim()
     .min(1, "Post text is required")
-    .max(3000, "Post text exceeds maximum length")
-    .trim(),
+    .max(3000, "Post text exceeds maximum length"),
   visibility: z.enum(["public", "friends-only", "private"]).optional(),
   media: z
     .array(
@@ -92,7 +100,10 @@ export const editPostSchema = z.object({
  * Create comment request body
  */
 export const createCommentSchema = z.object({
-  text: z.string().min(1).max(3000).trim(),
+  // .trim() runs BEFORE .min()/.max() so whitespace-only text fails length
+  // validation instead of passing min(1) and then trimming to "" downstream
+  // (fail-closed: reject at the schema boundary, never persist empty content).
+  text: z.string().trim().min(1).max(3000),
 });
 
 /**

@@ -305,6 +305,38 @@ describe("CommentHandler", () => {
       expect(data.error).toBe("CONTENT_REJECTED");
     });
 
+    it("should return 400 (not 500, not a silent empty write) for whitespace-only text", async () => {
+      // Exercise the REAL validateRequest + createCommentSchema for this one
+      // call (both are otherwise mocked/stubbed for the rest of the file) so
+      // this pins the actual schema-boundary rejection, not a bypassed mock.
+      const { validateRequest } = await import(
+        "../../src/lib/validate-request.js"
+      );
+      const { validateRequest: realValidateRequest } =
+        await vi.importActual<typeof import("../../src/lib/validate-request.js")>(
+          "../../src/lib/validate-request.js",
+        );
+      (validateRequest as any).mockImplementationOnce(realValidateRequest);
+
+      const request = new Request("http://test.com/comments", {
+        method: "POST",
+        body: JSON.stringify({ text: "   " }),
+      });
+
+      const response = await handler.createComment(
+        "post-123",
+        request,
+        mockSession,
+        mockEnv,
+        mockRequestContext,
+        TEST_TENANT_ID,
+      );
+
+      expect(response.status).toBe(400);
+      // Never a crash, and the comment is never created with empty text.
+      expect(mockDb.postComment.create).not.toHaveBeenCalled();
+    });
+
     it("should use timeout/retry logic with USER_FACING preset", async () => {
       mockDb.post.findUnique.mockResolvedValue({ deletedAt: null });
       mockDb.postComment.create.mockResolvedValue({
@@ -508,6 +540,40 @@ describe("CommentHandler", () => {
       expect(data.id).toBeDefined();
       // Links should be empty array if fetch fails (source returns linksResponse || [])
       expect(data.links).toEqual([]);
+    });
+  });
+
+  describe("editComment", () => {
+    it("should return 400 (not 500, not a silent empty write) for whitespace-only text", async () => {
+      // Exercise the REAL validateRequest + inline editCommentSchema for
+      // this one call so this pins the actual schema-boundary rejection,
+      // not a bypassed mock.
+      const { validateRequest } = await import(
+        "../../src/lib/validate-request.js"
+      );
+      const { validateRequest: realValidateRequest } =
+        await vi.importActual<typeof import("../../src/lib/validate-request.js")>(
+          "../../src/lib/validate-request.js",
+        );
+      (validateRequest as any).mockImplementationOnce(realValidateRequest);
+
+      const request = new Request("http://test.com/comments/comment-123", {
+        method: "PATCH",
+        body: JSON.stringify({ text: "   " }),
+      });
+
+      const response = await handler.editComment(
+        "comment-123",
+        request,
+        mockSession,
+        mockEnv,
+        mockRequestContext,
+        TEST_TENANT_ID,
+      );
+
+      expect(response.status).toBe(400);
+      // Never a crash, and the comment is never updated with empty text.
+      expect(mockDb.postComment.update).not.toHaveBeenCalled();
     });
   });
 
