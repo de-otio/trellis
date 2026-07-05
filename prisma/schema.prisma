@@ -2115,9 +2115,10 @@ model Relationship {
 // change) through an ALTER TYPE migration. The vocabulary is enforced in app
 // code instead — the hand-written union in lib/graph/types.ts, the
 // allowlist in entity-relationship-handler.ts, and the fixed traversal set
-// in lib/graph/postgres/discovery.ts (raw SQL already compares via
-// `type::text`). Same deliberate pattern as InteractionEvent.interactionType
-// and MediaModerationJob.decision.
+// in lib/graph/postgres/discovery.ts (raw SQL compares the text column
+// directly — the enum-era `::text` casts were dropped by AR8). Same
+// deliberate pattern as InteractionEvent.interactionType and
+// MediaModerationJob.decision.
 model EntityRelationship {
   id       String @id @default(cuid())
   tenantId String @map("tenant_id")

@@ -20,7 +20,10 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Prisma, PrismaClient } from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { runWithTenantContext, tenantId } from "@de-otio/saas-foundation/tenant";
-import { DiscoveryOps } from "../../../src/lib/graph/postgres/discovery.js";
+import {
+  DiscoveryOps,
+  SHARED_CONNECTIONS_DEGREE_CAP,
+} from "../../../src/lib/graph/postgres/discovery.js";
 
 const TEST_DB_URL = process.env.DATABASE_URL;
 const suite = TEST_DB_URL ? describe : describe.skip;
@@ -60,14 +63,14 @@ suite("PostgresGraphService.DiscoveryOps (live CTE)", () => {
     });
   }
 
-  async function ownership(entityId: string, tenant: string) {
+  async function ownership(entityId: string, tenant: string, userId: string = U) {
     await prisma.entityOwnership.create({
       data: {
         tenantId: tenant,
         entityId,
-        userId: U,
+        userId,
         role: "PRIMARY_OWNER",
-        addedByUserId: U,
+        addedByUserId: userId,
         status: "ACTIVE",
       },
     });
@@ -198,6 +201,68 @@ suite("PostgresGraphService.DiscoveryOps (live CTE)", () => {
     });
   });
 
+  describe("geo-backed discovery (fake PostGIS lookup, live entity/graph filters)", () => {
+    // A deterministic stand-in for the PostGIS repository: proximity ranking
+    // is its own subsystem; what THIS suite proves is the live-Postgres
+    // graph-fact filtering (fetchDiscoverableFields) layered on top.
+    const geo = {
+      findNearby: async () => [
+        { entityId: C, distanceMeters: 300 },
+        { entityId: B, distanceMeters: 700 }, // already related → dropped
+        { entityId: HIDDEN, distanceMeters: 900 }, // non-discoverable → dropped
+        { entityId: D, distanceMeters: 2500 },
+      ],
+      findNearAnchors: async () => [
+        { entityId: C, distanceMeters: 1200 },
+        { entityId: HIDDEN, distanceMeters: 400 }, // non-discoverable → dropped
+      ],
+    };
+
+    it("discoverNearby returns coarse distance bands, drops related/hidden, preserves distance order", async () => {
+      const geoOps = new DiscoveryOps(prisma, geo);
+      const results = await run(() => geoOps.discoverNearby(U, 48.2, 16.4, 5000));
+      const ids = results.map((r) => r.entityId);
+      expect(ids).toEqual([C, D]); // B related, HIDDEN non-discoverable
+      const c = results.find((r) => r.entityId === C);
+      expect(c?.distanceBand).toBe("< 500m");
+      expect(c).not.toHaveProperty("distanceMeters"); // never exact distance
+      const d = results.find((r) => r.entityId === D);
+      expect(d?.distanceBand).toBe("2-5km");
+    });
+
+    it("discoverNearby honors entityType/breed equality filters", async () => {
+      const geoOps = new DiscoveryOps(prisma, geo);
+      const husky = await run(() =>
+        geoOps.discoverNearby(U, 48.2, 16.4, 5000, { breed: "Husky" }),
+      );
+      expect(husky.map((r) => r.entityId)).toEqual([C]);
+      const none = await run(() =>
+        geoOps.discoverNearby(U, 48.2, 16.4, 5000, { entityType: "cat" }),
+      );
+      expect(none).toEqual([]);
+    });
+
+    it("getRecommendations includes the nearby signal with distance-derived scores", async () => {
+      const geoOps = new DiscoveryOps(prisma, geo);
+      const results = await run(() => geoOps.getRecommendations(U, 10));
+      const c = results.find((r) => r.entityId === C);
+      expect(c).toBeDefined();
+      // C is both a shared-connections candidate (0.1) and a nearby candidate
+      // ((1 - 1200/10000) * 0.5 = 0.44) — dedup keeps the highest.
+      expect(c?.reason).toBe("nearby");
+      expect(c?.confidence).toBeCloseTo(0.44, 10);
+      // HIDDEN stays out even when geo proposes it.
+      expect(results.map((r) => r.entityId)).not.toContain(HIDDEN);
+    });
+
+    it("discoverNearby returns [] without a geo lookup or tenant", async () => {
+      const noGeo = new DiscoveryOps(prisma);
+      expect(await run(() => noGeo.discoverNearby(U, 1, 2, 100))).toEqual([]);
+      const geoOps = new DiscoveryOps(prisma, geo);
+      expect(await geoOps.discoverNearby(U, 1, 2, 100)).toEqual([]); // no tenant ctx
+    });
+  });
+
   describe("getRecommendations per-owner diversity cap (MAX_RECOMMENDATIONS_PER_OWNER = 2)", () => {
     // A separate, self-contained fixture: a single hub owner owns five entities
     // that all surface to the viewer via the shared-connections signal. Pre-cap,
@@ -287,6 +352,121 @@ suite("PostgresGraphService.DiscoveryOps (live CTE)", () => {
       // All five hub entities are the only candidates, so relaxation fills them in.
       expect(hubCount).toBe(5);
       expect(new Set(results.map((r) => r.entityId)).size).toBe(results.length); // no dups
+    });
+  });
+
+  describe("shared-connections fan-out bounds (hub fixture, hundreds of edges)", () => {
+    // A realistic fan-out graph: the viewer owns three anchor entities, all
+    // edge-connected to ONE hub entity; the hub has 300 leaf neighbours. The
+    // old recursive CTE re-walked the hub once per (seed, path) — this pins
+    // the rewritten two-level traversal's bounds: per-node fan-out stops at
+    // SHARED_CONNECTIONS_DEGREE_CAP, seed attribution survives the join
+    // (every admitted leaf keeps all three seeds → score 0.3).
+    const FAN_TENANT = tenantId("t-pg-disc-fanout");
+    const FAN_VIEWER = "pgfan-viewer";
+    const ANCHORS = ["pgfan-a1", "pgfan-a2", "pgfan-a3"];
+    const HUB = "pgfan-hub";
+    const LEAF_COUNT = 300;
+    const leafId = (i: number) => `pgfan-leaf-${String(i).padStart(3, "0")}`;
+
+    beforeAll(async () => {
+      await wipeTenants([FAN_TENANT], [FAN_VIEWER]);
+      await seedTenant(FAN_TENANT);
+      await prisma.user.create({
+        data: {
+          id: FAN_VIEWER,
+          email: `${FAN_VIEWER}@example.com`,
+          handle: FAN_VIEWER,
+          role: "END_USER",
+          personalTenantId: FAN_TENANT,
+        },
+      });
+
+      await seedEntity(HUB, FAN_TENANT);
+      for (const a of ANCHORS) {
+        await seedEntity(a, FAN_TENANT);
+        await ownership(a, FAN_TENANT, FAN_VIEWER);
+        await edge(a, HUB, "PLAYMATE", "CONFIRMED", FAN_TENANT);
+      }
+      // Bulk-create the leaf entities + hub edges (300 of each).
+      await prisma.entity.createMany({
+        data: Array.from({ length: LEAF_COUNT }, (_, i) => ({
+          id: leafId(i + 1),
+          tenantId: FAN_TENANT,
+          name: leafId(i + 1),
+          entityType: "dog",
+          metadata: {},
+        })),
+      });
+      await prisma.entityRelationship.createMany({
+        data: Array.from({ length: LEAF_COUNT }, (_, i) => ({
+          tenantId: FAN_TENANT,
+          entityId: HUB,
+          relatedEntityId: leafId(i + 1),
+          type: "PACK_MATE",
+          status: "CONFIRMED" as const,
+          proposedByUserId: FAN_VIEWER,
+        })),
+      });
+    });
+
+    afterAll(async () => {
+      await wipeTenants([FAN_TENANT], [FAN_VIEWER]);
+    });
+
+    const runFan = <T,>(fn: () => Promise<T>) => runWithTenantContext(FAN_TENANT, fn);
+
+    it("caps hub fan-out at the degree cap and keeps full seed attribution", async () => {
+      // Reach the signal directly (private) — getRecommendations' diversity
+      // cap/merge would obscure the traversal-shape assertions.
+      const rows = await runFan(() =>
+        (ops as unknown as {
+          computeSharedConnections(
+            u: string,
+            t: string,
+            l: number,
+          ): Promise<Array<{ entityId: string; score: number }>>;
+        }).computeSharedConnections(FAN_VIEWER, FAN_TENANT, 1000),
+      );
+      const ids = rows.map((r) => r.entityId);
+
+      // Hub is a hop-1 candidate; its expansion is truncated at the degree
+      // cap. The hub's neighbour list (ordered by id) starts with the three
+      // anchors ("pgfan-a…" < "pgfan-leaf-…"), so the cap admits the anchors
+      // plus the first (DEGREE_CAP − 3) leaves — deterministic truncation.
+      expect(ids).toContain(HUB);
+      const admittedLeaves = SHARED_CONNECTIONS_DEGREE_CAP - ANCHORS.length;
+      const leaves = ids.filter((id) => id.startsWith("pgfan-leaf-"));
+      expect(leaves).toHaveLength(admittedLeaves);
+      expect(rows).toHaveLength(admittedLeaves + 1); // + the hub (anchors are owned → excluded)
+      // Deterministic truncation: the first N leaves by id.
+      expect([...leaves].sort()).toEqual(
+        Array.from({ length: admittedLeaves }, (_, i) => leafId(i + 1)),
+      );
+      // Seed attribution survives the two-level join: every leaf is 2 hops
+      // from ALL three anchors → COUNT(DISTINCT seed)/10 = 0.3. Same for hub.
+      for (const row of rows) {
+        expect(row.score).toBeCloseTo(0.3, 10);
+      }
+    });
+
+    it("anchors below the caps traverse exactly (hop-1 candidate from every anchor)", async () => {
+      // The hub itself: hop 1 from all three anchors, not owned/related →
+      // candidate. Anchors: owned → excluded. (Exactness below the caps is
+      // additionally EXCEPT-proven against the old recursive CTE in the AR8
+      // fix; this pins the class-level behavior.)
+      const rows = await runFan(() =>
+        (ops as unknown as {
+          computeSharedConnections(
+            u: string,
+            t: string,
+            l: number,
+          ): Promise<Array<{ entityId: string }>>;
+        }).computeSharedConnections(FAN_VIEWER, FAN_TENANT, 1000),
+      );
+      const ids = rows.map((r) => r.entityId);
+      for (const a of ANCHORS) expect(ids).not.toContain(a);
+      expect(ids).toContain(HUB);
     });
   });
 

@@ -15,8 +15,15 @@ import {
   runWithTenantContext,
   tenantId,
 } from "@de-otio/saas-foundation/tenant";
-import { RelationshipOps } from "../../../../src/lib/graph/postgres/relationships.js";
-import { GraphNotFoundError } from "../../../../src/lib/graph/errors.js";
+import {
+  DEFAULT_MAX_EDGES_PER_USER,
+  RelationshipOps,
+  resolveMaxEdgesPerUser,
+} from "../../../../src/lib/graph/postgres/relationships.js";
+import {
+  GraphConflictError,
+  GraphNotFoundError,
+} from "../../../../src/lib/graph/errors.js";
 
 const TENANT = tenantId("tenant-1");
 const withTenant = <T>(fn: () => T): T => runWithTenantContext(TENANT, fn);
@@ -64,6 +71,7 @@ const relationship = {
   findUnique: vi.fn(),
   findFirst: vi.fn(),
   findMany: vi.fn(),
+  count: vi.fn(),
   create: vi.fn(),
   update: vi.fn(),
   updateMany: vi.fn(),
@@ -92,6 +100,8 @@ beforeEach(() => {
   $transaction.mockImplementation(async (cb: (tx: unknown) => unknown) =>
     cb({ relationship }),
   );
+  // Default: user is well below the per-user edge cap.
+  relationship.count.mockResolvedValue(0);
   ops = new RelationshipOps(prisma);
 });
 
@@ -161,6 +171,7 @@ describe("createRelationship", () => {
       $transaction.mockImplementation(async (cb: (tx: unknown) => unknown) =>
         cb({ relationship }),
       );
+      relationship.count.mockResolvedValue(0);
       relationship.findUnique.mockResolvedValueOnce(null);
       relationship.create.mockResolvedValueOnce(makeRow());
 
@@ -249,6 +260,55 @@ describe("createRelationship", () => {
       }),
     ).rejects.toThrow(GraphNotFoundError);
     expect(relationship.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects a NEW edge once the per-user cap is reached (GraphConflictError)", async () => {
+    const capped = new RelationshipOps(prisma, 3);
+    relationship.findUnique.mockResolvedValueOnce(null); // no existing edge
+    relationship.count.mockResolvedValueOnce(3); // at cap
+
+    await expect(
+      withTenant(() =>
+        capped.createRelationship({
+          userId: "user-1",
+          targetType: "entity",
+          targetId: "entity-1",
+        }),
+      ),
+    ).rejects.toThrow(GraphConflictError);
+    expect(relationship.create).not.toHaveBeenCalled();
+  });
+
+  it("still returns an EXISTING edge idempotently when the user is at the cap", async () => {
+    const capped = new RelationshipOps(prisma, 3);
+    relationship.findUnique.mockResolvedValueOnce(
+      makeRow({ computedScore: 0.42 }),
+    );
+    relationship.count.mockResolvedValueOnce(3);
+
+    const rel = await withTenant(() =>
+      capped.createRelationship({
+        userId: "user-1",
+        targetType: "entity",
+        targetId: "entity-1",
+      }),
+    );
+    expect(rel.computedScore).toBe(0.42);
+    expect(relationship.create).not.toHaveBeenCalled();
+  });
+
+  it("resolveMaxEdgesPerUser: env override wins, bad values fall back to the default", () => {
+    expect(resolveMaxEdgesPerUser({} as NodeJS.ProcessEnv)).toBe(
+      DEFAULT_MAX_EDGES_PER_USER,
+    );
+    expect(
+      resolveMaxEdgesPerUser({ GRAPH_MAX_EDGES_PER_USER: "250" } as NodeJS.ProcessEnv),
+    ).toBe(250);
+    for (const bad of ["0", "-5", "abc", ""]) {
+      expect(
+        resolveMaxEdgesPerUser({ GRAPH_MAX_EDGES_PER_USER: bad } as NodeJS.ProcessEnv),
+      ).toBe(DEFAULT_MAX_EDGES_PER_USER);
+    }
   });
 });
 
@@ -488,6 +548,57 @@ describe("getRelationships", () => {
     // Only c (0.3) is strictly below the cursor score 0.6.
     expect(result.items.map((r) => r.targetId)).toEqual(["c"]);
     expect(result.hasMore).toBe(false);
+  });
+
+  it("does not drop tied rows at the page boundary (composite keyset cursor)", async () => {
+    // Five rows sharing one score: a score-only cursor would skip ALL of the
+    // remaining tied rows after page 1. Walk the pages and assert full,
+    // duplicate-free enumeration.
+    const rows = ["a", "b", "c", "d", "e"].map((id) =>
+      makeRow({ targetId: id, computedScore: 0.5 }),
+    );
+    relationship.findMany.mockResolvedValue(rows);
+
+    const page1 = await withTenant(() =>
+      ops.getRelationships("user-1", { pagination: { limit: 2 } }),
+    );
+    expect(page1.items.map((r) => r.targetId)).toEqual(["a", "b"]);
+    expect(page1.hasMore).toBe(true);
+
+    const page2 = await withTenant(() =>
+      ops.getRelationships("user-1", {
+        pagination: { limit: 2, cursor: page1.cursor! },
+      }),
+    );
+    expect(page2.items.map((r) => r.targetId)).toEqual(["c", "d"]);
+    expect(page2.hasMore).toBe(true);
+
+    const page3 = await withTenant(() =>
+      ops.getRelationships("user-1", {
+        pagination: { limit: 2, cursor: page2.cursor! },
+      }),
+    );
+    expect(page3.items.map((r) => r.targetId)).toEqual(["e"]);
+    expect(page3.hasMore).toBe(false);
+    expect(page3.cursor).toBeNull();
+    relationship.findMany.mockReset();
+  });
+
+  it("cursor tiebreak only admits TIED rows past the boundary id — lower-scored rows always appear", async () => {
+    relationship.findMany.mockResolvedValueOnce([
+      makeRow({ targetId: "m", computedScore: 0.5 }),
+      makeRow({ targetId: "z", computedScore: 0.5 }),
+      makeRow({ targetId: "a", computedScore: 0.3 }), // lower score, smaller id
+    ]);
+    // Cursor at (0.5, "m") — the next page must contain z (tied, past "m") AND a.
+    const cursor = Buffer.from(
+      JSON.stringify({ score: 0.5, targetId: "m" }),
+    ).toString("base64");
+
+    const result = await withTenant(() =>
+      ops.getRelationships("user-1", { pagination: { limit: 10, cursor } }),
+    );
+    expect(result.items.map((r) => r.targetId)).toEqual(["z", "a"]);
   });
 
   it("returns an empty page when the user has no relationships", async () => {

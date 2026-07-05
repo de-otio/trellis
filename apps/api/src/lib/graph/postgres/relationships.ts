@@ -6,7 +6,7 @@
  */
 import type { PrismaClient } from "@prisma/client";
 import { getCurrentTenantId } from "@de-otio/saas-foundation/tenant";
-import { GraphNotFoundError } from "../errors.js";
+import { GraphConflictError, GraphNotFoundError } from "../errors.js";
 import {
   CONNECTION_BONUSES,
   effectiveScore,
@@ -78,20 +78,58 @@ const TIER_NAMES: Record<CircleTier, TierName> = {
   3: "ambient",
 };
 
-/** Encode a score-based pagination cursor (base64 JSON, matches neo4j). */
-function encodeCursor(score: number): string {
-  return Buffer.from(JSON.stringify({ score })).toString("base64");
+/**
+ * Default per-user relationship-edge cap (per tenant). A single account
+ * creating unbounded edges inflates every fan-out query anchored on its
+ * edge list (circle counts, feeds, recommendations) — this bounds the blast
+ * radius at write time. Runtime-tunable via GRAPH_MAX_EDGES_PER_USER
+ * (threshold-secrecy rule: operational caps are config, the default here is
+ * just the fallback).
+ */
+export const DEFAULT_MAX_EDGES_PER_USER = 1000;
+
+/** Resolve the per-user edge cap from env, falling back to the default. */
+export function resolveMaxEdgesPerUser(
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  const raw = env.GRAPH_MAX_EDGES_PER_USER;
+  if (raw !== undefined) {
+    const parsed = Number.parseInt(raw, 10);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return DEFAULT_MAX_EDGES_PER_USER;
 }
 
-/** Decode a score-based pagination cursor. Returns null if invalid. */
-function decodeCursor(cursor: string): number | null {
+/**
+ * Composite keyset cursor for the score ordering. A score-only cursor drops
+ * every row TIED with the boundary score (strict `< score` skips them all),
+ * so the cursor carries the standard (score, targetId) keyset pair: rows
+ * strictly below the score, plus tied rows past the boundary targetId.
+ */
+interface ScoreCursor {
+  score: number;
+  /** Tiebreak key. Null for a legacy score-only cursor (strict-< fallback). */
+  targetId: string | null;
+}
+
+/** Encode a (score, targetId) pagination cursor (base64 JSON). */
+function encodeCursor(score: number, targetId: string): string {
+  return Buffer.from(JSON.stringify({ score, targetId })).toString("base64");
+}
+
+/** Decode a pagination cursor. Returns null if invalid. */
+function decodeCursor(cursor: string): ScoreCursor | null {
   try {
     const parsed = JSON.parse(
       Buffer.from(cursor, "base64").toString("utf8"),
     ) as unknown;
     if (parsed && typeof parsed === "object" && "score" in parsed) {
       const score = (parsed as { score: unknown }).score;
-      if (typeof score === "number") return score;
+      const targetId = (parsed as { targetId?: unknown }).targetId;
+      if (typeof score === "number") {
+        // Legacy score-only cursors (pre-tiebreak) degrade to strict-<.
+        return { score, targetId: typeof targetId === "string" ? targetId : null };
+      }
     }
     return null;
   } catch {
@@ -100,7 +138,11 @@ function decodeCursor(cursor: string): number | null {
 }
 
 export class RelationshipOps {
-  constructor(private readonly prisma: PrismaClient) {}
+  constructor(
+    private readonly prisma: PrismaClient,
+    /** Per-user edge cap; injectable for tests, env-resolved by default. */
+    private readonly maxEdgesPerUser: number = resolveMaxEdgesPerUser(),
+  ) {}
 
   /**
    * Create a scored relationship from a user to a target (user or entity).
@@ -108,7 +150,14 @@ export class RelationshipOps {
    * Initial score comes from the connection method (CONNECTION_BONUSES, default
    * 0.3 for `discovery`). For user→user targets, if the reverse edge already
    * exists both edges are marked `reciprocated`. Idempotent like the Neo4j
-   * MERGE: a pre-existing edge is returned unchanged rather than throwing.
+   * MERGE: a pre-existing edge is returned unchanged rather than throwing —
+   * the idempotent return also bypasses the edge cap (no new edge is made).
+   *
+   * Enforces the per-user edge cap ({@link resolveMaxEdgesPerUser}): once the
+   * user has that many edges in the tenant, new edges are rejected with a
+   * GraphConflictError (handlers map it to 409). Best-effort (count+create in
+   * one transaction; a concurrent burst may land a few over — the cap bounds
+   * abuse, it is not an exact quota).
    */
   async createRelationship(
     input: CreateRelationshipInput,
@@ -135,6 +184,16 @@ export class RelationshipOps {
       });
       if (existing) {
         return existing;
+      }
+
+      // Per-user edge cap — checked only when a NEW edge would be created.
+      const edgeCount = await tx.relationship.count({
+        where: { userId, tenantId },
+      });
+      if (edgeCount >= this.maxEdgesPerUser) {
+        throw new GraphConflictError(
+          `Relationship limit reached: user ${userId} already has ${edgeCount} relationships (cap ${this.maxEdgesPerUser})`,
+        );
       }
 
       // For user→user targets, reciprocity is determined by the presence of the
@@ -272,8 +331,10 @@ export class RelationshipOps {
   }
 
   /**
-   * List a user's relationships, ordered by effective score descending, with
-   * optional tier / target-type filters and score-cursor pagination.
+   * List a user's relationships, ordered by (effective score DESC, targetId
+   * ASC), with optional tier / target-type filters and composite
+   * (score, targetId) keyset-cursor pagination — the tiebreak keeps rows that
+   * share the boundary score from being dropped between pages.
    *
    * Ordering and the cursor are over the EFFECTIVE score (manual override wins
    * over computed). There is no stored effective-score column, so the ordering
@@ -288,8 +349,8 @@ export class RelationshipOps {
     },
   ): Promise<PaginatedResult<Relationship>> {
     const limit = options?.pagination?.limit ?? 50;
-    const cursor = options?.pagination?.cursor ?? null;
-    const cursorScore = cursor !== null ? decodeCursor(cursor) : null;
+    const rawCursor = options?.pagination?.cursor ?? null;
+    const cursor = rawCursor !== null ? decodeCursor(rawCursor) : null;
     const tenantId = getCurrentTenantId();
 
     const where: {
@@ -312,21 +373,33 @@ export class RelationshipOps {
     // user are bounded (a user's circle), so this is acceptable and exact.
     const rows = await this.prisma.relationship.findMany({ where });
 
-    const mapped = rows
-      .map(rowToRelationship)
-      .sort((a, b) => b.score - a.score);
+    // Sort must match the cursor predicate exactly: score DESC, then targetId
+    // ASC as the deterministic tiebreak (plain code-unit comparison — no
+    // locale dependence).
+    const mapped = rows.map(rowToRelationship).sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return a.targetId < b.targetId ? -1 : a.targetId > b.targetId ? 1 : 0;
+    });
 
-    // Score-cursor pagination: take items strictly below the cursor score.
+    // Keyset pagination: strictly below the cursor score, OR tied with it and
+    // past the boundary targetId. (Legacy score-only cursors have targetId
+    // null and keep the old strict-< behavior.)
     const afterCursor =
-      cursorScore !== null
-        ? mapped.filter((r) => r.score < cursorScore)
+      cursor !== null
+        ? mapped.filter(
+            (r) =>
+              r.score < cursor.score ||
+              (cursor.targetId !== null &&
+                r.score === cursor.score &&
+                r.targetId > cursor.targetId),
+          )
         : mapped;
 
     const hasMore = afterCursor.length > limit;
     const items = hasMore ? afterCursor.slice(0, limit) : afterCursor;
     const lastItem = items[items.length - 1];
     const nextCursor =
-      hasMore && lastItem ? encodeCursor(lastItem.score) : null;
+      hasMore && lastItem ? encodeCursor(lastItem.score, lastItem.targetId) : null;
 
     return { items, cursor: nextCursor, hasMore };
   }
