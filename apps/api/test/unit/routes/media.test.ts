@@ -204,6 +204,8 @@ describe("Media Routes", () => {
           maxObjects: 1000,
           maxBytes: 1024 * 1024 * 1024, // 1 GiB
         },
+        // T15c: review-rate cap (flagged objects per rolling window).
+        reviewRateCap: 20,
       },
     };
 
@@ -988,9 +990,29 @@ describe("Media Routes", () => {
       (r) => r.path === "/api/media/upload" && r.method === "POST",
     );
 
+    // The gate issues TWO mediaFile.count calls in one round trip: the quota
+    // USAGE count (where.lifecycle === "APPROVED") and the review-rate count
+    // (where.lifecycle is an `{ in: [...] }` filter). Discriminate on the
+    // where shape so each can be driven independently.
+    const setQuotaCounts = (usage: number, review = 0) =>
+      mockMediaFileCount.mockImplementation(async (args: any) =>
+        args?.where?.lifecycle?.in ? review : usage,
+      );
+
+    const postUpload = async () => {
+      const jpegMagic = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]);
+      const formData = new FormData();
+      formData.append("file", new Blob([jpegMagic], { type: "image/jpeg" }), "test.jpg");
+      return uploadRoute!.handler(
+        new Request("https://api.rkm1.de/api/media/upload", { method: "POST", body: formData }),
+        mockEnv,
+        { url: new URL("https://api.rkm1.de/api/media/upload"), pathname: "/api/media/upload", params: {} },
+      );
+    };
+
     it("rejects with 429 when object cap is reached", async () => {
       // Saturate the object count so the quota check fails with object-cap.
-      mockMediaFileCount.mockResolvedValue(1000); // == maxObjects
+      setQuotaCounts(1000); // == maxObjects
       mockMediaFileAggregate.mockResolvedValue({ _sum: { size: 0 } });
 
       const jpegMagic = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]);
@@ -1032,7 +1054,7 @@ describe("Media Routes", () => {
 
     it("allows upload when usage is just under both caps", async () => {
       // currentObjects = 999 (one below 1000 cap), currentBytes = 0 — should pass.
-      mockMediaFileCount.mockResolvedValue(999);
+      setQuotaCounts(999);
       mockMediaFileAggregate.mockResolvedValue({ _sum: { size: 0 } });
 
       const jpegMagic = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]);
@@ -1047,6 +1069,168 @@ describe("Media Routes", () => {
 
       // Should reach the sync-image path and succeed (200).
       expect(response.status).toBe(200);
+    });
+
+    it("usage aggregate uses the SHARED storage-accounting predicate (APPROVED + deletedAt null)", async () => {
+      setQuotaCounts(0);
+      await postUpload();
+
+      // Both the count and the sum must be scoped by quotaUsageWhere.
+      const usageCountCall = mockMediaFileCount.mock.calls.find(
+        (c: any[]) => c[0]?.where?.lifecycle === "APPROVED",
+      );
+      expect(usageCountCall).toBeDefined();
+      expect(usageCountCall![0].where).toEqual({
+        tenantId: TEST_TENANT_ID,
+        lifecycle: "APPROVED",
+        deletedAt: null,
+      });
+      expect(mockMediaFileAggregate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            tenantId: TEST_TENANT_ID,
+            lifecycle: "APPROVED",
+            deletedAt: null,
+          },
+        }),
+      );
+    });
+
+    it("rejects with 429 (Upload rate limited) when the review-rate cap is hit — regardless of quota headroom", async () => {
+      // Usage far under quota, but 20 flagged objects in the window (== cap).
+      setQuotaCounts(0, 20);
+      mockMediaFileAggregate.mockResolvedValue({ _sum: { size: 0 } });
+
+      const response = await postUpload();
+
+      expect(response.status).toBe(429);
+      const body = await response.json();
+      expect(body).toHaveProperty("error", "Upload rate limited");
+    });
+
+    it("allows upload when the flagged-object count is one below the cap", async () => {
+      setQuotaCounts(0, 19); // cap is 20
+      mockMediaFileAggregate.mockResolvedValue({ _sum: { size: 0 } });
+
+      const response = await postUpload();
+      expect(response.status).toBe(200);
+    });
+
+    // ── T16: per-tenant quota override (Tenant.storageQuotaBytes/Objects) ──
+
+    const mockTenantFindUnique = vi.fn();
+    const useDbWithTenant = () => {
+      mockWithQueryTimeoutAndRetry.mockImplementation(
+        async (_m: any, _r: string, _e: any, queryFn: (db: any) => Promise<any>) =>
+          queryFn({
+            mediaFile: {
+              findUnique: mockMediaFileFindUnique,
+              create: mockMediaFileCreate,
+              upsert: mockMediaFileUpsert,
+              count: mockMediaFileCount,
+              aggregate: mockMediaFileAggregate,
+            },
+            tenant: { findUnique: mockTenantFindUnique },
+          }),
+      );
+    };
+
+    it("tenant byte override WINS over the env default (smaller override denies with 413)", async () => {
+      useDbWithTenant();
+      setQuotaCounts(0);
+      // Usage 100 bytes; env default is 1 GiB, but the tenant override is
+      // 100 bytes — the 4-byte upload must tip over the OVERRIDE.
+      mockMediaFileAggregate.mockResolvedValue({ _sum: { size: 100 } });
+      mockTenantFindUnique.mockResolvedValue({
+        storageQuotaBytes: BigInt(100),
+        storageQuotaObjects: null,
+      });
+
+      const response = await postUpload();
+
+      expect(response.status).toBe(413);
+      const body = await response.json();
+      expect(body).toHaveProperty("error", "Upload quota exceeded");
+      // The override was read with the entitlement select.
+      expect(mockTenantFindUnique).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: TEST_TENANT_ID },
+          select: { storageQuotaBytes: true, storageQuotaObjects: true },
+        }),
+      );
+    });
+
+    it("tenant object override WINS over the env default (429 object-cap at the override)", async () => {
+      useDbWithTenant();
+      setQuotaCounts(3); // 3 APPROVED objects
+      mockMediaFileAggregate.mockResolvedValue({ _sum: { size: 0 } });
+      mockTenantFindUnique.mockResolvedValue({
+        storageQuotaBytes: null,
+        storageQuotaObjects: 3, // == current usage → object-cap
+      });
+
+      const response = await postUpload();
+
+      expect(response.status).toBe(429);
+      const body = await response.json();
+      expect(body).toHaveProperty("error", "Upload quota exceeded");
+    });
+
+    it("NULL override columns fall back to the env default (upload allowed)", async () => {
+      useDbWithTenant();
+      setQuotaCounts(3); // under the 1000-object env default
+      mockMediaFileAggregate.mockResolvedValue({ _sum: { size: 0 } });
+      mockTenantFindUnique.mockResolvedValue({
+        storageQuotaBytes: null,
+        storageQuotaObjects: null,
+      });
+
+      const response = await postUpload();
+      expect(response.status).toBe(200);
+    });
+
+    it("a larger tenant override permits an upload the env default would deny", async () => {
+      useDbWithTenant();
+      // Usage at the 1 GiB env-default ceiling — the default would 413, but
+      // the tenant bought headroom (2 GiB override).
+      setQuotaCounts(0);
+      mockMediaFileAggregate.mockResolvedValue({ _sum: { size: 1024 * 1024 * 1024 } });
+      mockTenantFindUnique.mockResolvedValue({
+        storageQuotaBytes: BigInt(2 * 1024 * 1024 * 1024),
+        storageQuotaObjects: null,
+      });
+
+      const response = await postUpload();
+      expect(response.status).toBe(200);
+    });
+
+    it("fail-closed: a broken (NaN) override denies instead of widening to the default", async () => {
+      useDbWithTenant();
+      setQuotaCounts(0);
+      mockMediaFileAggregate.mockResolvedValue({ _sum: { size: 0 } });
+      // A corrupt read surfaces NaN — checkUploadQuota must deny (413/429
+      // family; no reason tag ⇒ object-cap-style 429 per the status mapping).
+      mockTenantFindUnique.mockResolvedValue({
+        storageQuotaBytes: Number.NaN,
+        storageQuotaObjects: null,
+      });
+
+      const response = await postUpload();
+      expect([413, 429]).toContain(response.status);
+      const body = await response.json();
+      expect(body).toHaveProperty("error", "Upload quota exceeded");
+    });
+
+    it("fail-closed: tenant-row read failure inside the round trip denies with 503", async () => {
+      useDbWithTenant();
+      setQuotaCounts(0);
+      mockMediaFileAggregate.mockResolvedValue({ _sum: { size: 0 } });
+      mockTenantFindUnique.mockRejectedValue(new Error("tenant read failed"));
+
+      const response = await postUpload();
+      expect(response.status).toBe(503);
+      const body = await response.json();
+      expect(body).toHaveProperty("error", "Upload unavailable");
     });
   });
 

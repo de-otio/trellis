@@ -15,6 +15,38 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ## [Unreleased]
 
+### Added
+
+- **Per-tenant storage-quota entitlement seam (T16).** New nullable
+  `Tenant.storageQuotaBytes` / `Tenant.storageQuotaObjects` columns (migration
+  `20260705120000_t16_tenant_storage_quota`); the effective quota at both
+  upload gates is now `tenant override ?? env default`
+  (`lib/media/quota-resolution.ts` — a broken override fails CLOSED via
+  `checkUploadQuota`, never widens to the default). No billing/purchase flows
+  — an operator (or a future billing system) writes the columns.
+- **Quota usage now counts ONLY approved content.** The usage aggregate both
+  gates read is scoped by the shared storage-accounting predicate
+  (`quotaUsageWhere`: `lifecycle = APPROVED && deletedAt IS NULL` —
+  `lib/media/storage-accounting.ts`): users are never charged quota for
+  blocked (`REVIEW`/`QUARANTINED`/`REJECTED`) or never-completed uploads, and
+  soft-delete frees quota immediately. Pinned decisions (N = 7 d hard-delete,
+  X = 24 h abandonment TTL, staging S3 TTLs) in ONE doc section:
+  `doc/02-technical/operations/storage-accounting.md`. Four-case integration
+  test: `test/integration/storage-accounting.integration.test.ts`.
+- **Review-rate cap enforcement (T15c).** `env.media.reviewRateCap`
+  (`MEDIA_REVIEW_RATE_CAP`) is now ENFORCED at both upload gates: once a
+  tenant accumulates the cap's worth of flagged objects
+  (`REVIEW`/`QUARANTINED`) inside the rolling window
+  (`MEDIA_REVIEW_RATE_WINDOW_MS`, default 24 h), new uploads are denied 429
+  (`lib/media/review-rate-cap.ts`) — one tenant can no longer torch the
+  moderation budget or flood the platform-reclaimed storage bucket.
+
+### Fixed
+
+- Stale "quota enforcement is advisory in P0b" comment in `env.ts` — the
+  quota has been hard-enforced (413/429, fail-closed 503 on read failure)
+  since the P0b hardening.
+
 ## [0.17.0] — 2026-07-05
 
 ### Changed

@@ -394,15 +394,25 @@ export interface Env {
      */
     reviewRateCap: number;
     /**
-     * Per-tenant upload quota: maximum number of stored objects and total
-     * bytes. Quota enforcement is advisory in P0b (logged, not hard-blocked);
-     * the consumer's CDK env sets hard values. Sources: MEDIA_QUOTA_MAX_OBJECTS
-     * / MEDIA_QUOTA_MAX_BYTES.
+     * Per-tenant upload quota DEFAULTS (the free tier): maximum number of
+     * stored objects and total bytes. Enforcement is LIVE and fail-closed —
+     * both upload gates (routes/media.ts and presigned-upload-handler.ts)
+     * hard-deny with 413 (byte-cap) / 429 (object-cap); any quota-read
+     * failure denies with 503. (The former "advisory in P0b" note is stale —
+     * enforcement shipped with the P0b hardening.)
+     *
+     * These env values are the platform-wide DEFAULT; a tenant with a non-null
+     * `Tenant.storageQuotaBytes` / `Tenant.storageQuotaObjects` override uses
+     * that instead (T16 entitlement seam; lib/media/quota-resolution.ts).
+     * What USAGE counts against the quota is the shared storage-accounting
+     * predicate: only `lifecycle === APPROVED && deletedAt IS NULL` rows
+     * (lib/media/storage-accounting.ts). The consumer's CDK feeds the values
+     * from SSM. Sources: MEDIA_QUOTA_MAX_OBJECTS / MEDIA_QUOTA_MAX_BYTES.
      */
     uploadQuota: {
-      /** Maximum number of stored MediaFile objects per tenant. Default: 1000. */
+      /** Default max stored (APPROVED) objects per tenant. Dev default: 1000. */
       maxObjects: number;
-      /** Maximum total bytes of stored media per tenant. Default: 1 GiB. */
+      /** Default max total bytes of stored (APPROVED) media per tenant. Dev default: 1 GiB. */
       maxBytes: number;
     };
     /**

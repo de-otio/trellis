@@ -50,7 +50,33 @@ const state = {
   sessions: [] as SessionRow[],
   media: [] as MediaRow[],
   nextId: 1,
+  // T16: the tenant quota-override row returned by fakeDb.tenant.findUnique
+  // (null = no override → env defaults apply).
+  tenantOverride: null as {
+    storageQuotaBytes: bigint | number | null;
+    storageQuotaObjects: number | null;
+  } | null,
 };
+
+/** Match a MediaRow against the (subset of) Prisma where the gates use. */
+function matchesMediaWhere(m: MediaRow, where: any): boolean {
+  if (!where) return true;
+  if (where.tenantId !== undefined && m.tenantId !== where.tenantId) return false;
+  if (typeof where.lifecycle === "string" && m.lifecycle !== where.lifecycle) {
+    return false;
+  }
+  if (
+    where.lifecycle &&
+    typeof where.lifecycle === "object" &&
+    Array.isArray(where.lifecycle.in) &&
+    !where.lifecycle.in.includes(m.lifecycle)
+  ) {
+    return false;
+  }
+  // MediaRow has no deletedAt/updatedAt columns in this fake: treat every row
+  // as non-deleted and inside the review window (conservative for the gates).
+  return true;
+}
 
 function cuid(prefix: string): string {
   // cuid-shaped: 'c' + 24 [a-z0-9]
@@ -120,10 +146,19 @@ const fakeDb = {
       );
       return { count: before - state.media.length };
     },
-    count: async () => state.media.length,
-    aggregate: async () => ({
-      _sum: { size: state.media.reduce((a, m) => a + m.size, 0) },
+    count: async ({ where }: any = {}) =>
+      state.media.filter((m) => matchesMediaWhere(m, where)).length,
+    aggregate: async ({ where }: any = {}) => ({
+      _sum: {
+        size: state.media
+          .filter((m) => matchesMediaWhere(m, where))
+          .reduce((a, m) => a + m.size, 0),
+      },
     }),
+  },
+  tenant: {
+    findUnique: async () =>
+      state.tenantOverride === null ? null : { ...state.tenantOverride },
   },
 };
 
@@ -182,6 +217,8 @@ function makeEnv(): Env {
         audio: ["audio/mpeg", "audio/mp4"],
       },
       uploadQuota: { maxObjects: 1000, maxBytes: 1_000_000_000 },
+      // T15c: review-rate cap (flagged objects per rolling window).
+      reviewRateCap: 20,
       maxDurationSeconds: 60,
       presignExpirySeconds: 900,
     },
@@ -227,6 +264,7 @@ beforeEach(() => {
   state.sessions = [];
   state.media = [];
   state.nextId = 1;
+  state.tenantOverride = null;
   mockHead.mockReset();
   mockDelete.mockReset();
   mockResolveTenant.mockClear();
@@ -294,6 +332,102 @@ describe("PresignedUploadHandler.createSession", () => {
     expect(res.status).toBe(413);
     expect(state.sessions).toHaveLength(0);
     expect(state.media).toHaveLength(0);
+  });
+
+  // ── T16 quota resolution + T15c review-rate cap on the presigned gate ──
+
+  /** Seed a media row directly (bypasses the handler). */
+  const seedMedia = (lifecycle: string, size: number, n = 1) => {
+    for (let i = 0; i < n; i++) {
+      state.media.push({
+        id: cuid("m"),
+        tenantId: TENANT,
+        lifecycle,
+        uploadId: null,
+        size,
+        mimeType: "video/mp4",
+      });
+    }
+  };
+
+  const createSmallVideoSession = async () => {
+    const env = makeEnv();
+    const handler = new PresignedUploadHandler(env, makePort().port);
+    return handler.createSession(USER, "US", env, {
+      mimeType: "video/mp4",
+      sizeBytes: 1000,
+    });
+  };
+
+  it("denies 413 when APPROVED usage saturates the env-default byte quota", async () => {
+    seedMedia("APPROVED", 1_000_000_000); // == env default maxBytes
+    const res = await createSmallVideoSession();
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.status).toBe(413);
+    expect(res.error).toBe("Upload quota exceeded");
+  });
+
+  it("non-APPROVED rows do NOT count against quota (shared storage-accounting predicate)", async () => {
+    // The same byte volume in non-verdict/rejected states must not deny.
+    seedMedia("UPLOADED", 500_000_000);
+    seedMedia("REJECTED", 500_000_000);
+    const res = await createSmallVideoSession();
+    expect(res.ok).toBe(true);
+  });
+
+  it("tenant byte override WINS over the env default (413 at the override)", async () => {
+    state.tenantOverride = { storageQuotaBytes: BigInt(1000), storageQuotaObjects: null };
+    seedMedia("APPROVED", 999);
+    const res = await createSmallVideoSession(); // 999 + 1000 > 1000
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.status).toBe(413);
+  });
+
+  it("tenant object override WINS over the env default (429 object-cap)", async () => {
+    state.tenantOverride = { storageQuotaBytes: null, storageQuotaObjects: 1 };
+    seedMedia("APPROVED", 10);
+    const res = await createSmallVideoSession();
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.status).toBe(429);
+    expect(res.error).toBe("Upload quota exceeded");
+  });
+
+  it("NULL override columns fall back to the env default (allowed)", async () => {
+    state.tenantOverride = { storageQuotaBytes: null, storageQuotaObjects: null };
+    seedMedia("APPROVED", 10, 3);
+    const res = await createSmallVideoSession();
+    expect(res.ok).toBe(true);
+  });
+
+  it("fail-closed: a broken (NaN) byte override denies instead of widening", async () => {
+    state.tenantOverride = {
+      storageQuotaBytes: Number.NaN,
+      storageQuotaObjects: null,
+    };
+    const res = await createSmallVideoSession();
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect([413, 429]).toContain(res.status);
+    expect(res.error).toBe("Upload quota exceeded");
+  });
+
+  it("denies 429 (Upload rate limited) when the review-rate cap is reached", async () => {
+    seedMedia("REVIEW", 10, 15);
+    seedMedia("QUARANTINED", 10, 5); // 15 + 5 == cap (20)
+    const res = await createSmallVideoSession();
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.status).toBe(429);
+    expect(res.error).toBe("Upload rate limited");
+  });
+
+  it("allows when flagged objects are one below the review-rate cap", async () => {
+    seedMedia("REVIEW", 10, 19);
+    const res = await createSmallVideoSession();
+    expect(res.ok).toBe(true);
   });
 
   it("fails closed (500) when no tenant resolves", async () => {

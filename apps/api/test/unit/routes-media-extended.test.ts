@@ -174,6 +174,8 @@ const mockEnv = {
     // allows the image upload to reach its 200 assertion. Without this the gate
     // reads undefined limits and fails closed (checkUploadQuota -> denied).
     uploadQuota: { maxObjects: 1_000_000, maxBytes: 1_000_000_000_000 },
+    // T15c review-rate cap — must be present (fail-closed gate) and generous.
+    reviewRateCap: 1_000_000,
   },
 };
 
