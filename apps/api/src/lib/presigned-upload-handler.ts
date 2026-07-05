@@ -42,6 +42,7 @@ import type { Env } from "../env.js";
 import { getLogger, Logger } from "./logger.js";
 import {
   planPresignedUpload,
+  presignByteCap,
   type PresignPlanResult,
 } from "./media/presign-policy.js";
 import {
@@ -220,9 +221,13 @@ export class PresignedUploadHandler {
 
     // --- Media class: only async-pending types are presignable. ---
     const isAudio = input.mimeType?.toLowerCase().startsWith("audio/");
-    const maxBytes = isAudio
-      ? env.media.maxBytes.audio
-      : env.media.maxBytes.video;
+    // AR-SEC F2: the SSM-fed maxBytes values are PER-TRACK budgets; a muxed
+    // video carries BOTH tracks, so its rail is the COMBINED video+audio
+    // budget (an audio-only file is railed at the single audio budget).
+    const maxBytes = presignByteCap(
+      isAudio ? "audio" : "video",
+      env.media.maxBytes,
+    );
     const allowlist = isAudio
       ? env.media.allowlist.audio
       : env.media.allowlist.video;
@@ -469,11 +474,10 @@ export class PresignedUploadHandler {
     }
     // Defense in depth: the content-length-range condition already bounded the
     // size at S3; a larger object here means the rail was bypassed somehow.
-    // Fail closed: remove the object and fail the session.
-    const declaredCap = Math.max(
-      env.media.maxBytes.video,
-      env.media.maxBytes.audio,
-    );
+    // Fail closed: remove the object and fail the session. The loosest
+    // legitimate rail is the combined video+audio track budget (AR-SEC F2 —
+    // matches the widest cap createSession can sign).
+    const declaredCap = presignByteCap("video", env.media.maxBytes);
     if (typeof head.size === "number" && head.size > declaredCap) {
       try {
         await env.MEDIA_BUCKET_R2.delete(objectKey);

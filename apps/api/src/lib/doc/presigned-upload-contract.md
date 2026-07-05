@@ -38,7 +38,10 @@ Rate limit: 10 sessions/hour/user.
     "expiresInSeconds": 900       // grant lifetime, clamped to [60,3600]
   },
   "constraints": {
-    "maxBytes": 209715200,        // the content-length-range MAX (byte rail)
+    "maxBytes": 314572800,        // the content-length-range MAX (byte rail);
+                                  // for video/*: the COMBINED video+audio
+                                  // track budgets (a muxed file carries both);
+                                  // for audio/*: the audio-track budget
     "maxDurationSeconds": 60      // user-facing limit; client trims to this
   }
 }
@@ -137,5 +140,8 @@ outcome.
 client trims to it. It is enforced **authoritatively server-side** post-upload
 via ffprobe: an over-cap clip is driven to `REJECTED` and its S3 object is
 **deleted before any moderation job runs**. The byte cap is an invisible rail
-(`content-length-range`) sized to ~`60s × generous max bitrate`; it only ever
-stops an absurd multi-GB PUT.
+(`content-length-range`): the SSM values are **per-track** budgets, each sized
+to ~`60s × generous max bitrate`, and the rail for a `video/*` upload budgets
+the **combined video+audio tracks** (a muxed file carries both — AR-SEC F2)
+while `audio/*` is railed at the single audio-track budget; it only ever stops
+an absurd multi-GB PUT.

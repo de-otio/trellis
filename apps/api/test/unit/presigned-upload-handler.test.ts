@@ -283,10 +283,11 @@ describe("PresignedUploadHandler.createSession", () => {
 
     const res = await createHappySession(handler, env);
 
-    // The signed grant used the byte rail [1, maxBytes.video] and the exact key.
+    // The signed grant used the byte rail [1, video+audio track budgets]
+    // (AR-SEC F2: a muxed video carries BOTH tracks) and the exact key.
     expect(calls).toHaveLength(1);
     expect(calls[0].minBytes).toBe(1);
-    expect(calls[0].maxBytes).toBe(200_000_000);
+    expect(calls[0].maxBytes).toBe(300_000_000);
     expect(calls[0].key).toBe(`pending/${TENANT}/${res.session.sessionId}`);
     expect(calls[0].contentType).toBe("video/mp4");
     expect(calls[0].expirySeconds).toBe(900);
@@ -294,7 +295,7 @@ describe("PresignedUploadHandler.createSession", () => {
     // Response carries the upload grant + constraints for the client trimmer.
     expect(res.upload.method).toBe("POST");
     expect(res.upload.fields["Content-Type"]).toBe("video/mp4");
-    expect(res.constraints.maxBytes).toBe(200_000_000);
+    expect(res.constraints.maxBytes).toBe(300_000_000);
     expect(res.constraints.maxDurationSeconds).toBe(60);
 
     // DB state: session awaiting-upload; media born AWAITING_UPLOAD (never
@@ -325,7 +326,8 @@ describe("PresignedUploadHandler.createSession", () => {
     const handler = new PresignedUploadHandler(env, makePort().port);
     const res = await handler.createSession(USER, "US", env, {
       mimeType: "video/mp4",
-      sizeBytes: 200_000_001,
+      // Over the combined video+audio track budgets (AR-SEC F2 rail).
+      sizeBytes: 300_000_001,
     });
     expect(res.ok).toBe(false);
     if (res.ok) return;
@@ -691,5 +693,111 @@ describe("PresignedUploadHandler.abandonSession", () => {
       env,
     );
     expect(res.ok).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AR-SEC F2: the byte rail must budget for BOTH tracks of a muxed video.
+//
+// The SSM-fed values (MEDIA_MAX_BYTES_VIDEO / MEDIA_MAX_BYTES_AUDIO) are
+// PER-TRACK budgets (the contract sizes the rail as "~60s x generous max
+// bitrate" per track). A muxed video/mp4 carries BOTH a video and an audio
+// track, so its legitimate maximum is the COMBINED budget (video + audio),
+// not the video-track budget alone. makeEnv(): video 200 MB, audio 100 MB
+// => combined 300 MB.
+// ---------------------------------------------------------------------------
+
+describe("AR-SEC F2 — combined video+audio track budgets on the byte rail", () => {
+  it("grants a legitimate muxed clip whose size exceeds the video-track budget alone", async () => {
+    const env = makeEnv();
+    const { port, calls } = makePort();
+    const handler = new PresignedUploadHandler(env, port);
+
+    // 250 MB: a full 200 MB video track + a 50 MB audio track. Legitimate
+    // (each track within its budget) but > maxBytes.video alone.
+    const res = await handler.createSession(USER, "US", env, {
+      mimeType: "video/mp4",
+      sizeBytes: 250_000_000,
+    });
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+
+    // The signed rail max is the COMBINED track budget.
+    expect(calls[0].maxBytes).toBe(300_000_000);
+    expect(res.constraints.maxBytes).toBe(300_000_000);
+  });
+
+  it("still refuses (413) beyond the combined budgets — the rail stays railed", async () => {
+    const env = makeEnv();
+    const handler = new PresignedUploadHandler(env, makePort().port);
+    const res = await handler.createSession(USER, "US", env, {
+      mimeType: "video/mp4",
+      sizeBytes: 300_000_001, // > video budget + audio budget: absurd PUT
+    });
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.status).toBe(413);
+    expect(state.sessions).toHaveLength(0);
+    expect(state.media).toHaveLength(0);
+  });
+
+  it("audio uploads stay railed at the audio budget (single track)", async () => {
+    const env = makeEnv();
+    const handler = new PresignedUploadHandler(env, makePort().port);
+    const res = await handler.createSession(USER, "US", env, {
+      mimeType: "audio/mpeg",
+      sizeBytes: 100_000_001, // > maxBytes.audio — no second track to budget
+    });
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.status).toBe(413);
+  });
+
+  it("completeSession defense-in-depth accepts a staged object within the combined budgets", async () => {
+    const env = makeEnv();
+    const handler = new PresignedUploadHandler(env, makePort().port);
+    const created = await handler.createSession(USER, "US", env, {
+      mimeType: "video/mp4",
+      sizeBytes: 250_000_000,
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+
+    // The staged object is the same legitimate muxed clip.
+    mockHead.mockResolvedValue({ size: 250_000_000 });
+    const res = await handler.completeSession(
+      created.session.sessionId,
+      USER,
+      "US",
+      env,
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.media.lifecycle).toBe("UPLOADED");
+    expect(mockDelete).not.toHaveBeenCalled();
+  });
+
+  it("completeSession defense-in-depth still deletes+fails an over-combined staged object", async () => {
+    const env = makeEnv();
+    const handler = new PresignedUploadHandler(env, makePort().port);
+    const created = await handler.createSession(USER, "US", env, {
+      mimeType: "video/mp4",
+      sizeBytes: 1000, // small declaration; the rail was "bypassed somehow"
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+
+    mockHead.mockResolvedValue({ size: 300_000_001 }); // > combined budgets
+    const res = await handler.completeSession(
+      created.session.sessionId,
+      USER,
+      "US",
+      env,
+    );
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.status).toBe(413);
+    expect(mockDelete).toHaveBeenCalled();
+    expect(state.media[0].lifecycle).toBe("UPLOAD_FAILED");
   });
 });
