@@ -84,6 +84,22 @@ const TIER_NAMES: Record<CircleTier, TierName> = {
   3: "ambient",
 };
 
+/**
+ * getCircleStatus unseen-count window (days). A tier that was never marked
+ * read used to count ALL history (lastReadAt defaulted to the epoch) — ×4
+ * per status poll. The status badge only needs "is there something new",
+ * so the count window is floored at now − 7d. Product/display semantic,
+ * not an operational-security threshold (threshold-secrecy rule N/A).
+ */
+export const CIRCLE_STATUS_WINDOW_DAYS = 7;
+
+/**
+ * getCircleStatus unseen-count cap. Counts saturate at this value (the
+ * client renders "99+"); the query stops enumerating past it (LIMIT inside
+ * the UNION subquery) instead of counting unbounded history.
+ */
+export const CIRCLE_STATUS_UNSEEN_CAP = 100;
+
 /** Score-band bounds for a single tier (matches circle-queries.md getTierBounds). */
 function getCircleTierBounds(
   tier: CircleTier,
@@ -583,39 +599,62 @@ export class CircleOps {
   async getCircleStatus(userId: string): Promise<CircleTierStatus[]> {
     const thresholds = await this.loadThresholds(userId);
     const readStates = await this.loadReadStates(userId);
-    const epoch = new Date(0);
     const tenantR = this.tenantFilter();
     const tenantP = this.postTenantFilter();
     const tiers: CircleTier[] = [0, 1, 2, 3];
+    // Never-read tiers used to count from the epoch (all history). Floor the
+    // window at now − CIRCLE_STATUS_WINDOW_DAYS; a fresher read watermark
+    // still wins (identical rows whenever lastReadAt is inside the window).
+    const windowFloor = new Date(
+      Date.now() - CIRCLE_STATUS_WINDOW_DAYS * 24 * 60 * 60 * 1000,
+    );
 
-    // Four parallel per-tier count queries (circle-queries.md recommended
-    // variant). Each counts distinct unseen posts reachable through this tier's
-    // relationships (entity-subject path OR author path).
+    // Four parallel per-tier count queries. The old single-query OR-join
+    // (posts joined on "subject-entity EXISTS … OR author") forced a
+    // join-filter scan of every candidate post per relationship row. Rewritten
+    // as a UNION of the two independently-indexable branches (entity-subject
+    // path via post_subjects(entity_id), author path via
+    // posts(author_id, created_at)); UNION dedupes across branches exactly
+    // like COUNT(DISTINCT) did, and the LIMIT caps enumeration at
+    // CIRCLE_STATUS_UNSEEN_CAP (client renders "99+").
     return Promise.all(
       tiers.map(async (tier) => {
         const bounds = getCircleTierBounds(tier, thresholds);
         const upper = bounds.upper === Infinity ? 1e9 : bounds.upper;
-        const lastReadAt = readStates[tier] ?? epoch;
+        const readAt = readStates[tier];
+        const since = readAt && readAt > windowFloor ? readAt : windowFloor;
 
         const rows = await this.prisma.$queryRaw<{ unseenCount: bigint }[]>(
           Prisma.sql`
-          SELECT COUNT(DISTINCT p.id) AS "unseenCount"
-          FROM relationships r
-          JOIN posts p ON (
-            (r.target_type = 'entity' AND EXISTS (
-              SELECT 1 FROM post_subjects ps
-              WHERE ps.post_id = p.id AND ps.entity_id = r.target_id
-            ))
-            OR (r.target_type = 'user' AND p.author_id = r.target_id)
-          )
-          WHERE r.user_id = ${userId}
-            ${tenantR}
-            ${tenantP}
-            AND ${EFFECTIVE_SCORE_SQL} >= ${bounds.lower}
-            AND ${EFFECTIVE_SCORE_SQL} < ${upper}
-            AND p.deleted_at IS NULL
-            AND ${RADIUS_INT_SQL} >= ${tier}
-            AND p.created_at > ${lastReadAt}
+          SELECT COUNT(*) AS "unseenCount" FROM (
+            SELECT p.id
+            FROM relationships r
+            JOIN post_subjects ps ON ps.entity_id = r.target_id
+            JOIN posts p ON p.id = ps.post_id
+            WHERE r.user_id = ${userId}
+              AND r.target_type = 'entity'
+              ${tenantR}
+              ${tenantP}
+              AND ${EFFECTIVE_SCORE_SQL} >= ${bounds.lower}
+              AND ${EFFECTIVE_SCORE_SQL} < ${upper}
+              AND p.deleted_at IS NULL
+              AND ${RADIUS_INT_SQL} >= ${tier}
+              AND p.created_at > ${since}
+            UNION
+            SELECT p.id
+            FROM relationships r
+            JOIN posts p ON p.author_id = r.target_id
+            WHERE r.user_id = ${userId}
+              AND r.target_type = 'user'
+              ${tenantR}
+              ${tenantP}
+              AND ${EFFECTIVE_SCORE_SQL} >= ${bounds.lower}
+              AND ${EFFECTIVE_SCORE_SQL} < ${upper}
+              AND p.deleted_at IS NULL
+              AND ${RADIUS_INT_SQL} >= ${tier}
+              AND p.created_at > ${since}
+            LIMIT ${CIRCLE_STATUS_UNSEEN_CAP}
+          ) unseen
         `,
         );
 

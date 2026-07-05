@@ -36,7 +36,10 @@ const AUTHOR_CLOSE = "circ-author-close"; // a user author at close-friends tier
 const STRANGER = "circ-stranger"; // no relationship → never visible
 
 const since = new Date("2026-01-01T00:00:00.000Z");
-const POST_TS = new Date("2026-02-01T00:00:00.000Z");
+// Recent timestamp (1h ago): getCircleStatus only counts posts inside its
+// 7-day window (CIRCLE_STATUS_WINDOW_DAYS), so the shared fixture posts must
+// be recent for the status assertions below.
+const POST_TS = new Date(Date.now() - 60 * 60 * 1000);
 
 suite("CircleOps dual-gated visibility (Postgres)", () => {
   let prisma: PrismaClient;
@@ -312,20 +315,161 @@ suite("CircleOps dual-gated visibility (Postgres)", () => {
   });
 
   it("markCircleRead + getCircleStatus reflect the read watermark", async () => {
-    // Before marking: tier 0 has unseen posts.
+    // Before marking: tier 0 has unseen posts (POST_TS is inside the window).
     const before = await run(() => ops.getCircleStatus(VIEWER));
     const t0Before = before.find((s) => s.tier === 0);
     expect(t0Before?.unseenCount ?? 0).toBeGreaterThan(0);
 
     // Mark read at a timestamp after all seeded posts.
-    await run(() =>
-      ops.markCircleRead(VIEWER, 0, new Date("2026-03-01T00:00:00.000Z")),
-    );
+    const readAt = new Date();
+    await run(() => ops.markCircleRead(VIEWER, 0, readAt));
 
     const after = await run(() => ops.getCircleStatus(VIEWER));
     const t0After = after.find((s) => s.tier === 0);
     expect(t0After?.unseenCount).toBe(0);
     expect(t0After?.caughtUp).toBe(true);
-    expect(t0After?.lastReadAt).toEqual(new Date("2026-03-01T00:00:00.000Z"));
+    expect(t0After?.lastReadAt).toEqual(readAt);
+  });
+
+  // ---------------------------------------------------------------------------
+  // getCircleStatus window floor + saturation cap (AR8 fix 1)
+  // ---------------------------------------------------------------------------
+
+  describe("getCircleStatus window floor + cap", () => {
+    const CAP_TENANT = "t-circles-itest-cap";
+    const CAP_VIEWER = "circ-cap-viewer"; // 120 recent posts → cap at 100
+    const CAP_ENT = "circ-cap-ent";
+    const WIN_VIEWER = "circ-win-viewer"; // 5 recent + 3 old posts → 5
+    const WIN_ENT = "circ-win-ent";
+    const AUTHOR = "circ-cap-author";
+
+    /** Bulk-seed posts about an entity (createMany — the cap fixture is 100+ rows). */
+    async function seedManyPosts(
+      prefix: string,
+      entityId: string,
+      count: number,
+      createdAt: Date,
+      tenant: string,
+    ) {
+      await prisma.post.createMany({
+        data: Array.from({ length: count }, (_, i) => ({
+          id: `${prefix}-${i + 1}`,
+          tenantId: tenant,
+          authorId: AUTHOR,
+          text: `${prefix}-${i + 1}`,
+          radius: "SHOUT" as const,
+          createdAt,
+        })),
+      });
+      await prisma.postSubject.createMany({
+        data: Array.from({ length: count }, (_, i) => ({
+          postId: `${prefix}-${i + 1}`,
+          entityId,
+        })),
+      });
+    }
+
+    async function wipeCapFixture() {
+      await prisma.postSubject.deleteMany({
+        where: { post: { tenantId: CAP_TENANT } },
+      });
+      await prisma.post.deleteMany({ where: { tenantId: CAP_TENANT } });
+      await prisma.relationship.deleteMany({ where: { tenantId: CAP_TENANT } });
+      await prisma.entity.deleteMany({ where: { tenantId: CAP_TENANT } });
+      await prisma.user.deleteMany({
+        where: { id: { in: [CAP_VIEWER, WIN_VIEWER, AUTHOR] } },
+      });
+      await prisma.tenant.deleteMany({
+        where: {
+          id: {
+            in: [
+              CAP_TENANT,
+              `${CAP_VIEWER}-pt`,
+              `${WIN_VIEWER}-pt`,
+              `${AUTHOR}-pt`,
+            ],
+          },
+        },
+      });
+    }
+
+    beforeAll(async () => {
+      await wipeCapFixture();
+      await seedTenant(CAP_TENANT);
+      await seedUser(CAP_VIEWER);
+      await seedUser(WIN_VIEWER);
+      await seedUser(AUTHOR);
+      await seedEntity(CAP_ENT, CAP_TENANT, "CapEnt");
+      await seedEntity(WIN_ENT, CAP_TENANT, "WinEnt");
+
+      // Both viewers relate at tier 0 (score 0.9) inside CAP_TENANT.
+      await prisma.relationship.createMany({
+        data: [
+          {
+            tenantId: CAP_TENANT,
+            userId: CAP_VIEWER,
+            targetType: "entity",
+            targetId: CAP_ENT,
+            computedScore: 0.9,
+            connectionMethod: "discovery",
+          },
+          {
+            tenantId: CAP_TENANT,
+            userId: WIN_VIEWER,
+            targetType: "entity",
+            targetId: WIN_ENT,
+            computedScore: 0.9,
+            connectionMethod: "discovery",
+          },
+        ],
+      });
+
+      const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+      const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+      // Cap fixture: 120 recent posts (> the 100 cap).
+      await seedManyPosts("p-cap", CAP_ENT, 120, oneHourAgo, CAP_TENANT);
+      // Window fixture: 5 recent + 3 outside the 7-day window.
+      await seedManyPosts("p-win-new", WIN_ENT, 5, oneHourAgo, CAP_TENANT);
+      await seedManyPosts("p-win-old", WIN_ENT, 3, eightDaysAgo, CAP_TENANT);
+    });
+
+    afterAll(async () => {
+      await wipeCapFixture();
+    });
+
+    const runCap = <T,>(fn: () => Promise<T>) =>
+      runWithTenantContext(tenantId(CAP_TENANT), fn);
+
+    it("saturates unseenCount at 100 (client renders 99+)", async () => {
+      const statuses = await runCap(() => ops.getCircleStatus(CAP_VIEWER));
+      const t0 = statuses.find((s) => s.tier === 0);
+      expect(t0?.unseenCount).toBe(100);
+      expect(t0?.caughtUp).toBe(false);
+    });
+
+    it("floors a never-read tier at the 7-day window (old posts not counted)", async () => {
+      const statuses = await runCap(() => ops.getCircleStatus(WIN_VIEWER));
+      const t0 = statuses.find((s) => s.tier === 0);
+      // 5 recent posts count; the 3 posts older than 7 days do not.
+      expect(t0?.unseenCount).toBe(5);
+      expect(t0?.caughtUp).toBe(false);
+    });
+
+    it("a read watermark inside the window still wins over the floor", async () => {
+      // Watermark 30 minutes ago — inside the 7d window and NEWER than the
+      // recent posts (1h ago) → everything is seen.
+      await runCap(() =>
+        ops.markCircleRead(WIN_VIEWER, 0, new Date(Date.now() - 30 * 60 * 1000)),
+      );
+      const mid = await runCap(() => ops.getCircleStatus(WIN_VIEWER));
+      expect(mid.find((s) => s.tier === 0)?.unseenCount).toBe(0);
+
+      // Watermark BEFORE the recent posts (2h ago) → all 5 unseen again.
+      await runCap(() =>
+        ops.markCircleRead(WIN_VIEWER, 0, new Date(Date.now() - 2 * 60 * 60 * 1000)),
+      );
+      const back = await runCap(() => ops.getCircleStatus(WIN_VIEWER));
+      expect(back.find((s) => s.tier === 0)?.unseenCount).toBe(5);
+    });
   });
 });
