@@ -187,6 +187,8 @@ describe("AR16 /api/media/upload/batch — cas/ moderation-bypass", () => {
           maxObjects: 1000,
           maxBytes: 1024 * 1024 * 1024,
         },
+        // T15c review-rate cap — must be present (fail-closed gate).
+        reviewRateCap: 20,
       },
     };
 

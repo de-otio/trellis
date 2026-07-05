@@ -1765,6 +1765,20 @@ model Tenant {
   suspendedAt   DateTime? @map("suspended_at")
   suspendReason String?   @map("suspend_reason")
 
+  // ── Per-tenant storage-quota entitlement (T16) ──
+  // NULL = the tenant is on the platform's free-tier default, which arrives
+  // via env (MEDIA_QUOTA_MAX_BYTES / MEDIA_QUOTA_MAX_OBJECTS — SSM-sourced in
+  // the consumer's CDK; never a compiled literal). A non-null value is a
+  // per-tenant OVERRIDE (entitlement seam only — billing/purchase flows are
+  // deliberately out of scope; an operator or a future billing system writes
+  // these columns). Resolution: effective = override ?? env default
+  // (lib/media/quota-resolution.ts). What USAGE counts against the quota is
+  // the shared storage-accounting predicate (lib/media/storage-accounting.ts:
+  // lifecycle === APPROVED && deletedAt IS NULL) — see
+  // doc/02-technical/operations/storage-accounting.md.
+  storageQuotaBytes   BigInt? @map("storage_quota_bytes")
+  storageQuotaObjects Int?    @map("storage_quota_objects")
+
   members          TenantMember[]
   domains          TenantDomain[]
   identityProvider TenantIdentityProvider?

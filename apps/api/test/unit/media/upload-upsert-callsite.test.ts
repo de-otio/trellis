@@ -169,6 +169,9 @@ function makeEnv() {
       // P0b quota ceilings (injected from Env.media). Generous so the quota
       // gate allows the upload and the flow reaches the upsert under test.
       uploadQuota: { maxObjects: 1_000_000, maxBytes: 1_000_000_000_000 },
+      // T15c review-rate cap — must be present (the gate is fail-closed on a
+      // missing/non-finite cap) and generous for the same reason.
+      reviewRateCap: 1_000_000,
     },
   };
 }

@@ -15,6 +15,13 @@ import { getLogger, Logger } from "../logger.js";
 import { casKey, isCasKeyError, processingKey, validateContentHash } from "../media/cas-keys.js";
 import { buildMediaUpsertArgs } from "../media/media-upsert.js";
 import { checkUploadQuota } from "../media/quota-check.js";
+import { resolveQuotaLimits, type TenantQuotaOverride } from "../media/quota-resolution.js";
+import {
+  isOverReviewRateCap,
+  reviewRateWhere,
+  reviewRateWindowStart,
+} from "../media/review-rate-cap.js";
+import { quotaUsageWhere } from "../media/storage-accounting.js";
 import { decisionToStatus } from "../media/media-lifecycle.js";
 import type { MediaLifecycle } from "../media/media-lifecycle.js";
 import { getMediaModerationProvider } from "../media/request-moderation.js";
@@ -853,12 +860,19 @@ export const mediaRoutes: Route[] = [
           return CorsHandler.addCorsHeaders(errorResponse, request, env);
         }
 
-        // Quota check (P0b): count + size-sum for the tenant from the DB.
-        // ASSUMPTION: quota usage = all non-deleted MediaFile rows for the
-        // tenant (count = currentObjects, sum(size) = currentBytes).
+        // Quota + review-rate gate (T16 / T15c): one DB round trip reads
+        //   - the tenant's usage under the SHARED storage-accounting predicate
+        //     (quotaUsageWhere — ONLY lifecycle=APPROVED, non-deleted rows
+        //     count; see lib/media/storage-accounting.ts),
+        //   - the tenant's quota override columns (effective limits =
+        //     override ?? env.media.uploadQuota — resolveQuotaLimits),
+        //   - the tenant's flagged-object count in the rolling window
+        //     (review-rate cap; see lib/media/review-rate-cap.ts).
         // checkUploadQuota is fail-closed: any bad number => denied.
         {
           let quotaState = { currentObjects: 0, currentBytes: 0 };
+          let quotaOverride: TenantQuotaOverride | null = null;
+          let reviewCountInWindow = 0;
           try {
             const raw = await withQueryTimeoutAndRetry(
               sharedDatabaseConnectionManager,
@@ -867,16 +881,31 @@ export const mediaRoutes: Route[] = [
               async (db) => {
                 const dbAny = db as any;
                 if (!dbAny.mediaFile) return null;
-                const [countResult, sumResult] = await Promise.all([
-                  dbAny.mediaFile.count({
-                    where: { tenantId, deletedAt: null },
-                  }),
+                const usageWhere = quotaUsageWhere(tenantId);
+                const [countResult, sumResult, tenantRow, reviewCount] = await Promise.all([
+                  dbAny.mediaFile.count({ where: usageWhere }),
                   dbAny.mediaFile.aggregate({
-                    where: { tenantId, deletedAt: null },
+                    where: usageWhere,
                     _sum: { size: true },
                   }),
+                  // Older test fakes may lack the tenant model — treat as
+                  // "no override" (falls back to the env default).
+                  dbAny.tenant?.findUnique
+                    ? dbAny.tenant.findUnique({
+                        where: { id: tenantId },
+                        select: { storageQuotaBytes: true, storageQuotaObjects: true },
+                      })
+                    : Promise.resolve(null),
+                  dbAny.mediaFile.count({
+                    where: reviewRateWhere(tenantId, reviewRateWindowStart()),
+                  }),
                 ]);
-                return { count: countResult as number, sumBytes: (sumResult?._sum?.size ?? 0) as number };
+                return {
+                  count: countResult as number,
+                  sumBytes: (sumResult?._sum?.size ?? 0) as number,
+                  tenantRow: (tenantRow ?? null) as TenantQuotaOverride | null,
+                  reviewCount: reviewCount as number,
+                };
               },
               {
                 ...QueryTimeoutPresets.USER_FACING,
@@ -886,6 +915,8 @@ export const mediaRoutes: Route[] = [
             );
             if (raw) {
               quotaState = { currentObjects: raw.count, currentBytes: raw.sumBytes };
+              quotaOverride = raw.tenantRow;
+              reviewCountInWindow = raw.reviewCount;
             }
           } catch {
             // Quota DB read failure — fail-closed: deny the upload.
@@ -900,10 +931,30 @@ export const mediaRoutes: Route[] = [
             return CorsHandler.addCorsHeaders(errorResponse, request, env);
           }
 
+          // T15(c): review-rate cap — checked BEFORE the quota verdict so a
+          // moderation-flooding tenant gets a clear 429 regardless of quota
+          // headroom. Cap value from env.media.reviewRateCap (SSM-fed).
+          if (isOverReviewRateCap(reviewCountInWindow, env.media.reviewRateCap)) {
+            logger.warn("[Media Upload] Review-rate cap exceeded — denying upload", {
+              userId: session.userId,
+              tenantId,
+              reviewCountInWindow,
+            });
+            const errorResponse = securityHeaders.createSecureResponse(
+              JSON.stringify({
+                error: "Upload rate limited",
+                message:
+                  "Too many recent uploads required moderation review. Try again later.",
+              }),
+              { status: 429, headers: { "content-type": "application/json" } },
+            );
+            return CorsHandler.addCorsHeaders(errorResponse, request, env);
+          }
+
           const quotaResult = checkUploadQuota(
             quotaState,
             file.size,
-            env.media.uploadQuota,
+            resolveQuotaLimits(quotaOverride, env.media.uploadQuota),
           );
           if (!quotaResult.allowed) {
             logger.warn("[Media Upload] Quota exceeded", {

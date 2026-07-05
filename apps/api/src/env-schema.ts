@@ -192,6 +192,9 @@ export function buildBootEnvSchema(stage: BootStage) {
       MEDIA_RATE_SERVE_PER_MIN: positiveIntString.optional(),
       MEDIA_MAX_DURATION_SECONDS: positiveIntString.optional(),
       MEDIA_REVIEW_RATE_CAP: positiveIntString.optional(),
+      // Rolling window (ms) for the review-rate cap (T15c). Optional; the
+      // gate falls back to its compiled 24 h default (review-rate-cap.ts).
+      MEDIA_REVIEW_RATE_WINDOW_MS: positiveIntString.optional(),
       MEDIA_QUOTA_MAX_OBJECTS: positiveIntString.optional(),
       MEDIA_QUOTA_MAX_BYTES: positiveIntString.optional(),
       MEDIA_CANONICAL_QUALITY: qualityString.optional(),

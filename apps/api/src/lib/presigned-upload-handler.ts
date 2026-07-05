@@ -763,8 +763,12 @@ export class PresignedUploadHandler {
   }
 
   /**
-   * Quota gate (fail-closed): tenant's current object count + byte sum from
-   * the DB; any read failure denies. Mirrors the proxied path's behavior.
+   * Quota + review-rate gate (fail-closed): one round trip reads the tenant's
+   * usage under the SHARED storage-accounting predicate (quotaUsageWhere —
+   * only lifecycle=APPROVED, non-deleted rows count), the tenant's quota
+   * override (T16: effective limits = override ?? env.media.uploadQuota), and
+   * the tenant's flagged-object count for the review-rate cap (T15c). Any
+   * read failure denies. Mirrors the proxied path's behavior.
    */
   private async checkQuota(
     tenantId: string,
@@ -783,25 +787,55 @@ export class PresignedUploadHandler {
       "./db-query-helper.js"
     );
     const { checkUploadQuota } = await import("./media/quota-check.js");
+    const { resolveQuotaLimits } = await import("./media/quota-resolution.js");
+    const { quotaUsageWhere } = await import("./media/storage-accounting.js");
+    const { isOverReviewRateCap, reviewRateWhere, reviewRateWindowStart } =
+      await import("./media/review-rate-cap.js");
+    type TenantQuotaOverride =
+      import("./media/quota-resolution.js").TenantQuotaOverride;
 
     let quotaState = { currentObjects: 0, currentBytes: 0 };
+    let quotaOverride: TenantQuotaOverride | null = null;
+    let reviewCountInWindow = 0;
     try {
-      const raw = await withQueryTimeoutAndRetry<{ count: number; sumBytes: number } | null>(
+      const raw = await withQueryTimeoutAndRetry<{
+        count: number;
+        sumBytes: number;
+        tenantRow: TenantQuotaOverride | null;
+        reviewCount: number;
+      } | null>(
         sharedDatabaseConnectionManager,
         region,
         env as any,
         async (db: any) => {
           if (!db.mediaFile) return null;
-          const [count, sum] = await Promise.all([
-            db.mediaFile.count({ where: { tenantId, deletedAt: null } }),
+          const usageWhere = quotaUsageWhere(tenantId);
+          const [count, sum, tenantRow, reviewCount] = await Promise.all([
+            db.mediaFile.count({ where: usageWhere }),
             db.mediaFile.aggregate({
-              where: { tenantId, deletedAt: null },
+              where: usageWhere,
               _sum: { size: true },
+            }),
+            // Older test fakes may lack the tenant model — treat as "no
+            // override" (falls back to the env default).
+            db.tenant?.findUnique
+              ? db.tenant.findUnique({
+                  where: { id: tenantId },
+                  select: {
+                    storageQuotaBytes: true,
+                    storageQuotaObjects: true,
+                  },
+                })
+              : Promise.resolve(null),
+            db.mediaFile.count({
+              where: reviewRateWhere(tenantId, reviewRateWindowStart()),
             }),
           ]);
           return {
             count: count as number,
             sumBytes: (sum?._sum?.size ?? 0) as number,
+            tenantRow: (tenantRow ?? null) as TenantQuotaOverride | null,
+            reviewCount: reviewCount as number,
           };
         },
         {
@@ -812,6 +846,8 @@ export class PresignedUploadHandler {
       );
       if (raw) {
         quotaState = { currentObjects: raw.count, currentBytes: raw.sumBytes };
+        quotaOverride = raw.tenantRow;
+        reviewCountInWindow = raw.reviewCount;
       }
     } catch {
       this.logger.warn("presigned.create: quota read failed — denying", {
@@ -826,10 +862,27 @@ export class PresignedUploadHandler {
       };
     }
 
+    // T15(c): review-rate cap — checked BEFORE the quota verdict so a
+    // moderation-flooding tenant gets a clear 429 regardless of quota headroom.
+    if (isOverReviewRateCap(reviewCountInWindow, env.media.reviewRateCap)) {
+      this.logger.warn("presigned.create: review-rate cap exceeded — denying", {
+        userId,
+        tenantId,
+        reviewCountInWindow,
+      });
+      return {
+        ok: false,
+        status: 429,
+        error: "Upload rate limited",
+        message:
+          "Too many recent uploads required moderation review. Try again later.",
+      };
+    }
+
     const quotaResult = checkUploadQuota(
       quotaState,
       sizeBytes,
-      env.media.uploadQuota,
+      resolveQuotaLimits(quotaOverride, env.media.uploadQuota),
     );
     if (!quotaResult.allowed) {
       const status = quotaResult.reason === "byte-cap" ? 413 : 429;
