@@ -65,6 +65,30 @@ vi.mock("../../../src/lib/region-detection", () => ({
   },
 }));
 
+// Mock PresignedUploadHandler (T14). Default: complete/abandon MISS with 404
+// so the legacy dispatch falls through; individual tests override to exercise
+// the presigned branch.
+const mockPresignedCreate = vi.fn();
+const mockPresignedComplete = vi.fn(async () => ({
+  ok: false as const,
+  status: 404,
+  error: "Not found",
+  message: "No such upload session.",
+}));
+const mockPresignedAbandon = vi.fn(async () => ({
+  ok: false as const,
+  status: 404,
+  error: "Not found",
+  message: "No such upload session.",
+}));
+vi.mock("../../../src/lib/presigned-upload-handler", () => ({
+  PresignedUploadHandler: class {
+    createSession = mockPresignedCreate;
+    completeSession = mockPresignedComplete;
+    abandonSession = mockPresignedAbandon;
+  },
+}));
+
 describe("Upload Session Routes", () => {
   let mockEnv: any;
   let mockSession: Session;
@@ -657,5 +681,200 @@ describe("Upload Session Routes", () => {
 
       expect(response.status).toBe(500);
           });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T14 — presigned direct-to-S3 dispatch on the shared endpoints
+// ---------------------------------------------------------------------------
+
+describe("Upload Session Routes — presigned dispatch (T14)", () => {
+  let mockEnv: any;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockEnv = {
+      DATABASE_URL: "postgresql://test",
+      SESSION_SECRET: "test-secret",
+      ENVIRONMENT: "dev",
+    };
+    mockGetSession.mockResolvedValue({
+      userId: "user-123",
+      email: "test@example.com",
+      expiresAt: Date.now() + 3600000,
+    } as Session);
+    mockApplyRateLimitKV.mockResolvedValue(null);
+    mockCreateSecureResponse.mockImplementation(
+      (body: any, options: any) => new Response(body, options),
+    );
+    mockAddSecurityHeaders.mockImplementation((r: any) => r);
+    mockDetectRegion.mockResolvedValue("EU");
+    mockPresignedComplete.mockResolvedValue({
+      ok: false,
+      status: 404,
+      error: "Not found",
+      message: "No such upload session.",
+    });
+    mockPresignedAbandon.mockResolvedValue({
+      ok: false,
+      status: 404,
+      error: "Not found",
+      message: "No such upload session.",
+    });
+  });
+
+  const createRoute = uploadSessionRoutes.find(
+    (r) => r.method === "POST" && r.path === "/api/upload-sessions",
+  );
+  const completeRoute = uploadSessionRoutes.find(
+    (r) => r.method === "POST" && r.path === "/api/upload-sessions/:id/complete",
+  );
+
+  it("a JSON body with {mimeType, sizeBytes} selects the presigned flow (201 + grant)", async () => {
+    const grant = {
+      ok: true,
+      session: {
+        sessionId: "csession000000000000000a1",
+        mediaId: "cmedia00000000000000000a1",
+        status: "awaiting-upload",
+        expiresAt: "2026-07-06T00:00:00.000Z",
+      },
+      upload: {
+        method: "POST",
+        url: "https://bucket.s3.amazonaws.com/",
+        fields: { key: "pending/t/s", policy: "p", "x-amz-signature": "s" },
+        objectKey: "pending/t/s",
+        expiresInSeconds: 900,
+      },
+      constraints: { maxBytes: 200000000, maxDurationSeconds: 60 },
+    };
+    mockPresignedCreate.mockResolvedValue(grant);
+
+    const request = new Request("https://example.com/api/upload-sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ mimeType: "video/mp4", sizeBytes: 5000000 }),
+    });
+    const response = await createRoute!.handler(request, mockEnv, {
+      url: new URL("https://example.com/api/upload-sessions"),
+      pathname: "/api/upload-sessions",
+      params: {},
+    });
+
+    expect(mockPresignedCreate).toHaveBeenCalledWith("user-123", "EU", mockEnv, {
+      mimeType: "video/mp4",
+      sizeBytes: 5000000,
+    });
+    // The LEGACY handler is not touched on the presigned branch.
+    expect(mockCreateSession).not.toHaveBeenCalled();
+    expect(response.status).toBe(201);
+    const body = await response.json();
+    expect(body.upload.fields).toHaveProperty("x-amz-signature");
+  });
+
+  it("a half-declared body (mimeType without sizeBytes) is a 400, never a silent legacy fallback", async () => {
+    const request = new Request("https://example.com/api/upload-sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ mimeType: "video/mp4" }),
+    });
+    const response = await createRoute!.handler(request, mockEnv, {
+      url: new URL("https://example.com/api/upload-sessions"),
+      pathname: "/api/upload-sessions",
+      params: {},
+    });
+    expect(response.status).toBe(400);
+    expect(mockPresignedCreate).not.toHaveBeenCalled();
+    expect(mockCreateSession).not.toHaveBeenCalled();
+  });
+
+  it("a presigned refusal maps to its status code (e.g. 413)", async () => {
+    mockPresignedCreate.mockResolvedValue({
+      ok: false,
+      status: 413,
+      error: "File too large",
+      message: "The declared size exceeds the upload size limit.",
+    });
+    const request = new Request("https://example.com/api/upload-sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ mimeType: "video/mp4", sizeBytes: 999999999999 }),
+    });
+    const response = await createRoute!.handler(request, mockEnv, {
+      url: new URL("https://example.com/api/upload-sessions"),
+      pathname: "/api/upload-sessions",
+      params: {},
+    });
+    expect(response.status).toBe(413);
+  });
+
+  it("complete dispatches presigned-first; a presigned hit short-circuits the legacy handler", async () => {
+    mockPresignedComplete.mockResolvedValue({
+      ok: true,
+      session: {
+        sessionId: "csession000000000000000a1",
+        mediaId: "cmedia00000000000000000a1",
+        status: "uploaded",
+      },
+      media: { id: "cmedia00000000000000000a1", lifecycle: "UPLOADED" },
+    });
+    const request = new Request(
+      "https://example.com/api/upload-sessions/csession000000000000000a1/complete",
+      { method: "POST" },
+    );
+    const response = await completeRoute!.handler(request, mockEnv, {
+      url: new URL(
+        "https://example.com/api/upload-sessions/csession000000000000000a1/complete",
+      ),
+      pathname: "/api/upload-sessions/csession000000000000000a1/complete",
+      params: { id: "csession000000000000000a1" },
+    });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.media.lifecycle).toBe("UPLOADED");
+    expect(mockCompleteSession).not.toHaveBeenCalled();
+  });
+
+  it("complete falls through to the legacy handler on a presigned 404 miss", async () => {
+    mockCompleteSession.mockResolvedValue({ success: true, mediaCount: 2 });
+    const request = new Request(
+      "https://example.com/api/upload-sessions/legacy-1/complete",
+      { method: "POST" },
+    );
+    const response = await completeRoute!.handler(request, mockEnv, {
+      url: new URL("https://example.com/api/upload-sessions/legacy-1/complete"),
+      pathname: "/api/upload-sessions/legacy-1/complete",
+      params: { id: "legacy-1" },
+    });
+    expect(mockPresignedComplete).toHaveBeenCalled();
+    expect(mockCompleteSession).toHaveBeenCalledWith(
+      "legacy-1",
+      "user-123",
+      "EU",
+      mockEnv,
+    );
+    expect(response.status).toBe(200);
+  });
+
+  it("a presigned non-404 refusal (e.g. 409) is returned as-is — no legacy fallback", async () => {
+    mockPresignedComplete.mockResolvedValue({
+      ok: false,
+      status: 409,
+      error: "Upload not found",
+      message: "No object at the granted key.",
+    });
+    const request = new Request(
+      "https://example.com/api/upload-sessions/csession000000000000000a1/complete",
+      { method: "POST" },
+    );
+    const response = await completeRoute!.handler(request, mockEnv, {
+      url: new URL(
+        "https://example.com/api/upload-sessions/csession000000000000000a1/complete",
+      ),
+      pathname: "/api/upload-sessions/csession000000000000000a1/complete",
+      params: { id: "csession000000000000000a1" },
+    });
+    expect(response.status).toBe(409);
+    expect(mockCompleteSession).not.toHaveBeenCalled();
   });
 });

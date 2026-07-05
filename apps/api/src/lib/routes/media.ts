@@ -5,7 +5,6 @@
  * Implements content-addressed storage (CAS) with SHA-256 hashing for deduplication.
  */
 
-import { randomBytes as cryptoRandomBytes } from "node:crypto";
 import { CorsHandler } from "../cors-handler.js";
 import { sharedDatabaseConnectionManager } from "../database-connection-manager.js";
 import {
@@ -13,11 +12,11 @@ import {
   withQueryTimeoutAndRetry,
 } from "../db-query-helper.js";
 import { getLogger, Logger } from "../logger.js";
-import { casKey, isCasKeyError, pendingKey, processingKey, validateContentHash } from "../media/cas-keys.js";
+import { casKey, isCasKeyError, processingKey, validateContentHash } from "../media/cas-keys.js";
 import { buildMediaUpsertArgs } from "../media/media-upsert.js";
 import { checkUploadQuota } from "../media/quota-check.js";
-import { decisionToStatus } from "../media/moderation-status.js";
-import type { ModerationStatus } from "../media/moderation-status.js";
+import { decisionToStatus } from "../media/media-lifecycle.js";
+import type { MediaLifecycle } from "../media/media-lifecycle.js";
 import { getMediaModerationProvider } from "../media/request-moderation.js";
 import {
   canonicalContentType,
@@ -46,7 +45,7 @@ import type { Route } from "./types.js";
  * tenant can be resolved (caller fails closed). See media/tenant-resolution.ts
  * for the recorded assumption.
  */
-async function resolveUploadTenantId(
+export async function resolveUploadTenantId(
   userId: string,
   region: string,
   env: any,
@@ -87,20 +86,6 @@ async function resolveUploadTenantId(
 
   const resolution = resolveMediaTenantId(ambient, personalTenantId, scopeMode);
   return resolution.ok ? resolution.tenantId : null;
-}
-
-/**
- * Generate a CUID v1-shaped upload ID suitable for `pendingKey`.
- *
- * Uses `node:crypto` randomBytes — the ONLY source of non-determinism allowed
- * in this module (imperative shell; not a pure-core unit). The shape
- * `c[a-z0-9]{24}` matches the UPLOAD_ID_RE used by `pendingKey`.
- */
-function generateUploadId(): string {
-  // 12 random bytes → 24 lowercase hex chars → prepend 'c' = 25-char cuid-shaped id
-  // matching UPLOAD_ID_RE = /^c[a-z0-9]{24}$/ in cas-keys.ts.
-  const hex = cryptoRandomBytes(12).toString("hex"); // exactly 24 [0-9a-f] chars
-  return `c${hex}`;
 }
 
 /**
@@ -288,7 +273,7 @@ async function mediaDenyResponse(
  *  2. Look up the DB record (the ONLY source of a servable key — the no-DB
  *     storage-probe maze was deleted in T9; storage is never probed for
  *     un-recorded bytes).
- *  3. `isServable` gate: serve ONLY when `moderationStatus === "APPROVED"` AND
+ *  3. `isServable` gate: serve ONLY when `lifecycle === "APPROVED"` AND
  *     not `hidden` AND not soft-deleted — for EVERY viewer incl. the owner.
  *  4. Every other outcome (incl. not-found / DB-error / invalid-hash / error
  *     path) returns the single byte-identical {@link mediaDenyResponse}.
@@ -317,7 +302,7 @@ export async function serveMediaByHash(
     // (DB-error) both resolve to `mediaFile = null` and deny identically — no
     // separate I/O shape on either branch (no extra audit/DB write).
     let mediaFile: {
-      moderationStatus: ModerationStatus;
+      lifecycle: MediaLifecycle;
       hidden: boolean;
       deletedAt: Date | null;
       originalKey: string | null;
@@ -382,7 +367,7 @@ export async function serveMediaByHash(
     if (
       !mediaFile ||
       !isServable({
-        moderationStatus: mediaFile.moderationStatus,
+        lifecycle: mediaFile.lifecycle,
         hidden: mediaFile.hidden,
         deletedAt: mediaFile.deletedAt,
       })
@@ -953,120 +938,21 @@ export const mediaRoutes: Route[] = [
         }
 
         if (ingestRoute.kind === "async-pending") {
-          // --- Async-pending path (video / audio) --------------------------------
-          // 1. Write RAW bytes to pending/{tenantId}/{uploadId} in R2.
-          // 2. Create a MediaFile DB row: moderationStatus=PENDING,
-          //    originalKey=null, uploadId=<generated>.
-          // No inline hashing, no transcoding, no moderation — the P0b worker
-          // picks up the staged object via the S3 trigger on the pending/ prefix.
-          const uploadId = generateUploadId();
-          const stagingKey = pendingKey(tenantId, uploadId);
-          if (isCasKeyError(stagingKey)) {
-            logger.error("[Media Upload] Failed to build pending key", {
-              userId: session.userId,
-              kind: stagingKey.kind,
-            });
-            const errorResponse = securityHeaders.createSecureResponse(
-              JSON.stringify({ error: "Upload error" }),
-              { status: 500, headers: { "content-type": "application/json" } },
-            );
-            return CorsHandler.addCorsHeaders(errorResponse, request, env);
-          }
-
-          const r2Bucket = (env as any).MEDIA_BUCKET_R2 || (env as any).R2_BUCKET;
-          if (!r2Bucket) {
-            logger.error("[Media Upload] No R2 bucket configured for pending write", {
-              userId: session.userId,
-            });
-            const errorResponse = securityHeaders.createSecureResponse(
-              JSON.stringify({ error: "Upload unavailable" }),
-              { status: 503, headers: { "content-type": "application/json" } },
-            );
-            return CorsHandler.addCorsHeaders(errorResponse, request, env);
-          }
-
-          try {
-            await r2Bucket.put(stagingKey, fileBuffer, {
-              httpMetadata: { contentType: mimeType },
-            });
-          } catch (r2Error: any) {
-            logger.error("[Media Upload] R2 pending write failed", {
-              userId: session.userId,
-              error: r2Error.message,
-            });
-            const errorResponse = securityHeaders.createSecureResponse(
-              JSON.stringify({ error: "Upload failed" }),
-              { status: 500, headers: { "content-type": "application/json" } },
-            );
-            return CorsHandler.addCorsHeaders(errorResponse, request, env);
-          }
-
-          // Create the MediaFile row: PENDING + null originalKey + uploadId.
-          // The row exists immediately so the client can track the upload by
-          // uploadId; originalKey is filled by the P0b worker after transcoding.
-          try {
-            await withQueryTimeoutAndRetry(
-              sharedDatabaseConnectionManager,
-              uploadRegion,
-              env as any,
-              async (db) => {
-                const dbAny = db as any;
-                if (!dbAny.mediaFile) throw new Error("mediaFile model unavailable");
-                return await dbAny.mediaFile.create({
-                  data: {
-                    tenantId,
-                    // contentHash is null until known: the P0b worker computes
-                    // the real SHA-256 of the transcoded bytes and sets it via
-                    // persistCleanedContent. The within-tenant unique tolerates
-                    // many NULL content_hash rows (distinct NULLs in Postgres).
-                    contentHash: null,
-                    mimeType,
-                    size: file.size,
-                    originalKey: null,
-                    uploadId,
-                    uploadStatus: "PENDING",
-                    uploadedBy: session.userId,
-                    // moderationStatus defaults to PENDING in the schema.
-                  },
-                });
-              },
-              {
-                ...QueryTimeoutPresets.USER_FACING,
-                maxRetries: 1,
-                context: { operation: "mediaUpload_createPendingRecord", userId: session.userId },
-              },
-            );
-          } catch (dbError: any) {
-            logger.error("[Media Upload] Pending DB record creation failed", {
-              uploadId,
-              error: dbError.message,
-            });
-            // Best-effort: attempt to remove the orphaned R2 object so the
-            // pending/ prefix stays clean. Non-fatal if this fails.
-            try { await r2Bucket.delete(stagingKey); } catch { /* ignore */ }
-            const errorResponse = securityHeaders.createSecureResponse(
-              JSON.stringify({ error: "Database error" }),
-              { status: 500, headers: { "content-type": "application/json" } },
-            );
-            return CorsHandler.addCorsHeaders(errorResponse, request, env);
-          }
-
-          logger.info("[Media Upload] Async-pending upload accepted", {
-            userId: session.userId,
-            uploadId,
-            stagingKey,
-            mimeType,
-            size: file.size,
-          });
-
-          const pendingResponse = securityHeaders.createSecureResponse(
+          // --- Video / audio: direct-to-S3 ONLY (T14) -----------------------
+          // The proxied body-through-Fargate path for video/audio is removed:
+          // streaming popular video through the API task is a scaling dead
+          // end, and the presigned flow gives S3 itself the byte rail
+          // (content-length-range). Clients must create a presigned upload
+          // session and PUT/POST the bytes straight to S3.
+          const errorResponse = securityHeaders.createSecureResponse(
             JSON.stringify({
-              uploadId,
-              status: "pending",
+              error: "Use presigned upload",
+              message:
+                "Video/audio uploads must use the presigned direct-to-S3 flow: POST /api/upload-sessions with {mimeType, sizeBytes}, upload with the returned grant, then POST /api/upload-sessions/{id}/complete.",
             }),
-            { status: 202, headers: { "content-type": "application/json" } },
+            { status: 400, headers: { "content-type": "application/json" } },
           );
-          return CorsHandler.addCorsHeaders(pendingResponse, request, env);
+          return CorsHandler.addCorsHeaders(errorResponse, request, env);
         }
 
         // --- Sync-image path (ingestRoute.kind === "sync-image") ---------------
@@ -1220,7 +1106,7 @@ export const mediaRoutes: Route[] = [
         // empty. The injected provider uses {bucket, key} to locate the STAGED
         // object.
         const moderationBucketName = (env as any).MEDIA_BUCKET_NAME;
-        let decision: ModerationStatus;
+        let decision: MediaLifecycle;
         try {
           const verdict = await getMediaModerationProvider().moderateImage({
             bucket: moderationBucketName,
@@ -1285,7 +1171,7 @@ export const mediaRoutes: Route[] = [
               // T9: a within-tenant dedup hit (identical bytes re-uploaded)
               // must NOT transfer ownership or de-publish the canonical row.
               // buildMediaUpsertArgs guarantees the `update` payload touches
-              // neither uploadedBy nor moderationStatus — subsequent uploaders
+              // neither uploadedBy nor lifecycle — subsequent uploaders
               // get a reference (via the post→media relation), not a mutation
               // of the shared row. The verdict applies to the `create` only.
               return await db.mediaFile.upsert(
@@ -1299,7 +1185,7 @@ export const mediaRoutes: Route[] = [
                   width: metadata?.width,
                   height: metadata?.height,
                   duration: metadata?.duration,
-                  moderationStatus: decision,
+                  lifecycle: decision,
                 }),
               );
             },
@@ -1340,7 +1226,7 @@ export const mediaRoutes: Route[] = [
           contentHash,
           uploadedBy: session.userId,
           originalKey: uploadOriginalKey,
-          moderationStatus: decision,
+          lifecycle: decision,
           uploadRegion,
         });
 
@@ -1350,7 +1236,7 @@ export const mediaRoutes: Route[] = [
           fileSize: file.size,
           mimeType,
           contentHash,
-          moderationStatus: decision,
+          lifecycle: decision,
         });
 
         // Reconstruct the client serve URL. This is the public API URL the

@@ -418,6 +418,12 @@ export interface Env {
       /** BCP-47 language code. Source: MEDIA_TRANSCRIBE_LANGUAGE_CODE. Default: "en-US". */
       languageCode: string;
     };
+    /**
+     * Lifetime (seconds) of a presigned direct-upload grant (T14). Clamped to
+     * [60, 3600] by the presign planner regardless of the configured value.
+     * Source: MEDIA_PRESIGN_EXPIRY_SECONDS. Default: 900.
+     */
+    presignExpirySeconds: number;
   };
   // --- end Media config seam -------------------------------------------------
 
@@ -545,6 +551,7 @@ export function resolveMediaEnv(): { media: {
   reviewRateCap: number;
   uploadQuota: { maxObjects: number; maxBytes: number };
   transcribe: { outputBucket?: string; languageCode: string };
+  presignExpirySeconds: number;
 } } {
   // --- maxBytes: conservative dev defaults (10 MiB image, 100 MiB video/audio) ---
   const parseBytes = (raw: string | undefined, fallback: number): number => {
@@ -681,6 +688,18 @@ export function resolveMediaEnv(): { media: {
   const rawLanguageCode = (process.env.MEDIA_TRANSCRIBE_LANGUAGE_CODE ?? "").trim();
   const transcribeLanguageCode = rawLanguageCode.length > 0 ? rawLanguageCode : "en-US";
 
+  // --- presignExpirySeconds: lifetime of a presigned direct-upload grant ---
+  // (T14). Conservative dev default (15 min); the planner clamps to
+  // [60, 3600] regardless of what arrives here (presign-policy.ts).
+  const presignExpiryRaw = Number.parseInt(
+    process.env.MEDIA_PRESIGN_EXPIRY_SECONDS ?? "",
+    10,
+  );
+  const presignExpirySeconds =
+    Number.isFinite(presignExpiryRaw) && presignExpiryRaw > 0
+      ? presignExpiryRaw
+      : 900;
+
   return {
     media: {
       maxBytes: { image: maxBytesImage, video: maxBytesVideo, audio: maxBytesAudio },
@@ -695,6 +714,7 @@ export function resolveMediaEnv(): { media: {
       reviewRateCap,
       uploadQuota: { maxObjects: quotaMaxObjects, maxBytes: quotaMaxBytes },
       transcribe: { outputBucket: transcribeOutputBucket, languageCode: transcribeLanguageCode },
+      presignExpirySeconds,
     },
   };
 }

@@ -64,6 +64,7 @@
     "@aws-sdk/client-sns": "^3.1078.0",
     "@aws-sdk/client-sqs": "^3.1078.0",
     "@aws-sdk/client-ssm": "^3.1078.0",
+    "@aws-sdk/s3-presigned-post": "^3.1079.0",
     "@aws-sdk/s3-request-presigner": "^3.1078.0",
     "@aws-sdk/util-dynamodb": "^3.996.5",
     "@de-otio/saas-foundation": "^0.3.0",
