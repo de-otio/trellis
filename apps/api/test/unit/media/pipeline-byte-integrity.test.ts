@@ -88,6 +88,8 @@ interface SharedPersistence {
     // contentHash starts null (mirrors the upload path); the worker sets the
     // real SHA-256 of the cleaned bytes via persistCleanedContent.
     contentHash: string | null;
+    // The pinned staging version (AR-SEC F3); set by persistCleanedContent.
+    stagingVersionId: string | null;
     lifecycle: MediaLifecycle;
   };
   jobs: Array<{ mediaId: string; track: Track; jobId: string; decision: ModerationDecision | null; thresholdSnapshot: unknown }>;
@@ -131,6 +133,7 @@ describe("P0b pipeline — cross-worker byte integrity (APPROVED path)", () => {
         tenantId: TENANT,
         uploadId: UPLOAD,
         contentHash: null, // null until the worker hashes the cleaned bytes
+        stagingVersionId: null, // null until the worker pins the version
         lifecycle: "UPLOADED",
       },
       jobs: [],
@@ -164,9 +167,11 @@ describe("P0b pipeline — cross-worker byte integrity (APPROVED path)", () => {
           shared.jobs.push({ ...input, decision: null });
         },
         async persistCleanedContent(mediaId, content) {
-          // The processing worker replaces the placeholder with the real hash.
+          // The processing worker replaces the placeholder with the real hash
+          // and pins the staging version it moderated (AR-SEC F3).
           if (mediaId === shared.row.id) {
             shared.row.contentHash = content.contentHash;
+            shared.row.stagingVersionId = content.stagingVersionId;
           }
         },
         async markMediaForReview(mediaId) {
@@ -247,7 +252,8 @@ describe("P0b pipeline — cross-worker byte integrity (APPROVED path)", () => {
           lifecycle: shared.row.lifecycle,
           tenantId: shared.row.tenantId,
           uploadId: shared.row.uploadId!,
-          contentHash: shared.row.contentHash, // the REAL post-transcode hash
+          contentHash: shared.row.contentHash!, // the REAL post-transcode hash
+          stagingVersionId: shared.row.stagingVersionId, // the pinned version
         };
       },
       async persistMediaStatus(mediaId, status) {
@@ -348,6 +354,8 @@ describe("P0b pipeline — cross-worker byte integrity (APPROVED path)", () => {
       tenantId: TENANT,
       uploadId: UPLOAD,
       contentHash: hashHex(cleanedBytes),
+      // The pinned version of the staging put above (AR-SEC F3).
+      stagingVersionId: (await storage.headObject(stagingK)).versionId!,
     };
     const claimed = new Set<string>();
     const jobs = [
@@ -418,5 +426,189 @@ describe("P0b pipeline — cross-worker byte integrity (APPROVED path)", () => {
     // The crux: promotion copied the CLEANED staging bytes, NOT the raw pending.
     expect(served.equals(cleanedBytes)).toBe(true);
     expect(served.equals(rawBytes)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AR-SEC F3 (TOCTOU): bytes overwritten AFTER moderation must never promote.
+// ---------------------------------------------------------------------------
+
+describe("P0b pipeline — AR-SEC F3 staging-overwrite TOCTOU", () => {
+  it("staging bytes overwritten after moderation start are NEVER promoted to cas/", async () => {
+    const storage = new MockStoragePort();
+
+    const rawBytes = Buffer.from("RAW-UPLOAD-bytes");
+    const cleanedBytes = Buffer.from("CLEANED-moderated-safe-bytes");
+    // The attacker's swap: written to the SAME staging key after moderation
+    // has already been started on the cleaned bytes (e.g. a re-POST with a
+    // still-valid grant re-triggering a processing overwrite).
+    const attackerBytes = Buffer.from("ATTACKER-unmoderated-swap-bytes");
+
+    const pendingK = k(pendingKey, TENANT, UPLOAD);
+    const stagingK = `processing/${TENANT}/${UPLOAD}`;
+    const expectedCasK = casKey(TENANT, hashHex(cleanedBytes));
+    if (isCasKeyError(expectedCasK)) throw new Error("expected valid cas key");
+
+    await storage.putObject(pendingK, rawBytes, "video/mp4");
+
+    const transcode = new MockTranscodePort({ duration: 10 });
+    const origTranscodeVideo = transcode.transcodeVideo.bind(transcode);
+    transcode.transcodeVideo = async (input) => {
+      const res = await origTranscodeVideo(input);
+      await storage.putObject(input.outputPath, cleanedBytes, "video/mp4");
+      return res;
+    };
+
+    const shared: SharedPersistence = {
+      row: {
+        id: MEDIA_ID,
+        tenantId: TENANT,
+        uploadId: UPLOAD,
+        contentHash: null,
+        stagingVersionId: null,
+        lifecycle: "UPLOADED",
+      },
+      jobs: [],
+      claimed: new Set(),
+    };
+
+    const moderation = new MockModerationProvider();
+    const transcribe = new MockTranscribePort();
+
+    const processingDeps: MediaProcessingDeps = {
+      storage,
+      transcode,
+      transcribe,
+      moderation,
+      persistence: {
+        async findMediaByUploadId(uploadId): Promise<MediaFileRow | null> {
+          return uploadId === UPLOAD
+            ? {
+                id: shared.row.id,
+                tenantId: shared.row.tenantId,
+                uploadId: shared.row.uploadId,
+              }
+            : null;
+        },
+        async createModerationJob(input) {
+          shared.jobs.push({ ...input, decision: input.initialDecision ?? null });
+        },
+        async persistCleanedContent(mediaId, content) {
+          if (mediaId === shared.row.id) {
+            shared.row.contentHash = content.contentHash;
+            // Version-pin plumbing (AR-SEC F3): persist the staging object
+            // version the worker moderated.
+            shared.row.stagingVersionId = content.stagingVersionId;
+          }
+        },
+        async markMediaForReview() {
+          shared.row.lifecycle = "REVIEW";
+        },
+        async markMediaUploaded() {},
+        async markMediaRejected() {
+          shared.row.lifecycle = "REJECTED";
+        },
+      },
+      config: { maxDurationSeconds: 60, thresholds: THRESHOLDS },
+      bucket: BUCKET,
+      newJobName: (seed) => `jobname-${seed}`,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    };
+
+    // PHASE 1 — processing starts moderation on the CLEANED bytes.
+    const procOut = await processObjectKey(pendingK, processingDeps);
+    expect(procOut.disposition).toBe("ack");
+    expect(procOut.reason).toBe("started-moderation");
+    expect(shared.row.contentHash).toBe(hashHex(cleanedBytes));
+
+    // === THE ATTACK: overwrite the staging object AFTER moderation started ===
+    await storage.putObject(stagingK, attackerBytes, "video/mp4");
+
+    // PHASE 2 — both tracks approve; the completion promotes.
+    const visualJob = shared.jobs.find((j) => j.track === "VISUAL")!;
+    const audioJob = shared.jobs.find((j) => j.track === "AUDIO")!;
+    audioJob.decision = "approved";
+
+    const store: CompletionStore = {
+      async claimMessage(dedupeKey) {
+        if (shared.claimed.has(dedupeKey)) return false;
+        shared.claimed.add(dedupeKey);
+        return true;
+      },
+      async findJobByJobId(jobId): Promise<ModerationJobRow | null> {
+        const j = shared.jobs.find((x) => x.jobId === jobId);
+        return j
+          ? { mediaId: MEDIA_ID, track: j.track, thresholdSnapshot: j.thresholdSnapshot }
+          : null;
+      },
+      async persistTrackDecision(jobId, decision) {
+        const j = shared.jobs.find((x) => x.jobId === jobId);
+        if (j) j.decision = decision;
+      },
+      async readOtherTrack(_mediaId, thisTrack): Promise<OtherTrackState> {
+        const other = shared.jobs.find((x) => x.track !== thisTrack);
+        if (!other || other.decision === null) return { state: "absent" };
+        return { state: "decided", decision: other.decision };
+      },
+      async findMedia(mediaId): Promise<MediaCoords | null> {
+        if (mediaId !== shared.row.id) return null;
+        return {
+          lifecycle: shared.row.lifecycle,
+          tenantId: shared.row.tenantId,
+          uploadId: shared.row.uploadId!,
+          contentHash: shared.row.contentHash!,
+          // Version-pin plumbing (AR-SEC F3): hand the pinned version back.
+          stagingVersionId: shared.row.stagingVersionId,
+        };
+      },
+      async persistMediaStatus(mediaId, status) {
+        if (mediaId === shared.row.id) shared.row.lifecycle = status;
+      },
+    };
+
+    const completionDeps: CompletionDeps = {
+      store,
+      moderation: {
+        async moderateImage(): Promise<ModerationVerdict> {
+          return { decision: "approved", labels: [], provider: "fake" };
+        },
+        async startVideoModeration() {
+          return { jobId: "x" };
+        },
+        async getVideoModeration(): Promise<ModerationVerdict> {
+          return { decision: "approved", labels: [], provider: "fake" };
+        },
+      } satisfies MediaModerationProvider,
+      transcribe: {
+        async startTranscription() {
+          return { jobId: "x" };
+        },
+        async getTranscription() {
+          return { status: "COMPLETED" as const, transcript: "" };
+        },
+      },
+      textModeration: {
+        async moderateText(): Promise<ModerationVerdict> {
+          return { decision: "approved", labels: [], provider: "fake" };
+        },
+      },
+      storage,
+      reinterpretVisual: (v) => v.decision,
+      emitResolved: async () => {},
+      log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    };
+
+    const visualBody = JSON.stringify({
+      Message: JSON.stringify({ JobId: visualJob.jobId }),
+    });
+    const visualOut = await processCompletion(visualBody, completionDeps);
+    expect(visualOut.kind).toBe("applied");
+    expect((visualOut as { status: MediaLifecycle }).status).toBe("APPROVED");
+
+    // === THE INVARIANT: cas/ holds the MODERATED bytes, not the swap. ===
+    expect((await storage.headObject(expectedCasK)).exists).toBe(true);
+    const servedBytes = await storage.getObject(expectedCasK);
+    expect(servedBytes.equals(cleanedBytes)).toBe(true);
+    expect(servedBytes.equals(attackerBytes)).toBe(false);
   });
 });

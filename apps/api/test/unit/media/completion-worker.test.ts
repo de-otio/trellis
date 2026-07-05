@@ -141,6 +141,9 @@ function harness(opts: {
   mediaId?: string;
   currentStatus?: MediaLifecycle;
   casPresent?: boolean;
+  /** The pinned staging version on the media row (AR-SEC F3). Defaults to a
+   * pinned value; pass `null` to model a legacy/unpinned row. */
+  stagingVersionId?: string | null;
   thresholdSnapshot?: unknown;
   // visual path
   videoVerdict?: ModerationDecision;
@@ -176,6 +179,10 @@ function harness(opts: {
             tenantId: TENANT,
             uploadId: UPLOAD,
             contentHash: HASH,
+            stagingVersionId:
+              opts.stagingVersionId === undefined
+                ? "v-pinned-1"
+                : opts.stagingVersionId,
           },
         },
       ],
@@ -434,7 +441,10 @@ describe("processCompletion — both tracks required for approval", () => {
     expect(h.storageCalls).toContain("copyObject");
   });
 
-  it("APPROVED but CAS object ABSENT => persist+emit but NO promotion (doubt never serves bytes)", async () => {
+  it("AR-SEC F3: approved but pinned bytes unresolvable => held in REVIEW, never APPROVED", async () => {
+    // Pre-F3 behavior persisted APPROVED (and emitted "ready"!) with no
+    // certified bytes present — an APPROVED row that could later be satisfied
+    // by unmoderated bytes. Now: doubt never serves — hold in REVIEW.
     const h = harness({
       jobId: "rek-1",
       track: "VISUAL",
@@ -443,11 +453,12 @@ describe("processCompletion — both tracks required for approval", () => {
       other: { state: "decided", decision: "approved" },
     });
     const out = await processCompletion(snsBody("rek-1"), h.deps);
-    expect((out as { status: MediaLifecycle }).status).toBe("APPROVED");
-    // status persisted, event emitted...
+    expect((out as { status: MediaLifecycle }).status).toBe("REVIEW");
+    // REVIEW persisted, not-ready emitted...
     expect(h.state.calls).toContain("persistMediaStatus");
-    expect(h.emitted).toEqual([{ mediaId: "media-1", status: "ready" }]);
-    // ...but bytes were NOT copied because the CAS object is not present.
+    expect(h.state.media.get("media-1")!.coords.lifecycle).toBe("REVIEW");
+    expect(h.emitted).toEqual([{ mediaId: "media-1", status: "not-ready" }]);
+    // ...and bytes were NOT copied (nothing certified to copy).
     expect(h.storageCalls).not.toContain("copyObject");
   });
 });
@@ -831,5 +842,104 @@ describe("T14 fail-closed — errored/timed-out moderation is HELD, never served
     expect(
       isServable({ lifecycle: "AWAITING_UPLOAD", hidden: false, deletedAt: null }),
     ).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AR-SEC F3 — version-pinned promotion (TOCTOU)
+// ---------------------------------------------------------------------------
+
+describe("processCompletion — AR-SEC F3 version-pinned promotion", () => {
+  const approvedOpts = {
+    jobId: "rek-1",
+    track: "VISUAL" as Track,
+    videoVerdict: "approved" as ModerationDecision,
+    other: { state: "decided", decision: "approved" } as OtherTrackState,
+  };
+
+  it("promotes by copying the PINNED staging version, never the current key contents", async () => {
+    const h = harness({ ...approvedOpts, stagingVersionId: "v-moderated-7" });
+    const copies: Array<{
+      from: string;
+      to: string;
+      fromVersionId?: string;
+    }> = [];
+    const deps: CompletionDeps = {
+      ...h.deps,
+      storage: {
+        ...h.deps.storage,
+        copyObject: async (from, to, options) => {
+          copies.push({ from, to, fromVersionId: options?.fromVersionId });
+        },
+      },
+    };
+
+    const out = await processCompletion(snsBody("rek-1"), deps);
+    expect((out as { status: MediaLifecycle }).status).toBe("APPROVED");
+    expect(copies).toEqual([
+      { from: STAGING_KEY, to: CAS_KEY, fromVersionId: "v-moderated-7" },
+    ]);
+  });
+
+  it("pin resolution consults the EXACT pinned version on the staging key", async () => {
+    const h = harness({ ...approvedOpts, stagingVersionId: "v-moderated-9" });
+    const heads: Array<{ key: string; versionId?: string }> = [];
+    const deps: CompletionDeps = {
+      ...h.deps,
+      storage: {
+        ...h.deps.storage,
+        headObject: async (key, options) => {
+          heads.push({ key, versionId: options?.versionId });
+          return { exists: true, versionId: options?.versionId ?? "v-current" };
+        },
+      },
+    };
+
+    await processCompletion(snsBody("rek-1"), deps);
+    expect(heads).toContainEqual({
+      key: STAGING_KEY,
+      versionId: "v-moderated-9",
+    });
+  });
+
+  it("legacy/unpinned row with NO prior cas/ promote holds REVIEW (never an unpinned copy)", async () => {
+    // stagingVersionId null models a pre-pinning row; the staging key may
+    // even hold bytes, but WHICH bytes were moderated cannot be certified.
+    const h = harness({
+      ...approvedOpts,
+      stagingVersionId: null,
+      casPresent: false,
+    });
+    const out = await processCompletion(snsBody("rek-1"), h.deps);
+    expect((out as { status: MediaLifecycle }).status).toBe("REVIEW");
+    expect(h.emitted).toEqual([{ mediaId: "media-1", status: "not-ready" }]);
+    expect(h.storageCalls).not.toContain("copyObject");
+  });
+
+  it("legacy/unpinned row WITH a prior cas/ promote applies APPROVED without re-copying", async () => {
+    // cas/ already holds bytes from a prior (pinned) promote — a replayed
+    // completion must be an idempotent approval, and must NOT re-copy from
+    // staging (whose current bytes could postdate moderation).
+    const h = harness({
+      ...approvedOpts,
+      stagingVersionId: null,
+      casPresent: true,
+    });
+    const out = await processCompletion(snsBody("rek-1"), h.deps);
+    expect((out as { status: MediaLifecycle }).status).toBe("APPROVED");
+    expect(h.storageCalls).not.toContain("copyObject");
+  });
+
+  it("pinned version GONE from staging and no cas/ => REVIEW hold (fail closed)", async () => {
+    const h = harness({ ...approvedOpts, stagingVersionId: "v-moderated-3" });
+    const deps: CompletionDeps = {
+      ...h.deps,
+      storage: {
+        ...h.deps.storage,
+        headObject: async () => ({ exists: false }),
+      },
+    };
+    const out = await processCompletion(snsBody("rek-1"), deps);
+    expect((out as { status: MediaLifecycle }).status).toBe("REVIEW");
   });
 });

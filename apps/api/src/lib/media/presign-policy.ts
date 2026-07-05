@@ -35,6 +35,37 @@ import { routeUpload } from "./route-upload.js";
 export const MIN_PRESIGN_EXPIRY_SECONDS = 60;
 export const MAX_PRESIGN_EXPIRY_SECONDS = 3600;
 
+/** Per-class byte budgets (Env.media.maxBytes.video/.audio — SSM-fed values,
+ * never literals). */
+export interface TrackByteBudgets {
+  readonly video: number;
+  readonly audio: number;
+}
+
+/**
+ * Derive the `content-length-range` MAX for one presigned upload (AR-SEC F2).
+ *
+ * The operator budgets (Env.media.maxBytes.video / .audio) are PER-TRACK
+ * budgets — the frozen contract sizes the rail as "~60s × generous max
+ * bitrate" per track. A muxed video file carries BOTH a video and an audio
+ * track, so its rail must budget the COMBINED tracks; sizing it to the
+ * video-track budget alone rejects a legitimate clip whose audio pushes the
+ * file past that single budget. An audio file is single-track.
+ *
+ * The rail stays railed: the result is bounded by the sum of the two
+ * SSM-driven budgets (no literal here — this file ships in the public
+ * tarball), and the authoritative limits (duration cap via ffprobe, tenant
+ * quota) are enforced elsewhere. Pure and total.
+ */
+export function presignByteCap(
+  mediaClass: "video" | "audio",
+  budgets: TrackByteBudgets,
+): number {
+  return mediaClass === "audio"
+    ? budgets.audio
+    : budgets.video + budgets.audio;
+}
+
 /** Everything the planner needs. All values arrive from the shell (session
  * row + Env.media); none are read from process.env here. */
 export interface PresignPlanInput {

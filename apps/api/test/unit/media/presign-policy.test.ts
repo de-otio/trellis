@@ -16,6 +16,7 @@ import * as fc from "fast-check";
 
 import {
   planPresignedUpload,
+  presignByteCap,
   normalizeMimeType,
   MIN_PRESIGN_EXPIRY_SECONDS,
   MAX_PRESIGN_EXPIRY_SECONDS,
@@ -193,5 +194,34 @@ describe("normalizeMimeType", () => {
     expect(normalizeMimeType("  video/webm  ")).toBe("video/webm");
     expect(normalizeMimeType("")).toBe("");
     expect(normalizeMimeType(null as unknown as string)).toBe("");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// presignByteCap (AR-SEC F2)
+// ---------------------------------------------------------------------------
+
+describe("presignByteCap (AR-SEC F2 — combined track budgets)", () => {
+  const budgets = { video: 200_000_000, audio: 100_000_000 };
+
+  it("video = the COMBINED video+audio track budgets (a muxed file carries both)", () => {
+    expect(presignByteCap("video", budgets)).toBe(300_000_000);
+  });
+
+  it("audio = the single audio-track budget", () => {
+    expect(presignByteCap("audio", budgets)).toBe(100_000_000);
+  });
+
+  it("stays SSM-driven: scales with the injected budgets, no floor/ceiling literal", () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 1, max: 2 ** 40 }),
+        fc.integer({ min: 1, max: 2 ** 40 }),
+        (video, audio) => {
+          expect(presignByteCap("video", { video, audio })).toBe(video + audio);
+          expect(presignByteCap("audio", { video, audio })).toBe(audio);
+        },
+      ),
+    );
   });
 });

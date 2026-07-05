@@ -564,6 +564,9 @@ export function resolveMediaEnv(): { media: {
   presignExpirySeconds: number;
 } } {
   // --- maxBytes: conservative dev defaults (10 MiB image, 100 MiB video/audio) ---
+  // video/audio are PER-TRACK budgets (AR-SEC F2): the presigned byte rail
+  // budgets a muxed video as video+audio combined — see presignByteCap()
+  // in lib/media/presign-policy.ts.
   const parseBytes = (raw: string | undefined, fallback: number): number => {
     const n = Number.parseInt(raw ?? "", 10);
     return Number.isFinite(n) && n > 0 ? n : fallback;
