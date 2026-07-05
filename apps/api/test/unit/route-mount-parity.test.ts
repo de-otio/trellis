@@ -162,3 +162,38 @@ describe("served-route regression: T8 devices routes (the 0.19.0 mount gap)", ()
     });
   });
 });
+
+describe("served-route: T9 media-review moderator surface is mounted (401 unauth, not 404)", () => {
+  // Proves the T9 routes are actually SERVED by the Hono app (not merely in the
+  // aggregate) and that an unauthenticated request is refused at the session gate
+  // — 401, never Hono's 404. The MODERATOR role check (403) sits behind this and
+  // is exercised in test/unit/media/media-review-handler.test.ts.
+  const cases: Array<{ method: string; path: string }> = [
+    { method: "GET", path: "/api/admin/media-review" },
+    { method: "POST", path: "/api/admin/media-review/some-id/decision" },
+    { method: "POST", path: "/api/admin/media-review/some-id/escalate-csam" },
+    { method: "GET", path: "/api/admin/media-review/some-id/content" },
+  ];
+
+  for (const { method, path } of cases) {
+    it(`serves ${method} ${path} (401 unauth, NOT 404)`, async () => {
+      const app = buildHonoApp();
+      const res = await app.fetch(
+        new Request(`http://localhost${path}`, {
+          method,
+          ...(method === "POST"
+            ? {
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ decision: "approve" }),
+              }
+            : {}),
+        }),
+        { trellisEnv: env },
+      );
+      expect(res.status).toBe(401);
+      expect((await res.json()) as { error: string }).toMatchObject({
+        error: "Unauthorized",
+      });
+    });
+  }
+});
