@@ -490,6 +490,57 @@ describe("getRelationships", () => {
     expect(result.hasMore).toBe(false);
   });
 
+  it("does not drop tied rows at the page boundary (composite keyset cursor)", async () => {
+    // Five rows sharing one score: a score-only cursor would skip ALL of the
+    // remaining tied rows after page 1. Walk the pages and assert full,
+    // duplicate-free enumeration.
+    const rows = ["a", "b", "c", "d", "e"].map((id) =>
+      makeRow({ targetId: id, computedScore: 0.5 }),
+    );
+    relationship.findMany.mockResolvedValue(rows);
+
+    const page1 = await withTenant(() =>
+      ops.getRelationships("user-1", { pagination: { limit: 2 } }),
+    );
+    expect(page1.items.map((r) => r.targetId)).toEqual(["a", "b"]);
+    expect(page1.hasMore).toBe(true);
+
+    const page2 = await withTenant(() =>
+      ops.getRelationships("user-1", {
+        pagination: { limit: 2, cursor: page1.cursor! },
+      }),
+    );
+    expect(page2.items.map((r) => r.targetId)).toEqual(["c", "d"]);
+    expect(page2.hasMore).toBe(true);
+
+    const page3 = await withTenant(() =>
+      ops.getRelationships("user-1", {
+        pagination: { limit: 2, cursor: page2.cursor! },
+      }),
+    );
+    expect(page3.items.map((r) => r.targetId)).toEqual(["e"]);
+    expect(page3.hasMore).toBe(false);
+    expect(page3.cursor).toBeNull();
+    relationship.findMany.mockReset();
+  });
+
+  it("cursor tiebreak only admits TIED rows past the boundary id — lower-scored rows always appear", async () => {
+    relationship.findMany.mockResolvedValueOnce([
+      makeRow({ targetId: "m", computedScore: 0.5 }),
+      makeRow({ targetId: "z", computedScore: 0.5 }),
+      makeRow({ targetId: "a", computedScore: 0.3 }), // lower score, smaller id
+    ]);
+    // Cursor at (0.5, "m") — the next page must contain z (tied, past "m") AND a.
+    const cursor = Buffer.from(
+      JSON.stringify({ score: 0.5, targetId: "m" }),
+    ).toString("base64");
+
+    const result = await withTenant(() =>
+      ops.getRelationships("user-1", { pagination: { limit: 10, cursor } }),
+    );
+    expect(result.items.map((r) => r.targetId)).toEqual(["z", "a"]);
+  });
+
   it("returns an empty page when the user has no relationships", async () => {
     relationship.findMany.mockResolvedValueOnce([]);
     const result = await withTenant(() =>

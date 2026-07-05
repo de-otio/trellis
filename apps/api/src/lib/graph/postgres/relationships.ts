@@ -78,20 +78,36 @@ const TIER_NAMES: Record<CircleTier, TierName> = {
   3: "ambient",
 };
 
-/** Encode a score-based pagination cursor (base64 JSON, matches neo4j). */
-function encodeCursor(score: number): string {
-  return Buffer.from(JSON.stringify({ score })).toString("base64");
+/**
+ * Composite keyset cursor for the score ordering. A score-only cursor drops
+ * every row TIED with the boundary score (strict `< score` skips them all),
+ * so the cursor carries the standard (score, targetId) keyset pair: rows
+ * strictly below the score, plus tied rows past the boundary targetId.
+ */
+interface ScoreCursor {
+  score: number;
+  /** Tiebreak key. Null for a legacy score-only cursor (strict-< fallback). */
+  targetId: string | null;
 }
 
-/** Decode a score-based pagination cursor. Returns null if invalid. */
-function decodeCursor(cursor: string): number | null {
+/** Encode a (score, targetId) pagination cursor (base64 JSON). */
+function encodeCursor(score: number, targetId: string): string {
+  return Buffer.from(JSON.stringify({ score, targetId })).toString("base64");
+}
+
+/** Decode a pagination cursor. Returns null if invalid. */
+function decodeCursor(cursor: string): ScoreCursor | null {
   try {
     const parsed = JSON.parse(
       Buffer.from(cursor, "base64").toString("utf8"),
     ) as unknown;
     if (parsed && typeof parsed === "object" && "score" in parsed) {
       const score = (parsed as { score: unknown }).score;
-      if (typeof score === "number") return score;
+      const targetId = (parsed as { targetId?: unknown }).targetId;
+      if (typeof score === "number") {
+        // Legacy score-only cursors (pre-tiebreak) degrade to strict-<.
+        return { score, targetId: typeof targetId === "string" ? targetId : null };
+      }
     }
     return null;
   } catch {
@@ -272,8 +288,10 @@ export class RelationshipOps {
   }
 
   /**
-   * List a user's relationships, ordered by effective score descending, with
-   * optional tier / target-type filters and score-cursor pagination.
+   * List a user's relationships, ordered by (effective score DESC, targetId
+   * ASC), with optional tier / target-type filters and composite
+   * (score, targetId) keyset-cursor pagination — the tiebreak keeps rows that
+   * share the boundary score from being dropped between pages.
    *
    * Ordering and the cursor are over the EFFECTIVE score (manual override wins
    * over computed). There is no stored effective-score column, so the ordering
@@ -288,8 +306,8 @@ export class RelationshipOps {
     },
   ): Promise<PaginatedResult<Relationship>> {
     const limit = options?.pagination?.limit ?? 50;
-    const cursor = options?.pagination?.cursor ?? null;
-    const cursorScore = cursor !== null ? decodeCursor(cursor) : null;
+    const rawCursor = options?.pagination?.cursor ?? null;
+    const cursor = rawCursor !== null ? decodeCursor(rawCursor) : null;
     const tenantId = getCurrentTenantId();
 
     const where: {
@@ -312,21 +330,33 @@ export class RelationshipOps {
     // user are bounded (a user's circle), so this is acceptable and exact.
     const rows = await this.prisma.relationship.findMany({ where });
 
-    const mapped = rows
-      .map(rowToRelationship)
-      .sort((a, b) => b.score - a.score);
+    // Sort must match the cursor predicate exactly: score DESC, then targetId
+    // ASC as the deterministic tiebreak (plain code-unit comparison — no
+    // locale dependence).
+    const mapped = rows.map(rowToRelationship).sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return a.targetId < b.targetId ? -1 : a.targetId > b.targetId ? 1 : 0;
+    });
 
-    // Score-cursor pagination: take items strictly below the cursor score.
+    // Keyset pagination: strictly below the cursor score, OR tied with it and
+    // past the boundary targetId. (Legacy score-only cursors have targetId
+    // null and keep the old strict-< behavior.)
     const afterCursor =
-      cursorScore !== null
-        ? mapped.filter((r) => r.score < cursorScore)
+      cursor !== null
+        ? mapped.filter(
+            (r) =>
+              r.score < cursor.score ||
+              (cursor.targetId !== null &&
+                r.score === cursor.score &&
+                r.targetId > cursor.targetId),
+          )
         : mapped;
 
     const hasMore = afterCursor.length > limit;
     const items = hasMore ? afterCursor.slice(0, limit) : afterCursor;
     const lastItem = items[items.length - 1];
     const nextCursor =
-      hasMore && lastItem ? encodeCursor(lastItem.score) : null;
+      hasMore && lastItem ? encodeCursor(lastItem.score, lastItem.targetId) : null;
 
     return { items, cursor: nextCursor, hasMore };
   }
