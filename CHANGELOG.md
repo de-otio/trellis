@@ -15,6 +15,120 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ## [Unreleased]
 
+## [0.16.0] — 2026-07-05
+
+### Removed
+
+- **The legacy `friends` subsystem is deleted — friendship now lives in the
+  Postgres relationship graph (breaking).** The Cloudflare-era
+  `FriendsHandler` (KV-backed via the DynamoDB shim: `FRIENDS_KV` /
+  `CONNECTION_CODES_KV`) duplicated the real social graph in the
+  `relationships` edge table. `lib/friends-handler.ts`,
+  `lib/routes/friends.ts` (every `/api/friends*` endpoint), and both KV
+  bindings are removed; the Prisma-backed `/api/connection-codes` flow is the
+  one connection mechanism. The friend definition is now the convergence
+  contract in the new `lib/friend-ids.ts`: a *friend* of a user is the target
+  of an outgoing user→user `relationships` edge with circle **tier ≤ 1**
+  (explicit `code`/`import` connections; passive tier-2
+  `suggestion`/`discovery` edges do not count). Feed visibility filtering and
+  entity-tagging validation resolve the friend set from the edge table.
+  **Client handoff:** clients still calling `GET /api/friends` (e.g. the
+  skybber Flutter friends datasource) must repoint to
+  `/api/connection-codes` + the relationships surface. See
+  `doc/02-technical/database/schema-endstate-2026-07.md`.
+
+### Changed
+
+- **Pre-launch schema end-state pass (breaking; pre-launch window, nothing
+  live).** The AR10 prune drops every dormant zero-reference field cluster
+  (User Border-Safety prep, Post/PostComment classification columns, MediaFile
+  AT-Protocol `cid` + reconciliation bookkeeping, DirectMessage E2E-encryption
+  prep, and the dormant `IngestState`/`UserEncryptionKey` models) and prunes
+  indexes on hot tables (posts 17→7, users 16→2, media_files 16→7) — each
+  drop/keep justified inline in `schema.prisma`. `EntityRelationship.type`
+  changes from a Postgres enum to `String`: the edge vocabulary is dog-domain
+  vocabulary and must not be baked into the domain-agnostic core as a DB enum;
+  enforcement stays in app code (same pattern as
+  `InteractionEvent.interactionType`).
+
+- **All 14 accumulated pre-launch migrations are deleted and replaced by a
+  single clean `20260705050826_init` migration** (+ the restored data-only
+  `20260705051500_seed_role_metadata`, which now includes the MODERATOR row).
+  The init migration creates the `postgis` + `pg_trgm` extensions, the graph
+  edge tables (`relationships`, `entity_relationships` — previously created by
+  **no** migration; the graph CI lane papered over it with `db push` and now
+  runs `migrate deploy`), and the hand-written GiST/GIN/partial-unique
+  objects. Existing dev databases must be reset (`migrate deploy` onto a fresh
+  PostGIS Postgres); prod bootstrap is documented in
+  `doc/02-technical/operations/prod-db-bootstrap-runbook.md`.
+
+### Added
+
+- **Schema-drift CI guard.** A new `schema-drift` job
+  (`apps/api/scripts/check-schema-drift.sh`) applies `prisma/migrations/` to a
+  scratch PostGIS Postgres and diffs the result against `prisma/schema.prisma`
+  (`prisma migrate diff --script`); any unexplained difference fails CI, with
+  the six known hand-written migration objects allowlisted. After the init
+  lock, schema and migrations move in lockstep or the build goes red.
+
+- **Daily AI-spend guard for the media-processing worker (AR5).**
+  `lib/media/spend-guard.ts` adds a `MediaSpendGuardPort` capability seam plus
+  a pure cost-estimation core, wired into `media-processing-worker`: before
+  starting paid AI jobs (video moderation, transcription) the worker consults
+  a consuming-app-provided daily spend counter and stops new jobs at the cap.
+  The daily cap and per-minute rate are **runtime config** (Env/SSM via
+  `MediaSpendConfig`), never literals in the public tarball. Fail-closed
+  posture: an unreadable counter or a non-finite value blocks jobs
+  (retry/DLQ), invalid estimation inputs throw rather than under-estimate, and
+  a cap of 0 is an operator emergency stop; only *absent* config disables the
+  guard.
+
+### Fixed
+
+- **Whitespace-only post/comment text now fails closed with `400` instead of
+  `500` (H1).** The create/edit post and create/edit comment schemas apply
+  `.trim()` **before** `.min()/.max()`, so whitespace-only text (`"   "`,
+  `"\t"`, `"\n"`) fails length validation at the handler boundary instead of
+  passing `min(1)`, being trimmed to `""` downstream, and 500-ing. Nothing is
+  persisted; property + example tests pin the behavior at both the schema and
+  handler boundaries.
+
+## [0.15.1] — 2026-07-04
+
+### Fixed
+
+- **Declared five runtime dependencies the shipped code imports but
+  `package.json` never listed — one of which broke API-container boot on
+  0.15.0.** `dist/lib/cognito/issuer-probe.js` imports `undici` (the
+  DNS-rebinding-pinned dispatcher for the OIDC issuer probe); until 0.14.0
+  the package resolved only because another dependency happened to pull
+  `undici` in transitively, and 0.15.0's `@fedify/fedify` 2.3.1 update pruned
+  that transitive edge — so a consumer's fresh `npm install` produced a tree
+  where the server fails at startup with
+  `ERR_MODULE_NOT_FOUND: Cannot find package 'undici'`. Now declared
+  (`undici@^8.5.0`), along with the other phantom imports found by a scan of
+  the published `dist`/`src/lambda`: `@js-temporal/polyfill@^0.5.1`
+  (`post-service-fedify`/`dm-service-fedify` — fedify 2 vocab objects take
+  `Temporal.Instant`), and — moved from `devDependencies`, where they were
+  invisible to consumers — `@aws-sdk/client-cost-explorer@^3.1078.0`
+  (`lambda/tools/get-cost-report`), `@aws-sdk/client-ecs@^3.1078.0`
+  (`lambda/tools/describe-services`), and
+  `@aws-sdk/client-bedrock-agent-runtime@^3.1078.0`
+  (`lambda/diagnostics-proxy`), since `dist` and `src/lambda` ship in the
+  tarball and consumers bundle those Lambda entrypoints from
+  `node_modules`. `@prisma/client` remains an intentionally undeclared
+  *runtime* dependency — it is a `peerDependency` by design (AR14). No API
+  changes; the public export surface is untouched.
+
+  (A local scan had also flagged `neo4j-driver`/`@smithy/*`/`@aws-crypto/*`
+  imports in `dist/lib/graph/neo4j-graph-service.js` + `neptune-auth.js` —
+  those were stale incremental-`tsc` outputs of sources deleted in the
+  Postgres graph migration, present only in unclean local checkouts. The
+  published tarball is built from a clean CI checkout and never contained
+  them; nothing ships or imports Neo4j/Neptune code.)
+
+## [0.15.0] — 2026-07-04
+
 ### Fixed
 
 - **Text moderation now fails closed to ENABLED (AR-SEC T4 / F1).** The text
@@ -223,40 +337,6 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 - **`@de-otio/trellis-extension-api` 0.4.0 — structural DTOs for the extension contract (AR13).** New exported types `ExtensionEntity`, `ExtensionPost`, `ExtensionRelationship`, `ExtensionPaginatedResult`, `ExtensionCircleMember`, `ExtensionCircleTierStatus`, `ExtensionCircleEntityStatus`, `ExtensionGlanceItem`, `ExtensionVisiblePost`, `ExtensionEntityRelationship` (plus the `ExtensionNodeType`/`ExtensionCircleTier`/`ExtensionConnectionMethod` vocabulary). `ExtensionGraphService`'s relationship/circle query returns are now typed with these DTOs instead of `unknown`, and `ExtensionHooks.onPostCreated`/`onEntityCreated` receive `ExtensionPost`/`ExtensionEntity` instead of `any`. Core asserts at compile time that its internal types satisfy the DTOs (`apps/api/src/lib/extension-dto-contract.ts`) — a core field rename now fails the build before publish instead of breaking extensions at runtime. Prisma types remain core-internal and are not published. Discovery/recommendation result shapes stay `unknown` for now (follow-up).
 
 - **Organization classification, feed decluttering by org category, and a public organization directory.** Tenants can self-declare what kind of organization they are (business, non-profit, community group, government, educational, or other — via a platform-curated category tree, `PlatformCategory`) independently of `TenantType`, which only ever described membership structure, not commercial nature. Feed views gain a second, independent filter axis alongside circle tier: viewers can exclude or isolate posts by an author's organization category (e.g. "no business posts," or "non-profits only"), denormalized onto `Post.authorOrgRootCategoryCode` for the same cheap, indexed filtering already used for region/sensitivity/content-category. A new opt-in directory (`TenantDirectoryProfile`) lets a classified tenant become searchable by name, category, and location; location precision is a named level (`EXACT`/`NEIGHBORHOOD`/`CITY`/`HIDDEN`), not a boolean — `CITY`/`HIDDEN` listings are structurally excluded from distance-sorted search (not just response-shaped) to close a triangulation vector where ranking order alone could otherwise leak an intentionally-imprecise location. See [Organization Classification & Directory](docs/concepts/org-classification-and-directory.md) and [Classify and List Your Organization](docs/guides/classify-and-list-your-organization.md). Self-declared only in this release — third-party verification (TechSoup, Haus des Stiftens) and AI-assisted category-suggestion are planned follow-ups; org-to-org relationships (membership/subsidiary) and cross-tenant resource-sharing grants are designed but deliberately out of scope for this release.
-
-## [0.15.1] — 2026-07-04
-
-### Fixed
-
-- **Declared five runtime dependencies the shipped code imports but
-  `package.json` never listed — one of which broke API-container boot on
-  0.15.0.** `dist/lib/cognito/issuer-probe.js` imports `undici` (the
-  DNS-rebinding-pinned dispatcher for the OIDC issuer probe); until 0.14.0
-  the package resolved only because another dependency happened to pull
-  `undici` in transitively, and 0.15.0's `@fedify/fedify` 2.3.1 update pruned
-  that transitive edge — so a consumer's fresh `npm install` produced a tree
-  where the server fails at startup with
-  `ERR_MODULE_NOT_FOUND: Cannot find package 'undici'`. Now declared
-  (`undici@^8.5.0`), along with the other phantom imports found by a scan of
-  the published `dist`/`src/lambda`: `@js-temporal/polyfill@^0.5.1`
-  (`post-service-fedify`/`dm-service-fedify` — fedify 2 vocab objects take
-  `Temporal.Instant`), and — moved from `devDependencies`, where they were
-  invisible to consumers — `@aws-sdk/client-cost-explorer@^3.1078.0`
-  (`lambda/tools/get-cost-report`), `@aws-sdk/client-ecs@^3.1078.0`
-  (`lambda/tools/describe-services`), and
-  `@aws-sdk/client-bedrock-agent-runtime@^3.1078.0`
-  (`lambda/diagnostics-proxy`), since `dist` and `src/lambda` ship in the
-  tarball and consumers bundle those Lambda entrypoints from
-  `node_modules`. `@prisma/client` remains an intentionally undeclared
-  *runtime* dependency — it is a `peerDependency` by design (AR14). No API
-  changes; the public export surface is untouched.
-
-  (A local scan had also flagged `neo4j-driver`/`@smithy/*`/`@aws-crypto/*`
-  imports in `dist/lib/graph/neo4j-graph-service.js` + `neptune-auth.js` —
-  those were stale incremental-`tsc` outputs of sources deleted in the
-  Postgres graph migration, present only in unclean local checkouts. The
-  published tarball is built from a clean CI checkout and never contained
-  them; nothing ships or imports Neo4j/Neptune code.)
 
 ## [0.14.0] — 2026-06-30
 
