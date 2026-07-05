@@ -55,6 +55,29 @@ const TRAVERSAL_EDGE_TYPES = [
 const NEARBY_RECO_RADIUS_METERS = 5000;
 
 /**
+ * Traversal bounds for the shared-connections signal (graph-DoS guards, same
+ * family as the hop hard-cap above):
+ *
+ * - SEED_CAP — at most this many seed entities (owned + related) anchor the
+ *   traversal; deterministic (ordered by id) so repeat queries see the same
+ *   subgraph.
+ * - DEGREE_CAP — per-node neighbour fan-out limit at each expansion level;
+ *   deterministic (ordered by neighbour id). A hub node with thousands of
+ *   edges contributes its first DEGREE_CAP neighbours instead of exploding
+ *   the traversal (the old recursive CTE materialized
+ *   O(seeds × hub-degree) duplicate paths — no visited set).
+ *
+ * Below both caps the traversal is EXACT (row-for-row identical to the old
+ * recursive CTE — proven by EXCEPT-diff on a mixed-shape fixture); above
+ * them it is deliberately truncated. Like the hop cap these are structural
+ * DoS bounds baked into the traversal shape, not operator-tunable
+ * thresholds, so they are compile-time constants (threshold-secrecy rule
+ * does not apply — they are visible in the query shape anyway).
+ */
+export const SHARED_CONNECTIONS_SEED_CAP = 100;
+export const SHARED_CONNECTIONS_DEGREE_CAP = 100;
+
+/**
  * Discovery ranking version — increment whenever the recommendation signals,
  * their weights, the merge/dedup semantics, or the diversity cap change.
  *
@@ -436,10 +459,31 @@ export class DiscoveryOps {
   // -------------------------------------------------------------------------
 
   /**
-   * Shared-connections signal: same ≤2-hop traversal shape as discoverByGraph,
-   * but anchored from the user's OWNED and RELATED entities, counting distinct
-   * source entities per candidate. score = sharedCount / 10. Excludes entities the
-   * user already owns or relates to, and non-discoverable ones.
+   * Shared-connections signal: ≤2-hop undirected traversal anchored from the
+   * user's OWNED and RELATED entities, counting distinct source entities per
+   * candidate. score = sharedCount / 10. Excludes entities the user already
+   * owns or relates to, and non-discoverable ones.
+   *
+   * The traversal depth is FIXED at 2, so instead of a recursive CTE (which,
+   * lacking a visited set, materialized O(seeds × hub-degree) duplicate path
+   * rows and only deduped at the final aggregate) the two levels are explicit:
+   * hop1 (seed → neighbour, DISTINCT pairs), frontier (DISTINCT hop-1 nodes,
+   * expanded ONCE each), and hop2 (hop1 ⋈ expansion — a hash join instead of a
+   * per-path re-walk). The UNION between levels dedupes (seed, entity) pairs
+   * exactly like the old COUNT(DISTINCT) did, so the aggregate is unchanged.
+   *
+   * Seed-adjacent-seed graphs are handled exactly: a hop-1 neighbour that is
+   * itself a seed still expands (its neighbours ARE 2 hops from the anchoring
+   * seed); only the final candidate list excludes seeds — same as before.
+   * Mid-traversal seed pruning was evaluated and rejected: it changes
+   * COUNT(DISTINCT seed_id) whenever two seeds are adjacent.
+   *
+   * Bounds: seeds capped at SHARED_CONNECTIONS_SEED_CAP, per-node fan-out at
+   * SHARED_CONNECTIONS_DEGREE_CAP (both deterministic, ordered by id). Below
+   * the caps results are row-for-row identical to the recursive version.
+   *
+   * (`er.type` is a plain text column since the 0.16.0 schema end-state pass —
+   * the old `::text` cast was an enum-era artifact and is dropped here.)
    */
   private async computeSharedConnections(
     userId: string,
@@ -447,35 +491,70 @@ export class DiscoveryOps {
     limit: number,
   ): Promise<RecommendationCandidate[]> {
     const params: unknown[] = [userId, tenantId, TRAVERSAL_EDGE_TYPES as unknown as string[], limit];
+    // SEED/DEGREE caps are compile-time integers (never user input) — safe to
+    // inline as numeric literals, same pattern as the maxHops literal above.
+    const seedCap = SHARED_CONNECTIONS_SEED_CAP;
+    const degreeCap = SHARED_CONNECTIONS_DEGREE_CAP;
     const sql = `
-      WITH RECURSIVE seed AS (
-        -- the user's owned entities (OWNS) plus entities they relate to (RELATES_TO)
-        SELECT o.entity_id AS id
-        FROM entity_ownerships o
-        WHERE o.user_id = $1 AND o.tenant_id = $2 AND o.status = 'ACTIVE'
-        UNION
-        SELECT rel.target_id AS id
-        FROM relationships rel
-        WHERE rel.user_id = $1 AND rel.tenant_id = $2 AND rel.target_type = 'entity'
+      WITH seed AS (
+        -- the user's owned entities (OWNS) plus entities they relate to
+        -- (RELATES_TO), capped deterministically
+        SELECT id FROM (
+          SELECT o.entity_id AS id
+          FROM entity_ownerships o
+          WHERE o.user_id = $1 AND o.tenant_id = $2 AND o.status = 'ACTIVE'
+          UNION
+          SELECT rel.target_id AS id
+          FROM relationships rel
+          WHERE rel.user_id = $1 AND rel.tenant_id = $2 AND rel.target_type = 'entity'
+        ) s
+        ORDER BY id
+        LIMIT ${seedCap}
+      ),
+      hop1 AS (
+        -- level 1: distinct (seed, neighbour) pairs; per-seed fan-out capped
+        SELECT DISTINCT s.id AS seed_id, n.nb AS entity_id
+        FROM seed s
+        CROSS JOIN LATERAL (
+          SELECT er.related_entity_id AS nb
+          FROM entity_relationships er
+          WHERE er.entity_id = s.id AND er.tenant_id = $2
+            AND er.status = 'CONFIRMED' AND er.type = ANY($3)
+          UNION ALL
+          SELECT er.entity_id AS nb
+          FROM entity_relationships er
+          WHERE er.related_entity_id = s.id AND er.tenant_id = $2
+            AND er.status = 'CONFIRMED' AND er.type = ANY($3)
+          ORDER BY nb
+          LIMIT ${degreeCap}
+        ) n
+      ),
+      frontier AS (SELECT DISTINCT entity_id FROM hop1),
+      expanded AS (
+        -- each distinct hop-1 node expands ONCE (not once per path)
+        SELECT f.entity_id AS via, n.nb
+        FROM frontier f
+        CROSS JOIN LATERAL (
+          SELECT er.related_entity_id AS nb
+          FROM entity_relationships er
+          WHERE er.entity_id = f.entity_id AND er.tenant_id = $2
+            AND er.status = 'CONFIRMED' AND er.type = ANY($3)
+          UNION ALL
+          SELECT er.entity_id AS nb
+          FROM entity_relationships er
+          WHERE er.related_entity_id = f.entity_id AND er.tenant_id = $2
+            AND er.status = 'CONFIRMED' AND er.type = ANY($3)
+          ORDER BY nb
+          LIMIT ${degreeCap}
+        ) n
       ),
       reachable AS (
-        SELECT
-          s.id AS seed_id,
-          CASE WHEN er.entity_id = s.id THEN er.related_entity_id ELSE er.entity_id END AS entity_id,
-          1 AS hops
-        FROM seed s
-        JOIN entity_relationships er
-          ON (er.entity_id = s.id OR er.related_entity_id = s.id)
-        WHERE er.tenant_id = $2 AND er.status = 'CONFIRMED' AND er.type::text = ANY($3)
-        UNION ALL
-        SELECT
-          r.seed_id,
-          CASE WHEN er.entity_id = r.entity_id THEN er.related_entity_id ELSE er.entity_id END,
-          r.hops + 1
-        FROM reachable r
-        JOIN entity_relationships er
-          ON (er.entity_id = r.entity_id OR er.related_entity_id = r.entity_id)
-        WHERE r.hops < 2 AND er.tenant_id = $2 AND er.status = 'CONFIRMED' AND er.type::text = ANY($3)
+        SELECT seed_id, entity_id FROM hop1
+        UNION
+        -- level 2: seed attribution via hash join hop1 ⋈ expanded
+        SELECT h.seed_id, e.nb AS entity_id
+        FROM hop1 h
+        JOIN expanded e ON e.via = h.entity_id
       )
       SELECT
         d.id          AS entity_id,
@@ -502,7 +581,7 @@ export class DiscoveryOps {
           WHERE o2.user_id = $1 AND o2.tenant_id = $2 AND o2.entity_id = d.id AND o2.status = 'ACTIVE'
         )
       GROUP BY d.id, d.name, d.entity_type
-      ORDER BY score DESC
+      ORDER BY score DESC, entity_id ASC
       LIMIT $4
     `;
     const rows = await this.prisma.$queryRawUnsafe<
