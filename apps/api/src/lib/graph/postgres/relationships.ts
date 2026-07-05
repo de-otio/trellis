@@ -6,7 +6,7 @@
  */
 import type { PrismaClient } from "@prisma/client";
 import { getCurrentTenantId } from "@de-otio/saas-foundation/tenant";
-import { GraphNotFoundError } from "../errors.js";
+import { GraphConflictError, GraphNotFoundError } from "../errors.js";
 import {
   CONNECTION_BONUSES,
   effectiveScore,
@@ -79,6 +79,28 @@ const TIER_NAMES: Record<CircleTier, TierName> = {
 };
 
 /**
+ * Default per-user relationship-edge cap (per tenant). A single account
+ * creating unbounded edges inflates every fan-out query anchored on its
+ * edge list (circle counts, feeds, recommendations) — this bounds the blast
+ * radius at write time. Runtime-tunable via GRAPH_MAX_EDGES_PER_USER
+ * (threshold-secrecy rule: operational caps are config, the default here is
+ * just the fallback).
+ */
+export const DEFAULT_MAX_EDGES_PER_USER = 1000;
+
+/** Resolve the per-user edge cap from env, falling back to the default. */
+export function resolveMaxEdgesPerUser(
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  const raw = env.GRAPH_MAX_EDGES_PER_USER;
+  if (raw !== undefined) {
+    const parsed = Number.parseInt(raw, 10);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return DEFAULT_MAX_EDGES_PER_USER;
+}
+
+/**
  * Composite keyset cursor for the score ordering. A score-only cursor drops
  * every row TIED with the boundary score (strict `< score` skips them all),
  * so the cursor carries the standard (score, targetId) keyset pair: rows
@@ -116,7 +138,11 @@ function decodeCursor(cursor: string): ScoreCursor | null {
 }
 
 export class RelationshipOps {
-  constructor(private readonly prisma: PrismaClient) {}
+  constructor(
+    private readonly prisma: PrismaClient,
+    /** Per-user edge cap; injectable for tests, env-resolved by default. */
+    private readonly maxEdgesPerUser: number = resolveMaxEdgesPerUser(),
+  ) {}
 
   /**
    * Create a scored relationship from a user to a target (user or entity).
@@ -124,7 +150,14 @@ export class RelationshipOps {
    * Initial score comes from the connection method (CONNECTION_BONUSES, default
    * 0.3 for `discovery`). For user→user targets, if the reverse edge already
    * exists both edges are marked `reciprocated`. Idempotent like the Neo4j
-   * MERGE: a pre-existing edge is returned unchanged rather than throwing.
+   * MERGE: a pre-existing edge is returned unchanged rather than throwing —
+   * the idempotent return also bypasses the edge cap (no new edge is made).
+   *
+   * Enforces the per-user edge cap ({@link resolveMaxEdgesPerUser}): once the
+   * user has that many edges in the tenant, new edges are rejected with a
+   * GraphConflictError (handlers map it to 409). Best-effort (count+create in
+   * one transaction; a concurrent burst may land a few over — the cap bounds
+   * abuse, it is not an exact quota).
    */
   async createRelationship(
     input: CreateRelationshipInput,
@@ -151,6 +184,16 @@ export class RelationshipOps {
       });
       if (existing) {
         return existing;
+      }
+
+      // Per-user edge cap — checked only when a NEW edge would be created.
+      const edgeCount = await tx.relationship.count({
+        where: { userId, tenantId },
+      });
+      if (edgeCount >= this.maxEdgesPerUser) {
+        throw new GraphConflictError(
+          `Relationship limit reached: user ${userId} already has ${edgeCount} relationships (cap ${this.maxEdgesPerUser})`,
+        );
       }
 
       // For user→user targets, reciprocity is determined by the presence of the
