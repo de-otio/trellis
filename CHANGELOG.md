@@ -13,6 +13,51 @@ series:
 
 Entries below are for `@de-otio/trellis` unless noted otherwise.
 
+## [0.19.0] — 2026-07-05
+
+### Added
+
+- **Push-device registration + wakeup dispatcher (T8).** New `PushDevice`
+  model (migration `20260705171948_t8_push_devices`) and device endpoints
+  (`POST /api/devices/register`, `DELETE /api/devices/{id}` —
+  `lib/routes/devices.ts`, `lib/push/push-device-handler.ts`). Notifications
+  now fan out to registered devices through a consumer-injectable
+  `PushTransport` seam (`lib/push/push-transport.ts`,
+  `setPushTransportProvider`) driven by a wakeup dispatcher
+  (`lib/push/push-dispatcher.ts`); push tokens are encrypted at rest
+  (`lib/push/token-crypto.ts`). Contract:
+  `apps/api/src/lib/doc/push-device-contract.md`.
+- **Real GDPR-erasure e2e (H2/H3).** New integration test drives the
+  delete-account worker and the nightly GC purge against a real database and
+  real stored bytes, proving end-to-end erasure
+  (`test/integration/gdpr-erasure-worker.integration.test.ts`). No source
+  change.
+
+### Fixed
+
+- **Presigned byte rail now budgets BOTH tracks of a muxed video (F2).** The
+  `content-length-range` cap for a video upload was sized to the video-track
+  budget alone, rejecting legitimate clips whose audio track pushed the file
+  past that single budget. `presignByteCap()`
+  (`lib/media/presign-policy.ts`) now sizes a video rail as the combined
+  video+audio per-track budgets (audio stays single-track); the rail remains
+  bounded by the operator-configured budgets, and the authoritative limits
+  (ffprobe duration cap, tenant quota) are unchanged.
+- **Moderated bytes are version-pinned through moderation → promote (F3,
+  TOCTOU).** Promotion previously copied whatever bytes currently sat at the
+  staging key — not the bytes moderation actually scanned, so a swap at the
+  same key between moderation start and promote could serve unmoderated
+  bytes. The processing worker now resolves and persists the staged object's
+  S3 `versionId` (`stagingVersionId`), hashes and moderates the pinned bytes,
+  and the completion worker promotes from that exact version (replays with
+  cas/ already present skip the copy). Unresolvable versions fail CLOSED to
+  REVIEW — never an unpinned pipeline. `StoragePort` gains `versionId`
+  options on get/head/copy; `S3Ref` gains optional `versionId`. No Prisma
+  schema change. **Consumer handoff:** requires S3 bucket versioning on the
+  media bucket and adapter updates (persist/read `stagingVersionId`, use
+  versioned Get/Head/CopySource and Rekognition `S3Object.Version`) —
+  otherwise video uploads fail closed to REVIEW.
+
 ## [0.18.0] — 2026-07-05
 
 ### Added
