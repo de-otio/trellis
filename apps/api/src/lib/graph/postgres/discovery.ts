@@ -307,7 +307,7 @@ export class DiscoveryOps {
           ON (er.entity_id = m.id OR er.related_entity_id = m.id)
         WHERE er.tenant_id = $2
           AND er.status = 'CONFIRMED'
-          AND er.type::text = ANY($3)
+          AND er.type = ANY($3)
         UNION ALL
         -- hop 2 (cap): neighbours of reachable, stop at maxHops
         SELECT
@@ -319,7 +319,7 @@ export class DiscoveryOps {
         WHERE r.hops < ${maxHops}
           AND er.tenant_id = $2
           AND er.status = 'CONFIRMED'
-          AND er.type::text = ANY($3)
+          AND er.type = ANY($3)
       )
       SELECT
         d.id          AS entity_id,
