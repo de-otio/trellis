@@ -58,6 +58,7 @@ import { connectionCodeRoutes } from "./routes/connection-codes.js";
 import { contentDiscoveryRoutes } from "./routes/content-discovery.js";
 import { dashboardRoutes } from "./routes/dashboard.js";
 import { deletionRoutes } from "./routes/deletion.js";
+import { devicesRoutes } from "./routes/devices.js";
 import { entitiesRoutes } from "./routes/entities.js";
 import { exportRoutes } from "./routes/export.js";
 import { discoveryRoutes } from "./routes/discovery.js";
@@ -71,6 +72,7 @@ import { invitationsRoutes } from "./routes/invitations.js";
 import { linkReportRoutes } from "./routes/link-reports.js";
 import { mapRoutes } from "./routes/map.js";
 import { mediaRoutes } from "./routes/media.js";
+import { mediaReviewRoutes } from "./routes/media-review.js";
 import { mediaMetadataVisibilityRoutes } from "./routes/media-metadata-visibility.js";
 import { mfaRoutes } from "./routes/mfa.js";
 import { notificationsRoutes } from "./routes/notifications.js";
@@ -79,6 +81,7 @@ import { orphanedMediaRoutes } from "./routes/orphaned-media.js";
 import { orphanedMediaHealthRoutes } from "./routes/orphaned-media-health.js";
 import { outRoutes } from "./routes/out.js";
 import { parentalControlRoutes } from "./routes/parental-controls.js";
+import { platformCategoryAdminRoutes } from "./routes/platform-category-admin.js";
 import { postsRoutes } from "./routes/posts.js";
 import { privacyRoutes } from "./routes/privacy.js";
 import { productTaxonomyRoutes } from "./routes/products.js";
@@ -89,7 +92,10 @@ import { setupStatusRoutes } from "./routes/setup-status.js";
 import { taxonomyRoutes } from "./routes/taxonomy.js";
 import { taxonomyAnalyticsRoutes } from "./routes/taxonomy-analytics.js";
 import { tenantAuditRoutes } from "./routes/tenant-audit.js";
+import { tenantClassificationRoutes } from "./routes/tenant-classification.js";
 import { tenantComplianceRoutes } from "./routes/tenant-compliance.js";
+import { tenantDirectoryProfileRoutes } from "./routes/tenant-directory-profile.js";
+import { tenantDirectorySearchRoutes } from "./routes/tenant-directory-search.js";
 import { tenantDomainRoutes } from "./routes/tenant-domains.js";
 import { tenantIdpRoutes } from "./routes/tenant-idp.js";
 import { tenantMemberRoutes } from "./routes/tenant-members.js";
@@ -392,6 +398,18 @@ const PORTED_ROUTE_SETS: ReadonlyArray<ReadonlyArray<Route>> = [
   feedsRoutes,
   internaldocsRoutes,
   adminRoutes,
+  // H11 — route sets added to routes/index.ts AFTER H-final without being
+  // mounted here, so they 404'd in production despite green unit tests (Hono
+  // is the sole router; the routes/index.ts aggregate is only the OpenAPI
+  // data source). Found via the T8 devices 404; the route-mount-parity guard
+  // (test/unit/route-mount-parity.test.ts) now fails the build on any recur-
+  // rence. All paths are exact strings or ([^/]+) captures mount() translates.
+  devicesRoutes, // T8 — POST /api/devices/register, DELETE /api/devices/:id
+  tenantClassificationRoutes, // T1 — /api/tenants/:id/classification[...]
+  tenantDirectoryProfileRoutes, // T3 — /api/tenants/:id/directory-profile
+  tenantDirectorySearchRoutes, // T4 — /api/directory/search
+  platformCategoryAdminRoutes, // T5 — /api/admin/platform-categories[...]
+  mediaReviewRoutes, // T9 — /api/admin/media-review[...] (MODERATOR-only)
 ];
 
 /**

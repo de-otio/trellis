@@ -51,6 +51,7 @@ import { invitationsRoutes } from "./invitations.js";
 import { linkReportRoutes } from "./link-reports.js";
 import { mapRoutes } from "./map.js";
 import { mediaRoutes } from "./media.js";
+import { mediaReviewRoutes } from "./media-review.js";
 import { mfaRoutes } from "./mfa.js";
 import { mediaMetadataVisibilityRoutes } from "./media-metadata-visibility.js";
 import { uploadSessionRoutes } from "./upload-sessions.js";
@@ -227,6 +228,9 @@ const coreRoutes: Route[] = [
 
   // Media uploads
   ...mediaRoutes,
+
+  // Media REVIEW-queue moderator surface (T9 — MODERATOR-only)
+  ...mediaReviewRoutes,
 
   // Media metadata privacy controls
   ...mediaMetadataVisibilityRoutes,

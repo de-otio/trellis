@@ -101,6 +101,17 @@ export const PLATFORM_CATEGORY_CREATED: AuditAction = "platform_category.created
 export const PLATFORM_CATEGORY_DEACTIVATED: AuditAction = "platform_category.deactivated";
 export const PLATFORM_CATEGORY_REPARENTED: AuditAction = "platform_category.reparented";
 
+// ── Media-moderation review-queue actions (T9) ────────────────────────
+// Every human moderator decision on a REVIEW/QUARANTINED media item writes
+// one of these. The audited moderator VIEW bypass writes MEDIA_MODERATION_VIEWED
+// BEFORE any bytes are served (the bypass is never silent). CSAM escalation is a
+// human-paging STUB — it locks the item and records intent; it performs NO
+// automated statutory reporting (that is handled out-of-band by a human).
+export const MEDIA_MODERATION_APPROVED: AuditAction = "media.moderation.approved";
+export const MEDIA_MODERATION_REJECTED: AuditAction = "media.moderation.rejected";
+export const MEDIA_MODERATION_CSAM_ESCALATED: AuditAction = "media.moderation.csam_escalated";
+export const MEDIA_MODERATION_VIEWED: AuditAction = "media.moderation.viewed";
+
 /**
  * Old tenant/IdP `AuditEventType` string -> `AuditAction` constant.
  * The values are identical (preserved verbatim), so this is an identity
