@@ -13,7 +13,7 @@ series:
 
 Entries below are for `@de-otio/trellis` unless noted otherwise.
 
-## [Unreleased]
+## [0.18.0] — 2026-07-05
 
 ### Added
 
