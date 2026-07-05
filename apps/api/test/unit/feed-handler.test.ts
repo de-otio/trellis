@@ -457,6 +457,84 @@ describe("FeedHandler", () => {
       );
     });
 
+    it("uses the (createdAt, id) keyset for a composite cursor — boundary ties are not skipped", async () => {
+      const boundary = new Date("2024-01-01T09:00:00.000Z");
+      const cursor = Buffer.from(
+        JSON.stringify({ createdAt: boundary.toISOString(), postId: "post-b" }),
+      ).toString("base64");
+
+      const request = new Request("http://test.com/feeds/home");
+      await handler.getHomeFeed(
+        mockSession,
+        request,
+        mockEnv,
+        { limit: 20, cursor },
+        mockRequestContext,
+        TEST_TENANT_ID,
+      );
+
+      expect(mockDb.post.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            AND: expect.arrayContaining([
+              {
+                OR: [
+                  { createdAt: { lt: boundary } },
+                  { createdAt: boundary, id: { lt: "post-b" } },
+                ],
+              },
+            ]),
+          }),
+          // Deterministic order matching the keyset.
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        }),
+      );
+    });
+
+    it("emits a composite next cursor that round-trips through the keyset", async () => {
+      const ts = new Date("2024-01-01T09:00:00.000Z");
+      // limit 1 with 2 tied rows → hasMore, next cursor at (ts, post-1).
+      mockDb.post.findMany.mockResolvedValue([
+        {
+          id: "post-1",
+          authorId: "user-123",
+          text: "Tied post 1",
+          radius: PostRadius.SHOUT,
+          createdAt: ts,
+          author: { id: "user-123", email: "test@example.com" },
+          subjectEntities: [],
+        },
+        {
+          id: "post-0",
+          authorId: "user-123",
+          text: "Tied post 0",
+          radius: PostRadius.SHOUT,
+          createdAt: ts,
+          author: { id: "user-123", email: "test@example.com" },
+          subjectEntities: [],
+        },
+      ]);
+
+      const request = new Request("http://test.com/feeds/home");
+      const response = await handler.getHomeFeed(
+        mockSession,
+        request,
+        mockEnv,
+        { limit: 1 },
+        mockRequestContext,
+        TEST_TENANT_ID,
+      );
+      const data = await response.json();
+      expect(data.hasMore).toBe(true);
+      const decoded = JSON.parse(
+        Buffer.from(data.cursor, "base64").toString("utf8"),
+      );
+      expect(decoded).toEqual({
+        createdAt: ts.toISOString(),
+        postId: "post-1",
+      });
+    });
+
     it("should return hasMore when more posts available", async () => {
       // Return limit + 1 posts to indicate more available
       mockDb.post.findMany.mockResolvedValue([

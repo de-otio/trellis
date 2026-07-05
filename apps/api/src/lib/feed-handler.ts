@@ -101,6 +101,44 @@ export interface FeedResponse {
   };
 }
 
+/**
+ * Composite home-feed pagination cursor — the same (created_at, id) keyset
+ * the circles feed uses (lib/graph/postgres/circles.ts). A strict
+ * `createdAt <` cursor alone skips every post TIED with the boundary
+ * timestamp; the id tiebreak admits them.
+ */
+interface FeedCursor {
+  createdAt: Date;
+  /** Tiebreak post id. Null for a legacy ISO-date cursor (strict-< fallback). */
+  postId: string | null;
+}
+
+function decodeFeedCursor(raw?: string): FeedCursor | null {
+  if (!raw) return null;
+  try {
+    const d = JSON.parse(Buffer.from(raw, "base64").toString("utf8")) as {
+      createdAt?: unknown;
+      postId?: unknown;
+    };
+    if (typeof d.createdAt === "string" && typeof d.postId === "string") {
+      const t = new Date(d.createdAt);
+      if (!Number.isNaN(t.getTime())) return { createdAt: t, postId: d.postId };
+    }
+  } catch {
+    // Not base64 JSON — fall through to the legacy ISO-date format.
+  }
+  const legacy = new Date(raw);
+  return Number.isNaN(legacy.getTime())
+    ? null
+    : { createdAt: legacy, postId: null };
+}
+
+function encodeFeedCursor(createdAt: Date, postId: string): string {
+  return Buffer.from(
+    JSON.stringify({ createdAt: createdAt.toISOString(), postId }),
+  ).toString("base64");
+}
+
 export class FeedHandler {
   private logger: Logger;
 
@@ -161,7 +199,7 @@ export class FeedHandler {
   ): Promise<Response> {
     try {
       const limit = Math.min(options.limit || 20, 100);
-      const cursor = options.cursor ? new Date(options.cursor) : undefined;
+      const cursor = decodeFeedCursor(options.cursor);
 
       // Safer Social Design: Parse pagination and session awareness params
       const url = new URL(request.url);
@@ -344,10 +382,28 @@ export class FeedHandler {
                   // Note: We don't allow NULL dataRegion here - posts must have region set
                   dataRegion: region,
                 },
-                ...(cursor ? [{ createdAt: { lt: cursor } }] : []), // Optional cursor pagination
+                // Optional keyset cursor: (createdAt, id) — strictly older,
+                // or tied-with-boundary and past the boundary id. Legacy
+                // ISO-date cursors (postId null) keep the old strict-<.
+                ...(cursor
+                  ? [
+                      cursor.postId !== null
+                        ? {
+                            OR: [
+                              { createdAt: { lt: cursor.createdAt } },
+                              {
+                                createdAt: cursor.createdAt,
+                                id: { lt: cursor.postId },
+                              },
+                            ],
+                          }
+                        : { createdAt: { lt: cursor.createdAt } },
+                    ]
+                  : []),
               ],
             } as any,
-            orderBy: { createdAt: "desc" },
+            // Tiebreak matches the cursor keyset exactly (createdAt, id).
+            orderBy: [{ createdAt: "desc" }, { id: "desc" }],
             take: limit + 1,
             // Optimize includes: only fetch what's needed
             // On empty database, these should return quickly
@@ -444,7 +500,10 @@ export class FeedHandler {
 
       const nextCursor =
         hasMore && result.length > 0
-          ? result[result.length - 1].createdAt.toISOString()
+          ? encodeFeedCursor(
+              result[result.length - 1].createdAt,
+              result[result.length - 1].id,
+            )
           : undefined;
 
       // Enrich posts with sentiment counts and comment counts
