@@ -22,7 +22,6 @@ export interface Env {
   GOOGLE_API_KEY?: string; // Google API key for Perspective API (text moderation)
   MODERATION_CACHE_KV?: KVNamespace;
   FEED_CACHE_KV?: KVNamespace;
-  FRIENDS_KV?: KVNamespace;
   CACHE_KV?: KVNamespace;
   TAXONOMY_CACHE_KV?: KVNamespace;
   LINK_CHECK_QUEUE?: any; // Cloudflare Queue binding for link checks

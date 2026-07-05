@@ -24,8 +24,6 @@ export interface MockEnv {
   IDEMPOTENCY_KV?: KVNamespace;
   FEED_CACHE_KV?: KVNamespace;
   MODERATION_CACHE_KV?: KVNamespace;
-  FRIENDS_KV?: KVNamespace;
-  CONNECTION_CODES_KV?: KVNamespace;
   COMMENTS_KV?: KVNamespace;
   LOGS?: AnalyticsEngineDataset;
   [key: string]: any; // Allow dynamic secret keys

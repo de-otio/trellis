@@ -169,11 +169,6 @@ describe("InvitationHandler", () => {
         get: vi.fn(),
         delete: vi.fn().mockResolvedValue(undefined),
       },
-      FRIENDS_KV: {
-        put: vi.fn(),
-        get: vi.fn(),
-        delete: vi.fn(),
-      },
     };
 
     // Setup mock request

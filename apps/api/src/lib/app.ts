@@ -65,7 +65,6 @@ import { employeesRoutes } from "./routes/employees.js";
 import { entityRelationshipRoutes } from "./routes/entity-relationships.js";
 import { featureFlagsRoutes } from "./routes/feature-flags.js";
 import { feedsRoutes } from "./routes/feeds.js";
-import { friendsRoutes } from "./routes/friends.js";
 import { healthRoutes } from "./routes/health.js";
 import { internaldocsRoutes } from "./routes/internal-docs.js";
 import { invitationsRoutes } from "./routes/invitations.js";
@@ -321,7 +320,6 @@ const PORTED_ROUTE_SETS: ReadonlyArray<ReadonlyArray<Route>> = [
   agentAuthorizeRoutes,
   circleRoutes,
   entityRelationshipRoutes,
-  friendsRoutes,
   outRoutes,
   relationshipRoutes,
   taxonomyAnalyticsRoutes,

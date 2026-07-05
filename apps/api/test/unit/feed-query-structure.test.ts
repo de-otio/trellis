@@ -11,12 +11,11 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { PostVisibilityLevel } from "@prisma/client";
 
 // Mock dependencies - must be defined inside factory functions
-vi.mock("../../src/lib/friends-handler", async () => {
+vi.mock("../../src/lib/friend-ids", async () => {
   const { vi } = await import("vitest");
   return {
-    FriendsHandler: class MockFriendsHandler {
-      getFriends = vi.fn().mockResolvedValue([]);
-    },
+    FRIEND_TIER_MAX: 1,
+    getFriendUserIds: vi.fn().mockResolvedValue([]),
   };
 });
 

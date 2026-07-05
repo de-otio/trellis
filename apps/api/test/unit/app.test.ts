@@ -116,9 +116,10 @@ describe("Hono app seam (H0)", () => {
       "/api/mfa/status",
       "/api/map/nearby",
       "/api/user/delete-account",
-      // H4
+      // H4 (the legacy /api/friends endpoints were removed in the
+      // pre-launch schema end-state pass — connections go through
+      // /api/connection-codes + the relationships graph)
       "/api/circles/members",
-      "/api/friends",
       "/api/relationships/score",
       "/api/entity-relationships/pending",
       "/api/taxonomy/metrics",

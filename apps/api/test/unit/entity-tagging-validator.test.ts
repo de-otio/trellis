@@ -1,28 +1,24 @@
 /**
  * Unit Tests: Entity Tagging Validator
  *
- * Tests for entity tagging permission validation.
+ * Tests for entity tagging permission validation. Friendship is resolved
+ * from the `relationships` graph edge table (lib/friend-ids.ts) — the
+ * legacy KV-backed FriendsHandler was removed in the pre-launch schema
+ * end-state pass.
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  validateEntityTagging,
-  cacheEntityOwner,
-  getCachedEntityOwner,
-} from "../../src/lib/entity-tagging-validator.js";
-import { FriendsHandler } from "../../src/lib/friends-handler.js";
+import { validateEntityTagging } from "../../src/lib/entity-tagging-validator.js";
 import {
   InvalidEntitiesError,
   EntityTaggingPermissionError,
 } from "../../src/lib/entity-tagging-errors.js";
-import type { Session } from "../../src/lib/session-cookie.js";
-import type { PrismaClient } from "@prisma/client/edge";
+
+/** Build a friend-edge row as `relationship.findMany` would return it. */
+const friendEdge = (targetId: string) => ({ targetId });
 
 describe("validateEntityTagging", () => {
   let mockDb: any;
-  let mockFriendsHandler: FriendsHandler;
-  let mockSession: Session;
-  let mockEnv: any;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -31,52 +27,28 @@ describe("validateEntityTagging", () => {
       entity: {
         findMany: vi.fn(),
       },
-    };
-
-    mockFriendsHandler = {
-      getFriends: vi.fn(),
-    } as any;
-
-    mockSession = {
-      userId: "user-123",
-      email: "test@example.com",
-      expiresAt: Date.now() + 3600000,
-    };
-
-    mockEnv = {
-      FRIENDS_KV: {} as any,
-      CACHE_KV: {} as any,
+      relationship: {
+        findMany: vi.fn().mockResolvedValue([]),
+      },
     };
   });
 
   it("should allow tagging when no entities provided", async () => {
     await expect(
-      validateEntityTagging(
-        "user-123",
-        [],
-        mockDb as any,
-        mockFriendsHandler,
-        mockEnv,
-        mockSession,
-      ),
+      validateEntityTagging("user-123", [], mockDb as any),
     ).resolves.not.toThrow();
+    // No queries at all for the empty case
+    expect(mockDb.entity.findMany).not.toHaveBeenCalled();
+    expect(mockDb.relationship.findMany).not.toHaveBeenCalled();
   });
 
   it("should allow tagging own entities", async () => {
     mockDb.entity.findMany.mockResolvedValue([
       { id: "entity-1", owners: [{ userId: "user-123", role: "PRIMARY" }] },
     ]);
-    mockFriendsHandler.getFriends = vi.fn().mockResolvedValue([]);
 
     await expect(
-      validateEntityTagging(
-        "user-123",
-        ["entity-1"],
-        mockDb as any,
-        mockFriendsHandler,
-        mockEnv,
-        mockSession,
-      ),
+      validateEntityTagging("user-123", ["entity-1"], mockDb as any),
     ).resolves.not.toThrow();
   });
 
@@ -84,20 +56,17 @@ describe("validateEntityTagging", () => {
     mockDb.entity.findMany.mockResolvedValue([
       { id: "entity-1", owners: [{ userId: "friend-456", role: "PRIMARY" }] },
     ]);
-    mockFriendsHandler.getFriends = vi
-      .fn()
-      .mockResolvedValue([{ id: "friend-456", email: "friend@example.com" }]);
+    mockDb.relationship.findMany.mockResolvedValue([friendEdge("friend-456")]);
 
     await expect(
-      validateEntityTagging(
-        "user-123",
-        ["entity-1"],
-        mockDb as any,
-        mockFriendsHandler,
-        mockEnv,
-        mockSession,
-      ),
+      validateEntityTagging("user-123", ["entity-1"], mockDb as any),
     ).resolves.not.toThrow();
+
+    // Friend set must come from the caller's outgoing user-edges, tier ≤ 1
+    expect(mockDb.relationship.findMany).toHaveBeenCalledWith({
+      where: { userId: "user-123", targetType: "user", tier: { lte: 1 } },
+      select: { targetId: true },
+    });
   });
 
   it("should allow tagging mix of own and friends entities", async () => {
@@ -105,18 +74,13 @@ describe("validateEntityTagging", () => {
       { id: "entity-1", owners: [{ userId: "user-123", role: "PRIMARY" }] },
       { id: "entity-2", owners: [{ userId: "friend-456", role: "PRIMARY" }] },
     ]);
-    mockFriendsHandler.getFriends = vi
-      .fn()
-      .mockResolvedValue([{ id: "friend-456", email: "friend@example.com" }]);
+    mockDb.relationship.findMany.mockResolvedValue([friendEdge("friend-456")]);
 
     await expect(
       validateEntityTagging(
         "user-123",
         ["entity-1", "entity-2"],
         mockDb as any,
-        mockFriendsHandler,
-        mockEnv,
-        mockSession,
       ),
     ).resolves.not.toThrow();
   });
@@ -125,14 +89,7 @@ describe("validateEntityTagging", () => {
     mockDb.entity.findMany.mockResolvedValue([]);
 
     await expect(
-      validateEntityTagging(
-        "user-123",
-        ["entity-1"],
-        mockDb as any,
-        mockFriendsHandler,
-        mockEnv,
-        mockSession,
-      ),
+      validateEntityTagging("user-123", ["entity-1"], mockDb as any),
     ).rejects.toThrow(InvalidEntitiesError);
   });
 
@@ -140,17 +97,22 @@ describe("validateEntityTagging", () => {
     mockDb.entity.findMany.mockResolvedValue([
       { id: "entity-1", owners: [{ userId: "stranger-789", role: "PRIMARY" }] },
     ]);
-    mockFriendsHandler.getFriends = vi.fn().mockResolvedValue([]);
+    mockDb.relationship.findMany.mockResolvedValue([]);
 
     await expect(
-      validateEntityTagging(
-        "user-123",
-        ["entity-1"],
-        mockDb as any,
-        mockFriendsHandler,
-        mockEnv,
-        mockSession,
-      ),
+      validateEntityTagging("user-123", ["entity-1"], mockDb as any),
+    ).rejects.toThrow(EntityTaggingPermissionError);
+  });
+
+  it("should reject when the owner edge is only tier 2+ (not a friend)", async () => {
+    mockDb.entity.findMany.mockResolvedValue([
+      { id: "entity-1", owners: [{ userId: "suggested-999", role: "PRIMARY" }] },
+    ]);
+    // tier-filtered query returns nothing for a tier-2 (suggestion/discovery) edge
+    mockDb.relationship.findMany.mockResolvedValue([]);
+
+    await expect(
+      validateEntityTagging("user-123", ["entity-1"], mockDb as any),
     ).rejects.toThrow(EntityTaggingPermissionError);
   });
 
@@ -158,16 +120,12 @@ describe("validateEntityTagging", () => {
     mockDb.entity.findMany.mockResolvedValue([
       { id: "entity-1", owners: [{ userId: "user-123", role: "PRIMARY" }] },
     ]);
-    mockFriendsHandler.getFriends = vi.fn().mockResolvedValue([]);
 
     await expect(
       validateEntityTagging(
         "user-123",
         ["entity-1", "entity-1", "ENTITY-1"], // Duplicates and case variations
         mockDb as any,
-        mockFriendsHandler,
-        mockEnv,
-        mockSession,
       ),
     ).resolves.not.toThrow();
 
@@ -183,16 +141,12 @@ describe("validateEntityTagging", () => {
       { id: "entity-1", owners: [{ userId: "user-123", role: "PRIMARY" }] },
       { id: "entity-2", owners: [{ userId: "user-123", role: "PRIMARY" }] },
     ]);
-    mockFriendsHandler.getFriends = vi.fn().mockResolvedValue([]);
 
     await expect(
       validateEntityTagging(
         "user-123",
         ["  ENTITY-1  ", "entity-2"],
         mockDb as any,
-        mockFriendsHandler,
-        mockEnv,
-        mockSession,
       ),
     ).resolves.not.toThrow();
 
@@ -207,16 +161,12 @@ describe("validateEntityTagging", () => {
       { id: "entity-1", owners: [{ userId: "user-123", role: "PRIMARY" }] },
       { id: "entity-2", owners: [{ userId: "user-123", role: "PRIMARY" }] },
     ]);
-    mockFriendsHandler.getFriends = vi.fn().mockResolvedValue([]);
 
     await expect(
       validateEntityTagging(
         "user-123",
         ["entity-1", "", "   ", "entity-2"],
         mockDb as any,
-        mockFriendsHandler,
-        mockEnv,
-        mockSession,
       ),
     ).resolves.not.toThrow();
 
@@ -224,67 +174,5 @@ describe("validateEntityTagging", () => {
       where: { id: { in: ["entity-1", "entity-2"] } },
       select: { id: true, owners: { select: { userId: true, role: true }, where: { status: 'ACTIVE' } } },
     });
-  });
-});
-
-describe("cacheEntityOwner", () => {
-  it("should cache entity owner when CACHE_KV is available", async () => {
-    const mockPut = vi.fn().mockResolvedValue(undefined);
-    const env = {
-      CACHE_KV: {
-        put: mockPut,
-      } as any,
-    };
-
-    await cacheEntityOwner("entity-1", "owner-123", env, 300);
-
-    expect(mockPut).toHaveBeenCalledWith("entity-owner:entity-1", "owner-123", {
-      expirationTtl: 300,
-    });
-  });
-
-  it("should not cache when CACHE_KV is not available", async () => {
-    const env = {};
-
-    await expect(
-      cacheEntityOwner("entity-1", "owner-123", env, 300),
-    ).resolves.not.toThrow();
-  });
-});
-
-describe("getCachedEntityOwner", () => {
-  it("should get cached entity owner when CACHE_KV is available", async () => {
-    const mockGet = vi.fn().mockResolvedValue("owner-123");
-    const env = {
-      CACHE_KV: {
-        get: mockGet,
-      } as any,
-    };
-
-    const result = await getCachedEntityOwner("entity-1", env);
-
-    expect(result).toBe("owner-123");
-    expect(mockGet).toHaveBeenCalledWith("entity-owner:entity-1");
-  });
-
-  it("should return null when CACHE_KV is not available", async () => {
-    const env = {};
-
-    const result = await getCachedEntityOwner("entity-1", env);
-
-    expect(result).toBeNull();
-  });
-
-  it("should return null when cache miss", async () => {
-    const mockGet = vi.fn().mockResolvedValue(null);
-    const env = {
-      CACHE_KV: {
-        get: mockGet,
-      } as any,
-    };
-
-    const result = await getCachedEntityOwner("entity-1", env);
-
-    expect(result).toBeNull();
   });
 });

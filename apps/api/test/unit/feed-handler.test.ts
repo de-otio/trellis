@@ -54,13 +54,12 @@ vi.mock("../../src/lib/region-detection", () => {
   };
 });
 
-// Mock FriendsHandler
-const mockGetFriends = vi.fn();
-vi.mock("../../src/lib/friends-handler", () => {
+// Mock friend-set resolution (relationship edges — see lib/friend-ids.ts)
+const mockGetFriendUserIds = vi.fn();
+vi.mock("../../src/lib/friend-ids", () => {
   return {
-    FriendsHandler: class {
-      getFriends = mockGetFriends;
-    },
+    FRIEND_TIER_MAX: 1,
+    getFriendUserIds: (...args: unknown[]) => mockGetFriendUserIds(...args),
   };
 });
 
@@ -154,7 +153,7 @@ describe("FeedHandler", () => {
       session: mockSession,
     };
 
-    mockGetFriends.mockResolvedValue([]);
+    mockGetFriendUserIds.mockResolvedValue([]);
   });
 
   describe("getHomeFeed", () => {
@@ -402,9 +401,7 @@ describe("FeedHandler", () => {
     });
 
     it("should respect visibility filters", async () => {
-      mockGetFriends.mockResolvedValue([
-        { id: "friend-1", email: "friend@example.com" },
-      ]);
+      mockGetFriendUserIds.mockResolvedValue(["friend-1"]);
 
       const request = new Request("http://test.com/feeds/home");
       await handler.getHomeFeed(
@@ -1454,8 +1451,10 @@ describe("FeedHandler", () => {
       expect(data.error).toBe("Failed to get feed");
     });
 
-    it("should handle friends handler failures gracefully", async () => {
-      mockGetFriends.mockRejectedValue(new Error("Friends handler failed"));
+    it("should handle friend-set resolution failures gracefully", async () => {
+      mockGetFriendUserIds.mockRejectedValue(
+        new Error("relationship query failed"),
+      );
 
       const request = new Request("http://test.com/feeds/home");
       const response = await handler.getHomeFeed(

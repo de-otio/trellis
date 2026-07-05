@@ -1792,7 +1792,8 @@ export class InvitationHandler {
   }
 
   // NOTE: the former private createFriendshipFromInvitation/addToFriendsList
-  // helpers were dead code (never called — friendship creation from an
-  // invitation is confirmed by the user via FriendsHandler instead) and were
-  // removed (T17 cleanup, pre-launch dead-path deletion).
+  // helpers were dead code and were removed (T17 cleanup). The legacy
+  // KV-backed FriendsHandler itself was removed in the pre-launch schema
+  // end-state pass — connection edges are created via the GraphService
+  // (relationships table); see lib/friend-ids.ts.
 }

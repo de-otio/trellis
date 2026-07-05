@@ -902,12 +902,6 @@ export class DataRouter {
       );
     }
 
-    // Extract only the values needed from env before transaction
-    // This prevents Symbol serialization issues when Prisma serializes the transaction callback
-    const envForValidation = (env as any).CACHE_KV
-      ? { CACHE_KV: (env as any).CACHE_KV }
-      : {};
-
     // Use transaction to ensure atomicity
     const result = await db.$transaction(
       async (tx: any) => {
@@ -916,24 +910,14 @@ export class DataRouter {
           const { validateEntityTagging } = await import(
             "./entity-tagging-validator.js"
           );
-          const { FriendsHandler } = await import("./friends-handler.js");
-          const friendsHandler = new FriendsHandler();
 
-          // Sanitize session object to avoid Symbol serialization issues
-          const sanitizedSession = {
-            userId: String(session.userId),
-            email: String(session.email),
-          };
-
-          // Validate using transaction client to ensure consistency
-          // Only pass minimal env object (CACHE_KV if available) to avoid Symbol issues
+          // Validate using transaction client to ensure consistency.
+          // String() the userId to avoid Symbol serialization issues when
+          // Prisma serializes the transaction callback.
           await validateEntityTagging(
-            sanitizedSession.userId,
+            String(session.userId),
             entityRefs,
             tx as any, // Transaction client
-            friendsHandler,
-            envForValidation as any,
-            sanitizedSession as any,
           );
         }
 
