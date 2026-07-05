@@ -53,6 +53,12 @@ import type {
   MediaModerationProvider,
   S3Ref,
 } from "../lib/media/moderation-provider.js";
+import {
+  estimateJobCostUsd,
+  isOverDailyCap,
+  type MediaSpendConfig,
+  type MediaSpendGuardPort,
+} from "../lib/media/spend-guard.js";
 
 // ---------------------------------------------------------------------------
 // Injected persistence + config seams
@@ -131,6 +137,13 @@ export interface MediaProcessingConfig {
   readonly maxDurationSeconds: number;
   /** Current operative thresholds, snapshotted onto each started job. */
   readonly thresholds: ThresholdSnapshot;
+  /**
+   * Daily AI-spend guard config (AR5). Optional for consumers that have not
+   * adopted the guard; when set, `deps.spendGuard` MUST also be wired (and
+   * vice versa) — a half-wired guard fails the record closed rather than
+   * running unguarded. Values are Env/SSM-sourced, never literals.
+   */
+  readonly spend?: MediaSpendConfig;
 }
 
 /**
@@ -145,6 +158,12 @@ export interface MediaProcessingDeps {
   readonly moderation: MediaModerationProvider;
   readonly persistence: MediaPersistencePort;
   readonly config: MediaProcessingConfig;
+  /**
+   * Daily AI-spend counter (AR5). Optional; active iff `config.spend` is also
+   * set. Consulted BEFORE the transcode + paid AI jobs; incremented AFTER the
+   * jobs were started.
+   */
+  readonly spendGuard?: MediaSpendGuardPort;
   /** The object-storage bucket handle moderation/transcription refs carry. */
   readonly bucket: string;
   /**
@@ -309,6 +328,49 @@ export async function processObjectKey(
       throw new DurationCapExceededError();
     }
 
+    // --- 3b. Daily AI-spend guard (AR5) — gate BEFORE the transcode and the ---
+    // paid AI jobs. Every uncertainty fails CLOSED as a `fail` disposition
+    // (SQS retry → DLQ backstop), NEVER as poison: an over-cap or a counter
+    // outage says nothing about the media, so the object must not be driven
+    // to REVIEW; the message is routed to the DLQ via the redrive policy.
+    const spendGate = resolveSpendGuard(deps);
+    if (spendGate === "misconfigured") {
+      deps.logger.error(
+        "Spend guard misconfigured (config.spend and spendGuard must be wired together) — failing record closed",
+        { key: triggeringKey },
+      );
+      return { disposition: "fail", reason: "spend-guard-misconfigured" };
+    }
+    let estimatedUsd = 0;
+    if (spendGate !== undefined) {
+      estimatedUsd = estimateJobCostUsd(probed, spendGate.config.perMinuteRateUsd);
+      let currentUsd: number;
+      try {
+        currentUsd = await spendGate.guard.getTodaySpendUsd();
+      } catch (readErr) {
+        // Counter unreadable ⇒ we cannot prove we are under the cap ⇒ do NOT
+        // start paid jobs (fail closed). Retry/DLQ, never poison/REVIEW.
+        deps.logger.error(
+          "Spend counter read failed — failing record closed (no AI jobs started)",
+          { key: triggeringKey, error: readErr },
+        );
+        return { disposition: "fail", reason: "spend-guard-unavailable" };
+      }
+      if (isOverDailyCap(currentUsd, spendGate.config.dailyCapUsd)) {
+        deps.logger.warn(
+          "Daily media AI spend cap reached — short-circuiting job to retry/DLQ",
+          { key: triggeringKey, currentUsd, dailyCapUsd: spendGate.config.dailyCapUsd },
+        );
+        try {
+          await spendGate.guard.reportCapExceeded();
+        } catch (reportErr) {
+          // Best-effort observability signal; never changes the disposition.
+          deps.logger.warn("reportCapExceeded failed (ignored)", { error: reportErr });
+        }
+        return { disposition: "fail", reason: "daily-spend-cap-exceeded" };
+      }
+    }
+
     // --- 4. Transcode-and-discard ⇒ cleaned bytes. ---
     // The cleaned output is written to a transient staging key OUTSIDE pending/
     // (so re-uploading the cleaned bytes can never re-trigger this worker).
@@ -392,6 +454,25 @@ export async function processObjectKey(
       });
     }
 
+    // --- 7. Record the started jobs' estimated spend (AR5). The money is ---
+    // committed once the jobs are started, so the counter is incremented HERE
+    // (not at the gate): a short-circuited/retried record never inflates it.
+    // KNOWN FAIL-OPEN (write path only, documented — cf. T4-F2): if this write
+    // fails, the jobs have already been started and re-running them via a
+    // retry would double real spend, so we log loudly and ack; the counter may
+    // UNDERCOUNT until the backend recovers. The load-bearing READ gate above
+    // fails closed.
+    if (spendGate !== undefined) {
+      try {
+        await spendGate.guard.recordSpendUsd(estimatedUsd);
+      } catch (recordErr) {
+        deps.logger.error(
+          "Failed to record media AI spend — daily counter may undercount (jobs already started; acking)",
+          { key: triggeringKey, estimatedUsd, error: recordErr },
+        );
+      }
+    }
+
     deps.logger.info("Started per-track moderation jobs", {
       mediaId: row.id,
       stagingKey: cleanedStagingKeyOut,
@@ -399,6 +480,7 @@ export async function processObjectKey(
       visualJobId: visual.jobId,
       audioJobId,
       hasAudio: transcodeResult.hasAudio,
+      estimatedSpendUsd: estimatedUsd,
     });
 
     return { disposition: "ack", reason: "started-moderation" };
@@ -418,6 +500,32 @@ export async function processObjectKey(
     });
     return { disposition: "fail", reason: "retryable" };
   }
+}
+
+/**
+ * Resolve the AR5 spend-guard wiring for this deps bag.
+ *
+ * - Both `deps.spendGuard` and `deps.config.spend` present ⇒ active guard.
+ * - Neither present ⇒ `undefined` (guard not adopted; worker runs as before).
+ * - Exactly one present ⇒ `"misconfigured"`: a half-wired guard means the
+ *   operator INTENDED a cap, so running unguarded would fail OPEN. The caller
+ *   fails the record closed instead.
+ */
+function resolveSpendGuard(
+  deps: MediaProcessingDeps,
+):
+  | { guard: MediaSpendGuardPort; config: MediaSpendConfig }
+  | "misconfigured"
+  | undefined {
+  const guard = deps.spendGuard;
+  const config = deps.config.spend;
+  if (guard !== undefined && config !== undefined) {
+    return { guard, config };
+  }
+  if (guard === undefined && config === undefined) {
+    return undefined;
+  }
+  return "misconfigured";
 }
 
 /**
