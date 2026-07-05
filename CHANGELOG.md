@@ -13,6 +13,41 @@ series:
 
 Entries below are for `@de-otio/trellis` unless noted otherwise.
 
+## [0.20.0] — 2026-07-05
+
+### Added
+
+- **Moderator media-review queue (T9).** New MODERATOR/SUPER_ADMIN-only HTTP
+  surface over media awaiting a human decision
+  (`lib/routes/media-review.ts`, `lib/media/media-review-handler.ts`):
+  `GET /api/admin/media-review` (paginated REVIEW/QUARANTINED list with
+  per-track visual/audio verdicts for video), `POST
+  /api/admin/media-review/{id}/decision` (approve | reject), `POST
+  /api/admin/media-review/{id}/escalate-csam` (locks the item and writes a
+  CRITICAL audit row; statutory reporting remains a human/runbook process),
+  and `GET /api/admin/media-review/{id}/content` (audited moderator
+  byte-view via a new pure `moderator-serve-gate` that serves only
+  REVIEW/QUARANTINED items and never widens the public APPROVED-only gate).
+  Roles are resolved server-side from the User table; decisions go through
+  the existing media lifecycle state machine, and approval fails CLOSED
+  when the stored bytes are absent. Every decision and every byte-view
+  writes an `AuditEvent`. No Prisma schema change.
+
+### Fixed
+
+- **Five aggregated route sets are now actually served.** A route set listed
+  in the `routes/index.ts` aggregate is only served once mounted in
+  `lib/app.ts`; five sets added after the router consolidation were never
+  mounted and returned 404 in deployments despite green unit tests. Now
+  mounted: device registration (`POST /api/devices/register`, `DELETE
+  /api/devices/{id}`), tenant classification, tenant directory profile,
+  tenant directory search, and platform category admin. **Consumer note:
+  these endpoints become live on upgrade — anything previously relying on
+  them 404ing should be reviewed before deploying.** A new route-mount
+  parity guard (`test/unit/route-mount-parity.test.ts`) fails the build if
+  any aggregated route is not registered on the built app, closing the
+  defect class.
+
 ## [0.19.0] — 2026-07-05
 
 ### Added
