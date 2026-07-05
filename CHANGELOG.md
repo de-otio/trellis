@@ -15,6 +15,56 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ## [Unreleased]
 
+## [0.17.0] — 2026-07-05
+
+### Changed
+
+- **MediaFile lifecycle consolidation (breaking; pre-launch window, nothing
+  live).** The `moderation_status` (enum `ModerationStatus`) + `upload_status`
+  (string) column pair is replaced by a single `lifecycle` column driven by
+  ONE machine-checked state machine (`lib/media/media-lifecycle.ts`, enum
+  `MediaLifecycle`): `AWAITING_UPLOAD → UPLOADED → APPROVED | REVIEW |
+  QUARANTINED | REJECTED`, with `UPLOAD_FAILED` for expiry/abandon/reap
+  (T14/AR4). Every new row is born `AWAITING_UPLOAD` (fail-closed); the only
+  state that can serve bytes is `APPROVED` (and only with `!hidden &&
+  deletedAt == null` — `lib/media/serve-gate.ts`).
+  `lib/media/moderation-status.ts` is removed; the serve gate and promote
+  decision are consolidated on the new machine. Migration:
+  `20260705083217_t14_presigned_upload_lifecycle_consolidation`.
+
+### Added
+
+- **Presigned direct-to-S3 upload flow for video (T14).** New presigned
+  upload-session endpoints (`lib/routes/upload-sessions.ts`,
+  `lib/presigned-upload-handler.ts`): the client uploads straight to a
+  per-session `pending/{tenantId}/{sessionId}` staging key under a
+  POST-policy grant confined to the exact key, MIME type, and a
+  `content-length-range` byte rail (`lib/media/presign-policy.ts`).
+  Completion HEAD-verifies the staged object and can never advance the media
+  row past `UPLOADED` — verdicts belong to the moderation pipeline alone.
+  `UploadSession` gains a `kind` discriminator (`legacy` | `presigned`) plus
+  presigned-only columns. Contract:
+  `apps/api/src/lib/doc/presigned-upload-contract.md`.
+- **AR8 graph query hardening.** `getCircleStatus` rewritten as a UNION of
+  two indexable branches with a 7-day floor and a 100-row cap;
+  `computeSharedConnections` drops the recursive CTE for two bounded
+  expansion levels; `getRelationships` and the home feed move to composite
+  keyset cursors (`(score, targetId)` / `(createdAt, id)` — boundary ties no
+  longer skipped); score sweeps become one `UPDATE … FROM unnest` instead of
+  N per-row UPDATEs; a per-user relationship-edge cap is enforced at
+  `createRelationship`; the enum-era `er.type::text` casts are dropped. All
+  rewrites row-equality-proven; the graph suites run in the graph lane with
+  live coverage for every touched adapter.
+
+### Fixed
+
+- **Quota byte-accounting race in presigned completion (AR-SEC F1, Medium).**
+  `completeSession` persisted the HEAD-verified object size only when its own
+  lifecycle transition fired; when the S3 worker won the bytes-arrived race
+  the row kept the client-declared size forever, under-counting the storage
+  quota (`_sum: size`). The authoritative size is now persisted
+  unconditionally (idempotent separate update).
+
 ## [0.16.0] — 2026-07-05
 
 ### Removed
