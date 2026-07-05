@@ -49,6 +49,11 @@ import {
 } from "../../../src/lib/media/moderation-provider.js";
 import { pendingKey, casKey, isCasKeyError } from "../../../src/lib/media/cas-keys.js";
 import type { Track } from "../../../src/lib/media/track-verdict.js";
+import {
+  MockSpendGuardPort,
+  type MediaSpendConfig,
+  type MediaSpendGuardPort,
+} from "../../../src/lib/media/spend-guard.js";
 
 // ---------------------------------------------------------------------------
 // Fixtures — valid CUIDs (c + 24 [a-z0-9]) so cas-keys allowlists pass.
@@ -109,6 +114,8 @@ function makeDeps(opts: {
   transcode?: MockTranscodePort;
   maxDurationSeconds?: number;
   failPersistence?: boolean;
+  spendGuard?: MediaSpendGuardPort;
+  spend?: MediaSpendConfig;
 } = {}): { deps: MediaProcessingDeps; fake: PersistenceFake } {
   const fake: PersistenceFake = {
     rows: new Map((opts.rows ?? []).map((r) => [r.uploadId!, r])),
@@ -151,7 +158,9 @@ function makeDeps(opts: {
     config: {
       maxDurationSeconds: opts.maxDurationSeconds ?? 60,
       thresholds: THRESHOLDS,
+      ...(opts.spend ? { spend: opts.spend } : {}),
     },
+    ...(opts.spendGuard ? { spendGuard: opts.spendGuard } : {}),
     bucket: BUCKET,
     newJobName: (seed: string) => `jobname-${seed}`,
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
@@ -566,6 +575,151 @@ describe("processObjectKey — poison vs retryable", () => {
     expect(out.disposition).toBe("ack");
     expect(poisonOf(out)).toBe(true);
     expect(out.reason).toBe("poison-mark-failed");
+  });
+});
+
+describe("processObjectKey — daily AI-spend guard (AR5)", () => {
+  const SPEND: MediaSpendConfig = { dailyCapUsd: 5, perMinuteRateUsd: 0.2 };
+
+  function spendDeps(opts: {
+    spendUsd?: number;
+    guard?: MockSpendGuardPort;
+    spend?: MediaSpendConfig;
+    duration?: number;
+  } = {}) {
+    const guard = opts.guard ?? new MockSpendGuardPort({ spendUsd: opts.spendUsd ?? 0 });
+    const cleaned = Buffer.from("cleaned-bytes");
+    const storage = happyStorage(TENANT_A, UPLOAD_1, cleaned);
+    const transcode = new MockTranscodePort({ duration: opts.duration ?? 30 });
+    const built = makeDeps({
+      storage,
+      transcode,
+      spendGuard: guard,
+      spend: opts.spend ?? SPEND,
+      rows: [{ id: "media1", tenantId: TENANT_A, uploadId: UPLOAD_1 }],
+    });
+    return { ...built, guard, transcode };
+  }
+
+  it("under the cap: proceeds, starts jobs, and records the duration-based estimate AFTER starting", async () => {
+    const { deps, fake, guard } = spendDeps({ spendUsd: 4.99, duration: 30 });
+
+    const out = await processObjectKey(key(TENANT_A, UPLOAD_1), deps);
+
+    expect(out.disposition).toBe("ack");
+    expect(out.reason).toBe("started-moderation");
+    expect(fake.jobs).toHaveLength(2);
+    // 30s at 0.2 USD/min = 0.1 USD, recorded exactly once.
+    expect(guard.recorded).toEqual([0.1]);
+    expect(guard.capExceededReports).toBe(0);
+  });
+
+  it("over the cap: fails the record (SQS retry → DLQ), starts NOTHING, records NOTHING, never poisons", async () => {
+    const { deps, fake, guard, transcode } = spendDeps({ spendUsd: 5 }); // == cap ⇒ over
+    const videoSpy = vi.spyOn(transcode, "transcodeVideo");
+
+    const out = await processObjectKey(key(TENANT_A, UPLOAD_1), deps);
+
+    // `fail` ⇒ batchItemFailure ⇒ SQS redelivery ⇒ redrive policy routes the
+    // message to the DLQ (never a silent drop, never REVIEW).
+    expect(out).toEqual({ disposition: "fail", reason: "daily-spend-cap-exceeded" });
+    expect(videoSpy).not.toHaveBeenCalled(); // gate runs BEFORE the transcode
+    expect(fake.jobs).toHaveLength(0);
+    expect(fake.reviewed).toHaveLength(0); // an over-cap is NOT a media defect
+    expect(guard.recorded).toEqual([]); // a short-circuit never inflates the counter
+    expect(guard.capExceededReports).toBe(1); // observability signal emitted
+  });
+
+  it("a cap of 0 blocks every job (operator emergency stop)", async () => {
+    const { deps, fake } = spendDeps({
+      spendUsd: 0,
+      spend: { dailyCapUsd: 0, perMinuteRateUsd: 0.2 },
+    });
+
+    const out = await processObjectKey(key(TENANT_A, UPLOAD_1), deps);
+
+    expect(out.disposition).toBe("fail");
+    expect(fake.jobs).toHaveLength(0);
+  });
+
+  it("counter READ failure fails closed: no jobs, `fail` disposition, no REVIEW", async () => {
+    const guard = new MockSpendGuardPort();
+    guard.failReads(new Error("dynamo down"));
+    const { deps, fake } = spendDeps({ guard });
+
+    const out = await processObjectKey(key(TENANT_A, UPLOAD_1), deps);
+
+    expect(out).toEqual({ disposition: "fail", reason: "spend-guard-unavailable" });
+    expect(fake.jobs).toHaveLength(0);
+    expect(fake.reviewed).toHaveLength(0);
+  });
+
+  it("counter WRITE failure after jobs started still acks (documented fail-open on record; jobs are not re-run)", async () => {
+    const guard = new MockSpendGuardPort({ spendUsd: 0 });
+    guard.failRecords(new Error("dynamo write down"));
+    const { deps, fake } = spendDeps({ guard });
+
+    const out = await processObjectKey(key(TENANT_A, UPLOAD_1), deps);
+
+    expect(out.disposition).toBe("ack");
+    expect(out.reason).toBe("started-moderation");
+    expect(fake.jobs).toHaveLength(2); // the started jobs stand
+    expect((deps.logger.error as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(0);
+  });
+
+  it("a reportCapExceeded failure never changes the over-cap disposition", async () => {
+    const guard = new MockSpendGuardPort({ spendUsd: 99 });
+    vi.spyOn(guard, "reportCapExceeded").mockRejectedValue(new Error("cw down"));
+    const { deps } = spendDeps({ guard });
+
+    const out = await processObjectKey(key(TENANT_A, UPLOAD_1), deps);
+
+    expect(out).toEqual({ disposition: "fail", reason: "daily-spend-cap-exceeded" });
+  });
+
+  it("half-wired guard (config without port) fails closed as misconfigured", async () => {
+    const cleaned = Buffer.from("cleaned-bytes");
+    const storage = happyStorage(TENANT_A, UPLOAD_1, cleaned);
+    const { deps, fake } = makeDeps({
+      storage,
+      spend: SPEND, // config present…
+      // …but NO spendGuard port wired.
+      rows: [{ id: "media1", tenantId: TENANT_A, uploadId: UPLOAD_1 }],
+    });
+
+    const out = await processObjectKey(key(TENANT_A, UPLOAD_1), deps);
+
+    expect(out).toEqual({ disposition: "fail", reason: "spend-guard-misconfigured" });
+    expect(fake.jobs).toHaveLength(0);
+  });
+
+  it("half-wired guard (port without config) fails closed as misconfigured", async () => {
+    const cleaned = Buffer.from("cleaned-bytes");
+    const storage = happyStorage(TENANT_A, UPLOAD_1, cleaned);
+    const { deps, fake } = makeDeps({
+      storage,
+      spendGuard: new MockSpendGuardPort(),
+      rows: [{ id: "media1", tenantId: TENANT_A, uploadId: UPLOAD_1 }],
+    });
+
+    const out = await processObjectKey(key(TENANT_A, UPLOAD_1), deps);
+
+    expect(out).toEqual({ disposition: "fail", reason: "spend-guard-misconfigured" });
+    expect(fake.jobs).toHaveLength(0);
+  });
+
+  it("no guard wired at all: worker behaves exactly as before (backwards compatible)", async () => {
+    const cleaned = Buffer.from("cleaned-bytes");
+    const storage = happyStorage(TENANT_A, UPLOAD_1, cleaned);
+    const { deps, fake } = makeDeps({
+      storage,
+      rows: [{ id: "media1", tenantId: TENANT_A, uploadId: UPLOAD_1 }],
+    });
+
+    const out = await processObjectKey(key(TENANT_A, UPLOAD_1), deps);
+
+    expect(out.disposition).toBe("ack");
+    expect(fake.jobs).toHaveLength(2);
   });
 });
 
