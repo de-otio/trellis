@@ -28,7 +28,7 @@
  * vocabulary.
  */
 
-import type { ModerationDecision } from "./moderation-status.js";
+import type { ModerationDecision } from "./media-lifecycle.js";
 import type { TextModerationProvider } from "./text-moderation.js";
 
 /** The three known classifier decisions (kept local — not re-exported). */

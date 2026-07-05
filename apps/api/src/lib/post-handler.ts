@@ -335,7 +335,7 @@ export class PostHandler {
                     contentHash: true,
                     uploadedBy: true,
                     deletedAt: true,
-                    uploadStatus: true,
+                    lifecycle: true,
                     createdAt: true,
                   },
                 });
@@ -353,7 +353,7 @@ export class PostHandler {
                 contentHash: m.contentHash?.substring(0, 12) + "...",
                 uploadedBy: m.uploadedBy,
                 deletedAt: m.deletedAt,
-                uploadStatus: m.uploadStatus,
+                lifecycle: m.lifecycle,
                 createdAt: m.createdAt,
               })),
             };

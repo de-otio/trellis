@@ -14,7 +14,7 @@
 // Lives in the PUBLIC npm tarball: NO thresholds, secrets, or real-category
 // vocabulary here.
 
-import type { ModerationDecision } from "./moderation-status.js";
+import type { ModerationDecision } from "./media-lifecycle.js";
 
 /** The two moderation tracks a media object can carry. */
 export type Track = "VISUAL" | "AUDIO";

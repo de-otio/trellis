@@ -8,7 +8,7 @@ import {
 import {
   ALL_MODERATION_DECISIONS,
   type ModerationDecision,
-} from "../../../src/lib/media/moderation-status.js";
+} from "../../../src/lib/media/media-lifecycle.js";
 
 // ---------------------------------------------------------------------------
 // Arbitraries

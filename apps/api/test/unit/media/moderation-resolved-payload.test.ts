@@ -5,7 +5,7 @@
  * 1. "ready" if and only if status === "APPROVED".
  * 2. Every non-APPROVED status produces "not-ready".
  * 3. The returned object has exactly the keys {mediaId, status} — no extras.
- * 4. PENDING / REVIEW / QUARANTINED / REJECTED are indistinguishable in the
+ * 4. UPLOADED / REVIEW / QUARANTINED / REJECTED are indistinguishable in the
  *    output (the anti-oracle property).
  * 5. mediaId is faithfully echoed.
  */
@@ -17,12 +17,12 @@ import {
   type ModerationResolvedPayload,
 } from "../../../src/lib/media/moderation-resolved-payload.js";
 import {
-  ALL_MODERATION_STATUSES,
-  type ModerationStatus,
-} from "../../../src/lib/media/moderation-status.js";
+  ALL_MEDIA_LIFECYCLES,
+  type MediaLifecycle,
+} from "../../../src/lib/media/media-lifecycle.js";
 
 // ---------------------------------------------------------------------------
-// Exhaustive unit tests over every known ModerationStatus
+// Exhaustive unit tests over every known MediaLifecycle
 // ---------------------------------------------------------------------------
 
 describe("moderationResolvedPayload — exhaustive status coverage", () => {
@@ -31,13 +31,13 @@ describe("moderationResolvedPayload — exhaustive status coverage", () => {
     expect(p.status).toBe("ready");
   });
 
-  const nonApproved: ModerationStatus[] = ALL_MODERATION_STATUSES.filter(
+  const nonApproved: MediaLifecycle[] = ALL_MEDIA_LIFECYCLES.filter(
     (s) => s !== "APPROVED",
   );
 
   it.each(nonApproved)(
     "returns not-ready for %s",
-    (status: ModerationStatus) => {
+    (status: MediaLifecycle) => {
       const p = moderationResolvedPayload("m1", status);
       expect(p.status).toBe("not-ready");
     },
@@ -59,7 +59,7 @@ describe("moderationResolvedPayload — mediaId passthrough", () => {
   });
 
   it("echoes mediaId unchanged regardless of status", () => {
-    const statusArb = fc.constantFrom(...ALL_MODERATION_STATUSES);
+    const statusArb = fc.constantFrom(...ALL_MEDIA_LIFECYCLES);
     fc.assert(
       fc.property(fc.string(), statusArb, (id, status) => {
         const p = moderationResolvedPayload(id, status);
@@ -80,7 +80,7 @@ describe("moderationResolvedPayload — anti-oracle: exact key set", () => {
   });
 
   it("has exactly two keys for every status (property)", () => {
-    const statusArb = fc.constantFrom(...ALL_MODERATION_STATUSES);
+    const statusArb = fc.constantFrom(...ALL_MEDIA_LIFECYCLES);
     fc.assert(
       fc.property(fc.string(), statusArb, (id, status) => {
         const p = moderationResolvedPayload(id, status);
@@ -116,8 +116,8 @@ describe("moderationResolvedPayload — anti-oracle: exact key set", () => {
 // ---------------------------------------------------------------------------
 
 describe("moderationResolvedPayload — anti-oracle: non-APPROVED collapse", () => {
-  it("PENDING and REVIEW produce identical payloads for the same mediaId", () => {
-    const a = moderationResolvedPayload("abc", "PENDING");
+  it("UPLOADED and REVIEW produce identical payloads for the same mediaId", () => {
+    const a = moderationResolvedPayload("abc", "UPLOADED");
     const b = moderationResolvedPayload("abc", "REVIEW");
     expect(a).toEqual(b);
   });
@@ -135,7 +135,7 @@ describe("moderationResolvedPayload — anti-oracle: non-APPROVED collapse", () 
   });
 
   it("all non-APPROVED statuses produce the same payload (property)", () => {
-    const nonApproved = ALL_MODERATION_STATUSES.filter((s) => s !== "APPROVED");
+    const nonApproved = ALL_MEDIA_LIFECYCLES.filter((s) => s !== "APPROVED");
     fc.assert(
       fc.property(
         fc.string(),
@@ -163,7 +163,7 @@ describe("moderationResolvedPayload — anti-oracle: non-APPROVED collapse", () 
 
 describe("moderationResolvedPayload — binary partition property", () => {
   it("status is ready iff input status is APPROVED (property over all statuses)", () => {
-    const statusArb = fc.constantFrom(...ALL_MODERATION_STATUSES);
+    const statusArb = fc.constantFrom(...ALL_MEDIA_LIFECYCLES);
     fc.assert(
       fc.property(fc.string(), statusArb, (id, status) => {
         const p = moderationResolvedPayload(id, status);
@@ -177,7 +177,7 @@ describe("moderationResolvedPayload — binary partition property", () => {
   });
 
   it("status is never a value outside {ready, not-ready} (property)", () => {
-    const statusArb = fc.constantFrom(...ALL_MODERATION_STATUSES);
+    const statusArb = fc.constantFrom(...ALL_MEDIA_LIFECYCLES);
     fc.assert(
       fc.property(fc.string(), statusArb, (id, status) => {
         const p = moderationResolvedPayload(id, status);

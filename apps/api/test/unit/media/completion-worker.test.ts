@@ -14,8 +14,8 @@ import {
 } from "../../../src/lambda/media-completion-worker.js";
 import type {
   ModerationDecision,
-  ModerationStatus,
-} from "../../../src/lib/media/moderation-status.js";
+  MediaLifecycle,
+} from "../../../src/lib/media/media-lifecycle.js";
 import type { Track } from "../../../src/lib/media/track-verdict.js";
 import type {
   MediaModerationProvider,
@@ -84,7 +84,7 @@ function makeStore(state: StoreState): CompletionStore {
       const m = state.media.get(mediaId);
       if (m) {
         state.media.set(mediaId, {
-          coords: { ...m.coords, moderationStatus: status },
+          coords: { ...m.coords, lifecycle: status },
         });
       }
     },
@@ -139,7 +139,7 @@ function harness(opts: {
   jobId: string;
   track: Track;
   mediaId?: string;
-  currentStatus?: ModerationStatus;
+  currentStatus?: MediaLifecycle;
   casPresent?: boolean;
   thresholdSnapshot?: unknown;
   // visual path
@@ -172,7 +172,7 @@ function harness(opts: {
         mediaId,
         {
           coords: {
-            moderationStatus: opts.currentStatus ?? "PENDING",
+            lifecycle: opts.currentStatus ?? "UPLOADED",
             tenantId: TENANT,
             uploadId: UPLOAD,
             contentHash: HASH,
@@ -356,7 +356,7 @@ describe("processCompletion — re-fetch authoritative (body verdict ignored)", 
     );
 
     expect(out.kind).toBe("applied");
-    expect((out as { status: ModerationStatus }).status).toBe("REVIEW");
+    expect((out as { status: MediaLifecycle }).status).toBe("REVIEW");
     expect(h.emitted).toEqual([{ mediaId: "media-1", status: "not-ready" }]);
     // No promotion happened (storage copy not called).
     expect(h.storageCalls).not.toContain("copyObject");
@@ -386,7 +386,7 @@ describe("processCompletion — re-fetch authoritative (body verdict ignored)", 
     });
     const out = await processCompletion(ebBody("tr-1"), h.deps);
     expect(out.kind).toBe("applied");
-    expect((out as { status: ModerationStatus }).status).toBe("REVIEW");
+    expect((out as { status: MediaLifecycle }).status).toBe("REVIEW");
     expect(h.emitted).toEqual([{ mediaId: "media-1", status: "not-ready" }]);
   });
 });
@@ -404,7 +404,7 @@ describe("processCompletion — both tracks required for approval", () => {
       other: { state: "absent" },
     });
     const out = await processCompletion(snsBody("rek-1"), h.deps);
-    expect((out as { status: ModerationStatus }).status).toBe("REVIEW");
+    expect((out as { status: MediaLifecycle }).status).toBe("REVIEW");
     expect(h.emitted).toEqual([{ mediaId: "media-1", status: "not-ready" }]);
     expect(h.storageCalls).not.toContain("copyObject");
   });
@@ -417,7 +417,7 @@ describe("processCompletion — both tracks required for approval", () => {
       other: { state: "pending" },
     });
     const out = await processCompletion(snsBody("rek-1"), h.deps);
-    expect((out as { status: ModerationStatus }).status).toBe("REVIEW");
+    expect((out as { status: MediaLifecycle }).status).toBe("REVIEW");
     expect(h.storageCalls).not.toContain("copyObject");
   });
 
@@ -429,7 +429,7 @@ describe("processCompletion — both tracks required for approval", () => {
       other: { state: "decided", decision: "approved" },
     });
     const out = await processCompletion(snsBody("rek-1"), h.deps);
-    expect((out as { status: ModerationStatus }).status).toBe("APPROVED");
+    expect((out as { status: MediaLifecycle }).status).toBe("APPROVED");
     expect(h.emitted).toEqual([{ mediaId: "media-1", status: "ready" }]);
     expect(h.storageCalls).toContain("copyObject");
   });
@@ -443,7 +443,7 @@ describe("processCompletion — both tracks required for approval", () => {
       other: { state: "decided", decision: "approved" },
     });
     const out = await processCompletion(snsBody("rek-1"), h.deps);
-    expect((out as { status: ModerationStatus }).status).toBe("APPROVED");
+    expect((out as { status: MediaLifecycle }).status).toBe("APPROVED");
     // status persisted, event emitted...
     expect(h.state.calls).toContain("persistMediaStatus");
     expect(h.emitted).toEqual([{ mediaId: "media-1", status: "ready" }]);
@@ -513,7 +513,7 @@ describe("processCompletion — fixed promote/persist/emit ordering", () => {
       },
     };
     const out = await processCompletion(snsBody("rek-1"), deps);
-    expect((out as { status: ModerationStatus }).status).toBe("APPROVED");
+    expect((out as { status: MediaLifecycle }).status).toBe("APPROVED");
     expect(h.emitted).toEqual([{ mediaId: "media-1", status: "ready" }]);
   });
 });
@@ -700,12 +700,12 @@ describe("property — APPROVED/ready iff both tracks positively approved", () =
             track: "VISUAL",
             videoVerdict: thisDecision,
             other,
-            currentStatus: "PENDING",
+            currentStatus: "UPLOADED",
           });
           const out = await processCompletion(snsBody("rek-1"), h.deps);
           // PENDING always permits a legal transition, so the record applies.
           expect(out.kind).toBe("applied");
-          const status = (out as { status: ModerationStatus }).status;
+          const status = (out as { status: MediaLifecycle }).status;
           const bothApproved =
             thisDecision === "approved" &&
             other.state === "decided" &&
@@ -733,7 +733,7 @@ describe("property — APPROVED/ready iff both tracks positively approved", () =
           track: "VISUAL",
           videoVerdict: "quarantine",
           other,
-          currentStatus: "PENDING",
+          currentStatus: "UPLOADED",
         });
         await processCompletion(snsBody("rek-1"), h.deps);
         expect(h.emitted[0].status).toBe("not-ready");
@@ -766,5 +766,70 @@ describe("property — extractJobPointer is total and never fabricates", () => {
       }),
       { numRuns: 300 },
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T14 acceptance — FAIL-CLOSED: a video whose moderation errors or times out
+// is HELD (REVIEW / still-UPLOADED) and the serve gate NEVER serves it.
+// ---------------------------------------------------------------------------
+
+import { isServable } from "../../../src/lib/media/serve-gate.js";
+
+describe("T14 fail-closed — errored/timed-out moderation is HELD, never served", () => {
+  it("provider re-fetch FAILS (errored track) ⇒ REVIEW, no promotion, serve gate denies", async () => {
+    const h = harness({
+      jobId: "tr-err",
+      track: "AUDIO",
+      transcription: { status: "FAILED" }, // provider job errored
+      textVerdict: "approved", // would approve if (wrongly) consulted
+      other: { state: "decided", decision: "approved" }, // sibling is clean
+    });
+
+    const out = await processCompletion(ebBody("tr-err"), h.deps);
+
+    // HELD: the object lands in REVIEW (human queue), not APPROVED.
+    expect(out.kind).toBe("applied");
+    expect((out as { status: MediaLifecycle }).status).toBe("REVIEW");
+    // NEVER promoted: no bytes were copied toward the served cas/ prefix.
+    expect(h.storageCalls).not.toContain("copyObject");
+    // NEVER served: the serve gate denies the resulting state.
+    expect(
+      isServable({ lifecycle: "REVIEW", hidden: false, deletedAt: null }),
+    ).toBe(false);
+  });
+
+  it("provider re-fetch THROWS (timeout) ⇒ record retried, object stays UPLOADED, serve gate denies", async () => {
+    const h = harness({
+      jobId: "rek-timeout",
+      track: "VISUAL",
+      other: { state: "decided", decision: "approved" },
+    });
+    // The provider call times out / throws instead of answering.
+    h.deps.moderation.getVideoModeration = async () => {
+      throw new Error("ETIMEDOUT");
+    };
+
+    // processCompletion propagates (the SQS handler converts it to a retry) —
+    // the object's persisted state is untouched.
+    await expect(processCompletion(snsBody("rek-timeout"), h.deps)).rejects.toThrow();
+
+    const persisted = h.state.media.get("media-1")!.coords.lifecycle;
+    expect(persisted).toBe("UPLOADED"); // never advanced toward APPROVED
+    expect(h.storageCalls).not.toContain("copyObject");
+    expect(
+      isServable({ lifecycle: persisted, hidden: false, deletedAt: null }),
+    ).toBe(false);
+  });
+
+  it("moderation that never completes at all (no message) leaves UPLOADED — which the serve gate denies", () => {
+    // The degenerate case: the completion message is simply never delivered.
+    // The object sits at UPLOADED forever; the gate approves APPROVED only.
+    expect(
+      isServable({ lifecycle: "UPLOADED", hidden: false, deletedAt: null }),
+    ).toBe(false);
+    expect(
+      isServable({ lifecycle: "AWAITING_UPLOAD", hidden: false, deletedAt: null }),
+    ).toBe(false);
   });
 });

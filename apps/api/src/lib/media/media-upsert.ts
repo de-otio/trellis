@@ -1,17 +1,19 @@
 /**
- * Pure builder for the MediaFile upsert arguments (T9).
+ * Pure builder for the MediaFile upsert arguments (T9, reworked for the
+ * T14/AR4 lifecycle consolidation).
  *
  * Keeping this out of the route handler makes the dedup-safety invariant
  * directly unit-testable: a within-tenant dedup hit (identical bytes
- * re-uploaded) must NOT transfer ownership (`uploadedBy`) or de-publish the
- * canonical row (`moderationStatus`). Subsequent uploaders get a *reference*
- * (via the post→media relation), never a mutation of the shared row.
+ * re-uploaded) must NOT transfer ownership (`uploadedBy`) or de-publish /
+ * re-publish the canonical row (`lifecycle`). Subsequent uploaders get a
+ * *reference* (via the post→media relation), never a mutation of the shared
+ * row.
  *
  * The shell (media.ts) passes the result straight to
  * `db.mediaFile.upsert(buildMediaUpsertArgs(...))`.
  */
 
-import type { ModerationStatus } from "./moderation-status.js";
+import type { MediaLifecycle } from "./media-lifecycle.js";
 
 export interface MediaUpsertInput {
   tenantId: string;
@@ -24,12 +26,15 @@ export interface MediaUpsertInput {
   height?: number;
   duration?: number;
   /**
-   * The moderation verdict for the CANONICAL (first) upload of these bytes.
+   * The resolved lifecycle state for the CANONICAL (first) upload of these
+   * bytes. The sync-image path creates rows directly at their verdict
+   * (APPROVED/REVIEW/QUARANTINED) — bytes and verdict are known atomically.
    * Applied to `create` only — a dedup hit must NOT re-moderate or de-publish
-   * the existing canonical row (see module doc + the deliberately-minimal
-   * `update` payload). Absent ⇒ the schema default (`PENDING`) stands.
+   * the existing canonical row (see module doc + the deliberately-empty
+   * `update` payload). Absent ⇒ the schema default (`AWAITING_UPLOAD`,
+   * fail-closed) stands.
    */
-  moderationStatus?: ModerationStatus;
+  lifecycle?: MediaLifecycle;
 }
 
 /**
@@ -47,18 +52,20 @@ export interface MediaUpsertArgs {
     mimeType: string;
     size: number;
     originalKey: string;
-    uploadStatus: "COMPLETE";
     uploadedBy: string;
     width?: number;
     height?: number;
     duration?: number;
-    moderationStatus?: ModerationStatus;
+    lifecycle?: MediaLifecycle;
   };
   update: {
-    // DELIBERATELY MINIMAL. See module doc: a dedup hit must not touch
-    // `uploadedBy` or `moderationStatus`. We only re-assert COMPLETE so a
-    // previously-interrupted upload of the same bytes settles idempotently.
-    uploadStatus: "COMPLETE";
+    // DELIBERATELY EMPTY. See module doc: a dedup hit must not touch
+    // `uploadedBy` or `lifecycle` — the canonical row's verdict and ownership
+    // stand; the re-uploader only gains a reference. (The pre-T14 builder
+    // re-asserted `uploadStatus: "COMPLETE"` here; with the lifecycle
+    // consolidation there is no separate upload column left to settle, and a
+    // sync-image canonical row is only ever created at a final verdict.)
+    [key: string]: never;
   };
 }
 
@@ -78,19 +85,16 @@ export function buildMediaUpsertArgs(
       mimeType: input.mimeType,
       size: input.size,
       originalKey: input.originalKey,
-      uploadStatus: "COMPLETE",
       uploadedBy: input.uploadedBy,
       width: input.width,
       height: input.height,
       duration: input.duration,
       // Present only when the caller resolved a verdict (sync-image path);
-      // absent ⇒ the schema default (PENDING) stands. NEVER on `update`.
-      ...(input.moderationStatus !== undefined && {
-        moderationStatus: input.moderationStatus,
+      // absent ⇒ the schema default (AWAITING_UPLOAD) stands. NEVER on `update`.
+      ...(input.lifecycle !== undefined && {
+        lifecycle: input.lifecycle,
       }),
     },
-    update: {
-      uploadStatus: "COMPLETE",
-    },
+    update: {},
   };
 }

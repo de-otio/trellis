@@ -10,14 +10,14 @@
  *
  * This module enforces the anti-oracle contract at the type level: the
  * payload type has exactly two fields and the constructor function accepts
- * a full ModerationStatus but discards everything except the binary
+ * a full MediaLifecycle but discards everything except the binary
  * ready/not-ready distinction.
  *
  * Pure functional core: no I/O, no clock, no randomness. Deterministic
  * in => deterministic out.
  */
 
-import type { ModerationStatus } from "./moderation-status.js";
+import type { MediaLifecycle } from "./media-lifecycle.js";
 
 /**
  * The only view of a moderation outcome that leaves the moderation domain.
@@ -36,7 +36,7 @@ export interface ModerationResolvedPayload {
 }
 
 /**
- * Construct the anti-oracle resolved payload from a full ModerationStatus.
+ * Construct the anti-oracle resolved payload from a full MediaLifecycle.
  *
  * `"ready"` if and only if `status === "APPROVED"`. Every other status —
  * `PENDING`, `REVIEW`, `QUARANTINED`, `REJECTED` — maps to `"not-ready"`.
@@ -44,12 +44,12 @@ export interface ModerationResolvedPayload {
  * `"ready"`.
  *
  * @param mediaId - The stable identifier of the media object.
- * @param status  - The settled ModerationStatus (sourced from Env.media /
+ * @param status  - The settled MediaLifecycle (sourced from Env.media /
  *                  the moderation state machine; never hard-coded here).
  */
 export function moderationResolvedPayload(
   mediaId: string,
-  status: ModerationStatus,
+  status: MediaLifecycle,
 ): ModerationResolvedPayload {
   return {
     mediaId,

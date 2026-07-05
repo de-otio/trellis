@@ -1,35 +1,34 @@
 /**
  * stale-media-reap.ts — the SINGLE source of truth for which MediaFile rows the
- * stale-upload reapers may delete (AR4).
+ * stale-upload reapers may delete (AR4, reworked for the T14 lifecycle
+ * consolidation).
  *
  * Two reapers share this scope: the hourly Lambda cron
  * (`src/lambda/hourly-cron.ts`) and the scheduled job
- * (`src/lib/scheduled/media-stale-cleanup.ts`). Before AR4 each hard-deleted
- * `uploadStatus IN (PENDING, FAILED)` rows older than 1h — but async video
- * uploads are born PENDING and the pipeline advanced only
- * `contentHash`/`originalKey` (processing) and `moderationStatus` (completion),
- * never `uploadStatus`. Result: approved videos were deleted (cascading their
- * `MediaModerationJob` records, and in one reaper the S3 object) roughly an
- * hour after upload.
+ * (`src/lib/scheduled/media-stale-cleanup.ts`).
  *
- * The reap scope is therefore:
+ * The reap scope is:
  *
- *   1. `uploadStatus IN (PENDING, FAILED)` — unchanged; terminal COMPLETE rows
- *      are never candidates (the consumer's persistence ports now advance
- *      `uploadStatus` to COMPLETE when processing + moderation finish).
+ *   1. `lifecycle IN (AWAITING_UPLOAD, UPLOADED, UPLOAD_FAILED)` — the
+ *      non-verdict states. AWAITING_UPLOAD past the window = a presigned
+ *      grant that was never used; UPLOADED with no moderation job past the
+ *      window = a pipeline that never engaged (see 3); UPLOAD_FAILED =
+ *      terminal failure bookkeeping. Verdict states
+ *      (APPROVED/REVIEW/QUARANTINED/REJECTED) are NEVER candidates — REVIEW/
+ *      QUARANTINED are awaiting a human, REJECTED rows carry the moderation
+ *      audit trail, APPROVED rows serve.
  *   2. `createdAt` older than a reap window ≫ the moderation SLA (default
- *      24h, overridable via `MEDIA_STALE_REAP_WINDOW_MS`) — a jobless PENDING
- *      row may simply be waiting in a backlogged processing queue; only well
- *      past any plausible pipeline latency does "jobless + PENDING" mean
- *      "abandoned".
+ *      24h, overridable via `MEDIA_STALE_REAP_WINDOW_MS`) — a jobless
+ *      UPLOADED row may simply be waiting in a backlogged processing queue;
+ *      only well past any plausible pipeline latency does "jobless +
+ *      non-verdict" mean "abandoned".
  *   3. `moderationJobs: { none: {} }` — a row the moderation pipeline has
  *      engaged with (ANY `MediaModerationJob`, open OR resolved) is never
- *      reaped. An open job means moderation is in flight; a resolved job with
- *      a still-PENDING `uploadStatus` means the completion worker has not (or
- *      failed to) finish — deleting it would destroy a possibly-approved
- *      object plus its moderation audit records. Such rows must surface as a
- *      pipeline fault, not be silently deleted. (Deliberately stricter than
- *      "no OPEN job".)
+ *      reaped. An open job means moderation is in flight; a resolved job on a
+ *      still-UPLOADED row means the completion worker has not (or failed to)
+ *      finish — deleting it would destroy a possibly-approved object plus its
+ *      moderation audit records. Such rows must surface as a pipeline fault,
+ *      not be silently deleted. (Deliberately stricter than "no OPEN job".)
  *
  * Reapers must apply {@link staleMediaReapWhere} to BOTH the candidate
  * `findMany` AND the subsequent `deleteMany` (not `id IN (...)` alone), so a
@@ -40,14 +39,16 @@
  * The window default is compiled but env-overridable (threshold-secrecy rule:
  * operational windows are runtime config with defaults). It is a cleanup
  * window, not a security threshold — the load-bearing guard is (3).
- *
- * NOTE (T14 handoff): the broader `moderationStatus`/`uploadStatus`/orphan-flag
- * consolidation into one lifecycle state machine is deliberately NOT done here
- * — it is folded into the presigned-upload rework (02 T14).
  */
 
-/** Non-terminal upload states eligible for reaping (see module doc). */
-export const REAPABLE_UPLOAD_STATUSES: readonly string[] = ["PENDING", "FAILED"];
+import type { MediaLifecycle } from "./media-lifecycle.js";
+
+/** Non-verdict lifecycle states eligible for reaping (see module doc). */
+export const REAPABLE_LIFECYCLES: readonly MediaLifecycle[] = [
+  "AWAITING_UPLOAD",
+  "UPLOADED",
+  "UPLOAD_FAILED",
+];
 
 /**
  * Default reap window: 24 hours. Must be ≫ the worst-case moderation latency
@@ -90,7 +91,7 @@ export function staleMediaReapCutoff(
  * tests share the exact same object).
  */
 export interface StaleMediaReapWhere {
-  uploadStatus: { in: string[] };
+  lifecycle: { in: MediaLifecycle[] };
   createdAt: { lt: Date };
   moderationJobs: { none: Record<string, never> };
 }
@@ -101,7 +102,7 @@ export interface StaleMediaReapWhere {
  */
 export function staleMediaReapWhere(cutoff: Date): StaleMediaReapWhere {
   return {
-    uploadStatus: { in: [...REAPABLE_UPLOAD_STATUSES] },
+    lifecycle: { in: [...REAPABLE_LIFECYCLES] },
     createdAt: { lt: cutoff },
     // Prisma relation filter: matches rows with ZERO related MediaModerationJob
     // records (an empty condition matches every job). Any engaged row is

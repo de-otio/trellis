@@ -7,7 +7,7 @@
  * not on the shape of the query it issued.
  *
  * Bug being reproduced (architecture-review/02-architecture-traps.md §6.1):
- * async video uploads are born `uploadStatus: "PENDING"` and nothing advanced
+ * async video uploads are born `lifecycle: "UPLOADED"` and nothing advanced
  * it, so this cron hard-deleted in-flight video rows (cascading their
  * MediaModerationJob records) one hour after upload — approved videos 404'd.
  */
@@ -128,14 +128,14 @@ describe("hourly-cron handler", () => {
         // cutoff. Pre-fix the cron deleted this row; it MUST survive.
         mediaRow({
           id: "in-flight-open-job",
-          uploadStatus: "PENDING",
+          lifecycle: "UPLOADED",
           createdAt: new Date(Date.now() - 2 * HOUR),
           moderationJobs: [{ decision: null }],
         }),
         // The open-job guard must hold independent of ANY age window.
         mediaRow({
           id: "in-flight-open-job-old",
-          uploadStatus: "PENDING",
+          lifecycle: "UPLOADED",
           createdAt: new Date(Date.now() - 48 * HOUR),
           moderationJobs: [{ decision: null }],
         }),
@@ -144,7 +144,7 @@ describe("hourly-cron handler", () => {
         // video + its moderation records — protected too.
         mediaRow({
           id: "resolved-jobs-not-yet-complete",
-          uploadStatus: "PENDING",
+          lifecycle: "UPLOADED",
           createdAt: new Date(Date.now() - 48 * HOUR),
           moderationJobs: [{ decision: "approved" }, { decision: "approved" }],
         }),
@@ -164,7 +164,7 @@ describe("hourly-cron handler", () => {
       const rows = [
         mediaRow({
           id: "young-jobless",
-          uploadStatus: "PENDING",
+          lifecycle: "UPLOADED",
           createdAt: new Date(Date.now() - 2 * HOUR),
           moderationJobs: [],
         }),
@@ -180,19 +180,19 @@ describe("hourly-cron handler", () => {
       const rows = [
         mediaRow({
           id: "abandoned-pending",
-          uploadStatus: "PENDING",
+          lifecycle: "UPLOADED",
           createdAt: new Date(Date.now() - 25 * HOUR),
           moderationJobs: [],
         }),
         mediaRow({
           id: "abandoned-failed",
-          uploadStatus: "FAILED",
+          lifecycle: "UPLOAD_FAILED",
           createdAt: new Date(Date.now() - 25 * HOUR),
           moderationJobs: [],
         }),
         mediaRow({
           id: "complete-untouched",
-          uploadStatus: "COMPLETE",
+          lifecycle: "APPROVED",
           createdAt: new Date(Date.now() - 25 * HOUR),
           moderationJobs: [{ decision: "approved" }],
         }),
@@ -209,7 +209,7 @@ describe("hourly-cron handler", () => {
     const rows = [
       mediaRow({
         id: "orphaned-old",
-        uploadStatus: "COMPLETE",
+        lifecycle: "APPROVED",
         createdAt: new Date(Date.now() - 30 * HOUR),
         attachedToPost: false,
         orphanedAt: new Date(Date.now() - 25 * HOUR),

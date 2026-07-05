@@ -25,8 +25,8 @@ import {
   MockTextModerationProvider,
 } from "../../../src/lib/media/text-moderation.js";
 import type { ModerationVerdict } from "../../../src/lib/media/moderation-provider.js";
-import type { ModerationDecision } from "../../../src/lib/media/moderation-status.js";
-import { ALL_MODERATION_DECISIONS } from "../../../src/lib/media/moderation-status.js";
+import type { ModerationDecision } from "../../../src/lib/media/media-lifecycle.js";
+import { ALL_MODERATION_DECISIONS } from "../../../src/lib/media/media-lifecycle.js";
 
 // ---------------------------------------------------------------------------
 // Helpers

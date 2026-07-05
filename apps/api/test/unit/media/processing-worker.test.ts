@@ -102,6 +102,8 @@ interface PersistenceFake {
   /** persistCleanedContent calls: the real hash + serve key written per media. */
   cleaned: Array<{ mediaId: string; contentHash: string; originalKey: string }>;
   reviewed: string[]; // mediaIds marked for REVIEW
+  uploaded: string[]; // mediaIds driven through bytes-arrived (T14)
+  rejected: string[]; // mediaIds driven to REJECTED (T14 over-duration)
 }
 
 function makeDeps(opts: {
@@ -122,6 +124,8 @@ function makeDeps(opts: {
     jobs: [],
     cleaned: [],
     reviewed: [],
+    uploaded: [],
+    rejected: [],
   };
 
   const persistence = {
@@ -146,6 +150,12 @@ function makeDeps(opts: {
     },
     async markMediaForReview(mediaId: string): Promise<void> {
       fake.reviewed.push(mediaId);
+    },
+    async markMediaUploaded(mediaId: string): Promise<void> {
+      fake.uploaded.push(mediaId);
+    },
+    async markMediaRejected(mediaId: string): Promise<void> {
+      fake.rejected.push(mediaId);
     },
   };
 
@@ -338,21 +348,50 @@ describe("processObjectKey — tenant-from-row + key mismatch", () => {
 });
 
 describe("processObjectKey — duration cap", () => {
-  it("over-cap duration ⇒ poison ⇒ REVIEW + ack, no transcode, no jobs", async () => {
+  it("over-cap duration ⇒ REJECTED + staged object deleted BEFORE moderation, ack, no transcode, no jobs (T14)", async () => {
     const transcode = new MockTranscodePort({ duration: 120 }); // probe returns 120
     const videoSpy = vi.spyOn(transcode, "transcodeVideo");
+    const pendingK = key(TENANT_A, UPLOAD_1);
+    const storage = new MockStoragePort({ [pendingK]: Buffer.from("raw") });
+    const deleteSpy = vi.spyOn(storage, "deleteObject");
     const { deps, fake } = makeDeps({
+      storage,
       transcode,
       maxDurationSeconds: 60,
       rows: [{ id: "media1", tenantId: TENANT_A, uploadId: UPLOAD_1 }],
     });
 
-    const out = await processObjectKey(key(TENANT_A, UPLOAD_1), deps);
+    const out = await processObjectKey(pendingK, deps);
 
     expect(out.disposition).toBe("ack");
-    expect(poisonOf(out)).toBe(true);
-    expect(fake.reviewed).toEqual(["media1"]);
+    expect(out.reason).toBe("duration-cap-rejected");
+    expect(poisonOf(out)).toBeUndefined(); // terminal reject, not poison/REVIEW
+    expect(fake.rejected).toEqual(["media1"]); // row is REJECTED (never serves)
+    expect(fake.reviewed).toHaveLength(0); // no human-review bandwidth consumed
+    expect(deleteSpy).toHaveBeenCalledWith(pendingK); // bytes gone pre-moderation
     expect(videoSpy).not.toHaveBeenCalled(); // probe gate runs BEFORE transcode
+    expect(fake.jobs).toHaveLength(0); // NO moderation job ever saw the bytes
+  });
+
+  it("over-cap duration: reject-write is persisted BEFORE the delete; a delete failure still acks (row already REJECTED)", async () => {
+    const transcode = new MockTranscodePort({ duration: 120 });
+    const pendingK = key(TENANT_A, UPLOAD_1);
+    const storage = new MockStoragePort({ [pendingK]: Buffer.from("raw") });
+    vi.spyOn(storage, "deleteObject").mockRejectedValue(
+      new Error("AccessDenied"),
+    );
+    const { deps, fake } = makeDeps({
+      storage,
+      transcode,
+      maxDurationSeconds: 60,
+      rows: [{ id: "media1", tenantId: TENANT_A, uploadId: UPLOAD_1 }],
+    });
+
+    const out = await processObjectKey(pendingK, deps);
+
+    expect(out.disposition).toBe("ack");
+    expect(out.reason).toBe("duration-cap-rejected");
+    expect(fake.rejected).toEqual(["media1"]);
     expect(fake.jobs).toHaveLength(0);
   });
 

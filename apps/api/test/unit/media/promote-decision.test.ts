@@ -8,9 +8,9 @@ import {
 import type { TrackOutcome } from "../../../src/lib/media/track-verdict.js";
 import {
   ALL_MODERATION_DECISIONS,
-  ALL_MODERATION_STATUSES,
-  type ModerationStatus,
-} from "../../../src/lib/media/moderation-status.js";
+  ALL_MEDIA_LIFECYCLES,
+  type MediaLifecycle,
+} from "../../../src/lib/media/media-lifecycle.js";
 
 // ---------------------------------------------------------------------------
 // Arbitraries — drive the full TrackOutcome x TrackOutcome x status x present grid
@@ -34,8 +34,8 @@ const outcomeArb: fc.Arbitrary<TrackOutcome> = fc.oneof(
   absentArb,
 );
 
-const statusArb: fc.Arbitrary<ModerationStatus> = fc.constantFrom(
-  ...ALL_MODERATION_STATUSES,
+const statusArb: fc.Arbitrary<MediaLifecycle> = fc.constantFrom(
+  ...ALL_MEDIA_LIFECYCLES,
 );
 
 const inputArb: fc.Arbitrary<PromotionInput> = fc.record({
@@ -72,7 +72,7 @@ describe("decidePromotion — full TrackOutcome x TrackOutcome grid (from PENDIN
         const action = decidePromotion({
           visual,
           audio,
-          currentStatus: "PENDING",
+          currentStatus: "UPLOADED",
           casObjectPresent: true,
         });
 
@@ -93,7 +93,7 @@ describe("decidePromotion — full TrackOutcome x TrackOutcome grid (from PENDIN
         const action = decidePromotion({
           visual,
           audio,
-          currentStatus: "PENDING",
+          currentStatus: "UPLOADED",
           casObjectPresent: false,
         });
         // CAS absent => never promote, regardless of approval.
@@ -187,7 +187,7 @@ describe("decidePromotion — replay on terminal status is an idempotent no-op",
     // `decision` event there is an illegal transition and must no-op.
     fc.assert(
       fc.property(
-        fc.constantFrom("REVIEW", "QUARANTINED") as fc.Arbitrary<ModerationStatus>,
+        fc.constantFrom("REVIEW", "QUARANTINED") as fc.Arbitrary<MediaLifecycle>,
         outcomeArb,
         outcomeArb,
         fc.boolean(),
@@ -239,7 +239,7 @@ describe("decidePromotion — action booleans cohere with transition legality", 
     const action = decidePromotion({
       visual: { state: "decided", decision: "approved" },
       audio: { state: "errored" },
-      currentStatus: "PENDING",
+      currentStatus: "UPLOADED",
       casObjectPresent: true,
     });
     expect(action.combined).toBe("review");
@@ -254,7 +254,7 @@ describe("decidePromotion — action booleans cohere with transition legality", 
     const action = decidePromotion({
       visual: { state: "decided", decision: "quarantine" },
       audio: { state: "decided", decision: "approved" },
-      currentStatus: "PENDING",
+      currentStatus: "UPLOADED",
       casObjectPresent: true,
     });
     expect(action.combined).toBe("quarantine");
