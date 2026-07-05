@@ -33,6 +33,7 @@ import { commentsRoutes } from "./comments.js";
 import { contentDiscoveryRoutes } from "./content-discovery.js";
 import { dashboardRoutes } from "./dashboard.js";
 import { deletionRoutes } from "./deletion.js";
+import { devicesRoutes } from "./devices.js";
 import { employeesRoutes } from "./employees.js";
 import { entitiesRoutes } from "./entities.js";
 import { exportRoutes } from "./export.js";
@@ -241,6 +242,9 @@ const coreRoutes: Route[] = [
 
   // Notifications (Safer Social Design)
   ...notificationsRoutes,
+
+  // Push device registration (T8 — see lib/doc/push-device-contract.md)
+  ...devicesRoutes,
 
   // Parental Controls (Safer Social Design)
   ...parentalControlRoutes,
