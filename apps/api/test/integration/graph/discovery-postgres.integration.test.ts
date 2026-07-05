@@ -201,6 +201,68 @@ suite("PostgresGraphService.DiscoveryOps (live CTE)", () => {
     });
   });
 
+  describe("geo-backed discovery (fake PostGIS lookup, live entity/graph filters)", () => {
+    // A deterministic stand-in for the PostGIS repository: proximity ranking
+    // is its own subsystem; what THIS suite proves is the live-Postgres
+    // graph-fact filtering (fetchDiscoverableFields) layered on top.
+    const geo = {
+      findNearby: async () => [
+        { entityId: C, distanceMeters: 300 },
+        { entityId: B, distanceMeters: 700 }, // already related → dropped
+        { entityId: HIDDEN, distanceMeters: 900 }, // non-discoverable → dropped
+        { entityId: D, distanceMeters: 2500 },
+      ],
+      findNearAnchors: async () => [
+        { entityId: C, distanceMeters: 1200 },
+        { entityId: HIDDEN, distanceMeters: 400 }, // non-discoverable → dropped
+      ],
+    };
+
+    it("discoverNearby returns coarse distance bands, drops related/hidden, preserves distance order", async () => {
+      const geoOps = new DiscoveryOps(prisma, geo);
+      const results = await run(() => geoOps.discoverNearby(U, 48.2, 16.4, 5000));
+      const ids = results.map((r) => r.entityId);
+      expect(ids).toEqual([C, D]); // B related, HIDDEN non-discoverable
+      const c = results.find((r) => r.entityId === C);
+      expect(c?.distanceBand).toBe("< 500m");
+      expect(c).not.toHaveProperty("distanceMeters"); // never exact distance
+      const d = results.find((r) => r.entityId === D);
+      expect(d?.distanceBand).toBe("2-5km");
+    });
+
+    it("discoverNearby honors entityType/breed equality filters", async () => {
+      const geoOps = new DiscoveryOps(prisma, geo);
+      const husky = await run(() =>
+        geoOps.discoverNearby(U, 48.2, 16.4, 5000, { breed: "Husky" }),
+      );
+      expect(husky.map((r) => r.entityId)).toEqual([C]);
+      const none = await run(() =>
+        geoOps.discoverNearby(U, 48.2, 16.4, 5000, { entityType: "cat" }),
+      );
+      expect(none).toEqual([]);
+    });
+
+    it("getRecommendations includes the nearby signal with distance-derived scores", async () => {
+      const geoOps = new DiscoveryOps(prisma, geo);
+      const results = await run(() => geoOps.getRecommendations(U, 10));
+      const c = results.find((r) => r.entityId === C);
+      expect(c).toBeDefined();
+      // C is both a shared-connections candidate (0.1) and a nearby candidate
+      // ((1 - 1200/10000) * 0.5 = 0.44) — dedup keeps the highest.
+      expect(c?.reason).toBe("nearby");
+      expect(c?.confidence).toBeCloseTo(0.44, 10);
+      // HIDDEN stays out even when geo proposes it.
+      expect(results.map((r) => r.entityId)).not.toContain(HIDDEN);
+    });
+
+    it("discoverNearby returns [] without a geo lookup or tenant", async () => {
+      const noGeo = new DiscoveryOps(prisma);
+      expect(await run(() => noGeo.discoverNearby(U, 1, 2, 100))).toEqual([]);
+      const geoOps = new DiscoveryOps(prisma, geo);
+      expect(await geoOps.discoverNearby(U, 1, 2, 100)).toEqual([]); // no tenant ctx
+    });
+  });
+
   describe("getRecommendations per-owner diversity cap (MAX_RECOMMENDATIONS_PER_OWNER = 2)", () => {
     // A separate, self-contained fixture: a single hub owner owns five entities
     // that all surface to the viewer via the shared-connections signal. Pre-cap,

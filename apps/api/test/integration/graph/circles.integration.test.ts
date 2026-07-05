@@ -331,6 +331,74 @@ suite("CircleOps dual-gated visibility (Postgres)", () => {
     expect(t0After?.lastReadAt).toEqual(readAt);
   });
 
+  it("getGlanceItems surfaces the most-recent post per tier member (entity + author paths)", async () => {
+    // Tier 0: the only member is ENT_INNER (entity path).
+    const glance0 = await run(() => ops.getGlanceItems(VIEWER, 0, 10));
+    const inner = glance0.find((g) => g.targetId === ENT_INNER);
+    expect(inner).toBeDefined();
+    expect(inner?.targetType).toBe("entity");
+    // Its most-recent visible post is one of the two POST_TS posts about it.
+    expect(["p-multi", "p-inner-whisper"]).toContain(inner?.postId);
+
+    // Tier 1: the only member is AUTHOR_CLOSE (author path).
+    const glance1 = await run(() => ops.getGlanceItems(VIEWER, 1, 10));
+    const author = glance1.find((g) => g.targetId === AUTHOR_CLOSE);
+    expect(author).toBeDefined();
+    expect(author?.targetType).toBe("user");
+    expect(author?.postId).toBe("p-author-normal");
+  });
+
+  it("getDepthPostIds gates by the viewer's per-target tier (entity + user targets)", async () => {
+    const entityPosts = await run(() =>
+      ops.getDepthPostIds(VIEWER, "entity", ENT_INNER, since, 10),
+    );
+    // Viewer tier with ENT_INNER = 0 → all radii reach; both posts about it.
+    expect(new Set(entityPosts)).toEqual(new Set(["p-multi", "p-inner-whisper"]));
+
+    const userPosts = await run(() =>
+      ops.getDepthPostIds(VIEWER, "user", AUTHOR_CLOSE, since, 10),
+    );
+    // Viewer tier with AUTHOR_CLOSE = 1 → NORMAL reaches.
+    expect(userPosts).toEqual(["p-author-normal"]);
+  });
+
+  it("getCircleEntityStatus lists tier entities with unseen counts (radius-gated)", async () => {
+    const statuses = await run(() => ops.getCircleEntityStatus(VIEWER, 2));
+    const comm = statuses.find((s) => s.entityId === ENT_COMMUNITY);
+    expect(comm).toBeDefined();
+    expect(comm?.entityName).toBe("CommunityEnt");
+    // Posts about ENT_COMMUNITY reaching tier 2: p-comm-loud + p-multi
+    // (p-comm-whisper is radius-gated out).
+    expect(comm?.unseenCount).toBe(2);
+    expect(comm?.caughtUp).toBe(false);
+    expect(comm?.latestPostAt).toEqual(POST_TS);
+  });
+
+  it("applies the org-category feed filter (null-code posts: kept by exclude, dropped by include)", async () => {
+    const unfiltered = await run(() =>
+      ops.getVisiblePostIds(VIEWER, 0, since, { limit: 50 }),
+    );
+    // All fixture posts carry a NULL author_org_root_category_code:
+    // an exclude list keeps them …
+    const excluded = await run(() =>
+      ops.getVisiblePostIds(VIEWER, 0, since, { limit: 50 }, { exclude: ["VETS"] }),
+    );
+    expect(excluded.items.map((i) => i.postId).sort()).toEqual(
+      unfiltered.items.map((i) => i.postId).sort(),
+    );
+    // … an include whitelist drops them (NULL belongs to no listed category).
+    const included = await run(() =>
+      ops.getVisiblePostIds(VIEWER, 0, since, { limit: 50 }, { include: ["VETS"] }),
+    );
+    expect(included.items).toEqual([]);
+
+    // Same predicate on the glance query.
+    const glance = await run(() =>
+      ops.getGlanceItems(VIEWER, 0, 10, { include: ["VETS"] }),
+    );
+    expect(glance).toEqual([]);
+  });
+
   // ---------------------------------------------------------------------------
   // getCircleStatus window floor + saturation cap (AR8 fix 1)
   // ---------------------------------------------------------------------------

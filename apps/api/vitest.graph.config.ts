@@ -1,17 +1,23 @@
 /**
- * Vitest config for Neo4j graph integration tests.
+ * Vitest config for the Postgres GRAPH LANE — the graph-adapter integration
+ * suites (test/integration/graph/**) that prove the CircleOps / DiscoveryOps /
+ * RelationshipOps / ScoringOps SQL against a live Postgres carrying the
+ * trellis schema.
  *
  * Deliberately separate from vitest.config.ts (unit tests) and
- * vitest.integration.config.ts (Postgres/DynamoDB integration tests)
+ * vitest.integration.config.ts (broader Postgres/DynamoDB integration tests)
  * so that graph tests only run when explicitly requested.
  *
  * Prerequisites:
- *   - Neo4j running locally on bolt://localhost:7687
- *   - A dedicated "test" database created (CREATE DATABASE test)
- *   - NEO4J_TEST_URI, NEO4J_TEST_USER, NEO4J_TEST_PASSWORD set in env
+ *   - Postgres migrated to the current schema (e.g. the local docker dev DB)
+ *   - DATABASE_URL (or TEST_DB_URL) pointing at it — via the shell or
+ *     test/integration/graph/.env.test.local
+ *
+ * The suites keep their env guard (describe.skip without a DB) so the
+ * default `npm test` run needs no database.
  *
  * Run:
- *   npm run test:graph -w @de-otio/trellis
+ *   DATABASE_URL=postgresql://… npm run test:graph -w @de-otio/trellis
  */
 
 import { defineConfig } from "vitest/config";
@@ -42,6 +48,13 @@ try {
   // File doesn't exist — that's fine; env vars must be set externally
 }
 
+// Lane alias: allow TEST_DB_URL as the canonical graph-lane variable; the
+// suites read DATABASE_URL first, so map it through when only the alias is
+// set. (Shell-set DATABASE_URL always wins.)
+if (!process.env.DATABASE_URL && process.env.TEST_DB_URL) {
+  process.env.DATABASE_URL = process.env.TEST_DB_URL;
+}
+
 export default defineConfig({
   test: {
     globals: true,
@@ -53,9 +66,9 @@ export default defineConfig({
     // default Docker-Neo4j lane. It has its own config
     // (vitest.graph.failover.config.ts).
     exclude: ["test/integration/graph/**/*.failover.test.ts"],
-    // No shared setupFiles — graph tests manage their own Neo4j connection
-    // (the global test/setup.ts sets DATABASE_URL and other Postgres env vars
-    //  which are irrelevant here and would pollute the env)
+    // No shared setupFiles — graph suites manage their own Prisma client
+    // (the global test/setup.ts overrides DATABASE_URL and other env vars,
+    //  which would clobber the lane's DB selection)
     setupFiles: [],
     testTimeout: 30_000, // 30 seconds — connection + wipe can be slow on cold start
     hookTimeout: 30_000,
