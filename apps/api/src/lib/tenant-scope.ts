@@ -117,6 +117,10 @@ export const UNSCOPED_MODELS: ReadonlyMap<string, string> = new Map([
   ["CustomAudienceMember", "user"],
   ["UploadSession", "user"],
   ["MfaEnrollment", "user"],
+  // T8 push device tokens: a device belongs to the ACCOUNT, not a tenant —
+  // the wakeup dispatcher looks up by userId and devices follow the user
+  // across tenants (lib/doc/push-device-contract.md §1).
+  ["PushDevice", "user"],
   ["EncryptedUserSetting", "user"],
   ["Consent", "user"],
   ["NotificationPreference", "user"],
