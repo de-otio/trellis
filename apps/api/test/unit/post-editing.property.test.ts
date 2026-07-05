@@ -40,6 +40,12 @@ vi.mock("../../src/lib/media/request-text-moderation", () => ({
 vi.mock("../../src/lib/feature-toggle-service", () => ({
   FeatureToggleService: class {
     isEnabled = vi.fn().mockResolvedValue(true);
+    // editPost calls isEnabledFailClosed (not isEnabled) for the
+    // content-moderation gate (AR-SEC T4/F1 fail-closed-to-enabled). Without
+    // this, every call to editPost throws a TypeError here (unrelated to any
+    // post text) and every Property 5 iteration returns 500 regardless of
+    // input — masking the actual whitespace-only behavior under test.
+    isEnabledFailClosed = vi.fn().mockResolvedValue(true);
   },
 }));
 
@@ -346,6 +352,12 @@ describe("Property 3: Text length validation", () => {
         // Generate strings between 1 and 3000 characters
         fc.string({ minLength: 1, maxLength: 3000 }),
         (validText) => {
+          // Whitespace-only text is not valid (see the dedicated
+          // whitespace-only rejection test below) — this property is scoped
+          // to genuinely valid text, so skip generated inputs that are
+          // empty after trim.
+          fc.pre(validText.trim().length > 0);
+
           const result = editPostSchema.safeParse({ text: validText });
 
           // Should pass validation (text length is valid)
@@ -372,25 +384,24 @@ describe("Property 3: Text length validation", () => {
     }
   });
 
-  it("should handle whitespace-only text (schema trims after validation)", async () => {
+  it("should reject whitespace-only text (fail closed, not a silent empty write)", async () => {
     const { editPostSchema } = await import("../../src/lib/schemas.js");
 
-    // Note: The current schema uses .trim() AFTER validation, so whitespace-only
-    // strings pass the min(1) check. The trimmed result would be empty, but
-    // validation passes. This is a known limitation of the current schema.
-    // A future improvement could use .transform() before .min() to reject whitespace-only text.
+    // The schema applies .trim() BEFORE .min()/.max(), so whitespace-only
+    // strings fail the min(1) check instead of passing validation and then
+    // trimming to "" downstream. Fail-closed: reject at the schema boundary,
+    // never silently persist empty content.
     const whitespaceStrings = ["   ", "\t\t", "\n\n", "  \t\n  ", "\r\n"];
 
     for (const whitespaceText of whitespaceStrings) {
       const result = editPostSchema.safeParse({ text: whitespaceText });
 
-      // Current behavior: whitespace-only text passes validation
-      // because .trim() is applied after .min(1) check
-      expect(result.success).toBe(true);
-
-      // But the trimmed result would be empty
-      if (result.success) {
-        expect(result.data.text).toBe("");
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        const textError = result.error.issues.find((issue) =>
+          issue.path.includes("text"),
+        );
+        expect(textError).toBeDefined();
       }
     }
   });
@@ -514,6 +525,12 @@ describe("Property 5: Successful edit updates post and sets editedAt", () => {
       fc.asyncProperty(
         fc.string({ minLength: 1, maxLength: 3000 }), // New text
         async (newText) => {
+          // Whitespace-only text is not a "valid" edit (see the fail-closed
+          // whitespace-only rejection pinned in Property 3 / the dedicated
+          // 400 example tests below) — this property is scoped to genuinely
+          // valid text, so skip generated inputs that are empty after trim.
+          fc.pre(newText.trim().length > 0);
+
           vi.resetModules();
 
           const beforeEdit = new Date();
@@ -665,6 +682,223 @@ describe("Property 5: Successful edit updates post and sets editedAt", () => {
       ),
       { numRuns: 20 },
     );
+  });
+});
+
+describe("Fail-closed whitespace-only rejection (handler boundary)", () => {
+  /**
+   * Pins the fix for the confirmed fail-open bug: a whitespace-only edit/
+   * create used to pass schema validation (min(1) ran BEFORE trim()), reach
+   * the handler with effectively-empty text, and 500 downstream instead of
+   * being rejected. These tests exercise the REAL validateRequest + REAL
+   * schema for a single call (everything else in this file mocks/stubs
+   * both), so they pin actual schema-boundary behavior, not a bypassed mock.
+   */
+  it("editPost: whitespace-only text returns 400, not 500, and never persists", async () => {
+    vi.resetModules();
+
+    // Restore the full real schemas module for this test — earlier tests in
+    // this file leave "../../src/lib/schemas" doMock'd down to a partial
+    // stub (e.g. only `editPostSchema`), which persists across
+    // resetModules() and would otherwise break the handler's own
+    // `await import("./schemas.js")` destructuring.
+    vi.doMock("../../src/lib/schemas", async (importOriginal) => {
+      const actual =
+        await importOriginal<typeof import("../../src/lib/schemas.js")>();
+      return { ...actual };
+    });
+
+    let updateCalled = false;
+    vi.doMock("../../src/lib/database-connection-manager", () => ({
+      sharedDatabaseConnectionManager: {},
+    }));
+    vi.doMock("../../src/lib/db-query-helper", () => ({
+      withQueryTimeoutAndRetry: vi
+        .fn()
+        .mockImplementation(
+          async (_m: any, _r: any, _e: any, queryFn: (db: any) => Promise<any>) => {
+            const mockDb = {
+              post: {
+                update: vi.fn().mockImplementation((args: any) => {
+                  updateCalled = true;
+                  return Promise.resolve({
+                    id: "post-123",
+                    text: args.data.text,
+                    editedAt: args.data.editedAt,
+                    visibility: "PUBLIC",
+                    createdAt: new Date(),
+                    uri: "",
+                    author: { id: "owner-123", email: "owner@example.com", username: "owner" },
+                    media: [],
+                  });
+                }),
+              },
+              postSentiment: { groupBy: vi.fn().mockResolvedValue([]) },
+              postComment: { count: vi.fn().mockResolvedValue(0) },
+            };
+            return await queryFn(mockDb);
+          },
+        ),
+      QueryTimeoutPresets: {
+        USER_FACING: { timeoutMs: 3000, retryTimeoutMs: 2000 },
+        STANDARD: { timeoutMs: 3000, retryTimeoutMs: 2000 },
+      },
+    }));
+
+    vi.doMock("../../src/lib/data-router", () => ({
+      DataRouter: {
+        getPost: vi.fn().mockResolvedValue({
+          id: "post-123",
+          authorId: "owner-123",
+          text: "Original text",
+          visibility: "PUBLIC",
+          deletedAt: null,
+        }),
+        getDatabaseForRegion: vi.fn(),
+      },
+    }));
+
+    // Use the REAL validateRequest + REAL editPostSchema for this call
+    // (the file-level mocks stub both out for the other property tests).
+    const { validateRequest } = await import(
+      "../../src/lib/validate-request.js"
+    );
+    const { validateRequest: realValidateRequest } =
+      await vi.importActual<typeof import("../../src/lib/validate-request.js")>(
+        "../../src/lib/validate-request.js",
+      );
+    const { editPostSchema: realEditPostSchema } =
+      await vi.importActual<typeof import("../../src/lib/schemas.js")>(
+        "../../src/lib/schemas.js",
+      );
+    (validateRequest as any).mockImplementation((request: Request) =>
+      realValidateRequest(request, realEditPostSchema),
+    );
+
+    vi.doMock("../../src/lib/media/request-text-moderation", () => ({
+      getTextModerationProvider: () => ({
+        moderateText: vi
+          .fn()
+          .mockResolvedValue({ decision: "approved", labels: [], provider: "mock-text" }),
+      }),
+    }));
+
+    vi.doMock("../../src/lib/link-security-handler", () => ({
+      LinkSecurityHandler: class {
+        extractUrls = vi.fn().mockReturnValue([]);
+        validateUrlSync = vi.fn().mockReturnValue({ status: "safe" });
+      },
+      LinkStatus: { SAFE: "safe", BLOCKED: "blocked" },
+    }));
+
+    vi.doMock("../../src/lib/input-sanitizer", () => ({
+      InputSanitizer: { sanitizeText: (text: string) => text },
+    }));
+
+    const { PostHandler } = await import("../../src/lib/post-handler.js");
+    const handler = new PostHandler();
+
+    const mockSession = createMockSession({
+      userId: "owner-123",
+      email: "owner@example.com",
+    });
+    const mockEnv = {
+      DATABASE_URL: "postgres://test",
+      FEED_CACHE_KV: { get: vi.fn(), put: vi.fn(), delete: vi.fn() },
+    };
+    const mockRequestContext = createMockRequestContext(mockSession);
+
+    const request = new Request("http://test.com/posts/post-123", {
+      method: "PATCH",
+      body: JSON.stringify({ text: "   " }),
+    });
+
+    const response = await handler.editPost(
+      "post-123",
+      request,
+      mockSession as any,
+      mockEnv as any,
+      mockRequestContext as any,
+    );
+
+    expect(response.status).toBe(400);
+    expect(updateCalled).toBe(false); // never a silent empty-text write
+  });
+
+  it("createPost: whitespace-only text returns 400, not 500, and never persists", async () => {
+    vi.resetModules();
+
+    // Restore the full real schemas module for this test — earlier tests in
+    // this file leave "../../src/lib/schemas" doMock'd down to a partial
+    // stub (e.g. only `editPostSchema`), which persists across
+    // resetModules() and would otherwise break the handler's own
+    // `await import("./schemas.js")` destructuring of `createPostSchema`.
+    vi.doMock("../../src/lib/schemas", async (importOriginal) => {
+      const actual =
+        await importOriginal<typeof import("../../src/lib/schemas.js")>();
+      return { ...actual };
+    });
+
+    const mockCreatePostLocal = vi.fn();
+    vi.doMock("../../src/lib/data-router", () => ({
+      DataRouter: {
+        getUser: vi.fn(),
+        createUser: vi.fn(),
+        createPost: (...args: any[]) => mockCreatePostLocal(...args),
+        getPost: vi.fn(),
+        getDatabaseForRegion: vi.fn(),
+      },
+    }));
+
+    // Use the REAL validateRequest + REAL createPostSchema for this call
+    // (the file-level mock stubs createPostSchema out to `{}` for the other
+    // property tests).
+    const { validateRequest } = await import(
+      "../../src/lib/validate-request.js"
+    );
+    const { validateRequest: realValidateRequest } =
+      await vi.importActual<typeof import("../../src/lib/validate-request.js")>(
+        "../../src/lib/validate-request.js",
+      );
+    const { createPostSchema: realCreatePostSchema } =
+      await vi.importActual<typeof import("../../src/lib/schemas.js")>(
+        "../../src/lib/schemas.js",
+      );
+    (validateRequest as any).mockImplementation((request: Request) =>
+      realValidateRequest(request, realCreatePostSchema),
+    );
+
+    vi.doMock("../../src/lib/media/request-text-moderation", () => ({
+      getTextModerationProvider: () => ({
+        moderateText: vi
+          .fn()
+          .mockResolvedValue({ decision: "approved", labels: [], provider: "mock-text" }),
+      }),
+    }));
+
+    const { PostHandler } = await import("../../src/lib/post-handler.js");
+    const handler = new PostHandler();
+    const mockSession = createMockSession();
+    const mockEnv = {
+      DATABASE_URL: "postgres://test",
+      FEED_CACHE_KV: { get: vi.fn(), put: vi.fn() },
+    };
+    const mockRequestContext = createMockRequestContext(mockSession);
+
+    const request = new Request("http://test.com/posts", {
+      method: "POST",
+      body: JSON.stringify({ text: "   " }),
+    });
+
+    const response = await handler.createPost(
+      request,
+      mockSession as any,
+      mockEnv as any,
+      mockRequestContext as any,
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockCreatePostLocal).not.toHaveBeenCalled(); // never a silent empty-text write
   });
 });
 

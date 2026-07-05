@@ -1057,8 +1057,12 @@ export class CommentHandler {
       // Validate request body
       const { validateRequest } = await import("./validate-request.js");
       const { z } = await import("zod");
+      // .trim() runs BEFORE .min()/.max() so whitespace-only text fails
+      // length validation instead of passing min(1) and then trimming to ""
+      // downstream (fail-closed: reject at the schema boundary, never
+      // persist empty content).
       const editCommentSchema = z.object({
-        text: z.string().min(1).max(3000).trim(),
+        text: z.string().trim().min(1).max(3000),
       });
 
       const validation = await validateRequest(request, editCommentSchema);

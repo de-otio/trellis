@@ -126,13 +126,17 @@ vi.mock("../../src/lib/database-wrapper-helper", () => ({
 }));
 
 // Mock zod
+// Chain order matches the real editCommentSchema in comment-handler.ts:
+// z.string().trim().min(1).max(3000) — .trim() runs BEFORE .min()/.max() so
+// whitespace-only text fails length validation instead of passing min(1)
+// and trimming to "" downstream (fail-closed).
 vi.mock("zod", () => ({
   z: {
     object: vi.fn().mockReturnValue({}),
     string: vi.fn().mockReturnValue({
-      min: vi.fn().mockReturnValue({
-        max: vi.fn().mockReturnValue({
-          trim: vi.fn().mockReturnValue({}),
+      trim: vi.fn().mockReturnValue({
+        min: vi.fn().mockReturnValue({
+          max: vi.fn().mockReturnValue({}),
         }),
       }),
     }),
