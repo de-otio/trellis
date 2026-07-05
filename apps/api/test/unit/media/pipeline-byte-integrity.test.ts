@@ -46,8 +46,8 @@ import { MockModerationProvider } from "../../../src/lib/media/moderation-provid
 import { pendingKey, casKey, isCasKeyError } from "../../../src/lib/media/cas-keys.js";
 import type {
   ModerationDecision,
-  ModerationStatus,
-} from "../../../src/lib/media/moderation-status.js";
+  MediaLifecycle,
+} from "../../../src/lib/media/media-lifecycle.js";
 import type { Track } from "../../../src/lib/media/track-verdict.js";
 import type {
   MediaModerationProvider,
@@ -88,7 +88,7 @@ interface SharedPersistence {
     // contentHash starts null (mirrors the upload path); the worker sets the
     // real SHA-256 of the cleaned bytes via persistCleanedContent.
     contentHash: string | null;
-    moderationStatus: ModerationStatus;
+    lifecycle: MediaLifecycle;
   };
   jobs: Array<{ mediaId: string; track: Track; jobId: string; decision: ModerationDecision | null; thresholdSnapshot: unknown }>;
   claimed: Set<string>;
@@ -131,7 +131,7 @@ describe("P0b pipeline — cross-worker byte integrity (APPROVED path)", () => {
         tenantId: TENANT,
         uploadId: UPLOAD,
         contentHash: null, // null until the worker hashes the cleaned bytes
-        moderationStatus: "PENDING",
+        lifecycle: "UPLOADED",
       },
       jobs: [],
       claimed: new Set(),
@@ -170,8 +170,20 @@ describe("P0b pipeline — cross-worker byte integrity (APPROVED path)", () => {
           }
         },
         async markMediaForReview(mediaId) {
-          shared.row.moderationStatus = "REVIEW";
+          shared.row.lifecycle = "REVIEW";
           void mediaId;
+        },
+        async markMediaUploaded(mediaId) {
+          // Conditional bytes-arrived write: only from AWAITING_UPLOAD.
+          if (
+            mediaId === shared.row.id &&
+            shared.row.lifecycle === "AWAITING_UPLOAD"
+          ) {
+            shared.row.lifecycle = "UPLOADED";
+          }
+        },
+        async markMediaRejected(mediaId) {
+          if (mediaId === shared.row.id) shared.row.lifecycle = "REJECTED";
         },
       },
       config: { maxDurationSeconds: 60, thresholds: THRESHOLDS },
@@ -232,14 +244,14 @@ describe("P0b pipeline — cross-worker byte integrity (APPROVED path)", () => {
       async findMedia(mediaId): Promise<MediaCoords | null> {
         if (mediaId !== shared.row.id) return null;
         return {
-          moderationStatus: shared.row.moderationStatus,
+          lifecycle: shared.row.lifecycle,
           tenantId: shared.row.tenantId,
           uploadId: shared.row.uploadId!,
           contentHash: shared.row.contentHash, // the REAL post-transcode hash
         };
       },
       async persistMediaStatus(mediaId, status) {
-        if (mediaId === shared.row.id) shared.row.moderationStatus = status;
+        if (mediaId === shared.row.id) shared.row.lifecycle = status;
       },
     };
 
@@ -284,7 +296,7 @@ describe("P0b pipeline — cross-worker byte integrity (APPROVED path)", () => {
     // REVIEW behind a human — so this is the genuine auto-approve path: both
     // tracks decided-approved with the object still PENDING.)
     audioJob.decision = "approved";
-    expect(shared.row.moderationStatus).toBe("PENDING");
+    expect(shared.row.lifecycle).toBe("UPLOADED");
 
     // Sanity: cas/ still empty right before the promoting completion.
     expect((await storage.headObject(expectedCasK)).exists).toBe(false);
@@ -292,7 +304,7 @@ describe("P0b pipeline — cross-worker byte integrity (APPROVED path)", () => {
     const visualBody = JSON.stringify({ Message: JSON.stringify({ JobId: visualJob.jobId }) });
     const visualOut = await processCompletion(visualBody, completionDeps);
     expect(visualOut.kind).toBe("applied");
-    expect((visualOut as { status: ModerationStatus }).status).toBe("APPROVED");
+    expect((visualOut as { status: MediaLifecycle }).status).toBe("APPROVED");
 
     // ===================================================================
     // INVARIANTS after approval.
@@ -332,7 +344,7 @@ describe("P0b pipeline — cross-worker byte integrity (APPROVED path)", () => {
     await storage.putObject(stagingK, cleanedBytes, "video/mp4");
 
     const row = {
-      moderationStatus: "PENDING" as ModerationStatus,
+      lifecycle: "UPLOADED" as MediaLifecycle,
       tenantId: TENANT,
       uploadId: UPLOAD,
       contentHash: hashHex(cleanedBytes),
@@ -363,7 +375,7 @@ describe("P0b pipeline — cross-worker byte integrity (APPROVED path)", () => {
           return { ...row };
         },
         async persistMediaStatus(_m, status) {
-          row.moderationStatus = status;
+          row.lifecycle = status;
         },
       },
       moderation: {
@@ -400,7 +412,7 @@ describe("P0b pipeline — cross-worker byte integrity (APPROVED path)", () => {
       JSON.stringify({ Message: JSON.stringify({ JobId: "v1" }) }),
       deps,
     );
-    expect((out as { status: ModerationStatus }).status).toBe("APPROVED");
+    expect((out as { status: MediaLifecycle }).status).toBe("APPROVED");
 
     const served = await storage.getObject(casK);
     // The crux: promotion copied the CLEANED staging bytes, NOT the raw pending.

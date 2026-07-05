@@ -9,21 +9,22 @@
  * decision inline.
  */
 
-import type { ModerationStatus } from "./moderation-status.js";
+import type { MediaLifecycle } from "./media-lifecycle.js";
 
 /**
  * The ONLY state that may serve bytes.
  *
  * Flat and viewer-independent — there is **no owner exception**. The owner's
  * optimistic "I can see my own upload" view is a client-local copy (Flutter),
- * never a server URL. Operates on {@link ModerationStatus} (T1's hand-written
- * source of truth), mapped from `MediaFile.moderationStatus` at the shell
- * boundary.
+ * never a server URL. Operates on {@link MediaLifecycle} (the hand-written
+ * source of truth, T14/AR4 consolidation), mapped from `MediaFile.lifecycle`
+ * at the shell boundary.
  *
- * P0a invariant: video/audio are born `PENDING` and have no P0b worker to move
- * them forward, so this predicate denies them for every viewer.
+ * Fail-closed by construction: every lifecycle state except `APPROVED` —
+ * including AWAITING_UPLOAD/UPLOADED (bytes present but unmoderated or
+ * moderation still in flight / errored / timed out) — denies for every viewer.
  */
-export function canServe(status: ModerationStatus): boolean {
+export function canServe(status: MediaLifecycle): boolean {
   return status === "APPROVED";
 }
 
@@ -38,7 +39,7 @@ export function canServe(status: ModerationStatus): boolean {
  * not-yet-approved are byte-identical to a prober.
  */
 export function isServable(record: {
-  moderationStatus: ModerationStatus;
+  lifecycle: MediaLifecycle;
   hidden: boolean;
   deletedAt: Date | null;
 }): boolean {
@@ -48,7 +49,7 @@ export function isServable(record: {
   if (record.deletedAt !== null && record.deletedAt !== undefined) {
     return false;
   }
-  return canServe(record.moderationStatus);
+  return canServe(record.lifecycle);
 }
 
 /**

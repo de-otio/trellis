@@ -64,16 +64,27 @@ enum EntityStatus {
   TRANSFERRED
 }
 
-// Media moderation lifecycle state. Mirrors the hand-written ModerationStatus
-// union in apps/api/src/lib/media/moderation-status.ts — spelling must match.
-// Every new MediaFile is born PENDING (fail-closed); only the moderation
-// pipeline can advance to APPROVED.
-enum ModerationStatus {
-  PENDING
+// Media lifecycle state (T14/AR4 consolidation). Mirrors the hand-written
+// MediaLifecycle union in apps/api/src/lib/media/media-lifecycle.ts — spelling
+// must match. ONE state machine replaces the former ModerationStatus enum +
+// uploadStatus string pair:
+//
+//   AWAITING_UPLOAD -> UPLOADED -> APPROVED | REVIEW | QUARANTINED | REJECTED
+//   AWAITING_UPLOAD | UPLOADED -> UPLOAD_FAILED   (expiry/abandon/reap)
+//   REVIEW | QUARANTINED --human--> APPROVED | REJECTED
+//   (any) --csam--> REJECTED
+//
+// Every new MediaFile is born AWAITING_UPLOAD (fail-closed); the ONLY state
+// that can serve bytes is APPROVED (and only with !hidden && deletedAt=null —
+// see lib/media/serve-gate.ts).
+enum MediaLifecycle {
+  AWAITING_UPLOAD
+  UPLOADED
   APPROVED
   REVIEW
   QUARANTINED
   REJECTED
+  UPLOAD_FAILED
 }
 
 model PostGeoIndex {
@@ -567,9 +578,12 @@ model MediaFile {
   thumbnailKey String? @map("thumbnail_key") // S3 key: cas/{tenantId}/{hash}/thumbnail (see lib/media/cas-keys.ts — the ONLY key builder)
   optimizedKey String? @map("optimized_key") // S3 key: cas/{tenantId}/{hash}/optimized (see lib/media/cas-keys.ts)
 
-  // Moderation state — the lifecycle gate (see ModerationStatus enum above).
-  // Default PENDING means every object is fail-closed until approved.
-  moderationStatus ModerationStatus @default(PENDING) @map("moderation_status")
+  // Lifecycle state — THE gate (see MediaLifecycle enum above; T14/AR4
+  // consolidation of the former moderationStatus + uploadStatus pair).
+  // Default AWAITING_UPLOAD means every object is fail-closed until bytes are
+  // confirmed AND moderation approves. The sync-image path creates rows
+  // directly at their resolved verdict (bytes + verdict are known atomically).
+  lifecycle MediaLifecycle @default(AWAITING_UPLOAD) @map("lifecycle")
 
   // Media metadata (extracted from file headers)
   width    Int? // Image/video width in pixels
@@ -591,22 +605,26 @@ model MediaFile {
   metadataVisible Boolean @default(false) @map("metadata_visible")
   locationVisible Boolean @default(false) @map("location_visible")
 
-  // Media visibility and deletion tracking
+  // Media visibility and deletion tracking. DELIBERATELY NOT part of the
+  // lifecycle enum (T14/AR4): `hidden` is a moderator-reversible visibility
+  // toggle on an (usually APPROVED) object and `deletedAt` is the deletion
+  // audit timestamp — folding either into `lifecycle` would destroy the
+  // underlying moderation verdict on unhide/undelete. The serve gate is
+  // `lifecycle === APPROVED && !hidden && deletedAt == null` (serve-gate.ts).
   hidden    Boolean   @default(false) // Hide from posts (soft delete)
   deletedAt DateTime? @map("deleted_at") // Permanent deletion timestamp
   hiddenAt  DateTime? @map("hidden_at") // When media was hidden
   hiddenBy  String?   @map("hidden_by") // User ID who hid the media
 
-  // Upload lifecycle (AR10 prune: the never-read reconciliation bookkeeping
-  // columns — uploadBatchId, reconciledAt, reconcileAttempts,
-  // createdViaReconciliation — and the AT-Protocol `cid` column were removed.
-  // The moderationStatus/uploadStatus/orphan-flag consolidation into ONE state
-  // machine is deliberately deferred to the presigned-upload rework (T14) —
-  // see lib/media/stale-media-reap.ts and doc/decisions/… for the record.)
-  uploadStatus String  @default("PENDING") @map("upload_status") // PENDING, COMPLETE, FAILED
-  uploadedBy   String? @map("uploaded_by")
+  // (T14/AR4: the former uploadStatus String column is consolidated into
+  // `lifecycle` above. AR10 prune history: the never-read reconciliation
+  // bookkeeping columns and the AT-Protocol `cid` column were removed earlier.)
+  uploadedBy String? @map("uploaded_by")
 
-  // Optimistic upload tracking (for orphaned media cleanup)
+  // Optimistic upload tracking (for orphaned media cleanup). DELIBERATELY NOT
+  // part of the lifecycle enum (T14/AR4): attachment is orthogonal to the
+  // upload/moderation lifecycle — an APPROVED object can be attached or
+  // orphaned, and orphan-GC must never rewind a moderation verdict.
   attachedToPost Boolean   @default(false) @map("attached_to_post") // Whether media is attached to a post
   orphanedAt     DateTime? @map("orphaned_at") // When media was marked as orphaned
   lastAccessedAt DateTime  @default(now()) @map("last_accessed_at") // Last time media was accessed
@@ -624,26 +642,54 @@ model MediaFile {
   // flags are checked per-row after a tenant/hash lookup, never scanned), the
   // display-only [dateTaken], and the pruned reconciliation-column indexes.
   @@unique([tenantId, contentHash]) // Within-tenant dedup + the serve-path lookup index
-  @@index([moderationStatus]) // Gate queries: find PENDING for the moderation queue
+  @@index([lifecycle]) // Gate + queue queries (moderation queue, stale-reap scope)
   @@index([createdAt]) // For chronological sorting + stale-reap cutoff
-  @@index([uploadStatus]) // Stale-reap scope (uploadStatus IN + createdAt <)
   @@index([uploadedBy]) // GDPR erasure: deleteMany({ where: { uploadedBy } })
   @@index([attachedToPost, createdAt]) // For orphaned media queries
   @@index([orphanedAt]) // For cleanup job queries
   @@map("media_files")
 }
 
-// Upload session for optimistic image uploads
+// Upload session. Two kinds share this model (discriminated by `kind`):
+//
+//  - "legacy"    — the original optimistic image-upload session: tracks the
+//    mediaIds uploaded through the proxied POST /api/media path.
+//    status: 'active' | 'completed' | 'abandoned'.
+//
+//  - "presigned" — T14 direct-to-S3 upload session (video; images may also
+//    use it later). One session == one object == one MediaFile row. The
+//    session id doubles as MediaFile.uploadId and as the object-key segment
+//    (`pending/{tenantId}/{sessionId}` — cuid, satisfies UPLOAD_ID_RE), so
+//    the S3 OBJECT_CREATED trigger and the completion call converge on the
+//    same row. status: 'awaiting-upload' | 'uploaded' | 'abandoned' |
+//    'expired'. The presigned columns below are null on legacy rows.
 model UploadSession {
   id        String   @id @default(cuid())
   userId    String   @map("user_id")
-  mediaIds  String[] @map("media_ids") // Array of uploaded media IDs
-  status    String   @default("active") // 'active', 'completed', 'abandoned'
+  kind      String   @default("legacy") // 'legacy' | 'presigned'
+  mediaIds  String[] @map("media_ids") // Legacy: array of uploaded media IDs
+  status    String   @default("active") // See kind-specific vocabularies above
   createdAt DateTime @default(now()) @map("created_at")
   expiresAt DateTime @map("expires_at")
 
+  // ── Presigned-kind columns (null on legacy rows) ──
+  // Tenant that scopes the staged object (the key prefix is derived from it).
+  tenantId String? @map("tenant_id")
+  // The single MediaFile row this session uploads into (also reachable via
+  // MediaFile.uploadId == this.id; denormalized for direct lookup).
+  mediaId String? @map("media_id")
+  // The exact staging object key the presigned grant is confined to:
+  // pending/{tenantId}/{id}. Persisted so completion/abandon never re-derive.
+  objectKey String? @map("object_key")
+  // Client-declared upload metadata, validated at session creation.
+  declaredMimeType String? @map("declared_mime_type")
+  declaredBytes    Int?    @map("declared_bytes")
+  // When the completion call confirmed the bytes.
+  uploadedAt DateTime? @map("uploaded_at")
+
   @@index([userId, status])
   @@index([expiresAt])
+  @@index([mediaId])
   @@map("upload_sessions")
 }
 

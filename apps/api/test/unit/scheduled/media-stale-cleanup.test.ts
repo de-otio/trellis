@@ -67,14 +67,14 @@ describe("cleanupStaleMedia", () => {
         id: "media-1",
         contentHash: "hash1",
         originalKey: "uploads/media-1.jpg",
-        uploadStatus: "PENDING",
+        lifecycle: "UPLOADED",
         createdAt: new Date(Date.now() - 7200000),
       },
       {
         id: "media-2",
         contentHash: "hash2",
         originalKey: "uploads/media-2.png",
-        uploadStatus: "FAILED",
+        lifecycle: "UPLOAD_FAILED",
         createdAt: new Date(Date.now() - 7200000),
       },
     ];
@@ -94,7 +94,7 @@ describe("cleanupStaleMedia", () => {
     expect(mockDeleteMany).toHaveBeenCalledWith({
       where: {
         id: { in: ["media-1", "media-2"] },
-        uploadStatus: { in: ["PENDING", "FAILED"] },
+        lifecycle: { in: ["AWAITING_UPLOAD", "UPLOADED", "UPLOAD_FAILED"] },
         createdAt: { lt: expect.any(Date) },
         moderationJobs: { none: {} },
       },
@@ -108,7 +108,7 @@ describe("cleanupStaleMedia", () => {
 
     expect(mockFindMany).toHaveBeenCalledWith({
       where: {
-        uploadStatus: { in: ["PENDING", "FAILED"] },
+        lifecycle: { in: ["AWAITING_UPLOAD", "UPLOADED", "UPLOAD_FAILED"] },
         createdAt: { lt: expect.any(Date) },
         // AR4: never a row the moderation pipeline has engaged with.
         moderationJobs: { none: {} },
@@ -118,7 +118,7 @@ describe("cleanupStaleMedia", () => {
         id: true,
         contentHash: true,
         originalKey: true,
-        uploadStatus: true,
+        lifecycle: true,
         createdAt: true,
       },
     });
@@ -137,14 +137,14 @@ describe("cleanupStaleMedia", () => {
         id: "media-1",
         contentHash: "hash1",
         originalKey: "uploads/media-1.jpg",
-        uploadStatus: "PENDING",
+        lifecycle: "UPLOADED",
         createdAt: new Date(Date.now() - 7200000),
       },
       {
         id: "media-2",
         contentHash: "hash2",
         originalKey: "uploads/media-2.png",
-        uploadStatus: "FAILED",
+        lifecycle: "UPLOAD_FAILED",
         createdAt: new Date(Date.now() - 7200000),
       },
     ];
@@ -189,7 +189,7 @@ describe("cleanupStaleMedia", () => {
         id: "media-1",
         contentHash: "hash1",
         originalKey: "uploads/media-1.jpg",
-        uploadStatus: "PENDING",
+        lifecycle: "UPLOADED",
         createdAt: new Date(Date.now() - 7200000),
       },
     ];
@@ -207,7 +207,7 @@ describe("cleanupStaleMedia", () => {
         id: "media-1",
         contentHash: "hash1",
         originalKey: "uploads/media-1.jpg",
-        uploadStatus: "PENDING",
+        lifecycle: "UPLOADED",
         createdAt: new Date(Date.now() - 7200000),
       },
     ];
@@ -225,7 +225,7 @@ describe("cleanupStaleMedia", () => {
   // rows, so the assertion is on which rows SURVIVE, not on query shape.
   //
   // Bug being reproduced (architecture-review/02-architecture-traps.md §6.1):
-  // async video uploads are born `uploadStatus: "PENDING"` and nothing
+  // async video uploads are born `lifecycle: "UPLOADED"` and nothing
   // advanced it, so this reaper hard-deleted in-flight video rows (and their
   // S3 objects, cascading MediaModerationJob) at T+1h — approved videos then
   // 404'd an hour after upload.
@@ -247,7 +247,7 @@ describe("cleanupStaleMedia", () => {
         // legacy 1h cutoff. Pre-fix this row was deleted; it MUST survive.
         mediaRow({
           id: "in-flight-open-job",
-          uploadStatus: "PENDING",
+          lifecycle: "UPLOADED",
           createdAt: new Date(Date.now() - 2 * HOUR),
           originalKey: "processing/tenant-1/upload-1",
           moderationJobs: [{ decision: null }],
@@ -256,7 +256,7 @@ describe("cleanupStaleMedia", () => {
         // must protect it, independent of any age window.
         mediaRow({
           id: "in-flight-open-job-old",
-          uploadStatus: "PENDING",
+          lifecycle: "UPLOADED",
           createdAt: new Date(Date.now() - 48 * HOUR),
           originalKey: "processing/tenant-1/upload-2",
           moderationJobs: [{ decision: null }],
@@ -277,7 +277,7 @@ describe("cleanupStaleMedia", () => {
       const rows = seedBehavioralDb([
         mediaRow({
           id: "resolved-jobs-not-yet-complete",
-          uploadStatus: "PENDING",
+          lifecycle: "UPLOADED",
           createdAt: new Date(Date.now() - 48 * HOUR),
           originalKey: "cas/tenant-1/deadbeef",
           moderationJobs: [{ decision: "approved" }, { decision: "approved" }],
@@ -300,7 +300,7 @@ describe("cleanupStaleMedia", () => {
         // is NOT abandoned yet.
         mediaRow({
           id: "young-jobless",
-          uploadStatus: "PENDING",
+          lifecycle: "UPLOADED",
           createdAt: new Date(Date.now() - 2 * HOUR),
           moderationJobs: [],
         }),
@@ -316,14 +316,14 @@ describe("cleanupStaleMedia", () => {
       const rows = seedBehavioralDb([
         mediaRow({
           id: "abandoned-pending",
-          uploadStatus: "PENDING",
+          lifecycle: "UPLOADED",
           createdAt: new Date(Date.now() - 25 * HOUR),
           originalKey: "pending/tenant-1/upload-9",
           moderationJobs: [],
         }),
         mediaRow({
           id: "abandoned-failed",
-          uploadStatus: "FAILED",
+          lifecycle: "UPLOAD_FAILED",
           createdAt: new Date(Date.now() - 25 * HOUR),
           // Async-pending rows are born with a NULL originalKey (the worker
           // fills it post-transcode) — the S3 delete must skip those.
@@ -332,7 +332,7 @@ describe("cleanupStaleMedia", () => {
         }),
         mediaRow({
           id: "complete-untouched",
-          uploadStatus: "COMPLETE",
+          lifecycle: "APPROVED",
           createdAt: new Date(Date.now() - 25 * HOUR),
           originalKey: "cas/tenant-1/cafebabe",
           moderationJobs: [{ decision: "approved" }],

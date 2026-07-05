@@ -32,7 +32,7 @@ export async function cleanupStaleMedia(env: any): Promise<{
     const managed = sharedDatabaseConnectionManager.acquireClient(region, env);
     const db = managed.client;
 
-    // Find abandoned records: PENDING/FAILED, older than the reap window,
+    // Find abandoned records: non-verdict lifecycles, older than the reap window,
     // and NEVER inside the moderation pipeline (AR4 scope, shared with the
     // hourly Lambda cron).
     const cutoff = staleMediaReapCutoff();
@@ -43,7 +43,7 @@ export async function cleanupStaleMedia(env: any): Promise<{
         id: true,
         contentHash: true,
         originalKey: true,
-        uploadStatus: true,
+        lifecycle: true,
         createdAt: true,
       },
     });

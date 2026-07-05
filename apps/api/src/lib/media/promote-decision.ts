@@ -9,7 +9,7 @@
 // the reported actions in a fixed, safety-ordered sequence:
 //
 //   1. promote  (publish/adopt the CAS object so bytes can be served)
-//   2. persist  (write the new moderationStatus)
+//   2. persist  (write the new lifecycle state)
 //   3. emit     (publish the "resolved" moderation event)
 //
 // FAIL-CLOSED is the whole point. An illegal transition (e.g. a replayed
@@ -24,11 +24,11 @@
 
 import { combineTrackVerdicts, type TrackOutcome } from "./track-verdict.js";
 import {
-  nextStatus,
+  nextLifecycle,
   type ModerationDecision,
-  type ModerationStatus,
+  type MediaLifecycle,
   type TransitionResult,
-} from "./moderation-status.js";
+} from "./media-lifecycle.js";
 
 /**
  * Everything {@link decidePromotion} needs to decide the worker's action.
@@ -44,7 +44,7 @@ import {
 export interface PromotionInput {
   readonly visual: TrackOutcome;
   readonly audio: TrackOutcome;
-  readonly currentStatus: ModerationStatus;
+  readonly currentStatus: MediaLifecycle;
   readonly casObjectPresent: boolean;
 }
 
@@ -76,7 +76,7 @@ export interface PromotionAction {
  *
  * Logic (total):
  *  1. `combined = combineTrackVerdicts(visual, audio)` — fail-closed track join.
- *  2. `transition = nextStatus(currentStatus, { kind: "decision", decision: combined })`.
+ *  2. `transition = nextLifecycle(currentStatus, { kind: "decision", decision: combined })`.
  *  3. If `transition.ok === false` (illegal — e.g. replay on a terminal status):
  *     idempotent NO-OP — `shouldPromote`/`shouldPersistStatus`/`shouldEmitResolved`
  *     are all `false`.
@@ -95,7 +95,7 @@ export interface PromotionAction {
 export function decidePromotion(input: PromotionInput): PromotionAction {
   const combined = combineTrackVerdicts(input.visual, input.audio);
 
-  const transition = nextStatus(input.currentStatus, {
+  const transition = nextLifecycle(input.currentStatus, {
     kind: "decision",
     decision: combined,
   });

@@ -9,7 +9,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_STALE_MEDIA_REAP_WINDOW_MS,
-  REAPABLE_UPLOAD_STATUSES,
+  REAPABLE_LIFECYCLES,
   staleMediaReapCutoff,
   staleMediaReapWhere,
   staleMediaReapWindowMs,
@@ -46,20 +46,30 @@ describe("staleMediaReapCutoff", () => {
 });
 
 describe("staleMediaReapWhere", () => {
-  it("scopes to non-terminal uploadStatus, the age cutoff, AND zero moderation jobs", () => {
+  it("scopes to non-verdict lifecycles, the age cutoff, AND zero moderation jobs", () => {
     const cutoff = new Date("2026-07-03T12:00:00.000Z");
 
     expect(staleMediaReapWhere(cutoff)).toEqual({
-      uploadStatus: { in: ["PENDING", "FAILED"] },
+      lifecycle: { in: ["AWAITING_UPLOAD", "UPLOADED", "UPLOAD_FAILED"] },
       createdAt: { lt: cutoff },
       // Prisma relation filter: `none: {}` = the row has NO MediaModerationJob
       // at all. Deliberately stricter than "no OPEN job": a resolved job with a
-      // still-PENDING uploadStatus means the completion worker did not finish —
+      // still-UPLOADED lifecycle means the completion worker did not finish —
       // deleting would destroy a possibly-approved object + its moderation
       // audit records.
       moderationJobs: { none: {} },
     });
-    expect(REAPABLE_UPLOAD_STATUSES).toEqual(["PENDING", "FAILED"]);
+    expect(REAPABLE_LIFECYCLES).toEqual([
+      "AWAITING_UPLOAD",
+      "UPLOADED",
+      "UPLOAD_FAILED",
+    ]);
+  });
+
+  it("verdict states are NEVER reap candidates", () => {
+    for (const verdict of ["APPROVED", "REVIEW", "QUARANTINED", "REJECTED"]) {
+      expect(REAPABLE_LIFECYCLES).not.toContain(verdict);
+    }
   });
 
   it("returns a fresh, caller-mutable object per call (safe to spread into a deleteMany where)", () => {
@@ -67,7 +77,11 @@ describe("staleMediaReapWhere", () => {
     const a = staleMediaReapWhere(cutoff);
     const b = staleMediaReapWhere(cutoff);
     expect(a).not.toBe(b);
-    a.uploadStatus.in.push("COMPLETE");
-    expect(b.uploadStatus.in).toEqual(["PENDING", "FAILED"]);
+    a.lifecycle.in.push("APPROVED");
+    expect(b.lifecycle.in).toEqual([
+      "AWAITING_UPLOAD",
+      "UPLOADED",
+      "UPLOAD_FAILED",
+    ]);
   });
 });

@@ -748,7 +748,7 @@ describe("Media Routes", () => {
       expect(response.status).toBe(429);
     });
 
-    it("should accept valid video files", async () => {
+    it("recognizes valid video files and points them at the presigned flow (T14: 400, never proxied)", async () => {
       // Create a valid MP4 file (starts with ftyp box at offset 4)
       const mp4Magic = new Uint8Array([
         0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70,
@@ -763,19 +763,17 @@ describe("Media Routes", () => {
         body: formData,
       });
 
-      mockMediaFileCreate.mockResolvedValue({ id: "p1", uploadId: "c" + "0".repeat(24), originalKey: null });
-
       const response = await uploadRoute!.handler(mockRequest, mockEnv, {
         url: new URL("https://api.rkm1.de/api/media/upload"),
         pathname: "/api/media/upload",
         params: {},
       });
 
-      // P0b: video now takes the async-pending path → 202 Accepted.
-      expect(response.status).toBe(202);
+      // T14: recognized video is refused with the presigned pointer — NOT
+      // "Invalid file type" (that would mean detection broke).
+      expect(response.status).toBe(400);
       const body = await response.json();
-      expect(body).toHaveProperty("uploadId");
-      expect(body).toHaveProperty("status", "pending");
+      expect(body).toHaveProperty("error", "Use presigned upload");
     });
 
     it("should reject videos that are too large", async () => {
@@ -838,10 +836,10 @@ describe("Media Routes", () => {
     const putKeys = () => mockR2Put.mock.calls.map((c) => c[0] as string);
     const deleteKeys = () => mockR2Delete.mock.calls.map((c) => c[0] as string);
     const casWritten = () => putKeys().some((k) => k.startsWith("cas/"));
-    // The moderationStatus the route handed to the upsert builder.
+    // The lifecycle verdict the route handed to the upsert builder.
     const upsertModerationStatus = () => {
       const args = mockMediaFileUpsert.mock.calls[0]?.[0];
-      return args?.create?.moderationStatus;
+      return args?.create?.lifecycle;
     };
 
     it("approved → bytes promoted to cas/, staging deleted, row APPROVED", async () => {
@@ -1057,7 +1055,7 @@ describe("Media Routes", () => {
       (r) => r.path === "/api/media/upload" && r.method === "POST",
     );
 
-    it("routes video/mp4 to async-pending: 202, uploadId + status=pending, no originalKey", async () => {
+    it("refuses proxied video/mp4 with 400 + a pointer to the presigned flow (T14: video never streams through Fargate)", async () => {
       // MP4 magic: ftyp box at offset 4
       const mp4Bytes = new Uint8Array([
         0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70,
@@ -1066,61 +1064,40 @@ describe("Media Routes", () => {
       const formData = new FormData();
       formData.append("file", new Blob([mp4Bytes], { type: "video/mp4" }), "test.mp4");
 
-      mockMediaFileCreate.mockResolvedValue({
-        id: "pending-row-1",
-        uploadId: "c" + "0".repeat(24),
-        moderationStatus: "PENDING",
-        originalKey: null,
-      });
-
       const response = await uploadRoute!.handler(
         new Request("https://api.rkm1.de/api/media/upload", { method: "POST", body: formData }),
         mockEnv,
         { url: new URL("https://api.rkm1.de/api/media/upload"), pathname: "/api/media/upload", params: {} },
       );
 
-      expect(response.status).toBe(202);
+      expect(response.status).toBe(400);
       const body = await response.json();
-      expect(body).toHaveProperty("status", "pending");
-      expect(body).toHaveProperty("uploadId");
-      // uploadId must match UPLOAD_ID_RE: c[a-z0-9]{24}
-      expect(body.uploadId).toMatch(/^c[0-9a-f]{24}$/);
+      expect(body).toHaveProperty("error", "Use presigned upload");
+      expect(body.message).toContain("/api/upload-sessions");
 
-      // Raw bytes must have been written to a pending/ key in R2 — NOT to cas/.
-      expect(mockR2Put).toHaveBeenCalledTimes(1);
-      const [putKey] = mockR2Put.mock.calls[0];
-      expect(putKey).toMatch(/^pending\//);
-      expect(putKey).toContain(TEST_TENANT_ID);
-
-      // DB row must be created (not upserted) with null originalKey and the uploadId.
-      expect(mockMediaFileCreate).toHaveBeenCalledTimes(1);
-      const createCall = mockMediaFileCreate.mock.calls[0][0];
-      expect(createCall.data.originalKey).toBeNull();
-      expect(createCall.data.uploadId).toMatch(/^c[0-9a-f]{24}$/);
-      // moderationStatus defaults to PENDING in the schema; we only supply uploadId + uploadStatus.
-      expect(createCall.data.uploadStatus).toBe("PENDING");
-
-      // No bytes may reach the approved cas/ prefix on the async path.
+      // NOTHING is written or created on the refusal path: no staging write,
+      // no DB row, and (as always) no cas/ write.
+      expect(mockR2Put).not.toHaveBeenCalled();
+      expect(mockMediaFileCreate).not.toHaveBeenCalled();
       expectNoCasWrite();
     });
 
-    it("routes video/webm to async-pending: 202", async () => {
+    it("refuses proxied video/webm with 400 (presigned pointer)", async () => {
       // WebM magic: 1A 45 DF A3
       const webmBytes = new Uint8Array([0x1a, 0x45, 0xdf, 0xa3, 0x00]);
       const formData = new FormData();
       formData.append("file", new Blob([webmBytes], { type: "video/webm" }), "test.webm");
 
-      mockMediaFileCreate.mockResolvedValue({ id: "p2", uploadId: "c" + "1".repeat(24), originalKey: null });
-
       const response = await uploadRoute!.handler(
         new Request("https://api.rkm1.de/api/media/upload", { method: "POST", body: formData }),
         mockEnv,
         { url: new URL("https://api.rkm1.de/api/media/upload"), pathname: "/api/media/upload", params: {} },
       );
 
-      expect(response.status).toBe(202);
+      expect(response.status).toBe(400);
       const body = await response.json();
-      expect(body).toHaveProperty("status", "pending");
+      expect(body).toHaveProperty("error", "Use presigned upload");
+      expect(mockR2Put).not.toHaveBeenCalled();
       expectNoCasWrite();
     });
 
@@ -1162,7 +1139,7 @@ describe("Media Routes", () => {
       expect(response.status).toBe(400);
     });
 
-    it("video pending DB failure triggers R2 cleanup and returns 500", async () => {
+    it("the video refusal happens even when the DB is down (no dependency on any write)", async () => {
       const mp4Bytes = new Uint8Array([
         0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70,
         0x69, 0x73, 0x6f, 0x6d,
@@ -1170,7 +1147,8 @@ describe("Media Routes", () => {
       const formData = new FormData();
       formData.append("file", new Blob([mp4Bytes], { type: "video/mp4" }), "test.mp4");
 
-      // DB create throws — simulates DB outage after R2 write succeeded.
+      // A DB outage must not change the refusal: the presigned pointer is
+      // returned before any DB/storage interaction on the video path.
       mockMediaFileCreate.mockRejectedValue(new Error("DB unavailable"));
 
       const response = await uploadRoute!.handler(
@@ -1179,11 +1157,10 @@ describe("Media Routes", () => {
         { url: new URL("https://api.rkm1.de/api/media/upload"), pathname: "/api/media/upload", params: {} },
       );
 
-      expect(response.status).toBe(500);
-      // R2 delete was attempted to clean up the orphaned pending object.
-      expect(mockR2Delete).toHaveBeenCalledTimes(1);
-      const [deleteKey] = mockR2Delete.mock.calls[0];
-      expect(deleteKey).toMatch(/^pending\//);
+      expect(response.status).toBe(400);
+      const body = await response.json();
+      expect(body).toHaveProperty("error", "Use presigned upload");
+      expect(mockR2Delete).not.toHaveBeenCalled();
     });
   });
 
@@ -1247,7 +1224,7 @@ describe("Media Routes", () => {
       originalKey: APPROVED_CAS_KEY,
       optimizedKey: null,
       thumbnailKey: null,
-      moderationStatus: "APPROVED",
+      lifecycle: "APPROVED",
       hidden: false,
       deletedAt: null,
       ...over,
@@ -1283,7 +1260,7 @@ describe("Media Routes", () => {
 
     it("denies a PENDING MediaFile (gate is APPROVED-only)", async () => {
       mockMediaFileFindUnique.mockResolvedValue(
-        approvedRecord({ moderationStatus: "PENDING" }),
+        approvedRecord({ lifecycle: "UPLOADED" }),
       );
       mockR2Get.mockResolvedValue({ body: new ReadableStream() });
 
@@ -1399,7 +1376,7 @@ describe("Media Routes", () => {
         originalKey: casKeyValue,
         optimizedKey: null,
         thumbnailKey: null,
-        moderationStatus: "APPROVED",
+        lifecycle: "APPROVED",
         hidden: false,
         deletedAt: null,
       });
@@ -2302,10 +2279,11 @@ describe("Media Routes", () => {
       const route = mediaRoutes.find((r) => r.path === "/api/media/upload");
       const response = await route?.handler(request, mockEnv);
 
-      // P0b: WebM video now takes the async-pending path → 202 Accepted.
-      expect(response?.status).toBe(202);
+      // T14: WebM is detected as video and refused with the presigned
+      // pointer (never proxied through Fargate).
+      expect(response?.status).toBe(400);
       const webmBody = await response!.json();
-      expect(webmBody).toHaveProperty("status", "pending");
+      expect(webmBody).toHaveProperty("error", "Use presigned upload");
     });
 
     it("should handle form data parsing errors", async () => {
@@ -2504,10 +2482,11 @@ describe("Media Routes", () => {
       const route = mediaRoutes.find((r) => r.path === "/api/media/upload");
       const response = await route?.handler(request, mockEnv);
 
-      // P0b: QuickTime video now takes the async-pending path → 202 Accepted.
-      expect(response?.status).toBe(202);
+      // T14: QuickTime is detected as video and refused with the presigned
+      // pointer (never proxied through Fargate).
+      expect(response?.status).toBe(400);
       const qtBody = await response!.json();
-      expect(qtBody).toHaveProperty("status", "pending");
+      expect(qtBody).toHaveProperty("error", "Use presigned upload");
     });
   });
 
@@ -2893,10 +2872,10 @@ describe("Media Routes", () => {
         params: {},
       });
 
-      // P0b: video takes the async-pending path → 202 Accepted.
-      expect(response.status).toBe(202);
-
-      // Normalization (reencodeImage) must NOT be called for video uploads.
+      // T14: video is refused with the presigned pointer — and normalization
+      // (reencodeImage) must still NOT have been touched for a video.
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toBe("Use presigned upload");
       expect(mockReencodeImage).not.toHaveBeenCalled();
     });
 
@@ -3060,42 +3039,42 @@ describe("Media Routes", () => {
 
     it("accepts a QuickTime-brand ftyp ('qt  ') as video/quicktime", async () => {
       // brand 'qt  ' → detectedMimeType video/quicktime → in video allowlist.
-      // P0b: video takes the async-pending path → 202 Accepted.
       const response = await runUpload(
         ftypBlob("qt  ", "application/octet-stream"),
         "clip.mov",
       );
-      expect(response.status).toBe(202);
+      // T14: detected as video → presigned pointer (NOT "Invalid file type").
+      expect(response.status).toBe(400);
       const body = await response.json();
-      expect(body).toHaveProperty("status", "pending");
-      expect(body).toHaveProperty("uploadId");
-      // No bytes may reach the approved cas/ prefix on the async path.
+      expect(body).toHaveProperty("error", "Use presigned upload");
+      // No bytes may reach the approved cas/ prefix on a refusal.
       expectNoCasWrite();
     });
 
     it("accepts a default ISO-BMFF brand (isom) as video/mp4", async () => {
-      // P0b: video takes the async-pending path → 202 Accepted.
       const response = await runUpload(
         ftypBlob("isom", "application/octet-stream"),
         "clip.mp4",
       );
-      expect(response.status).toBe(202);
+      // T14: detected as video → presigned pointer.
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toBe("Use presigned upload");
       expectNoCasWrite();
     });
 
     it("accepts an mp42-brand ftyp as video/mp4", async () => {
-      // P0b: video takes the async-pending path → 202 Accepted.
       const response = await runUpload(
         ftypBlob("mp42", "application/octet-stream"),
         "clip.mp4",
       );
-      expect(response.status).toBe(202);
+      // T14: detected as video → presigned pointer.
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toBe("Use presigned upload");
       expectNoCasWrite();
     });
 
     it("treats a brand-less minimal ftyp (bytes < 12) as video/mp4 (default branch)", async () => {
       // Only 8 bytes: size + 'ftyp', no brand → brand === "" → default → mp4.
-      // P0b: video takes the async-pending path → 202 Accepted.
       const bytes = new Uint8Array([
         0x00, 0x00, 0x00, 0x08, 0x66, 0x74, 0x79, 0x70,
       ]);
@@ -3103,7 +3082,9 @@ describe("Media Routes", () => {
         new Blob([bytes], { type: "application/octet-stream" }),
         "clip.mp4",
       );
-      expect(response.status).toBe(202);
+      // T14: detected as video → presigned pointer.
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toBe("Use presigned upload");
       expectNoCasWrite();
     });
 
@@ -3135,8 +3116,11 @@ describe("Media Routes", () => {
               ftypBlob(brand, "application/octet-stream"),
               "clip.bin",
             );
-            // P0b: video takes the async-pending path → 202 Accepted.
-            expect(response.status).toBe(202);
+            // T14: detected as video → refused with the presigned pointer
+            // (a 400 "Invalid file type" here would mean detection broke).
+            expect(response.status).toBe(400);
+            const propBody = await response.json();
+            expect(propBody.error).toBe("Use presigned upload");
             expectNoCasWrite();
           },
         ),
@@ -3282,7 +3266,7 @@ describe("Media Routes", () => {
       originalKey: APPROVED_CAS_KEY,
       optimizedKey: null,
       thumbnailKey: null,
-      moderationStatus: "APPROVED",
+      lifecycle: "APPROVED",
       hidden: false,
       deletedAt: null,
       ...over,
@@ -3901,12 +3885,13 @@ describe("Media Routes", () => {
           params: {},
         },
       );
-      // Default fallback list includes video/mp4 → accepted.
-      // P0b: video takes the async-pending path → 202 Accepted.
-      expect(response.status).toBe(202);
+      // Default fallback list includes video/mp4 → recognized as video.
+      // T14: recognized video is refused with the presigned pointer (a
+      // 400 "Invalid file type" here would mean the fallback list broke).
+      expect(response.status).toBe(400);
       const fallbackBody = await response.json();
-      expect(fallbackBody).toHaveProperty("status", "pending");
-      // No bytes may reach the approved cas/ prefix on the async path.
+      expect(fallbackBody).toHaveProperty("error", "Use presigned upload");
+      // No bytes may reach the approved cas/ prefix on a refusal.
       expectNoCasWrite();
     });
 

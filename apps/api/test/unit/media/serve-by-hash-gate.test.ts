@@ -12,7 +12,7 @@
  *      2. no resolved viewer tenant (viewerTenantId === null)
  *      3. not-found (DB returns null)
  *      4. DB-error (query throws)
- *      5. PENDING / REVIEW / QUARANTINED / REJECTED
+ *      5. UPLOADED / REVIEW / QUARANTINED / REJECTED
  *      6. hidden (even when APPROVED)
  *      7. soft-deleted (even when APPROVED)
  *      8. APPROVED but originalKey === null
@@ -126,9 +126,9 @@ vi.mock("@de-otio/saas-foundation/tenant", () => ({
 
 import { serveMediaByHash } from "../../../src/lib/routes/media.js";
 import {
-  ALL_MODERATION_STATUSES,
-  type ModerationStatus,
-} from "../../../src/lib/media/moderation-status.js";
+  ALL_MEDIA_LIFECYCLES,
+  type MediaLifecycle,
+} from "../../../src/lib/media/media-lifecycle.js";
 
 const VALID_HASH = "a".repeat(64);
 const APPROVED_KEY = `cas/${RESOLVED_TENANT}/${VALID_HASH}`;
@@ -164,13 +164,13 @@ function makeEnv(bucket: any) {
 }
 
 function record(over: Partial<{
-  moderationStatus: ModerationStatus;
+  lifecycle: MediaLifecycle;
   hidden: boolean;
   deletedAt: Date | null;
   originalKey: string | null;
 }>) {
   return {
-    moderationStatus: "PENDING" as ModerationStatus,
+    lifecycle: "UPLOADED" as MediaLifecycle,
     hidden: false,
     deletedAt: null,
     originalKey: APPROVED_KEY,
@@ -226,7 +226,7 @@ describe("serveMediaByHash anti-oracle gate (T5)", () => {
 
   it("APPROVED serves bytes with Content-Disposition: attachment + canonical type", async () => {
     const bucket = makeBucket();
-    storeForViewer(record({ moderationStatus: "APPROVED" }));
+    storeForViewer(record({ lifecycle: "APPROVED" }));
 
     const res = await serveMediaByHash(
       VALID_HASH,
@@ -247,12 +247,12 @@ describe("serveMediaByHash anti-oracle gate (T5)", () => {
   it("property: no status !== APPROVED yields bytes to ANY viewer", async () => {
     await fc.assert(
       fc.asyncProperty(
-        fc.constantFrom<ModerationStatus>(...ALL_MODERATION_STATUSES),
+        fc.constantFrom<MediaLifecycle>(...ALL_MEDIA_LIFECYCLES),
         fc.integer({ min: 0, max: VIEWERS.length - 1 }),
         async (status, viewerIdx) => {
           if (status === "APPROVED") return;
           const bucket = makeBucket();
-          storeForViewer(record({ moderationStatus: status }));
+          storeForViewer(record({ lifecycle: status }));
 
           const res = await serveMediaByHash(
             VALID_HASH,
@@ -270,10 +270,10 @@ describe("serveMediaByHash anti-oracle gate (T5)", () => {
     );
   });
 
-  it("owner vs other vs public produces an IDENTICAL response for a PENDING object", async () => {
+  it("owner vs other vs public produces an IDENTICAL response for an UPLOADED object", async () => {
     const snaps = [];
     for (const viewer of VIEWERS) {
-      storeForViewer(record({ moderationStatus: "PENDING" }));
+      storeForViewer(record({ lifecycle: "UPLOADED" }));
       const res = await serveMediaByHash(
         VALID_HASH,
         "original",
@@ -328,11 +328,11 @@ describe("serveMediaByHash anti-oracle gate (T5)", () => {
         return { hash: VALID_HASH, env: makeEnv(makeBucket()), viewer: VIEWERS[1] };
       },
     },
-    ...(["PENDING", "REVIEW", "QUARANTINED", "REJECTED"] as ModerationStatus[]).map(
+    ...(["UPLOADED", "REVIEW", "QUARANTINED", "REJECTED"] as MediaLifecycle[]).map(
       (s) => ({
         name: `non-approved status: ${s}`,
         arrange: () => {
-          storeForViewer(record({ moderationStatus: s }));
+          storeForViewer(record({ lifecycle: s }));
           return { hash: VALID_HASH, env: makeEnv(makeBucket()), viewer: VIEWERS[1] };
         },
       }),
@@ -340,7 +340,7 @@ describe("serveMediaByHash anti-oracle gate (T5)", () => {
     {
       name: "hidden (APPROVED but hidden)",
       arrange: () => {
-        storeForViewer(record({ moderationStatus: "APPROVED", hidden: true }));
+        storeForViewer(record({ lifecycle: "APPROVED", hidden: true }));
         return { hash: VALID_HASH, env: makeEnv(makeBucket()), viewer: VIEWERS[1] };
       },
     },
@@ -348,7 +348,7 @@ describe("serveMediaByHash anti-oracle gate (T5)", () => {
       name: "soft-deleted (APPROVED but deletedAt set)",
       arrange: () => {
         storeForViewer(
-          record({ moderationStatus: "APPROVED", deletedAt: new Date(0) }),
+          record({ lifecycle: "APPROVED", deletedAt: new Date(0) }),
         );
         return { hash: VALID_HASH, env: makeEnv(makeBucket()), viewer: VIEWERS[1] };
       },
@@ -356,14 +356,14 @@ describe("serveMediaByHash anti-oracle gate (T5)", () => {
     {
       name: "APPROVED but originalKey === null",
       arrange: () => {
-        storeForViewer(record({ moderationStatus: "APPROVED", originalKey: null }));
+        storeForViewer(record({ lifecycle: "APPROVED", originalKey: null }));
         return { hash: VALID_HASH, env: makeEnv(makeBucket()), viewer: VIEWERS[1] };
       },
     },
     {
       name: "APPROVED + key but storage bucket falsy (misconfig)",
       arrange: () => {
-        storeForViewer(record({ moderationStatus: "APPROVED" }));
+        storeForViewer(record({ lifecycle: "APPROVED" }));
         // No MEDIA_BUCKET_R2 / R2_BUCKET on env -> r2Bucket falsy.
         return {
           hash: VALID_HASH,
@@ -375,7 +375,7 @@ describe("serveMediaByHash anti-oracle gate (T5)", () => {
     {
       name: "APPROVED + key + bucket but bucket.get returns null (bytes gone)",
       arrange: () => {
-        storeForViewer(record({ moderationStatus: "APPROVED" }));
+        storeForViewer(record({ lifecycle: "APPROVED" }));
         const emptyBucket = { get: vi.fn(async (_k: string) => null) };
         return { hash: VALID_HASH, env: makeEnv(emptyBucket), viewer: VIEWERS[1] };
       },
@@ -387,7 +387,7 @@ describe("serveMediaByHash anti-oracle gate (T5)", () => {
         // The viewer resolves to RESOLVED_TENANT, so the tenant-scoped lookup
         // misses and denies. (See the dedicated leak test below.)
         recordsByTenant = new Map([
-          [OTHER_TENANT, record({ moderationStatus: "APPROVED" })],
+          [OTHER_TENANT, record({ lifecycle: "APPROVED" })],
         ]);
         return { hash: VALID_HASH, env: makeEnv(makeBucket()), viewer: VIEWERS[1] };
       },
@@ -428,7 +428,7 @@ describe("serveMediaByHash anti-oracle gate (T5)", () => {
   // --- Pin the exact deny contract (catches a UNIFORM body/header mutation) --
 
   it("the deny body equals the documented constant and the header set is exactly the three security headers", async () => {
-    storeForViewer(record({ moderationStatus: "PENDING" }));
+    storeForViewer(record({ lifecycle: "UPLOADED" }));
     const res = await serveMediaByHash(
       VALID_HASH,
       "original",
@@ -447,7 +447,7 @@ describe("serveMediaByHash anti-oracle gate (T5)", () => {
   // --- CORS / origin independence ------------------------------------------
 
   it("deny is byte-identical across two different Origins (no origin-dependent oracle)", async () => {
-    storeForViewer(record({ moderationStatus: "PENDING" }));
+    storeForViewer(record({ lifecycle: "UPLOADED" }));
     const resA = await serveMediaByHash(
       VALID_HASH,
       "original",
@@ -455,7 +455,7 @@ describe("serveMediaByHash anti-oracle gate (T5)", () => {
       makeEnv(makeBucket()),
       VIEWERS[1],
     );
-    storeForViewer(record({ moderationStatus: "PENDING" }));
+    storeForViewer(record({ lifecycle: "UPLOADED" }));
     const resB = await serveMediaByHash(
       VALID_HASH,
       "original",
@@ -474,7 +474,7 @@ describe("serveMediaByHash anti-oracle gate (T5)", () => {
   // --- Tenant isolation (the cross-tenant leak guard) ----------------------
 
   it("scopes the DB lookup to the VIEWER's resolved tenant (composite unique carries that tenant)", async () => {
-    storeForViewer(record({ moderationStatus: "APPROVED" }));
+    storeForViewer(record({ lifecycle: "APPROVED" }));
     await serveMediaByHash(
       VALID_HASH,
       "original",
@@ -500,7 +500,7 @@ describe("serveMediaByHash anti-oracle gate (T5)", () => {
     // turning this test red.
     const bucket = makeBucket();
     recordsByTenant = new Map([
-      [OTHER_TENANT, record({ moderationStatus: "APPROVED" })],
+      [OTHER_TENANT, record({ lifecycle: "APPROVED" })],
     ]);
 
     const res = await serveMediaByHash(
@@ -524,7 +524,7 @@ describe("serveMediaByHash anti-oracle gate (T5)", () => {
     // OWN tenant, the gate serves. This guarantees the cross-tenant denial is
     // caused by the tenant scoping and not by some unrelated always-deny.
     const bucket = makeBucket();
-    storeForViewer(record({ moderationStatus: "APPROVED" }));
+    storeForViewer(record({ lifecycle: "APPROVED" }));
 
     const res = await serveMediaByHash(
       VALID_HASH,

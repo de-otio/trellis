@@ -20,7 +20,9 @@
 //   - The tenant is re-derived FROM THE ROW, and the triggering key must equal
 //     pendingKey(rowTenant, uploadId); a mismatch is a hard reject (poison →
 //     REVIEW + ack), so a forged/odd key cannot make us moderate the wrong cas/.
-//   - Over-cap duration is poison → REVIEW + ack (no transcode attempted).
+//   - Over-cap duration (T14): terminal REJECTED + the staged object is
+//     DELETED before any moderation/transcode job is started (ffprobe is the
+//     authoritative duration gate — S3 cannot enforce duration). Ack.
 //   - The worker ONLY starts moderation jobs + persists their jobIds; it never
 //     fetches verdicts (a separate poller owns fan-in). Moderation runs on the
 //     cleaned bytes at the STAGING key, NOT the raw pending upload — and the
@@ -43,7 +45,7 @@ import {
 import { exceedsDurationCap } from "../lib/media/duration-cap.js";
 import { classifyWorkerError } from "../lib/media/classify-worker-error.js";
 import type { Track } from "../lib/media/track-verdict.js";
-import type { ModerationDecision } from "../lib/media/moderation-status.js";
+import type { ModerationDecision } from "../lib/media/media-lifecycle.js";
 import type {
   StoragePort,
   TranscodePort,
@@ -124,8 +126,21 @@ export interface MediaPersistencePort {
     mediaId: string,
     content: { contentHash: string; originalKey: string },
   ): Promise<void>;
-  /** Drive a media object's moderationStatus to REVIEW (poison path). */
+  /** Drive a media object's lifecycle to REVIEW (poison path). */
   markMediaForReview(mediaId: string): Promise<void>;
+  /**
+   * Drive the `bytes-arrived` transition: AWAITING_UPLOAD -> UPLOADED (T14).
+   * MUST be a conditional write (update ... where lifecycle=AWAITING_UPLOAD)
+   * so it is idempotent and can never rewind a resolved verdict — the client
+   * completion call performs the same transition and the two race benignly.
+   */
+  markMediaUploaded(mediaId: string): Promise<void>;
+  /**
+   * Drive a media object's lifecycle to REJECTED — the T14 over-duration
+   * terminal path (UPLOADED --over-duration--> REJECTED). The worker deletes
+   * the staged object right after; the row must never serve either way.
+   */
+  markMediaRejected(mediaId: string): Promise<void>;
 }
 
 /**
@@ -256,13 +271,6 @@ class KeyTenantMismatchError extends Error {
   }
 }
 
-/** A permanent payload defect: the probed duration exceeds the configured cap. */
-class DurationCapExceededError extends Error {
-  constructor() {
-    super("media duration cap exceeded");
-    this.name = "DurationCapExceeded";
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Orchestration core — testable against the B0 Mocks
@@ -322,10 +330,43 @@ export async function processObjectKey(
       throw new KeyTenantMismatchError();
     }
 
+    // --- 2b. Bytes are confirmed present (this event fired because they ---
+    // landed): drive AWAITING_UPLOAD -> UPLOADED (T14 `bytes-arrived`) before
+    // any processing, so later decision events fan in from the correct state.
+    // The adapter's conditional write makes this idempotent — the client's
+    // completion call performs the same transition and the two race benignly,
+    // and a resolved verdict is never rewound. A throw here is transient
+    // (classify → retry), never poison.
+    await deps.persistence.markMediaUploaded(row.id);
+
     // --- 3. Duration cap (probe BEFORE transcoding — cost + abuse guard). ---
+    // T14: over-cap is a TERMINAL REJECT, not REVIEW — duration is a product
+    // limit, not a content-safety doubt, so it must not consume human-review
+    // bandwidth. The staged object is deleted BEFORE any moderation/transcode
+    // job could see it (ffprobe is the authoritative duration gate; S3's
+    // content-length-range can only rail bytes, not seconds). Fail-closed
+    // either way: a REJECTED row never serves, and if the reject-write throws
+    // the record retries (row stays UPLOADED — also never serves).
     const probed = await deps.transcode.probeDurationSeconds(triggeringKey);
     if (exceedsDurationCap(probed, deps.config.maxDurationSeconds)) {
-      throw new DurationCapExceededError();
+      await deps.persistence.markMediaRejected(row.id);
+      try {
+        await deps.storage.deleteObject(triggeringKey);
+      } catch (delErr) {
+        // The row is already REJECTED (never serves); a leftover pending/
+        // object is storage noise, not a safety hole. Log loudly for ops.
+        deps.logger.error(
+          "Over-duration reject: staged-object delete failed (row already REJECTED)",
+          { key: triggeringKey, error: delErr },
+        );
+      }
+      deps.logger.warn("Duration cap exceeded — media REJECTED, staged object deleted", {
+        key: triggeringKey,
+        mediaId: row.id,
+        probedSeconds: probed,
+        maxDurationSeconds: deps.config.maxDurationSeconds,
+      });
+      return { disposition: "ack", reason: "duration-cap-rejected" };
     }
 
     // --- 3b. Daily AI-spend guard (AR5) — gate BEFORE the transcode and the ---

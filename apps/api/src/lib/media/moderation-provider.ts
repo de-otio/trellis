@@ -23,7 +23,7 @@
 // local use (below) and re-exported so call sites that pull the decision union
 // from the provider seam keep working; the single source of truth is
 // ./moderation-status.ts.
-import type { ModerationDecision } from "./moderation-status.js";
+import type { ModerationDecision } from "./media-lifecycle.js";
 export type { ModerationDecision };
 
 /** An opaque reference to an already-stored image object (key + bucket handle). */

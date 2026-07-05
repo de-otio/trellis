@@ -2,16 +2,16 @@
  * Call-site dedup-safety test for the /api/media/upload route (T9).
  *
  * The pure `buildMediaUpsertArgs` builder is already proven to keep the `update`
- * payload free of `uploadedBy` and `moderationStatus` (media-upsert.test.ts).
+ * payload free of `uploadedBy` and `lifecycle` (media-upsert.test.ts).
  * But the BUILDER being correct does not prove the CALL SITE uses it correctly:
  * a spread-and-merge at the route (e.g. `upsert({ ...buildMediaUpsertArgs(x),
- * update: { ...args.update, uploadedBy, moderationStatus } })`) would silently
+ * update: { ...args.update, uploadedBy, lifecycle } })`) would silently
  * re-introduce ownership-takeover / de-publish on a within-tenant dedup hit.
  *
  * This drives the ACTUAL upload route handler from `mediaRoutes`, mocks the I/O
  * edges (session, rate limit, re-encode, upload service, metadata, DB), captures
  * the args handed to `db.mediaFile.upsert`, and asserts the `update` payload
- * carries NEITHER `uploadedBy` NOR `moderationStatus`. A merge at the call site
+ * carries NEITHER `uploadedBy` NOR `lifecycle`. A merge at the call site
  * turns this red.
  *
  * Follows CLAUDE.md vitest patterns: vi.hoisted mock factories, vi.clearAllMocks
@@ -205,7 +205,7 @@ describe("/api/media/upload — upsert call-site dedup safety (T9)", () => {
     expect(upsertMock).toHaveBeenCalledTimes(1);
   });
 
-  it("the upsert UPDATE payload carries NEITHER uploadedBy NOR moderationStatus (no ownership takeover / de-publish on dedup hit)", async () => {
+  it("the upsert UPDATE payload carries NEITHER uploadedBy NOR lifecycle (no ownership takeover / de-publish on dedup hit)", async () => {
     await uploadRoute.handler(makeUploadRequest(), makeEnv() as any, {
       params: {},
     } as any);
@@ -216,10 +216,9 @@ describe("/api/media/upload — upsert call-site dedup safety (T9)", () => {
     // The load-bearing invariant: a within-tenant dedup hit must not mutate the
     // shared row's ownership or publish state.
     expect("uploadedBy" in args.update).toBe(false);
-    expect("moderationStatus" in args.update).toBe(false);
+    expect("lifecycle" in args.update).toBe(false);
     // It must touch ONLY the idempotent COMPLETE re-assert.
-    expect(Object.keys(args.update)).toEqual(["uploadStatus"]);
-    expect(args.update.uploadStatus).toBe("COMPLETE");
+    expect(Object.keys(args.update)).toEqual([]);
   });
 
   it("the upsert is scoped by the within-tenant composite unique and creates a born-owned row", async () => {
@@ -241,6 +240,6 @@ describe("/api/media/upload — upsert call-site dedup safety (T9)", () => {
     // ...and create now pins the moderation verdict for the CANONICAL upload
     // (approved by the default mock verdict). The dedup-no-takeover invariant
     // still holds on `update` (proven above).
-    expect(args.create.moderationStatus).toBe("APPROVED");
+    expect(args.create.lifecycle).toBe("APPROVED");
   });
 });

@@ -15,20 +15,20 @@ import {
   isServable,
 } from "../../../src/lib/media/serve-gate.js";
 import {
-  ALL_MODERATION_STATUSES,
-  type ModerationStatus,
-} from "../../../src/lib/media/moderation-status.js";
+  ALL_MEDIA_LIFECYCLES,
+  type MediaLifecycle,
+} from "../../../src/lib/media/media-lifecycle.js";
 
 // Seed fast-check for determinism (pinned, no clock/RNG drift).
 const FC = { seed: 0x5e_11_ca_7e, numRuns: 500 } as const;
 
-const statusArb = fc.constantFrom<ModerationStatus>(
-  ...ALL_MODERATION_STATUSES,
+const statusArb = fc.constantFrom<MediaLifecycle>(
+  ...ALL_MEDIA_LIFECYCLES,
 );
 
 describe("canServe (T5 gate predicate)", () => {
   it("APPROVED is the ONLY status that serves", () => {
-    for (const status of ALL_MODERATION_STATUSES) {
+    for (const status of ALL_MEDIA_LIFECYCLES) {
       expect(canServe(status)).toBe(status === "APPROVED");
     }
   });
@@ -48,20 +48,20 @@ describe("canServe (T5 gate predicate)", () => {
 describe("isServable (full record gate)", () => {
   it("serves only APPROVED + not-hidden + not-deleted", () => {
     expect(
-      isServable({ moderationStatus: "APPROVED", hidden: false, deletedAt: null }),
+      isServable({ lifecycle: "APPROVED", hidden: false, deletedAt: null }),
     ).toBe(true);
   });
 
   it("hidden denies even when APPROVED", () => {
     expect(
-      isServable({ moderationStatus: "APPROVED", hidden: true, deletedAt: null }),
+      isServable({ lifecycle: "APPROVED", hidden: true, deletedAt: null }),
     ).toBe(false);
   });
 
   it("deletedAt denies even when APPROVED", () => {
     expect(
       isServable({
-        moderationStatus: "APPROVED",
+        lifecycle: "APPROVED",
         hidden: false,
         deletedAt: new Date(0),
       }),
@@ -74,9 +74,9 @@ describe("isServable (full record gate)", () => {
         statusArb,
         fc.boolean(),
         fc.option(fc.date(), { nil: null }),
-        (moderationStatus, hidden, deletedAt) => {
-          if (moderationStatus !== "APPROVED") {
-            expect(isServable({ moderationStatus, hidden, deletedAt })).toBe(
+        (lifecycle, hidden, deletedAt) => {
+          if (lifecycle !== "APPROVED") {
+            expect(isServable({ lifecycle, hidden, deletedAt })).toBe(
               false,
             );
           }
@@ -93,7 +93,7 @@ describe("isServable (full record gate)", () => {
         fc.option(fc.date(), { nil: null }),
         (hidden, deletedAt) => {
           const result = isServable({
-            moderationStatus: "APPROVED",
+            lifecycle: "APPROVED",
             hidden,
             deletedAt,
           });

@@ -9,7 +9,7 @@
  * SURVIVE. It implements exactly the operator subset the reapers use:
  *
  *   - `id: { in: [...] }`
- *   - `uploadStatus: { in: [...] }`
+ *   - `lifecycle: { in: [...] }`
  *   - `createdAt: { lt: Date }`
  *   - `moderationJobs: { none: <job condition> }` (Prisma relation-filter
  *     semantics: the row matches iff NO related job matches the condition;
@@ -26,7 +26,7 @@ export interface FakeModerationJob {
 
 export interface FakeMediaRow {
   id: string;
-  uploadStatus: string;
+  lifecycle: string;
   createdAt: Date;
   contentHash: string | null;
   originalKey: string | null;
@@ -41,7 +41,7 @@ export function mediaRow(
   seed: Partial<FakeMediaRow> & { id: string },
 ): FakeMediaRow {
   return {
-    uploadStatus: "PENDING",
+    lifecycle: "UPLOADED",
     createdAt: new Date(),
     contentHash: null,
     originalKey: null,
@@ -73,9 +73,9 @@ export function matchesMediaWhere(row: FakeMediaRow, where: Where): boolean {
         if (c.in !== undefined && !c.in.includes(row.id)) return false;
         break;
       }
-      case "uploadStatus": {
+      case "lifecycle": {
         const c = cond as { in?: string[] };
-        if (c.in !== undefined && !c.in.includes(row.uploadStatus)) return false;
+        if (c.in !== undefined && !c.in.includes(row.lifecycle)) return false;
         break;
       }
       case "createdAt": {

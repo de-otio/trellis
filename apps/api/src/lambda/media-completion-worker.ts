@@ -67,8 +67,8 @@ import type {
 } from "../lib/media/moderation-provider.js";
 import type {
   ModerationDecision,
-  ModerationStatus,
-} from "../lib/media/moderation-status.js";
+  MediaLifecycle,
+} from "../lib/media/media-lifecycle.js";
 
 // ---------------------------------------------------------------------------
 // Narrow data shapes the shell needs from persistence. These mirror the Prisma
@@ -117,13 +117,13 @@ export interface CompletionStore {
     thisTrack: Track,
   ): Promise<OtherTrackState>;
 
-  /** Read the media object's current persisted moderation status + CAS coords. */
+  /** Read the media object's current persisted lifecycle + CAS coords. */
   findMedia(mediaId: string): Promise<MediaCoords | null>;
 
   /** Persist a new moderation status for the media object. */
   persistMediaStatus(
     mediaId: string,
-    status: ModerationStatus,
+    status: MediaLifecycle,
   ): Promise<void>;
 }
 
@@ -148,7 +148,7 @@ export type OtherTrackState =
  * uploadId placeholder).
  */
 export interface MediaCoords {
-  readonly moderationStatus: ModerationStatus;
+  readonly lifecycle: MediaLifecycle;
   /** Tenant that owns this object (cas-keys input). */
   readonly tenantId: string;
   /** Upload session id — addresses the raw pending + cleaned staging keys. */
@@ -204,7 +204,7 @@ export type RecordOutcome =
   | { readonly kind: "duplicate" } // dedupe hit — already processed
   | { readonly kind: "unroutable" } // no jobId / unknown job — fail-closed drop
   | { readonly kind: "illegal-transition" } // replay on terminal — ack-drop, no DLQ
-  | { readonly kind: "applied"; readonly status: ModerationStatus }
+  | { readonly kind: "applied"; readonly status: MediaLifecycle }
   | { readonly kind: "retry"; readonly reason: string }; // transient I/O — return to queue
 
 // ---------------------------------------------------------------------------
@@ -455,7 +455,7 @@ export async function processCompletion(
   const action = decidePromotion({
     visual,
     audio,
-    currentStatus: media.moderationStatus,
+    currentStatus: media.lifecycle,
     casObjectPresent: casPresent,
   });
 
@@ -464,7 +464,7 @@ export async function processCompletion(
   if (action.transition.ok === false) {
     deps.log?.info?.("completion: illegal/absorbing transition — ack-drop", {
       mediaId: job.mediaId,
-      from: media.moderationStatus,
+      from: media.lifecycle,
     });
     return { kind: "illegal-transition" };
   }
