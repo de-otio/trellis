@@ -413,6 +413,32 @@ describe("PresignedUploadHandler.completeSession", () => {
     expect(state.media[0].lifecycle).toBe("UPLOADED");
   });
 
+  it("AR-SEC F1: persists the real object size even when the worker won the race (media already UPLOADED)", async () => {
+    const env = makeEnv();
+    const handler = new PresignedUploadHandler(env, makePort().port);
+    const created = await createHappySession(handler, env);
+
+    // The S3 OBJECT_CREATED worker already drove bytes-arrived: media is
+    // UPLOADED, but the row still carries the client-DECLARED size (the
+    // quota-abuse vector: declare 1 byte, upload megabytes).
+    state.media[0].lifecycle = "UPLOADED";
+    state.media[0].size = 1;
+    mockHead.mockResolvedValue({ size: 4_900_000 });
+
+    const res = await handler.completeSession(
+      created.session.sessionId,
+      USER,
+      "US",
+      env,
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.media.lifecycle).toBe("UPLOADED");
+    // The lifecycle transition was an idempotent no-op, but the authoritative
+    // HEAD size must be persisted regardless — quota (_sum: size) counts it.
+    expect(state.media[0].size).toBe(4_900_000);
+  });
+
   it("does NOT rewind a resolved verdict (fast pipeline won the race)", async () => {
     const env = makeEnv();
     const handler = new PresignedUploadHandler(env, makePort().port);

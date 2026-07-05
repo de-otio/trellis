@@ -500,6 +500,19 @@ export class PresignedUploadHandler {
           select: { id: true, lifecycle: true },
         });
         if (!media) return null;
+        // AR-SEC F1: persist the authoritative object size UNCONDITIONALLY —
+        // not only when the lifecycle transition fires. When the S3 worker
+        // wins the bytes-arrived race (media already UPLOADED, or even
+        // resolved), the conditional write below is skipped and the row would
+        // otherwise keep the client-DECLARED size forever, under-counting the
+        // storage quota (_sum: size). The HEAD gives authoritative bytes and
+        // this write is idempotent, so it always runs.
+        if (typeof head.size === "number") {
+          await db.mediaFile.updateMany({
+            where: { id: media.id },
+            data: { size: head.size },
+          });
+        }
         const transition = nextLifecycle(media.lifecycle, {
           kind: "bytes-arrived",
         });
@@ -513,10 +526,7 @@ export class PresignedUploadHandler {
           // so a racing worker transition is never overwritten backwards.
           await db.mediaFile.updateMany({
             where: { id: media.id, lifecycle: media.lifecycle },
-            data: {
-              lifecycle: transition.status,
-              ...(typeof head.size === "number" ? { size: head.size } : {}),
-            },
+            data: { lifecycle: transition.status },
           });
         }
         const fresh = await db.mediaFile.findUnique({
