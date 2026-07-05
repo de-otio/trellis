@@ -1168,7 +1168,6 @@ export class MediaHandler {
   ): Promise<{
     id: string;
     contentHash: string;
-    cid: string | null;
     mimeType: string;
     size: number;
     thumbnailUrl: string;
@@ -1464,7 +1463,6 @@ export class MediaHandler {
       const result = {
         id: media.id,
         contentHash: media.contentHash,
-        cid: media.cid || null,
         mimeType: media.mimeType,
         size: media.size,
         thumbnailUrl,

@@ -4218,22 +4218,20 @@ describe("MediaHandler", () => {
       ...over,
     });
 
-    it("includes width/height/duration/cid when present", async () => {
-      wireInPosts(m({ width: 800, height: 600, duration: 12, cid: "bafycid123" }));
+    it("includes width/height/duration when present", async () => {
+      wireInPosts(m({ width: 800, height: 600, duration: 12 }));
       const result = await handler.getMediaDetails("cmgmdid000000000000000000", "user-123", mockEnv);
       expect(result.width).toBe(800);
       expect(result.height).toBe(600);
       expect(result.duration).toBe(12);
-      expect(result.cid).toBe("bafycid123");
     });
 
-    it("maps width/height/duration to undefined and cid to null when absent", async () => {
-      wireInPosts(m({ width: null, height: null, duration: null, cid: null }));
+    it("maps width/height/duration to undefined when absent", async () => {
+      wireInPosts(m({ width: null, height: null, duration: null }));
       const result = await handler.getMediaDetails("cmgmdid000000000000000000", "user-123", mockEnv);
       expect(result.width).toBeUndefined();
       expect(result.height).toBeUndefined();
       expect(result.duration).toBeUndefined();
-      expect(result.cid).toBeNull();
     });
 
     it("includes videoMetadata when present (separate gate from exif)", async () => {

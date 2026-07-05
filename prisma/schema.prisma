@@ -11,7 +11,6 @@ datasource db {
 }
 
 // Generic Entity model (replaces Dog model)
-// NO tenantId - schema-per-tenant provides isolation
 model Entity {
   id         String  @id @default(cuid())
   // Multi-tenancy (v0.7) — every entity belongs to exactly one tenant.
@@ -53,10 +52,9 @@ model Entity {
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
-  @@index([tenantId])
+  // AR10 prune: dropped [tenantId] (prefix of the composite below), [status]
+  // and [entityType, status] (all entity reads are tenant-scoped).
   @@index([tenantId, entityType, status])
-  @@index([status])
-  @@index([entityType, status])
   @@map("entities")
 }
 
@@ -91,17 +89,11 @@ model PostGeoIndex {
   place     String?
   labels    Json?    @default("[]")
 
-  // PREPARATORY: Data classification for Border Safety Mode
-  // Classify location data as sensitive, benign, or decoy for future selective wiping
-  sensitivityLevel String @default("benign") @map("sensitivity_level")
-  // Values: 'benign', 'sensitive', 'decoy'
-
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@index([tenantId])
   @@index([entityRef])
   @@index([geohash])
-  @@index([sensitivityLevel]) // Index for sensitivity level queries
   @@map("post_geo_index")
 }
 
@@ -124,15 +116,6 @@ model EntityLocation {
 
   @@index([tenantId])
   @@map("entity_location")
-}
-
-model IngestState {
-  id            String   @id @default(cuid())
-  cursor        String?  @unique
-  lastProcessed DateTime @default(now()) @map("last_processed")
-  updatedAt     DateTime @updatedAt @map("updated_at")
-
-  @@map("ingest_state")
 }
 
 // User roles
@@ -315,30 +298,15 @@ model User {
   publicKey    String? @map("public_key") // Public key in PEM format
   privateKey   String? @map("private_key") // Private key in PEM format (encrypted at rest)
 
-  // PREPARATORY: Border Safety Mode support
-  // Default encryption key ID (currently unused, for future E2E encryption)
-  encryptionKeyId String? @map("encryption_key_id")
+  // AR10 prune (pre-launch schema end-state pass): the dormant Border-Safety
+  // prep cluster (encryptionKeyId, defaultContext, travelMode*,
+  // panicActionConfig, emailHash, messageRetentionDays, autoDeleteAfterDays,
+  // and the UserEncryptionKey table) had ZERO code references and was removed.
+  // When Border Safety Mode is actually built, it gets a designed-for-purpose
+  // schema — not these speculative columns.
 
-  // Default profile context (currently always 'primary')
-  defaultContext String @default("primary") @map("default_context")
-
-  // Travel mode status (dormant feature flag)
-  travelModeActive      Boolean   @default(false) @map("travel_mode_active")
-  travelModeActivatedAt DateTime? @map("travel_mode_activated_at")
-
-  // Panic action configuration (JSON, dormant)
-  panicActionConfig String? @map("panic_action_config") // JSON: { enabled: boolean, action: 'wipe' | 'lock' }
-
-  // Privacy fields for email hashing and anonymous IDs
-  emailHash   String? @unique @map("email_hash") // SHA-256 hash of email (for privacy)
-  anonymousId String? @unique @map("anonymous_id") // Anonymous identifier for privacy
-
-  // Data retention settings
-  messageRetentionDays Int? @map("message_retention_days") // How long to keep messages
-  autoDeleteAfterDays  Int? @map("auto_delete_after_days") // Auto-delete data after N days
-
-  // Encryption keys relation
-  encryptionKeys UserEncryptionKey[]
+  // Anonymous identifier for privacy (KEYED pseudonym — see lib/pseudonym.ts)
+  anonymousId String? @unique @map("anonymous_id")
 
   // MFA enrollment relation
   mfaEnrollment MfaEnrollment?
@@ -388,21 +356,15 @@ model User {
   sentInvitations      TenantInvitation[] @relation("TenantInvitationInviter")
   acceptedInvitations  TenantInvitation[] @relation("TenantInvitationAcceptedBy")
 
+  // AR10 prune: dropped the single-column indexes duplicating @unique fields
+  // (username, actorUri, anonymousId, cognitoSub, personalTenantId — a unique
+  // constraint already creates the index), the low-cardinality boolean/flag
+  // indexes never used as scan predicates (suspended, emailVerified,
+  // identityVerified), the region/dataRegion indexes (no user-table scan
+  // filters on them; region routing happens above the DB), and the indexes on
+  // pruned dormant columns. users is a hot write path (login/profile churn) —
+  // every surviving index must earn its write cost.
   @@index([role])
-  @@index([region])
-  @@index([dataRegion])
-  @@index([suspended])
-  @@index([username])
-  @@index([emailVerified])
-  @@index([identityVerified])
-  @@index([actorUri]) // Index for ActivityPub actor lookups
-  @@index([encryptionKeyId]) // Index for encryption key lookups
-  @@index([travelModeActive]) // Index for travel mode queries
-  @@index([defaultContext]) // Index for context queries
-  @@index([emailHash]) // Index for email hash lookups
-  @@index([anonymousId]) // Index for anonymous ID lookups
-  @@index([cognitoSub]) // Index for Cognito sub lookups
-  @@index([personalTenantId])
   @@index([invitationId]) // Phase 0 (E2): invitation-chain traversal, Phase 2 detection only
   @@map("users")
 }
@@ -418,38 +380,6 @@ model MfaEnrollment {
   lastUsedAt      DateTime? @map("last_used_at")
 
   @@map("mfa_enrollments")
-}
-
-// User encryption keys (for Border Safety Mode and future E2E message encryption)
-model UserEncryptionKey {
-  id        String @id @default(cuid())
-  userId    String @map("user_id")
-  contextId String @map("context_id") // 'primary' or 'decoy'
-
-  // Encrypted key material (encrypted with user's password-derived key)
-  encryptedKey String @map("encrypted_key") @db.Text
-
-  // Key derivation parameters (for PBKDF2 or Argon2)
-  kdfParams String @map("kdf_params") @db.Text // JSON
-
-  // Key metadata
-  algorithm  String @default("AES-256-GCM")
-  keyPurpose String // 'data_encryption', 'backup', 'export', 'message_encryption'
-
-  // FUTURE: Support for E2E message encryption
-  // Distinguishes between Border Safety Mode keys and E2E message keys
-  keyType String @default("border_safety") @map("key_type")
-  // Values: 'border_safety' (user's own data), 'e2e_messages' (message encryption)
-
-  createdAt DateTime  @default(now()) @map("created_at")
-  rotatedAt DateTime? @map("rotated_at")
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@unique([userId, contextId, keyPurpose, keyType])
-  @@index([userId])
-  @@index([userId, keyType]) // For querying keys by type
-  @@map("user_encryption_keys")
 }
 
 // Purpose discriminator for the unified Consent model.
@@ -510,10 +440,10 @@ model Consent {
 
   // Research-row uniqueness (studyId non-null). Does NOT cover CROSS_REGION
   // rows — those are constrained by the raw partial index in the migration.
+  // AR10 prune: dropped [userId] (prefix of [userId, purpose, active]), the
+  // boolean [consented], and [dataRegion, accessRegion] (all consent reads
+  // are user-scoped).
   @@unique([userId, purpose, studyId])
-  @@index([userId])
-  @@index([consented])
-  @@index([dataRegion, accessRegion])
   @@index([userId, purpose, active])
   @@map("consent")
 }
@@ -581,22 +511,10 @@ model Post {
   // Link security fields
   hasBlockedLinks Boolean @default(false) @map("has_blocked_links")
 
-  // PREPARATORY: Data classification for Border Safety Mode
-  // Classify data as sensitive, benign, or decoy for future selective wiping
-  sensitivityLevel String @default("benign") @map("sensitivity_level")
-  // Values: 'benign', 'sensitive', 'decoy'
-  // Currently all posts are 'benign' (default)
-
-  // Profile context that owns this data
-  ownerContext String @default("primary") @map("owner_context")
-  // Currently always 'primary'
-
-  // Screening risk level (for content screening)
-  screeningRiskLevel String @default("low") @map("screening_risk_level")
-  // Values: 'low', 'medium', 'high'
-
-  // Content category (optional classification)
-  contentCategory String? @map("content_category")
+  // AR10 prune: the dormant classification columns (sensitivityLevel,
+  // ownerContext, screeningRiskLevel, contentCategory) were written-by-default
+  // and read by nothing; removed pre-launch. Border-Safety / context-aware
+  // access gets a designed schema when it is actually built.
 
   // Feed-declutter denormalization (org classification). Resolved by walking
   // PlatformCategory.parentCategoryId to the root at write time, from the
@@ -609,22 +527,20 @@ model Post {
   // posts keep their old value unless explicitly backfilled.
   authorOrgRootCategoryCode String? @map("author_org_root_category_code") // PlatformCategory.code of the root ancestor
 
+  // AR10 prune (posts is the hottest write path — 17 indexes reduced to 7):
+  // dropped [activityId]/[objectId] (duplicate their @unique), [uri] (AP
+  // object lookups go through the @unique objectId/activityId; nothing
+  // queries by uri), [deletedAt] (always combined with selective predicates;
+  // a bare mostly-NULL index never wins), [editedAt] (nothing queries edited
+  // posts), [dataRegion, createdAt] (single-region launch — with dataRegion
+  // constant it degenerates to [createdAt], which stays), and the four
+  // dormant-classification indexes (columns pruned above).
   @@index([tenantId, createdAt])
   @@index([authorId, createdAt])
   @@index([authorId, radius, createdAt])
   @@index([primaryEntityId])
   @@index([createdAt])
-  @@index([uri])
-  @@index([deletedAt])
-  @@index([dataRegion, createdAt]) // Composite index for feed queries: filters by region and orders by creation time (most selective fields first)
-  @@index([activityId]) // For ActivityPub activity lookups
-  @@index([objectId]) // For ActivityPub object lookups
   @@index([groupId]) // Index for group posts
-  @@index([authorId, ownerContext, sensitivityLevel]) // Composite index for context-aware data access
-  @@index([sensitivityLevel]) // Index for sensitivity level queries
-  @@index([ownerContext]) // Index for context queries
-  @@index([screeningRiskLevel]) // Index for risk level queries
-  @@index([editedAt]) // Index for querying edited posts
   @@index([authorOrgRootCategoryCode, createdAt]) // Feed-declutter predicate (org classification)
   @@map("posts")
 }
@@ -638,7 +554,6 @@ model MediaFile {
   id           String  @id @default(cuid())
   tenantId     String  @map("tenant_id") // Tenant that owns this object (NOT NULL)
   contentHash  String? @map("content_hash") // SHA-256 hash (lowercase hex); null until post-transcode for video (set by the P0b worker)
-  cid          String? @unique // AT Protocol CID (optional, for compatibility)
   mimeType     String  @map("mime_type")
   size         Int
   // uploadId: client-side idempotency key for the upload session. Nullable
@@ -649,8 +564,8 @@ model MediaFile {
   // the CAS key is computed post-transcode by the pipeline worker; the row
   // exists before transcoding completes.
   originalKey  String? @map("original_key") // S3 key: cas/{tenantId}/{hash} (null until transcode for video)
-  thumbnailKey String? @map("thumbnail_key") // S3 key: cas/{tenantId}/{hash}/thumb
-  optimizedKey String? @map("optimized_key") // S3 key: cas/{tenantId}/{hash}/opt
+  thumbnailKey String? @map("thumbnail_key") // S3 key: cas/{tenantId}/{hash}/thumbnail (see lib/media/cas-keys.ts — the ONLY key builder)
+  optimizedKey String? @map("optimized_key") // S3 key: cas/{tenantId}/{hash}/optimized (see lib/media/cas-keys.ts)
 
   // Moderation state — the lifecycle gate (see ModerationStatus enum above).
   // Default PENDING means every object is fail-closed until approved.
@@ -682,13 +597,14 @@ model MediaFile {
   hiddenAt  DateTime? @map("hidden_at") // When media was hidden
   hiddenBy  String?   @map("hidden_by") // User ID who hid the media
 
-  // Reconciliation fields (Option 2: Eventual Consistency)
-  uploadStatus             String    @default("PENDING") @map("upload_status") // PENDING, RECONCILING, COMPLETE, FAILED
-  uploadedBy               String?   @map("uploaded_by")
-  uploadBatchId            String?   @map("upload_batch_id")
-  reconciledAt             DateTime? @map("reconciled_at")
-  reconcileAttempts        Int       @default(0) @map("reconcile_attempts")
-  createdViaReconciliation Boolean   @default(false) @map("created_via_reconciliation")
+  // Upload lifecycle (AR10 prune: the never-read reconciliation bookkeeping
+  // columns — uploadBatchId, reconciledAt, reconcileAttempts,
+  // createdViaReconciliation — and the AT-Protocol `cid` column were removed.
+  // The moderationStatus/uploadStatus/orphan-flag consolidation into ONE state
+  // machine is deliberately deferred to the presigned-upload rework (T14) —
+  // see lib/media/stale-media-reap.ts and doc/decisions/… for the record.)
+  uploadStatus String  @default("PENDING") @map("upload_status") // PENDING, COMPLETE, FAILED
+  uploadedBy   String? @map("uploaded_by")
 
   // Optimistic upload tracking (for orphaned media cleanup)
   attachedToPost Boolean   @default(false) @map("attached_to_post") // Whether media is attached to a post
@@ -702,20 +618,16 @@ model MediaFile {
   posts          PostMedia[] // Many-to-many with posts
   moderationJobs MediaModerationJob[] // P0b: per-track moderation job records
 
-  @@unique([tenantId, contentHash]) // Within-tenant dedup (replaces bare contentHash @unique)
-  @@index([cid])
+  // AR10 prune: dropped @@index([tenantId, contentHash]) (exact duplicate of
+  // the @@unique above — the serve path uses the unique's index), the boolean
+  // flag indexes ([hidden, deletedAt], [metadataVisible], [locationVisible] —
+  // flags are checked per-row after a tenant/hash lookup, never scanned), the
+  // display-only [dateTaken], and the pruned reconciliation-column indexes.
+  @@unique([tenantId, contentHash]) // Within-tenant dedup + the serve-path lookup index
   @@index([moderationStatus]) // Gate queries: find PENDING for the moderation queue
-  @@index([tenantId, contentHash]) // Serve path: tenant-scoped CAS lookup
-  @@index([hidden, deletedAt]) // For filtering visible media
-  @@index([createdAt]) // For chronological sorting
-  @@index([dateTaken])
-  @@index([metadataVisible])
-  @@index([locationVisible])
-  @@index([uploadStatus])
-  @@index([uploadedBy])
-  @@index([uploadBatchId])
-  @@index([reconciledAt])
-  @@index([uploadStatus, reconciledAt]) // For cleanup queries
+  @@index([createdAt]) // For chronological sorting + stale-reap cutoff
+  @@index([uploadStatus]) // Stale-reap scope (uploadStatus IN + createdAt <)
+  @@index([uploadedBy]) // GDPR erasure: deleteMany({ where: { uploadedBy } })
   @@index([attachedToPost, createdAt]) // For orphaned media queries
   @@index([orphanedAt]) // For cleanup job queries
   @@map("media_files")
@@ -766,8 +678,8 @@ model MediaModerationJob {
   createdAt         DateTime        @default(now()) @map("created_at")
   updatedAt         DateTime        @updatedAt @map("updated_at")
 
+  // AR10 prune: dropped [jobId] (duplicate of @unique).
   @@index([mediaId])
-  @@index([jobId])
   @@map("media_moderation_jobs")
 }
 
@@ -797,9 +709,9 @@ model PostMedia {
   media  MediaFile @relation(fields: [mediaId], references: [id], onDelete: Restrict)
   tenant Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
+  // AR10 prune: dropped [postId] (prefix of the unique).
   @@unique([postId, mediaId])
   @@index([tenantId])
-  @@index([postId])
   @@index([mediaId])
   @@map("post_media")
 }
@@ -818,15 +730,16 @@ model PostSentiment {
   post   Post   @relation(fields: [postId], references: [id], onDelete: Cascade)
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
+  // AR10 prune: dropped [postId] / [postUri] (prefixes of the composite
+  // uniques above), [postId, sentiment] and the summary index (both are
+  // leading prefixes of idx_post_sentiment_pagination — a b-tree on
+  // (a, b, c DESC, d DESC) serves equality on (a) / (a, b) and the windowed
+  // summary scan). 4 indexes carry every read path.
   @@unique([postId, authorId])
   @@unique([postUri, authorId])
-  @@index([postId])
-  @@index([postUri])
   @@index([authorId])
-  @@index([postId, sentiment]) // For faster sentiment count aggregation (groupBy)
   @@index([postId, createdAt]) // For time-based sentiment queries
-  @@index([postId, sentiment, createdAt(sort: Desc)], name: "idx_post_sentiment_summary") // For window function query (top 3 users per sentiment)
-  @@index([postId, sentiment, createdAt(sort: Desc), id(sort: Desc)], name: "idx_post_sentiment_pagination") // For cursor-based pagination
+  @@index([postId, sentiment, createdAt(sort: Desc), id(sort: Desc)], name: "idx_post_sentiment_pagination") // Aggregation, summary + cursor pagination
   @@index([tenantId])
   @@map("post_sentiments")
 }
@@ -856,21 +769,7 @@ model PostComment {
   // Link security fields
   hasBlockedLinks Boolean @default(false) @map("has_blocked_links")
 
-  // PREPARATORY: Data classification for Border Safety Mode
-  // Classify data as sensitive, benign, or decoy for future selective wiping
-  sensitivityLevel String @default("benign") @map("sensitivity_level")
-  // Values: 'benign', 'sensitive', 'decoy'
-
-  // Profile context that owns this data
-  ownerContext String @default("primary") @map("owner_context")
-  // Currently always 'primary'
-
-  // Screening risk level (for content screening)
-  screeningRiskLevel String @default("low") @map("screening_risk_level")
-  // Values: 'low', 'medium', 'high'
-
-  // Content category (optional classification)
-  contentCategory String? @map("content_category")
+  // AR10 prune: dormant classification columns removed (see Post model note).
 
   post       Post               @relation(fields: [postId], references: [id], onDelete: Cascade)
   tenant     Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -878,20 +777,16 @@ model PostComment {
   sentiments CommentSentiment[]
   linkChecks LinkCheck[]
 
+  // AR10 prune: dropped [hiddenByPostOwner] and [deletedAt] (low-cardinality
+  // flags always combined with a selective postId predicate), [rootUri]
+  // (prefix of [rootUri, createdAt]), and the dormant-classification indexes.
   @@index([tenantId])
   @@index([postId, createdAt])
   @@index([postUri, createdAt])
   @@index([authorId])
-  @@index([hiddenByPostOwner])
-  @@index([deletedAt]) // Filter deleted comments
-  @@index([authorId, ownerContext]) // Composite index for context-aware data access
-  @@index([sensitivityLevel]) // Index for sensitivity level queries
-  @@index([ownerContext]) // Index for context queries
-  @@index([screeningRiskLevel]) // Index for risk level queries
   // Threading indexes
-  @@index([rootUri]) // Find all comments in a thread
   @@index([replyToUri]) // Find direct replies to a comment
-  @@index([rootUri, createdAt]) // Thread comments ordered by time
+  @@index([rootUri, createdAt]) // Thread comments ordered by time (covers bare rootUri lookups)
   @@index([postId, rootUri]) // Thread comments within a specific post
   @@map("post_comments")
 }
@@ -906,8 +801,8 @@ model PostCommentMedia {
 
   comment PostComment @relation(fields: [commentId], references: [id], onDelete: Cascade)
 
+  // AR10 prune: dropped [commentId] (prefix of the unique).
   @@unique([commentId, mediaId])
-  @@index([commentId])
   @@index([mediaId])
   @@map("post_comment_media")
 }
@@ -923,10 +818,10 @@ model CommentSentiment {
 
   comment PostComment @relation(fields: [commentId], references: [id], onDelete: Cascade)
 
+  // AR10 prune: dropped [commentId] / [commentUri] (prefixes of the
+  // composite uniques above).
   @@unique([commentId, authorId])
   @@unique([commentUri, authorId])
-  @@index([commentId])
-  @@index([commentUri])
   @@index([authorId])
   @@index([commentId, sentiment]) // For faster sentiment count aggregation (groupBy)
   @@index([commentId, createdAt]) // For time-based sentiment queries
@@ -944,10 +839,10 @@ model PostSubject {
   post   Post   @relation(fields: [postId], references: [id], onDelete: Cascade)
   entity Entity @relation(fields: [entityId], references: [id], onDelete: Cascade)
 
+  // AR10 prune: dropped [postId] (prefix of the unique) and [entityId]
+  // (prefix of [entityId, createdAt]).
   @@unique([postId, entityId])
-  @@index([postId])
   @@index([entityId, createdAt]) // Core query: "posts about this entity, newest first"
-  @@index([entityId])
   @@map("post_subjects")
 }
 
@@ -1044,9 +939,9 @@ model FeatureToggle {
   changedAt   DateTime @default(now()) @updatedAt @map("last_changed")
   createdAt   DateTime @default(now()) @map("created_at")
 
+  // AR10 prune: dropped [key] (prefix of the composite unique) and the
+  // boolean [enabled].
   @@unique([key, tenantId])
-  @@index([key])
-  @@index([enabled])
   @@index([tenantId])
   @@map("feature_toggles")
 }
@@ -1071,11 +966,10 @@ model Invitation {
   // Phase 0 (E2): accounts that recorded this invitation as their signup origin.
   signupUsers User[] @relation("SignupInvitation")
 
-  @@index([code])
-  @@index([createdBy])
+  // AR10 prune: dropped [code] (duplicate of @unique), [createdBy] (prefix of
+  // [createdBy, createdAt]) and the boolean [used].
   @@index([createdBy, createdAt]) // Composite index for efficient listing queries (filter by createdBy, order by createdAt)
   @@index([usedBy])
-  @@index([used])
   @@index([email])
   @@index([expiresAt])
   @@map("invitations")
@@ -1099,9 +993,9 @@ model TaxonomyDimension {
 
   categories TaxonomyCategory[]
 
+  // AR10 prune: dropped [tenantId] and [tenantId, code] (prefix/duplicate of
+  // the composite unique).
   @@unique([tenantId, code])
-  @@index([tenantId])
-  @@index([tenantId, code])
   @@index([tenantId, isActive])
   @@map("taxonomy_dimensions")
 }
@@ -1122,9 +1016,9 @@ model TaxonomyCategory {
   dimension TaxonomyDimension @relation(fields: [dimensionId], references: [id], onDelete: Cascade)
   taxons    TaxonomyTaxon[]
 
+  // AR10 prune: dropped [tenantId] and [tenantId, dimensionId] (prefixes of
+  // the composite unique).
   @@unique([tenantId, dimensionId, code])
-  @@index([tenantId])
-  @@index([tenantId, dimensionId])
   @@index([tenantId, isActive])
   @@map("taxonomy_categories")
 }
@@ -1160,10 +1054,10 @@ model TaxonomyTaxon {
   entityTags  EntityTaxonomyTag[]
   productTags ProductTaxonomyTag[]
 
+  // AR10 prune: dropped [tenantId] and [tenantId, taxonId] (prefix/duplicate
+  // of the composite unique).
   @@unique([tenantId, taxonId])
-  @@index([tenantId])
   @@index([tenantId, categoryId])
-  @@index([tenantId, taxonId])
   @@index([tenantId, isActive])
   @@index([parentTaxonId])
   @@map("taxonomy_taxons")
@@ -1180,10 +1074,10 @@ model PostTaxonomyTag {
   post  Post          @relation(fields: [postId], references: [id], onDelete: Cascade)
   taxon TaxonomyTaxon @relation(fields: [taxonId], references: [id], onDelete: Cascade)
 
+  // AR10 prune: dropped [postId] (prefix of the unique) and [addedBy]
+  // (never queried).
   @@unique([postId, taxonId])
-  @@index([postId])
   @@index([taxonId])
-  @@index([addedBy])
   @@map("post_taxonomy_tags")
 }
 
@@ -1197,8 +1091,8 @@ model EntityTaxonomyTag {
   entity Entity        @relation(fields: [entityId], references: [id], onDelete: Cascade)
   taxon  TaxonomyTaxon @relation(fields: [taxonId], references: [id], onDelete: Cascade)
 
+  // AR10 prune: dropped [entityId] (prefix of the unique).
   @@unique([entityId, taxonId])
-  @@index([entityId])
   @@index([taxonId])
   @@map("entity_taxonomy_tags")
 }
@@ -1254,9 +1148,9 @@ model EntityOwnership {
   tenant  Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   addedBy User   @relation("OwnershipAddedBy", fields: [addedByUserId], references: [id])
 
+  // AR10 prune: dropped [entityId] (prefix of the unique and of [entityId, role]).
   @@unique([entityId, userId])
   @@index([tenantId])
-  @@index([entityId])
   @@index([userId])
   @@index([entityId, role])
   @@map("entity_ownerships")
@@ -1346,8 +1240,8 @@ model Group {
   posts   Post[]
   tenant  Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
+  // AR10 prune: dropped [actorUri] (duplicate of @unique).
   @@index([tenantId])
-  @@index([actorUri])
   @@index([privacy])
   @@map("groups")
 }
@@ -1365,9 +1259,9 @@ model GroupMember {
   group  Group  @relation(fields: [groupId], references: [id], onDelete: Cascade)
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
+  // AR10 prune: dropped [groupId] (prefix of the unique and of [groupId, role]).
   @@unique([groupId, actorUri])
   @@index([tenantId])
-  @@index([groupId])
   @@index([actorUri])
   @@index([groupId, role])
   @@map("group_members")
@@ -1421,12 +1315,10 @@ model DirectMessage {
   recipientId String @map("recipient_id") // Recipient's user ID (not actor URI, for foreign key)
   text        String @db.Text
 
-  // PREPARATORY: E2E message encryption support (for future implementation)
-  // Currently messages are plaintext. These fields prepare for E2E encryption.
-  encryptedText       String? @map("encrypted_text") @db.Text // Encrypted message content (future)
-  encryptionKeyId     String? @map("encryption_key_id") // Reference to UserEncryptionKey (keyType: 'e2e_messages')
-  encryptionAlgorithm String? @default("AES-256-GCM") @map("encryption_algorithm") // Encryption algorithm
-  encryptionIV        String? @map("encryption_iv") // Initialization vector for encryption
+  // AR10 prune: the dormant E2E-encryption prep columns (encryptedText,
+  // encryptionKeyId, encryptionAlgorithm, encryptionIV) had zero code
+  // references and were removed; E2E messaging gets a designed schema when
+  // it is actually built.
 
   objectId   String?   @unique @map("object_id") // ActivityStreams object URI
   activityId String?   @unique @map("activity_id") // Create activity URI
@@ -1437,10 +1329,10 @@ model DirectMessage {
   sender    User @relation("SentMessages", fields: [senderId], references: [id], onDelete: Cascade)
   recipient User @relation("ReceivedMessages", fields: [recipientId], references: [id], onDelete: Cascade)
 
+  // AR10 prune: dropped [recipientId] (prefix of [recipientId, read]) and the
+  // pruned-column [encryptionKeyId] index.
   @@index([senderId])
-  @@index([recipientId])
   @@index([recipientId, read])
-  @@index([encryptionKeyId]) // Index for encryption key lookups
   @@map("direct_messages")
 }
 
@@ -1470,8 +1362,8 @@ model CustomAudienceMember {
   audience CustomAudience @relation(fields: [audienceId], references: [id], onDelete: Cascade)
   member   User           @relation("AudienceMembers", fields: [memberId], references: [id], onDelete: Cascade)
 
+  // AR10 prune: dropped [audienceId] (prefix of the composite unique).
   @@unique([audienceId, memberId]) // Prevent duplicate members
-  @@index([audienceId])
   @@index([memberId])
   @@map("custom_audience_members")
 }
@@ -1493,7 +1385,7 @@ model DomainReputation {
   // Relations
   linkChecks LinkCheck[]
 
-  @@index([domain])
+  // AR10 prune: dropped [domain] (duplicate of @unique).
   @@index([status])
   @@index([reputation])
   @@map("domain_reputations")
@@ -1634,7 +1526,7 @@ model EmailSuppression {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  @@index([email])
+  // AR10 prune: dropped [email] (duplicate of @unique).
 }
 
 // ============================================================================
@@ -1860,7 +1752,7 @@ model Tenant {
   classification   TenantClassification?
   directoryProfile TenantDirectoryProfile?
 
-  @@index([slug])
+  // AR10 prune: dropped [slug] (duplicate of @unique).
   @@index([type, status])
   @@map("tenants")
 }
@@ -1970,7 +1862,7 @@ model TenantIdentityProvider {
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
-  @@index([cognitoIdpName])
+  // AR10 prune: dropped [cognitoIdpName] (duplicate of @unique).
   @@index([status])
   @@map("tenant_identity_providers")
 }
@@ -2022,8 +1914,8 @@ model TenantInvitation {
   invitedBy  User   @relation("TenantInvitationInviter", fields: [invitedByUserId], references: [id])
   acceptedBy User?  @relation("TenantInvitationAcceptedBy", fields: [acceptedByUserId], references: [id])
 
+  // AR10 prune: dropped [token] (duplicate of @unique).
   @@unique([tenantId, email])
-  @@index([token])
   @@index([email])
   @@index([expiresAt])
   @@map("tenant_invitations")
@@ -2203,23 +2095,36 @@ model Relationship {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
+  // AR10 prune: dropped [userId] (prefix of the composite unique and of
+  // [userId, tier]) and the bare [targetId] (polymorphic reverse lookups are
+  // always type-qualified → [targetType, targetId] carries them).
   @@unique([userId, targetType, targetId])
-  @@index([userId]) // forward: a user's relationships
   @@index([targetType, targetId]) // reverse: who relates to X (FoF, recompute)
-  @@index([targetId])
   @@index([userId, tier]) // circle-tier membership
   @@index([tenantId])
   @@map("relationships")
 }
 
-// Typed, unscored entity-to-entity edge (PACK_MATE, SIBLING, …), confirmable.
+// Typed, unscored entity-to-entity edge, confirmable.
+//
+// `type` is a String, NOT a Postgres enum (pre-launch schema end-state pass):
+// the edge vocabulary is DOMAIN vocabulary (the current values — PACK_MATE,
+// SIBLING, PLAYMATE, PARENT, OFFSPRING, WALK_BUDDY — are dog-domain terms),
+// and trellis is the domain-agnostic core. Baking a vertical's vocabulary
+// into a DB enum would force every other vertical (and every vocabulary
+// change) through an ALTER TYPE migration. The vocabulary is enforced in app
+// code instead — the hand-written union in lib/graph/types.ts, the
+// allowlist in entity-relationship-handler.ts, and the fixed traversal set
+// in lib/graph/postgres/discovery.ts (raw SQL already compares via
+// `type::text`). Same deliberate pattern as InteractionEvent.interactionType
+// and MediaModerationJob.decision.
 model EntityRelationship {
   id       String @id @default(cuid())
   tenantId String @map("tenant_id")
 
   entityId         String                   @map("entity_id")
   relatedEntityId  String                   @map("related_entity_id")
-  type             EntityRelationshipType
+  type             String
   status           EntityRelationshipStatus @default(PENDING)
   proposedByUserId String                   @map("proposed_by_user_id")
 
@@ -2232,15 +2137,6 @@ model EntityRelationship {
   @@index([relatedEntityId, type, status]) // reverse / pending-by-owner
   @@index([tenantId])
   @@map("entity_relationships")
-}
-
-enum EntityRelationshipType {
-  PACK_MATE
-  SIBLING
-  PLAYMATE
-  PARENT
-  OFFSPRING
-  WALK_BUDDY
 }
 
 enum EntityRelationshipStatus {
@@ -2261,8 +2157,8 @@ model EncryptedUserSetting {
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  // AR10 prune: dropped [userId] (prefix of the composite unique).
   @@unique([userId, namespace])
-  @@index([userId])
   @@map("encrypted_user_settings")
 }
 
@@ -2278,7 +2174,7 @@ model BlockedUser {
   blocker User   @relation("BlockedUserBlocker", fields: [blockerId], references: [id], onDelete: Cascade)
   blocked User   @relation("BlockedUserBlocked", fields: [blockedId], references: [id], onDelete: Cascade)
 
+  // AR10 prune: dropped [tenantId, blockerId] (prefix of the composite unique).
   @@unique([tenantId, blockerId, blockedId])
-  @@index([tenantId, blockerId])
   @@map("blocked_users")
 }

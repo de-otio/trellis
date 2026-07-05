@@ -104,9 +104,9 @@ export interface DeletionResult {
  *
  * Does NOT check authorization — caller must verify permissions.
  *
- * Models with onDelete: Cascade on the User relation (MfaEnrollment,
- * UserEncryptionKey, and Report via the reporter FK) are automatically deleted
- * by the final user.delete().
+ * Models with onDelete: Cascade on the User relation (MfaEnrollment, and
+ * Report via the reporter FK) are automatically deleted by the final
+ * user.delete().
  */
 export async function deleteUserData(
   db: PrismaClient,
@@ -243,8 +243,8 @@ export async function deleteUserData(
     data: { resourceId: pseudonymizeUserId(userId, pseudonymSecret) },
   });
 
-  // 16. Delete the user (cascades to MfaEnrollment, UserEncryptionKey, Report
-  //     (reporter side), and actor-side InteractionEvent rows)
+  // 16. Delete the user (cascades to MfaEnrollment, Report (reporter side),
+  //     and actor-side InteractionEvent rows)
   await db.user.delete({ where: { id: userId } });
 
   return {

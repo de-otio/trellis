@@ -102,7 +102,6 @@ export const UNSCOPED_MODELS: ReadonlyMap<string, string> = new Map([
   ["DomainReputation", "global"],
   ["EmailSuppression", "global"],
   ["FeatureToggle", "global"],
-  ["IngestState", "global"],
   ["RoleMetadata", "global"],
   // P0b moderation-message dedupe ledger: a system-global exactly-once table
   // keyed on an opaque messageDedupeKey. No tenantId column; identical bytes
@@ -118,7 +117,6 @@ export const UNSCOPED_MODELS: ReadonlyMap<string, string> = new Map([
   ["CustomAudienceMember", "user"],
   ["UploadSession", "user"],
   ["MfaEnrollment", "user"],
-  ["UserEncryptionKey", "user"],
   ["EncryptedUserSetting", "user"],
   ["Consent", "user"],
   ["NotificationPreference", "user"],
