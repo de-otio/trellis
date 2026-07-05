@@ -60,6 +60,19 @@ function makePrisma() {
       create: vi.fn().mockResolvedValue({ id: "ie-1" }),
     },
     $transaction: vi.fn(async (ops: unknown[]) => ops),
+    // Set-based score write (UPDATE … FROM unnest). Tagged-template mock:
+    // calls receive (templateStrings, ids[], scores[], tiers[]).
+    $executeRaw: vi.fn().mockResolvedValue(0),
+  };
+}
+
+/** Extract the (ids, scores, tiers) arrays from the unnest $executeRaw call. */
+function executeRawArrays(prisma: ReturnType<typeof makePrisma>) {
+  const call = prisma.$executeRaw.mock.calls[0];
+  return {
+    ids: call[1] as string[],
+    scores: call[2] as number[],
+    tiers: call[3] as number[],
   };
 }
 
@@ -254,10 +267,11 @@ describe("ScoringOps", () => {
         newTier: expectedTier,
       });
 
-      // Both edges are written (computedScore + tier) in one transaction.
-      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
-      const txOps = prisma.$transaction.mock.calls[0][0];
-      expect(txOps).toHaveLength(2);
+      // Both edges are written (computedScore + tier) in ONE set-based
+      // statement (UPDATE … FROM unnest) — not per-row updates.
+      expect(prisma.$executeRaw).toHaveBeenCalledTimes(1);
+      const { ids } = executeRawArrays(prisma);
+      expect(ids).toEqual(["rel-changing", "rel-stable"]);
     });
 
     it("pins owned entities to tier 0 (score 1.0) via the OWNS exemption", async () => {
@@ -280,9 +294,9 @@ describe("ScoringOps", () => {
       // Owned → effective 1.0 → tier 0, a change from tier 3.
       expect(updates).toHaveLength(1);
       expect(updates[0].newTier).toBe(0);
-      const txOps = prisma.$transaction.mock.calls[0][0];
-      expect(txOps[0].data.computedScore).toBe(1.0);
-      expect(txOps[0].data.tier).toBe(0);
+      const { scores, tiers } = executeRawArrays(prisma);
+      expect(scores[0]).toBe(1.0);
+      expect(tiers[0]).toBe(0);
     });
 
     it("returns [] and skips writes with no tenant", async () => {
@@ -295,7 +309,7 @@ describe("ScoringOps", () => {
       prisma.relationship.findMany.mockResolvedValue([]);
       const updates = await withTenant(() => ops.recomputeScores(USER));
       expect(updates).toEqual([]);
-      expect(prisma.$transaction).not.toHaveBeenCalled();
+      expect(prisma.$executeRaw).not.toHaveBeenCalled();
     });
   });
 
@@ -322,8 +336,8 @@ describe("ScoringOps", () => {
       expect(updates[0].newTier).toBeGreaterThan(0); // dropped down
       expect(updates[0].newScore).toBeLessThan(0.8);
 
-      const txOps = prisma.$transaction.mock.calls[0][0];
-      expect(txOps[0].data.computedScore).toBeLessThan(0.8);
+      const { scores } = executeRawArrays(prisma);
+      expect(scores[0]).toBeLessThan(0.8);
     });
 
     it("exempts owned entities from decay", async () => {
@@ -347,7 +361,7 @@ describe("ScoringOps", () => {
 
       // Owned entity skipped entirely — no tier change, no write.
       expect(updates).toEqual([]);
-      expect(prisma.$transaction).not.toHaveBeenCalled();
+      expect(prisma.$executeRaw).not.toHaveBeenCalled();
     });
 
     it("only considers edges with a lastInteractionAt (filter passed to prisma)", async () => {

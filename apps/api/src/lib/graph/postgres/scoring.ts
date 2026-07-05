@@ -285,19 +285,31 @@ export class ScoringOps {
 
   // ---- internals -----------------------------------------------------------
 
-  /** Batch-write computedScore + tier for a set of relationship rows. */
+  /**
+   * Batch-write computedScore + tier for a set of relationship rows.
+   *
+   * One set-based `UPDATE … FROM unnest(...)` instead of N per-row UPDATE
+   * statements in a transaction — a decay/recompute sweep over a user's
+   * edges is a single round trip and a single atomic statement regardless
+   * of edge count. `updated_at` is bumped in SQL to match the Prisma
+   * `@updatedAt` behavior the per-row updates had.
+   */
   private async writeScoreUpdates(
     updates: Array<{ id: string; computedScore: number; tier: number }>,
   ): Promise<void> {
     if (updates.length === 0) return;
-    await this.prisma.$transaction(
-      updates.map((u) =>
-        this.prisma.relationship.update({
-          where: { id: u.id },
-          data: { computedScore: u.computedScore, tier: u.tier },
-        }),
-      ),
-    );
+    const ids = updates.map((u) => u.id);
+    const scores = updates.map((u) => u.computedScore);
+    const tiers = updates.map((u) => u.tier);
+    await this.prisma.$executeRaw`
+      UPDATE relationships AS r
+      SET computed_score = u.computed_score,
+          tier = u.tier,
+          updated_at = now()
+      FROM unnest(${ids}::text[], ${scores}::float8[], ${tiers}::int[])
+        AS u(id, computed_score, tier)
+      WHERE r.id = u.id
+    `;
   }
 
   /** The set of entity ids (from the given candidates) the user actively owns. */
