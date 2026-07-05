@@ -39,10 +39,13 @@ const table = new dynamodb.Table(this, 'MainTable', {
 
 > **Status — access-pattern catalogue.** The tables below enumerate the KV
 > access patterns Trellis uses or plans to use. The namespaces actually bound in
-> `apps/api/src/env.ts` today are: `ratelimit`, `privacy`, `friends`,
-> `connections`, `feed`, `moderation`, `comments`, `threatintel`, `taxonomy`,
+> `apps/api/src/env.ts` today are: `ratelimit`, `privacy`,
+> `feed`, `moderation`, `comments`, `threatintel`, `taxonomy`,
 > `followers`, `export`, `delete`, `csrf`, `session`, `invitations` (plus the
-> raw-SDK claims cache). Entries below for namespaces not in that list —
+> raw-SDK claims cache). The former `friends`/`connections` namespaces were
+> removed with the legacy KV friends subsystem (pre-launch schema end-state
+> pass) — connections live in the Postgres `relationships` edge table.
+> Entries below for namespaces not in that list —
 > e.g. the `fedify:*` key store, `safebrowsing:*`, and `costbudget:*`/`costtrack:*` —
 > are design-stage and may not have shipped backing yet. Verify against the code
 > before relying on them. Some auxiliary stores (idempotency, the token-bucket
