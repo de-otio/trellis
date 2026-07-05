@@ -15,6 +15,8 @@ import { createPrisma } from "../db.js";
 import { getLogger, Logger } from "./logger.js";
 import { CalmDeliveryResolver } from "./realtime/index.js";
 import { PushNotifier } from "./realtime/push-notifier.js";
+import { PushDispatcher } from "./push/push-dispatcher.js";
+import { resolvePushTransport } from "./push/push-transport.js";
 import {
   PrismaBlockStore,
   type BlockStore,
@@ -301,6 +303,17 @@ export class NotificationHandler {
         const kind = bypassPreferences ? "safety" : "wakeup";
         const pushNotifier = new PushNotifier(env.realtimeTransport, logger);
         await pushNotifier.notify({ target: { userId, tenantId }, kind });
+
+        // T8: fan the SAME content-free wakeup out to the user's registered
+        // push devices (APNs/FCM), through the injected PushTransport seam.
+        // No transport injected => no-op (default-OFF stays double-gated:
+        // flag AND injection). Best-effort like the realtime wakeup above —
+        // dispatch() never throws. See lib/doc/push-device-contract.md §4.
+        const pushTransport = resolvePushTransport();
+        if (pushTransport) {
+          const dispatcher = new PushDispatcher(pushTransport, logger);
+          await dispatcher.dispatch({ userId, kind }, db, env.SESSION_SECRET);
+        }
       }
 
       return { id: notification.id };

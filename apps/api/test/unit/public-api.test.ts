@@ -17,6 +17,7 @@ const EXPECTED_EXPORTS = [
   "getExtensions",
   "registerExtension",
   "setMediaModerationProvider",
+  "setPushTransportProvider",
   "setRealtimeProvider",
   "setTextModerationProvider",
   "startServer",
@@ -37,5 +38,9 @@ describe("public API surface (@de-otio/trellis)", () => {
   it("exposes the moderation-provider injection hooks as callables", () => {
     expect(typeof publicApi.setMediaModerationProvider).toBe("function");
     expect(typeof publicApi.setTextModerationProvider).toBe("function");
+  });
+
+  it("exposes the push-transport injection hook as a callable (T8)", () => {
+    expect(typeof publicApi.setPushTransportProvider).toBe("function");
   });
 });

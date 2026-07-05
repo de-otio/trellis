@@ -9,6 +9,17 @@ export { registerExtension, getExtension, getExtensions } from "./extensions.js"
 // Realtime transport seam: a consuming app (e.g. Skybber) injects a concrete
 // transport (AppSync Events) before serving; core ships the poll/noop default.
 export { setRealtimeProvider } from "./lib/realtime/index.js";
+// Push transport seam (T8): a consuming app injects the concrete APNs/FCM
+// delivery (e.g. an SNS-platform adapter) before serving; core ships NO
+// default — un-wired deploys never attempt a push. Frozen contract:
+// lib/doc/push-device-contract.md.
+export { setPushTransportProvider } from "./lib/push/index.js";
+export type {
+  PushTransport,
+  PushDeviceTarget,
+  PushSendOutcome,
+  PushPlatformWire,
+} from "./lib/push/index.js";
 // Media moderation seam: a consuming app injects a concrete image-moderation
 // provider before serving; core ships a fail-closed Null default (every verdict
 // = "review", so un-wired deploys never auto-approve).
