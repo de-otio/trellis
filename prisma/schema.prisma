@@ -708,18 +708,18 @@ model UploadSession {
 
   // ── Presigned-kind columns (null on legacy rows) ──
   // Tenant that scopes the staged object (the key prefix is derived from it).
-  tenantId String? @map("tenant_id")
+  tenantId         String?   @map("tenant_id")
   // The single MediaFile row this session uploads into (also reachable via
   // MediaFile.uploadId == this.id; denormalized for direct lookup).
-  mediaId String? @map("media_id")
+  mediaId          String?   @map("media_id")
   // The exact staging object key the presigned grant is confined to:
   // pending/{tenantId}/{id}. Persisted so completion/abandon never re-derive.
-  objectKey String? @map("object_key")
+  objectKey        String?   @map("object_key")
   // Client-declared upload metadata, validated at session creation.
-  declaredMimeType String? @map("declared_mime_type")
-  declaredBytes    Int?    @map("declared_bytes")
+  declaredMimeType String?   @map("declared_mime_type")
+  declaredBytes    Int?      @map("declared_bytes")
   // When the completion call confirmed the bytes.
-  uploadedAt DateTime? @map("uploaded_at")
+  uploadedAt       DateTime? @map("uploaded_at")
 
   @@index([userId, status])
   @@index([expiresAt])
@@ -2068,16 +2068,16 @@ model TenantClassification {
   tenantId   String @unique @map("tenant_id")
   categoryId String @map("category_id") // may point anywhere in the PlatformCategory tree, not just a root
 
-  verificationSource VerificationSource @default(SELF_DECLARED) @map("verification_source")
-  verifiedAt         DateTime?          @map("verified_at")
+  verificationSource    VerificationSource @default(SELF_DECLARED) @map("verification_source")
+  verifiedAt            DateTime?          @map("verified_at")
   // Case/record id at the verifying authority, when applicable — lets an admin
   // trace a TECHSOUP/HAUS_DES_STIFTENS claim back to its source record without
   // storing the verifier's full response body here.
-  verifiedByRef      String?            @map("verified_by_ref")
+  verifiedByRef         String?            @map("verified_by_ref")
   // Verification isn't only additive: a verifier can delist an org after the
   // fact. Set when a previously-verified classification's status is revoked, so
   // a stale "Verified via X" badge never survives a delisting.
-  verificationRevokedAt DateTime?       @map("verification_revoked_at")
+  verificationRevokedAt DateTime?          @map("verification_revoked_at")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -2132,7 +2132,7 @@ model TenantDirectoryProfile {
   tenantId String @unique @map("tenant_id")
 
   isDiscoverable   Boolean @default(false) @map("is_discoverable")
-  shortDescription String? @db.Text @map("short_description")
+  shortDescription String? @map("short_description") @db.Text
 
   lat               Float?
   lng               Float?
@@ -2272,4 +2272,94 @@ model BlockedUser {
   // AR10 prune: dropped [tenantId, blockerId] (prefix of the composite unique).
   @@unique([tenantId, blockerId, blockedId])
   @@map("blocked_users")
+}
+
+// ============================================================================
+// Open Social Web (plan: trellis-internal/plans/open-social-web)
+// ----------------------------------------------------------------------------
+// Cross-references (targetId, ownerUserId) are DENORMALIZED strings with no FK,
+// matching the Relationship/InteractionEvent polymorphic precedent; cascade on
+// referent delete is enforced in app code, not the DB. (Deviation from design
+// 03 §2 which showed an owner FK — traded for a purely-additive migration that
+// does not touch the User model.)
+// ============================================================================
+
+/// Anonymous email follower of a public target. The CONFIRMED row is itself the
+/// consent artifact (double opt-in = GDPR Art. 6(1)(a)); unsubscribe = withdrawal
+/// (Art. 7(3)). No User FK — subscribers have no account. The email is stored
+/// encrypted (per-record envelope ciphertext) plus a keyed HMAC hash for lookup;
+/// both carry a keyVersion prefix so keys can rotate. Client IP/UA at subscribe
+/// time is NOT stored here — it goes through SecurityEvent (retention-bound).
+model EmailSubscription {
+  id             String                  @id @default(uuid()) // random v4 (NOT cuid) — token entropy
+  tenantId       String                  @map("tenant_id") // denormalized; no FK (polymorphic precedent)
+  targetType     String                  @map("target_type") // "user" | "entity" (Relationship vocab)
+  targetId       String                  @map("target_id") // polymorphic; no FK
+  emailHash      String                  @map("email_hash") // "v{n}:" + keyed HMAC-SHA256(normalized email)
+  emailEnc       String                  @map("email_enc") // "v{n}:" + envelope ciphertext (per-record DEK)
+  tokenNonce     String                  @map("token_nonce") // random; bound into capability-token HMAC
+  status         EmailSubscriptionStatus @default(PENDING)
+  locale         String? // BCP-47, for localized digest
+  confirmedAt    DateTime?               @map("confirmed_at") // double opt-in timestamp = consent
+  unsubscribedAt DateTime?               @map("unsubscribed_at") // withdrawal
+  lastDigestAt   DateTime?               @map("last_digest_at") // digest high-water mark (digest job deferred)
+  bounceCount    Int                     @default(0) @map("bounce_count")
+  retentionUntil DateTime                @map("retention_until") // NON-NULL — pruned by hourly cron
+  createdAt      DateTime                @default(now()) @map("created_at")
+  updatedAt      DateTime                @updatedAt @map("updated_at")
+
+  @@unique([tenantId, targetType, targetId, emailHash]) // one sub per (target, email)
+  @@index([targetType, targetId, status]) // "confirmed subs for target X"
+  @@index([status, retentionUntil]) // prune scan
+  @@index([tenantId])
+  @@map("email_subscriptions")
+}
+
+enum EmailSubscriptionStatus {
+  PENDING // awaiting double-opt-in confirmation
+  CONFIRMED // active
+  UNSUBSCRIBED // withdrawn; emailEnc scrubbed, emailHash kept for suppression
+  BOUNCED // hard bounce / complaint; suppressed (see EmailSuppression)
+}
+
+/// A user-authored, ordered curated list of profiles (users and/or entities) for
+/// discovery — Mastodon-style "Collections". Not an algorithmic recommender.
+model Collection {
+  id          String               @id @default(cuid())
+  tenantId    String               @map("tenant_id")
+  ownerUserId String               @map("owner_user_id") // always a real user; denormalized (app-code cascade)
+  title       String
+  description String?
+  visibility  CollectionVisibility @default(PRIVATE)
+  itemCount   Int                  @default(0) @map("item_count") // denormalized, capped in handler
+  createdAt   DateTime             @default(now()) @map("created_at")
+  updatedAt   DateTime             @updatedAt @map("updated_at")
+
+  items CollectionItem[]
+
+  @@index([ownerUserId])
+  @@index([tenantId, visibility])
+  @@map("collections")
+}
+
+model CollectionItem {
+  id           String   @id @default(cuid())
+  collectionId String   @map("collection_id")
+  targetType   String   @map("target_type") // "user" | "entity"
+  targetId     String   @map("target_id") // polymorphic; no FK
+  position     Int // manual ordering
+  note         String? // optional per-item curator note
+  addedAt      DateTime @default(now()) @map("added_at")
+
+  collection Collection @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+
+  @@unique([collectionId, targetType, targetId]) // no dupes within a list
+  @@index([collectionId, position])
+  @@map("collection_items")
+}
+
+enum CollectionVisibility {
+  PUBLIC // browsable + discoverable
+  UNLISTED // link-shareable, not surfaced in discovery
+  PRIVATE // owner only
 }

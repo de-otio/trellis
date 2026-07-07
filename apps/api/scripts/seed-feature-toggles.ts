@@ -223,6 +223,21 @@ async function seedFeatureToggles() {
       description:
         "Enable automatic content moderation for posts and comments using OpenAI Moderation API",
     },
+    {
+      key: "email_subscriptions_enabled",
+      enabled: getEnabled("email_subscriptions_enabled", false),
+      description: "Anonymous email subscriptions (follow-by-email)",
+    },
+    {
+      key: "collections_enabled",
+      enabled: getEnabled("collections_enabled", false),
+      description: "Curated collections / lists",
+    },
+    {
+      key: "year_in_review_enabled",
+      enabled: getEnabled("year_in_review_enabled", false),
+      description: "Year-in-review recap (RecapService)",
+    },
   ];
 
   // Region-specific flags (from region-config.ts)

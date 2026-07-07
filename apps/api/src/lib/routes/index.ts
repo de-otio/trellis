@@ -40,6 +40,9 @@ import { exportRoutes } from "./export.js";
 import { featureFlagsRoutes } from "./feature-flags.js";
 import { feedsRoutes } from "./feeds.js";
 import { relationshipRoutes } from "./relationships.js";
+import { emailSubscriptionRoutes } from "./email-subscriptions.js";
+import { curatedCollectionRoutes } from "./collections.js";
+import { recapRoutes } from "./recap.js";
 import { circleRoutes } from "./circles.js";
 import { discoveryRoutes } from "./discovery.js";
 import { entityRelationshipRoutes } from "./entity-relationships.js";
@@ -323,6 +326,11 @@ const coreRoutes: Route[] = [
   // Custom audiences: authenticated `/api/audiences*` always on; the public
   // collection (`/audiences/:audienceId`) is gated.
   ...audienceRoutes.filter(appOnly),
+
+  // H12 — open social web (all gated OFF-by-default via featureToggleMiddleware).
+  ...emailSubscriptionRoutes,
+  ...curatedCollectionRoutes,
+  ...recapRoutes,
 ];
 
 // Merge extension routes (after core, before 404)

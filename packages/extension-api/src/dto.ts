@@ -184,3 +184,46 @@ export interface ExtensionEntityRelationship {
   /** When the relationship was created/proposed */
   since: Date;
 }
+
+// ---------------------------------------------------------------------------
+// Recap (year-in-review) shapes
+// ---------------------------------------------------------------------------
+
+/** The window a recap was computed over, as ISO-8601 strings. */
+export interface ExtensionRecapWindow {
+  from: string;
+  to: string;
+}
+
+/**
+ * The neutral recap payload core's `RecapService` computes for a subject
+ * (own-data-only aggregation — no cross-user comparison, no leaderboard/rank,
+ * no percentile). Passed to `extendRecap` so an extension can attach domain
+ * aggregates computed from its own tables for the same subject and window.
+ *
+ * Kept structurally in sync by hand with `RecapPayload` in
+ * `apps/api/src/lib/recap-service.ts` (no Prisma dependency allowed here —
+ * see the file header for why).
+ */
+export interface ExtensionRecapPayload {
+  window: ExtensionRecapWindow;
+  posts: {
+    count: number;
+    firstAt?: string;
+    mostReactedPostId?: string;
+  };
+  /** Sentiment counts received on the subject's own posts, by emotion. */
+  sentimentsReceived: Record<string, number>;
+  /** New Relationship edges involving the subject, created within the window. */
+  connectionsMade: number;
+  topMoments: Array<{ postId: string; at: string }>;
+  /** Domain fields attached by `extendRecap`, if any extension supplied them. */
+  extension?: Record<string, unknown>;
+}
+
+/** The subject + window a recap was requested for, passed to `extendRecap`. */
+export interface ExtensionRecapSubject {
+  subjectType: ExtensionNodeType;
+  subjectId: string;
+  window: ExtensionRecapWindow;
+}

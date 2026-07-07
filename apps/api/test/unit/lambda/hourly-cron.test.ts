@@ -82,6 +82,11 @@ function makeDb(rows: FakeMediaRow[]) {
         .mockResolvedValue([]),
       deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
+    // Open Social Web: the hourly cron also prunes expired EmailSubscription rows.
+    emailSubscription: {
+      findMany: vi.fn().mockResolvedValue([]),
+      deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+    },
   };
 }
 

@@ -16,7 +16,10 @@ export type SecurityEventType =
   | "rate_limit_exceeded"
   | "suspicious_activity"
   | "unauthorized_access"
-  | "database_connection_failure";
+  | "database_connection_failure"
+  // Anonymous email-subscription signup: the sanctioned retention-bound path
+  // for the subscribe-time client IP/UA (CLAUDE.md rule 7 / data-minimization).
+  | "email_subscription_created";
 
 export type SecurityEventSeverity = "low" | "medium" | "high" | "critical";
 

@@ -86,6 +86,10 @@ import { postsRoutes } from "./routes/posts.js";
 import { privacyRoutes } from "./routes/privacy.js";
 import { productTaxonomyRoutes } from "./routes/products.js";
 import { relationshipRoutes } from "./routes/relationships.js";
+// H12 — open social web (follow-by-email, collections, year-in-review)
+import { emailSubscriptionRoutes } from "./routes/email-subscriptions.js";
+import { curatedCollectionRoutes } from "./routes/collections.js";
+import { recapRoutes } from "./routes/recap.js";
 import { sentimentsRoutes } from "./routes/sentiments.js";
 import { settingsRoutes } from "./routes/settings.js";
 import { setupStatusRoutes } from "./routes/setup-status.js";
@@ -410,6 +414,11 @@ const PORTED_ROUTE_SETS: ReadonlyArray<ReadonlyArray<Route>> = [
   tenantDirectorySearchRoutes, // T4 — /api/directory/search
   platformCategoryAdminRoutes, // T5 — /api/admin/platform-categories[...]
   mediaReviewRoutes, // T9 — /api/admin/media-review[...] (MODERATOR-only)
+  // H12 — open social web. All gated OFF-by-default via featureToggleMiddleware;
+  // curatedCollectionRoutes is distinct from the AP `collectionRoutes` above.
+  emailSubscriptionRoutes, // /api/subscriptions/email[...] + /api/entities/:id/subscribers/summary
+  curatedCollectionRoutes, // /api/collections[...]
+  recapRoutes, // /api/recap/:subjectType/:subjectId
 ];
 
 /**

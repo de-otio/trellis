@@ -178,6 +178,16 @@ export const UNSCOPED_MODELS: ReadonlyMap<string, string> = new Map([
   // denormalized tenantId for the index, but isolation flows through the
   // parent (same posture as EntityTaxonomyTag, PostTaxonomyTag).
   ["TenantClassificationTag", "by-relation"],
+  // Open Social Web (follow-by-email + collections). EmailSubscription carries
+  // its own tenantId for attribution but is NOT auto-scoped: the subscribe /
+  // confirm / unsubscribe endpoints are ANONYMOUS (no active-tenant context)
+  // and resolve rows by primary key or capability token; create stamps tenantId
+  // explicitly via the composite unique. Collection is owner-scoped (boundary is
+  // ownerUserId; public reads are anonymous, no tenant context). CollectionItem
+  // has no tenantId — isolation flows through its parent Collection.
+  ["EmailSubscription", "anonymous-capability"],
+  ["Collection", "user"],
+  ["CollectionItem", "by-relation"],
 ]);
 
 // Operations whose `where` can safely have `{ tenantId }` AND-merged in.

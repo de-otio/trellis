@@ -51,4 +51,7 @@ export type {
   ExtensionGlanceItem,
   ExtensionVisiblePost,
   ExtensionEntityRelationship,
+  ExtensionRecapWindow,
+  ExtensionRecapPayload,
+  ExtensionRecapSubject,
 } from "./dto";

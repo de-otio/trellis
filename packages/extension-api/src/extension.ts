@@ -16,6 +16,8 @@ import type {
   ExtensionGlanceItem,
   ExtensionPaginatedResult,
   ExtensionPost,
+  ExtensionRecapPayload,
+  ExtensionRecapSubject,
   ExtensionRelationship,
   ExtensionVisiblePost,
 } from "./dto";
@@ -446,6 +448,27 @@ export interface TrellisExtension {
     manualOverride: boolean,
     existingLifeStage: string | null,
   ) => string | null;
+
+  /**
+   * Attach domain-specific aggregates to a year-in-review recap.
+   *
+   * Called by core's `RecapService` after it computes the neutral
+   * `ExtensionRecapPayload` for a subject (own-data-only: posts, sentiments
+   * received, connections made — no cross-user comparison, no leaderboard).
+   * The extension may compute additional aggregates from ITS OWN tables
+   * (e.g. a dogs extension: walks logged, pack-mates met) for the same
+   * subject and window, and return them as a flat object. Core merges the
+   * result under `payload.extension` — core itself never emits domain
+   * vocabulary.
+   *
+   * Mirrors `activityPub.enrichActor`: display-only enrichment, no writes.
+   * Optional — omit if the extension has no recap aggregates to attach.
+   */
+  extendRecap?: (
+    payload: ExtensionRecapPayload,
+    subject: ExtensionRecapSubject,
+    ctx: ExtensionContext,
+  ) => Promise<Record<string, unknown>>;
 
   /** Called once at startup with the extension's scoped context */
   init?: (ctx: ExtensionContext) => Promise<void>;

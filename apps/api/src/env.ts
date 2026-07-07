@@ -452,6 +452,59 @@ export interface Env {
   // resolveDirectorySearchEnv().
   directorySearch: DirectorySearchConfig;
   // --- end Directory config seams --------------------------------------------
+
+  // --- Email-subscription config seam (open-social-web/01-follow-by-email.md §6) ---
+  // Threshold-secrecy seam (CLAUDE.md rule 8): every operational value is env-
+  // injected via resolveEmailSubscriptionEnv(); no compiled threshold literal
+  // ships in the public tarball. Handlers read env.emailSubscription — never
+  // construct it.
+  emailSubscription: {
+    /** Signed confirm-token lifetime (hours). Source: EMAIL_SUB_CONFIRM_TOKEN_TTL_HOURS. Default 48. */
+    confirmTokenTtlHours: number;
+    /** PENDING-row self-expiry (hours) — primary email-bombing defense. Source: EMAIL_SUB_PENDING_TTL_HOURS. Default 72. */
+    pendingTtlHours: number;
+    /** UNSUBSCRIBED/BOUNCED suppression-tombstone retention (days). Source: EMAIL_SUB_SUPPRESSION_DAYS. Default 180. */
+    suppressionDays: number;
+    /** CONFIRMED-row rolling retention (days) so dead subs age out. Source: EMAIL_SUB_CONFIRMED_RETENTION_DAYS. Default 400. */
+    confirmedRetentionDays: number;
+    /** Subscribe rate limit per source IP per hour. Source: EMAIL_SUB_RATE_PER_IP_PER_HOUR. Default 10. */
+    ratePerIpPerHour: number;
+    /** Subscribe rate limit per target (feed/actor being followed) per hour. Source: EMAIL_SUB_RATE_PER_TARGET_PER_HOUR. Default 100. */
+    ratePerTargetPerHour: number;
+    /** Cross-target subscribe rate limit per email address per hour (email-bomb cap). Source: EMAIL_SUB_RATE_PER_EMAIL_PER_HOUR. Default 5. */
+    ratePerEmailPerHour: number;
+  };
+  /**
+   * HMAC key for signing/verifying email-subscription confirm/unsubscribe
+   * capability tokens and hashing subscriber emails (`emailHash`). REQUIRED
+   * (lazily, via `requireEmailSubHmacSecret()`) once email subscriptions are
+   * enabled — this must NEVER fall back to SESSION_SECRET or any other
+   * ambient secret (key-separation requirement; see the design doc's warning
+   * against reusing `activitypub/crypto.ts`). NOT validated at startup — the
+   * feature is off by default via a toggle, and existing deployments must
+   * keep booting without this var.
+   */
+  EMAIL_SUB_HMAC_SECRET?: string;
+  /**
+   * Base64-encoded 32-byte KEK for email-subscription field encryption
+   * (`emailEnc`). Decoded and length-checked lazily by
+   * `requireEmailSubEncKey()`. NEVER falls back to another secret. NOT
+   * validated at startup (see EMAIL_SUB_HMAC_SECRET).
+   */
+  EMAIL_SUB_ENC_KEY?: string;
+  // --- end Email-subscription config seam -------------------------------------
+
+  // --- Collections config seam (open-social-web/03-collections.md §3) ---------
+  // Threshold-secrecy seam: the cap is runtime config, never a compiled
+  // constant, so no number ships in the public tarball. Resolved by
+  // resolveCollectionEnv().
+  collection: {
+    /** Max items per collection. Source: COLLECTION_MAX_ITEMS. Default 25. */
+    maxItems: number;
+    /** Max collections per user. Source: COLLECTION_MAX_PER_USER. Default 50. */
+    maxPerUser: number;
+  };
+  // --- end Collections config seam ---------------------------------------------
 }
 
 /**
@@ -784,6 +837,88 @@ export function parseMediaThresholds(
 }
 
 /**
+ * Parse a positive integer env var, falling back to `fallback` when absent,
+ * non-numeric, or <= 0. Local defaulting helper — mirrors the inline
+ * `parseBytes`/`parseRateLimit` closures in resolveMediaEnv() above.
+ */
+function parsePositiveInt(raw: string | undefined, fallback: number): number {
+  const n = Number.parseInt(raw ?? "", 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+/**
+ * Resolve the email-subscription config block from `source` (defaults to
+ * `process.env`; tests can inject a fixture object).
+ *
+ * Single-writer: this is the ONLY place that reads the NUMERIC EMAIL_SUB_*
+ * env vars. The two REQUIRED secrets — EMAIL_SUB_HMAC_SECRET and
+ * EMAIL_SUB_ENC_KEY — are deliberately NOT read here: they're set directly
+ * onto Env in buildEnv() and resolved lazily via requireEmailSubHmacSecret()
+ * / requireEmailSubEncKey(), so their absence never fails this resolver or
+ * validateEnv()'s startup path (the feature is off by default via a toggle).
+ * Design: open-social-web/01-follow-by-email.md §6.
+ */
+export function resolveEmailSubscriptionEnv(
+  source: NodeJS.ProcessEnv = process.env,
+): {
+  emailSubscription: {
+    confirmTokenTtlHours: number;
+    pendingTtlHours: number;
+    suppressionDays: number;
+    confirmedRetentionDays: number;
+    ratePerIpPerHour: number;
+    ratePerTargetPerHour: number;
+    ratePerEmailPerHour: number;
+  };
+} {
+  return {
+    emailSubscription: {
+      confirmTokenTtlHours: parsePositiveInt(
+        source.EMAIL_SUB_CONFIRM_TOKEN_TTL_HOURS,
+        48,
+      ),
+      pendingTtlHours: parsePositiveInt(source.EMAIL_SUB_PENDING_TTL_HOURS, 72),
+      suppressionDays: parsePositiveInt(source.EMAIL_SUB_SUPPRESSION_DAYS, 180),
+      confirmedRetentionDays: parsePositiveInt(
+        source.EMAIL_SUB_CONFIRMED_RETENTION_DAYS,
+        400,
+      ),
+      ratePerIpPerHour: parsePositiveInt(
+        source.EMAIL_SUB_RATE_PER_IP_PER_HOUR,
+        10,
+      ),
+      ratePerTargetPerHour: parsePositiveInt(
+        source.EMAIL_SUB_RATE_PER_TARGET_PER_HOUR,
+        100,
+      ),
+      ratePerEmailPerHour: parsePositiveInt(
+        source.EMAIL_SUB_RATE_PER_EMAIL_PER_HOUR,
+        5,
+      ),
+    },
+  };
+}
+
+/**
+ * Resolve the collections config block from `source` (defaults to
+ * `process.env`; tests can inject a fixture object).
+ *
+ * Threshold-secrecy seam (CLAUDE.md rule 8): the cap is runtime config, never
+ * a compiled constant, so no number ships in the public tarball. Design:
+ * open-social-web/03-collections.md §3.
+ */
+export function resolveCollectionEnv(
+  source: NodeJS.ProcessEnv = process.env,
+): { collection: { maxItems: number; maxPerUser: number } } {
+  return {
+    collection: {
+      maxItems: parsePositiveInt(source.COLLECTION_MAX_ITEMS, 25),
+      maxPerUser: parsePositiveInt(source.COLLECTION_MAX_PER_USER, 50),
+    },
+  };
+}
+
+/**
  * Assemble a Postgres URL from Secrets Manager at runtime.
  *
  * The secret is fetched with the AWS SDK. Credentials live on the returned
@@ -916,6 +1051,56 @@ export function validateEnv(env: Env): string[] {
 }
 
 /**
+ * Require EMAIL_SUB_HMAC_SECRET — the key used to sign/verify email-
+ * subscription confirm/unsubscribe capability tokens and to hash subscriber
+ * emails (`emailHash`). Lazily required: NOT checked by `validateEnv()` (the
+ * feature is off by default via a toggle, so existing deployments must keep
+ * booting without this var) — throws only when a handler actually needs it.
+ *
+ * Must NEVER fall back to SESSION_SECRET or any other ambient secret
+ * (key-separation requirement — see open-social-web/01-follow-by-email.md
+ * §6's warning against reusing `activitypub/crypto.ts`, which collapses this
+ * separation).
+ */
+export function requireEmailSubHmacSecret(env: Env): string {
+  const secret = env.EMAIL_SUB_HMAC_SECRET;
+  if (!secret) {
+    throw new Error(
+      "EMAIL_SUB_HMAC_SECRET is required for email-subscription token signing " +
+        "and email hashing but is not set. It must NEVER fall back to " +
+        "SESSION_SECRET or any other ambient secret — set EMAIL_SUB_HMAC_SECRET explicitly.",
+    );
+  }
+  return secret;
+}
+
+/**
+ * Require EMAIL_SUB_ENC_KEY — the base64-encoded 32-byte KEK for
+ * email-subscription field encryption (`emailEnc`) — and decode it. Mirrors
+ * `resolveKek()` in `lib/oauth/envelope-crypto.ts` (DEVICE_AUTH_KEK_BASE64):
+ * absence or a wrong-length decode both throw.
+ *
+ * Lazily required, same as `requireEmailSubHmacSecret()` — not checked at
+ * startup, never falls back to another secret.
+ */
+export function requireEmailSubEncKey(env: Env): Buffer {
+  const raw = env.EMAIL_SUB_ENC_KEY;
+  if (!raw) {
+    throw new Error(
+      "EMAIL_SUB_ENC_KEY is required for email-subscription field encryption " +
+        "but is not set. Set EMAIL_SUB_ENC_KEY to a base64-encoded 32-byte key.",
+    );
+  }
+  const key = Buffer.from(raw, "base64");
+  if (key.length !== 32) {
+    throw new Error(
+      `EMAIL_SUB_ENC_KEY must decode to exactly 32 bytes, got ${key.length}`,
+    );
+  }
+  return key;
+}
+
+/**
  * Resolve a raw-string secret: a local env var wins (dev / migrations), else
  * fetch from AWS Secrets Manager via the foundation resolver.
  *
@@ -1011,6 +1196,13 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     // Directory-search config seam (T4): pagination/rate-limit/timeout bounds
     // from DIRECTORY_SEARCH_* vars. Resolver already returns { directorySearch }.
     ...resolveDirectorySearchEnv(),
+    // Email-subscription config seam (§6): resolveEmailSubscriptionEnv() reads
+    // the numeric EMAIL_SUB_* vars only — the two required secrets are set
+    // directly below (never through this resolver, so they stay out of
+    // validateEnv()'s startup path).
+    ...resolveEmailSubscriptionEnv(),
+    // Collections config seam (§3): resolveCollectionEnv() reads COLLECTION_* vars.
+    ...resolveCollectionEnv(),
     DATABASE_URL: databaseUrl,
     DATABASE_URL_CN: process.env.DATABASE_URL_CN,
     DIRECT_URL: process.env.DIRECT_URL,
@@ -1042,6 +1234,13 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     AGENT_VERIFICATION_URI_BASE:
       process.env.AGENT_VERIFICATION_URI_BASE ||
       "https://example.com/agents/authorize",
+
+    // Email-subscription REQUIRED secrets — raw passthrough only, no default,
+    // no ARN/Secrets-Manager path. Absence is fine here (feature is off by
+    // default); requireEmailSubHmacSecret()/requireEmailSubEncKey() throw
+    // lazily when a handler needs them. NEVER derive these from SESSION_SECRET.
+    EMAIL_SUB_HMAC_SECRET: process.env.EMAIL_SUB_HMAC_SECRET,
+    EMAIL_SUB_ENC_KEY: process.env.EMAIL_SUB_ENC_KEY,
 
     // Supabase
     SUPABASE_URL: process.env.SUPABASE_URL,

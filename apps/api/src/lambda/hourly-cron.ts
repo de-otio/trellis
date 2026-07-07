@@ -131,6 +131,37 @@ export const handler = async (): Promise<void> => {
     emitPruneMetrics("SecurityEvent", { deleted: 0, circuitBreakerTripped: false }, true);
   }
 
+  // 3b. Prune expired EmailSubscription rows (retentionUntil < now): PENDING
+  //     rows never confirmed (email-bomb defense), dead CONFIRMED rows, and
+  //     expired UNSUBSCRIBED/BOUNCED suppression tombstones. Same batched helper
+  //     + circuit breaker as SecurityEvent. (Open Social Web / follow-by-email.)
+  try {
+    const cutoff = new Date();
+    const result = await batchedPruneExpired({
+      findExpiredIds: async (take) => {
+        const rows = await db.emailSubscription.findMany({
+          where: { retentionUntil: { lt: cutoff } },
+          select: { id: true },
+          take,
+        });
+        return rows.map((r) => r.id);
+      },
+      deleteByIds: async (ids) => {
+        const res = await db.emailSubscription.deleteMany({ where: { id: { in: ids } } });
+        return res.count;
+      },
+      batchSize: eventConfig.pruneBatchSize,
+      maxIterations: eventConfig.pruneMaxIterations,
+    });
+    if (result.deleted > 0 || result.circuitBreakerTripped) {
+      logger.info("Expired email subscriptions pruned", { deleted: result.deleted, circuitBreakerTripped: result.circuitBreakerTripped });
+    }
+    emitPruneMetrics("EmailSubscription", result, false);
+  } catch (err) {
+    logger.error("Email subscription cleanup failed", { error: err });
+    emitPruneMetrics("EmailSubscription", { deleted: 0, circuitBreakerTripped: false }, true);
+  }
+
   // 4. Prune expired InteractionEvent rows (expiresAt < now), batched with a
   //    circuit breaker (Surveillance-hardening Phase 0, P2). Silent retention
   //    failure converts the behavioral log into the unbounded surveillance
@@ -162,7 +193,7 @@ export const handler = async (): Promise<void> => {
  * isolates the `Table` dimension so the two tables don't cross-contaminate.
  */
 function emitPruneMetrics(
-  table: "SecurityEvent" | "InteractionEvent",
+  table: "SecurityEvent" | "InteractionEvent" | "EmailSubscription",
   result: { deleted: number; circuitBreakerTripped: boolean },
   failed: boolean,
 ): void {
