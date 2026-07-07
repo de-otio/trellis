@@ -12,7 +12,14 @@
  * - SMTP (generic, for any SMTP-compatible service)
  */
 
-import { getLogger, Logger, type LoggerEnv } from "./logger.js";
+// NOTE: this module is intentionally free of the structured (pino-backed)
+// trellis logger. It is bundled into the Cognito `create-auth-challenge`
+// Lambda via `createEmailProvider`, and pulling in the foundation logger would
+// bloat that bundle. The one place that logs (Resend usage-stats) uses
+// `console.error` instead. The AWS SES SDK is loaded through a lazy, cached
+// dynamic import (see `loadSesSdk` below) so it can stay an esbuild external
+// (provided by the Lambda runtime) and the client is reused across warm
+// invocations.
 
 export interface EmailSendOptions {
   from: string;
@@ -66,16 +73,16 @@ export interface EmailProvider {
 export class ResendEmailProvider implements EmailProvider {
   private apiKey: string;
   private baseUrl: string;
-  private logger: Logger;
 
   constructor(
     apiKey: string,
     baseUrl: string = "https://api.resend.com",
-    env?: LoggerEnv | any,
+    // Retained for call-site compatibility; unused (this module avoids the
+    // structured logger to keep the Lambda bundle lean).
+    _env?: unknown,
   ) {
     this.apiKey = apiKey;
     this.baseUrl = baseUrl;
-    this.logger = getLogger();
   }
 
   getName(): string {
@@ -163,10 +170,7 @@ export class ResendEmailProvider implements EmailProvider {
         periodEnd: periodEnd.toISOString(),
       };
     } catch (error) {
-      this.logger.error(
-        "[ResendEmailProvider] Error fetching usage stats:",
-        error,
-      );
+      console.error("[ResendEmailProvider] Error fetching usage stats:", error);
       return null;
     }
   }
@@ -200,53 +204,19 @@ export class AlibabaDirectMailProvider implements EmailProvider {
     return "alibaba-directmail";
   }
 
-  async sendEmail(options: EmailSendOptions): Promise<EmailSendResult> {
-    // Alibaba Cloud DirectMail uses Alibaba Cloud SDK
-    // This is a simplified implementation - in production, use @alicloud/dysmsapi-sdk
-    // For now, we'll use their REST API
-
-    const endpoint = `https://dm.${this.region}.aliyuncs.com`;
-    const action = "SingleSendMail";
-
-    // Build request parameters
-    const params = new URLSearchParams({
-      Action: action,
-      Version: "2015-11-23",
-      AccessKeyId: this.accessKeyId,
-      Format: "JSON",
-      SignatureMethod: "HMAC-SHA1",
-      Timestamp: new Date().toISOString().replace(/[:\-]|\.\d{3}/g, ""),
-      SignatureVersion: "1.0",
-      AccountName: this.accountName,
-      FromAlias: options.from.split("@")[0],
-      ToAddress: Array.isArray(options.to) ? options.to.join(",") : options.to,
-      Subject: options.subject,
-      HtmlBody: options.html || options.text || "",
-      TextBody: options.text || "",
-      ReplyToAddress: options.replyTo || "false",
-    });
-
-    // Note: In production, you'd need to properly sign the request using HMAC-SHA1
-    // This is a placeholder - implement proper Alibaba Cloud signature algorithm
-    const response = await fetch(`${endpoint}?${params.toString()}`, {
-      method: "POST",
-    });
-
-    if (!response.ok) {
-      const error = await response.text();
-      throw new Error(
-        `Alibaba DirectMail API error: ${response.status} ${error}`,
-      );
-    }
-
-    const data = (await response.json()) as {
-      EnvId?: string;
-      RequestId?: string;
-    };
-    return {
-      messageId: data.EnvId || data.RequestId || "unknown",
-      provider: "alibaba-directmail",
-    };
+  async sendEmail(_options: EmailSendOptions): Promise<EmailSendResult> {
+    // NOT IMPLEMENTED. The earlier version issued an UNSIGNED request to the
+    // Alibaba DirectMail REST API (no HMAC-SHA1 signature), which the service
+    // rejects — it never actually delivered mail. Rather than silently issue a
+    // broken request, fail loudly. A real implementation must sign requests via
+    // the Alibaba Cloud SDK / proper signature algorithm before this is enabled.
+    void this.accessKeyId;
+    void this.accessKeySecret;
+    void this.region;
+    void this.accountName;
+    throw new Error(
+      "AlibabaDirectMailProvider.sendEmail is not implemented (requires a signed Alibaba Cloud SDK integration)",
+    );
   }
 
   async getUsageStats(): Promise<EmailUsageStats | null> {
@@ -284,55 +254,19 @@ export class TencentSESProvider implements EmailProvider {
     return "tencent-ses";
   }
 
-  async sendEmail(options: EmailSendOptions): Promise<EmailSendResult> {
-    // Tencent Cloud SES uses Tencent Cloud SDK
-    // This is a simplified implementation - in production, use tencentcloud-sdk-nodejs
-    // For now, we'll use their API v3
-
-    const endpoint = `https://ses.tencentcloudapi.com`;
-
-    // Note: In production, you'd need to properly sign the request using TC3-HMAC-SHA256
-    // This is a placeholder - implement proper Tencent Cloud signature algorithm
-    const payload = {
-      FromEmailAddress: this.fromEmail,
-      Destination: Array.isArray(options.to) ? options.to : [options.to],
-      Subject: options.subject,
-      Template: {
-        TemplateID: 0, // Use template ID if using templates
-        TemplateData: JSON.stringify({
-          html: options.html || options.text || "",
-          text: options.text || "",
-        }),
-      },
-      Simple: {
-        Html: options.html || options.text || "",
-        Text: options.text || "",
-      },
-    };
-
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-TC-Action": "SendEmail",
-        "X-TC-Version": "2020-10-14",
-        "X-TC-Region": this.region,
-      },
-      body: JSON.stringify(payload),
-    });
-
-    if (!response.ok) {
-      const error = await response.text();
-      throw new Error(`Tencent SES API error: ${response.status} ${error}`);
-    }
-
-    const data = (await response.json()) as {
-      Response?: { MessageId?: string };
-    };
-    return {
-      messageId: data.Response?.MessageId || "unknown",
-      provider: "tencent-ses",
-    };
+  async sendEmail(_options: EmailSendOptions): Promise<EmailSendResult> {
+    // NOT IMPLEMENTED. The earlier version issued an UNSIGNED request to the
+    // Tencent Cloud SES v3 API (no TC3-HMAC-SHA256 signature), which the service
+    // rejects — it never actually delivered mail. Fail loudly rather than issue
+    // a broken request. A real implementation must sign requests via the Tencent
+    // Cloud SDK / TC3-HMAC-SHA256 before this is enabled.
+    void this.secretId;
+    void this.secretKey;
+    void this.region;
+    void this.fromEmail;
+    throw new Error(
+      "TencentSESProvider.sendEmail is not implemented (requires a signed Tencent Cloud SDK integration)",
+    );
   }
 
   async getUsageStats(): Promise<EmailUsageStats | null> {
@@ -343,59 +277,99 @@ export class TencentSESProvider implements EmailProvider {
 }
 
 /**
+ * Lazily import `@aws-sdk/client-ses` once and cache the module promise.
+ *
+ * Deferring the import (a) lets the Cognito Lambda keep `@aws-sdk/*` marked
+ * external in esbuild (the SES SDK is provided by the Lambda runtime, not
+ * bundled), and (b) means non-SES code paths never pay to load it. The cached
+ * promise is reused across warm Lambda invocations.
+ */
+let sesSdkPromise:
+  | Promise<typeof import("@aws-sdk/client-ses")>
+  | undefined;
+function loadSesSdk(): Promise<typeof import("@aws-sdk/client-ses")> {
+  if (!sesSdkPromise) {
+    sesSdkPromise = import("@aws-sdk/client-ses");
+  }
+  return sesSdkPromise;
+}
+
+/**
  * AWS SES Provider (Global, including China regions)
+ *
+ * Sends via the AWS SDK (`@aws-sdk/client-ses`), signed with SigV4 by the SDK.
+ * Uses the **default credential provider chain** — no static keys are passed,
+ * so it picks up the ECS task role / Lambda execution role automatically.
  *
  * AWS SES works globally and has China regions (Beijing, Ningxia).
  * Documentation: https://docs.aws.amazon.com/ses/
  */
 export class AWSSESProvider implements EmailProvider {
-  private accessKeyId: string;
-  private secretAccessKey: string;
-  private region: string; // e.g., 'us-east-1', 'cn-north-1', 'cn-northwest-1'
+  private region: string; // e.g. 'us-east-1', 'cn-north-1', 'cn-northwest-1'
+  private fromEmail?: string;
+  private configurationSet?: string;
+  /** Cached SESClient promise — reused across warm invocations. */
+  private clientPromise?: Promise<
+    InstanceType<typeof import("@aws-sdk/client-ses").SESClient>
+  >;
 
   constructor(
-    accessKeyId: string,
-    secretAccessKey: string,
     region: string = "us-east-1",
+    opts?: { fromEmail?: string; configurationSet?: string },
   ) {
-    this.accessKeyId = accessKeyId;
-    this.secretAccessKey = secretAccessKey;
     this.region = region;
+    this.fromEmail = opts?.fromEmail;
+    this.configurationSet = opts?.configurationSet;
   }
 
   getName(): string {
     return "aws-ses";
   }
 
+  private async getClient() {
+    if (!this.clientPromise) {
+      this.clientPromise = (async () => {
+        const { SESClient } = await loadSesSdk();
+        // NO `credentials` option → default credential provider chain
+        // (ECS task role / Lambda execution role / env / SSO).
+        return new SESClient({ region: this.region });
+      })();
+    }
+    return this.clientPromise;
+  }
+
   async sendEmail(options: EmailSendOptions): Promise<EmailSendResult> {
-    // AWS SES uses AWS Signature Version 4
-    // This is a simplified implementation - in production, use AWS SDK
-    // For now, we'll use their REST API
+    const source = options.from || this.fromEmail;
+    if (!source) {
+      throw new Error(
+        "AWS SES requires a from address (options.from or the provider's fromEmail)",
+      );
+    }
 
-    const endpoint = `https://email.${this.region}.amazonaws.com`;
+    const { SendEmailCommand } = await loadSesSdk();
+    const client = await this.getClient();
 
-    // Note: In production, you'd need to properly sign the request using AWS Signature V4
-    // This is a placeholder - implement proper AWS signature algorithm
-    const payload = {
-      Source: options.from,
+    const toAddresses = Array.isArray(options.to) ? options.to : [options.to];
+    const ccAddresses = options.cc
+      ? Array.isArray(options.cc)
+        ? options.cc
+        : [options.cc]
+      : undefined;
+    const bccAddresses = options.bcc
+      ? Array.isArray(options.bcc)
+        ? options.bcc
+        : [options.bcc]
+      : undefined;
+
+    const command = new SendEmailCommand({
+      Source: source,
       Destination: {
-        ToAddresses: Array.isArray(options.to) ? options.to : [options.to],
-        CcAddresses: options.cc
-          ? Array.isArray(options.cc)
-            ? options.cc
-            : [options.cc]
-          : undefined,
-        BccAddresses: options.bcc
-          ? Array.isArray(options.bcc)
-            ? options.bcc
-            : [options.bcc]
-          : undefined,
+        ToAddresses: toAddresses,
+        CcAddresses: ccAddresses,
+        BccAddresses: bccAddresses,
       },
       Message: {
-        Subject: {
-          Data: options.subject,
-          Charset: "UTF-8",
-        },
+        Subject: { Data: options.subject, Charset: "UTF-8" },
         Body: {
           Html: options.html
             ? { Data: options.html, Charset: "UTF-8" }
@@ -406,27 +380,14 @@ export class AWSSESProvider implements EmailProvider {
         },
       },
       ReplyToAddresses: options.replyTo ? [options.replyTo] : undefined,
-    };
-
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-amz-json-1.1",
-        "X-Amz-Target": "AWSSimpleEmailService.SendEmail",
-      },
-      body: JSON.stringify(payload),
+      ...(this.configurationSet
+        ? { ConfigurationSetName: this.configurationSet }
+        : {}),
     });
 
-    if (!response.ok) {
-      const error = await response.text();
-      throw new Error(`AWS SES API error: ${response.status} ${error}`);
-    }
-
-    const data = (await response.json()) as {
-      SendEmailResult?: { MessageId?: string };
-    };
+    const response = await client.send(command);
     return {
-      messageId: data.SendEmailResult?.MessageId || "unknown",
+      messageId: response.MessageId || "unknown",
       provider: "aws-ses",
     };
   }
@@ -458,9 +419,114 @@ export interface EmailProviderConfig {
   tencentRegion?: string;
   tencentFromEmail?: string;
   // AWS SES config
+  /**
+   * @deprecated Ignored for authentication. The SES provider now uses the
+   * default AWS credential provider chain (ECS task / Lambda execution role).
+   * Retained only so existing call sites that still pass it keep compiling.
+   */
   awsAccessKeyId?: string;
+  /**
+   * @deprecated Ignored for authentication. See `awsAccessKeyId`.
+   */
   awsSecretAccessKey?: string;
   awsRegion?: string;
+  /** Default From address for the SES provider (used when a send omits `from`). */
+  awsFromEmail?: string;
+  /** SES configuration set name applied to every send (event publishing/tracking). */
+  sesConfigurationSet?: string;
+}
+
+/**
+ * Structural source for {@link emailProviderConfigFromEnv} /
+ * {@link validateEmailEnv}. Both the application `Env` object and the raw
+ * `process.env` satisfy this shape, so a single helper serves the API and the
+ * Cognito Lambda. All fields are optional strings.
+ */
+export interface EmailEnvSource {
+  EMAIL_SERVICE?: string;
+  EMAIL_SERVICE_REGION?: string;
+  AWS_SES_REGION?: string;
+  SES_REGION?: string;
+  AWS_REGION?: string;
+  FROM_EMAIL?: string;
+  SES_CONFIGURATION_SET?: string;
+  RESEND_API_KEY?: string;
+  RESEND_BASE_URL?: string;
+  ALIBABA_ACCESS_KEY_ID?: string;
+  ALIBABA_ACCESS_KEY_SECRET?: string;
+  ALIBABA_REGION?: string;
+  ALIBABA_ACCOUNT_NAME?: string;
+  TENCENT_SECRET_ID?: string;
+  TENCENT_SECRET_KEY?: string;
+  TENCENT_REGION?: string;
+  TENCENT_FROM_EMAIL?: string;
+}
+
+/**
+ * Build an {@link EmailProviderConfig} from an env-shaped source.
+ *
+ * Region precedence for the AWS SES provider:
+ *   EMAIL_SERVICE_REGION → AWS_SES_REGION → SES_REGION → AWS_REGION → us-east-1.
+ *
+ * Shared by the API (passes `Env`) and the Cognito magic-link Lambda (passes
+ * `process.env`) so provider selection is defined in exactly one place.
+ */
+export function emailProviderConfigFromEnv(
+  src: EmailEnvSource,
+): EmailProviderConfig {
+  const provider =
+    (src.EMAIL_SERVICE as EmailProviderConfig["provider"]) || "aws-ses";
+  const awsRegion =
+    src.EMAIL_SERVICE_REGION ||
+    src.AWS_SES_REGION ||
+    src.SES_REGION ||
+    src.AWS_REGION ||
+    "us-east-1";
+  return {
+    provider,
+    // Resend
+    resendApiKey: src.RESEND_API_KEY,
+    resendBaseUrl: src.RESEND_BASE_URL,
+    // AWS SES (role-based; no static credentials)
+    awsRegion,
+    awsFromEmail: src.FROM_EMAIL,
+    sesConfigurationSet: src.SES_CONFIGURATION_SET,
+    // Alibaba DirectMail
+    alibabaAccessKeyId: src.ALIBABA_ACCESS_KEY_ID,
+    alibabaAccessKeySecret: src.ALIBABA_ACCESS_KEY_SECRET,
+    alibabaRegion: src.ALIBABA_REGION,
+    alibabaAccountName: src.ALIBABA_ACCOUNT_NAME,
+    // Tencent SES
+    tencentSecretId: src.TENCENT_SECRET_ID,
+    tencentSecretKey: src.TENCENT_SECRET_KEY,
+    tencentRegion: src.TENCENT_REGION,
+    tencentFromEmail: src.TENCENT_FROM_EMAIL,
+  };
+}
+
+/**
+ * Validate email-related env for the EXPLICITLY selected provider. Returns a
+ * list of human-readable errors (empty = valid). Only the fields the selected
+ * provider actually needs are checked:
+ *   - `resend`  → RESEND_API_KEY
+ *   - `aws-ses` → FROM_EMAIL
+ *
+ * Callers gate this on `EMAIL_SERVICE` being set, so a deployment that never
+ * selects a provider is never penalised.
+ */
+export function validateEmailEnv(src: EmailEnvSource): string[] {
+  const errors: string[] = [];
+  const provider = src.EMAIL_SERVICE;
+  if (provider === "resend") {
+    if (!src.RESEND_API_KEY) {
+      errors.push("RESEND_API_KEY is required when EMAIL_SERVICE=resend");
+    }
+  } else if (provider === "aws-ses") {
+    if (!src.FROM_EMAIL) {
+      errors.push("FROM_EMAIL is required when EMAIL_SERVICE=aws-ses");
+    }
+  }
+  return errors;
 }
 
 export function createEmailProvider(
@@ -513,17 +579,14 @@ export function createEmailProvider(
 
     if (
       config.provider === "aws-ses" ||
-      (config.provider === "resend" && config.awsAccessKeyId)
+      (config.provider === "resend" &&
+        (config.awsAccessKeyId || config.awsFromEmail))
     ) {
-      if (!config.awsAccessKeyId || !config.awsSecretAccessKey) {
-        throw new Error("AWS SES requires accessKeyId and secretAccessKey");
-      }
-      // Use China region for AWS SES
-      return new AWSSESProvider(
-        config.awsAccessKeyId,
-        config.awsSecretAccessKey,
-        config.awsRegion || "cn-north-1",
-      );
+      // Role-based auth (default credential chain); China region by default.
+      return new AWSSESProvider(config.awsRegion || "cn-north-1", {
+        fromEmail: config.awsFromEmail,
+        configurationSet: config.sesConfigurationSet,
+      });
     }
   }
 
@@ -572,14 +635,14 @@ export function createEmailProvider(
       );
 
     case "aws-ses":
-      if (!config.awsAccessKeyId || !config.awsSecretAccessKey) {
-        throw new Error("AWS SES requires accessKeyId and secretAccessKey");
-      }
-      return new AWSSESProvider(
-        config.awsAccessKeyId,
-        config.awsSecretAccessKey,
-        config.awsRegion || "us-east-1",
-      );
+      // Role-based auth: the default AWS credential provider chain supplies
+      // credentials (ECS task role / Lambda execution role). Any
+      // awsAccessKeyId/awsSecretAccessKey on the config are @deprecated and
+      // ignored — no static keys are threaded into the client.
+      return new AWSSESProvider(config.awsRegion || "us-east-1", {
+        fromEmail: config.awsFromEmail,
+        configurationSet: config.sesConfigurationSet,
+      });
 
     default:
       throw new Error(`Unknown email provider: ${config.provider}`);

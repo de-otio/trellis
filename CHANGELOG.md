@@ -13,6 +13,23 @@ series:
 
 Entries below are for `@de-otio/trellis` unless noted otherwise.
 
+## [Unreleased]
+
+### Added
+
+- **Email provider abstraction with AWS SES and Resend support.** Transactional
+  emails (magic-link authentication tokens) are sent via a swappable provider
+  interface (`EmailProvider`), selected at runtime via the `EMAIL_SERVICE` env
+  var (`"aws-ses"` | `"resend"`, default: `"aws-ses"`). AWS SES uses the
+  default credential provider chain (role-based on ECS/Lambda, no static keys);
+  Resend uses an API key. The abstraction is shared between the API server and
+  the Cognito magic-link Lambda trigger (`create-auth-challenge`), ensuring
+  consistent provider selection. Email identity provisioning (DKIM, MAIL FROM,
+  DMARC, configuration set, bounce/complaint SNS) is handled by the `SesEmailIdentity`
+  CDK construct in `@de-otio/saas-foundation-cdk`. Trellis itself requires only
+  `FROM_EMAIL` for SES (verified in the sending region) or `RESEND_API_KEY` for
+  Resend; all other SES configuration is infrastructure-layer only.
+
 ## [0.20.0] — 2026-07-05
 
 ### Added
