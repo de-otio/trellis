@@ -5,6 +5,7 @@
  * magic link tokens, stores hashed tokens in DynamoDB, and sends emails via SES.
  */
 
+import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { mockDynamoSend, mockSesSend } = vi.hoisted(() => ({
@@ -87,6 +88,40 @@ describe("CreateAuthChallenge Lambda", () => {
 
     // challengeMetadata should be set
     expect(result.response.challengeMetadata).toBe("MAGIC_LINK");
+  });
+
+  it("should send via the email abstraction with content + token/hash intact", async () => {
+    const handler = await loadHandler();
+    const event = makeEvent();
+
+    const result = await handler(event);
+
+    // Routed through the email-provider abstraction → AWS SES SDK send().
+    expect(mockSesSend).toHaveBeenCalledTimes(1);
+    const sesInput = mockSesSend.mock.calls[0][0].input;
+
+    // From / to / subject preserved exactly.
+    expect(sesInput.Source).toBe("Trellis <noreply@trellis.test>");
+    expect(sesInput.Destination.ToAddresses).toEqual(["user@example.com"]);
+    expect(sesInput.Message.Subject.Data).toBe("Sign in to Trellis");
+
+    // The token issued to the caller must appear in the email body...
+    const token = result.response.privateChallengeParameters.token as string;
+    expect(sesInput.Message.Body.Html.Data).toContain(
+      `token=${token}`,
+    );
+    expect(sesInput.Message.Body.Text.Data).toContain(
+      `token=${token}`,
+    );
+    expect(sesInput.Message.Body.Html.Data).toContain("Sign in to Trellis");
+
+    // ...and DynamoDB must store the SHA-256 hash of that same token, never
+    // the token itself.
+    const putCall = mockDynamoSend.mock.calls[2][0];
+    const expectedHash = createHash("sha256").update(token).digest("hex");
+    expect(putCall.input.Item.pk.S).toBe(`magic-link:${expectedHash}`);
+    expect(putCall.input.Item.pk.S).not.toContain(token);
+    expect(putCall.input.Item.email.S).toBe("user@example.com");
   });
 
   it("should store the token with a 5-minute TTL in DynamoDB", async () => {

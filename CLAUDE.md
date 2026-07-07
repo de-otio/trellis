@@ -131,6 +131,26 @@ All configuration comes from `process.env`. Secrets are in AWS SSM Parameter Sto
 
 See `apps/api/src/env.ts` for the full environment schema.
 
+### Email Provider Configuration
+
+Trellis sends transactional email (magic-link login tokens) through a swappable provider abstraction, supporting both AWS SES and Resend. Provider selection and configuration is determined from environment variables read identically by both the API server and the Cognito magic-link Lambda trigger, ensuring consistent behavior.
+
+**Provider selection:** `EMAIL_SERVICE` env var (`"aws-ses"` | `"resend"`, default: `"aws-ses"`)
+
+**AWS SES** (`EMAIL_SERVICE=aws-ses`):
+- Credentials: Uses the default AWS credential provider chain (IAM role on ECS/Lambda; no static keys stored).
+- Required: `FROM_EMAIL` — default sender address (email address verified in SES for the sending region).
+- Optional: `AWS_SES_REGION` or `SES_REGION` (defaults to `AWS_REGION` or `us-east-1`).
+- Optional: `SES_CONFIGURATION_SET` — SES configuration set name (for event publishing and IP pool management).
+- IAM permission required: `ses:SendEmail` and `ses:SendRawEmail` on the verified sender identity ARN.
+- **Note:** Domain identity, Easy DKIM, custom MAIL FROM, and bounce/complaint SNS topic are provisioned separately by the `SesEmailIdentity` CDK construct in `@de-otio/saas-foundation-cdk` (no SES configuration needed in the trellis package itself).
+
+**Resend** (`EMAIL_SERVICE=resend`):
+- Required: `RESEND_API_KEY` — API key for Resend (stored in SSM Parameter Store).
+- Sends via HTTPS REST API; no AWS credentials needed.
+
+All other configuration (DMARC policy, DNS records, event destinations) is handled by the consuming application's infrastructure as code.
+
 ## Development Best Practices
 
 1. **Always read files before editing**

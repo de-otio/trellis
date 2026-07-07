@@ -1,12 +1,16 @@
 import { randomBytes, createHash } from "node:crypto";
 import { DynamoDBClient, PutItemCommand, GetItemCommand, UpdateItemCommand } from "@aws-sdk/client-dynamodb";
-import { SESClient, SendEmailCommand } from "@aws-sdk/client-ses";
 import { Logger } from "@aws-lambda-powertools/logger";
+import { createEmailProvider, emailProviderConfigFromEnv } from "../lib/email-provider.js";
 
 const logger = new Logger({ serviceName: "create-auth-challenge" });
 
 const dynamo = new DynamoDBClient({ region: process.env.AWS_REGION });
-const ses = new SESClient({ region: process.env.SES_REGION || process.env.AWS_REGION });
+// Email provider built once at module scope from env (region precedence lives
+// in emailProviderConfigFromEnv, shared with the API). The underlying SES SDK
+// is a lazy, cached dynamic import inside AWSSESProvider, so it stays an
+// esbuild external and the SESClient is reused across warm invocations.
+const emailProvider = createEmailProvider(emailProviderConfigFromEnv(process.env));
 const TABLE = process.env.DYNAMODB_TABLE!;
 const DOMAIN = process.env.DOMAIN!;
 
@@ -78,30 +82,23 @@ export const handler = async (event: any) => {
     throw err;
   }
 
-  // Send magic link email via SES
+  // Send magic link email via the email-provider abstraction (AWS SES by
+  // default, role-based auth). Subject/HTML/text content is unchanged.
   const magicLink = `https://${DOMAIN}/auth/verify?token=${token}&email=${encodeURIComponent(email)}`;
   try {
-    await ses.send(new SendEmailCommand({
-      Source: `Trellis <noreply@${DOMAIN}>`,
-      Destination: { ToAddresses: [email] },
-      Message: {
-        Subject: { Data: "Sign in to Trellis" },
-        Body: {
-          Html: {
-            Data: `
+    await emailProvider.sendEmail({
+      from: `Trellis <noreply@${DOMAIN}>`,
+      to: email,
+      subject: "Sign in to Trellis",
+      html: `
               <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 32px;">
                 <h2 style="color: #1a1a1a; margin-bottom: 24px;">Sign in to Trellis</h2>
                 <p style="color: #4a4a4a; font-size: 16px; line-height: 1.5;">Click the button below to sign in. This link expires in 5 minutes.</p>
                 <a href="${magicLink}" style="display: inline-block; background: #2563eb; color: #fff; padding: 14px 28px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 16px; margin: 24px 0;">Sign in to Trellis</a>
                 <p style="color: #9a9a9a; font-size: 13px; margin-top: 32px;">If you didn't request this, you can safely ignore this email.</p>
               </div>`,
-          },
-          Text: {
-            Data: `Sign in to Trellis\n\nClick this link to sign in (expires in 5 minutes):\n${magicLink}\n\nIf you didn't request this, ignore this email.`,
-          },
-        },
-      },
-    }));
+      text: `Sign in to Trellis\n\nClick this link to sign in (expires in 5 minutes):\n${magicLink}\n\nIf you didn't request this, ignore this email.`,
+    });
   } catch (err) {
     logger.error("Failed to send magic link email", { error: err });
     throw err;

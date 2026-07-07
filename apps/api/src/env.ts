@@ -33,6 +33,7 @@ import type { DirectoryProfileConfig } from "./lib/org-category/directory-profil
 import { resolveDirectoryProfileConfig } from "./lib/org-category/directory-profile-config.js";
 import type { DirectorySearchConfig } from "./lib/org-category/directory-search-config.js";
 import { resolveDirectorySearchEnv } from "./lib/org-category/directory-search-config.js";
+import { validateEmailEnv } from "./lib/email-provider.js";
 
 const stage = process.env.STAGE || "dev";
 
@@ -167,6 +168,8 @@ export interface Env {
   EMAIL_SERVICE_REGION?: string;
   FROM_EMAIL?: string;
   AWS_SES_REGION?: string;
+  /** SES configuration set applied to every send (event publishing/tracking). */
+  SES_CONFIGURATION_SET?: string;
   RESEND_API_KEY?: string;
   ALIBABA_ACCESS_KEY_ID?: string;
   ALIBABA_ACCESS_KEY_SECRET?: string;
@@ -900,6 +903,15 @@ export function validateEnv(env: Env): string[] {
     );
   }
 
+  // Email provider config — validate ONLY when a provider is explicitly
+  // selected via the RAW env var. buildEnv() defaults EMAIL_SERVICE to
+  // "aws-ses", so reading env.EMAIL_SERVICE here would fire for every
+  // deployment; reading process.env.EMAIL_SERVICE keeps deployments that never
+  // opt in unaffected.
+  if (process.env.EMAIL_SERVICE) {
+    errors.push(...validateEmailEnv(process.env));
+  }
+
   return errors;
 }
 
@@ -1078,6 +1090,7 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     EMAIL_SERVICE_REGION: process.env.EMAIL_SERVICE_REGION,
     FROM_EMAIL: process.env.FROM_EMAIL,
     AWS_SES_REGION: process.env.AWS_SES_REGION || process.env.AWS_REGION || "us-east-1",
+    SES_CONFIGURATION_SET: process.env.SES_CONFIGURATION_SET,
     RESEND_API_KEY: process.env.RESEND_API_KEY,
     ALIBABA_ACCESS_KEY_ID: process.env.ALIBABA_ACCESS_KEY_ID,
     ALIBABA_ACCESS_KEY_SECRET: process.env.ALIBABA_ACCESS_KEY_SECRET,
