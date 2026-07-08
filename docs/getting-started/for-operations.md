@@ -51,6 +51,41 @@ Secrets (database credentials, session secret, third-party API keys) are never
 read from the repository or compiled in — they arrive through the environment
 at runtime.
 
+## Opt-in capability features (Open Social Web)
+
+Three capabilities ship **disabled by default**, each gated by a global feature
+toggle (see the [Feature Flags guide](../guides/feature-flags.md)):
+`email_subscriptions_enabled`, `collections_enabled`, and
+`year_in_review_enabled`. While a toggle is off its routes return 404, so
+embedding the library never exposes these endpoints until an operator opts in
+per environment.
+
+**Enabling a feature in an environment** is two steps:
+
+1. **Apply the schema migration** that ships with the feature (Prisma
+   migrations, as part of your release — see [Health and lifecycle](#health-and-lifecycle)).
+2. **Turn the toggle on** — set it `true` in that environment's `FEATURE_FLAGS`
+   config (the source of truth that `seed:feature-toggles` writes to the DB on
+   deploy), or flip it for a single tenant with a `setToggle` override.
+
+**Follow-by-email additionally requires two secrets.** Email addresses are PII,
+and these guard them; both are **required whenever the feature is used and never
+fall back to any other secret** (a deliberate key-separation property). If either
+is missing while the toggle is on, the subscribe path returns a generic 500
+rather than silently degrading:
+
+| Variable | Purpose | Contract |
+|---|---|---|
+| `EMAIL_SUB_HMAC_SECRET` | Signs the confirm/unsubscribe capability tokens and keys the email lookup-hash (via HKDF sub-keys) | High-entropy string, **≥ 32 characters**. Rotating it invalidates in-flight confirm/unsubscribe links issued under the old value. |
+| `EMAIL_SUB_ENC_KEY` | Key-encryption key for the per-record envelope encryption of stored email addresses | **Base64 that decodes to exactly 32 bytes** (256-bit). Provision from your secret store; do **not** reuse `SESSION_SECRET`. |
+
+Provision both the same way as your other secrets (parameter/secret store →
+environment). Environments that leave `email_subscriptions_enabled` off do not
+need them. Every other operational parameter for these features (rate limits,
+token TTLs, retention windows, collection caps) is env-driven with a safe
+default — see the `EMAIL_SUB_*` and `COLLECTION_*` entries in
+[`apps/api/src/env.ts`](https://github.com/de-otio/trellis/blob/main/apps/api/src/env.ts).
+
 ## Monitoring conventions
 
 Because the consuming application owns the runtime, it also owns dashboards and

@@ -87,3 +87,24 @@ The unauthenticated `GET /api/feature-flags` route
 feature configuration for a request (region from the `region` query parameter
 or detected from the request), falling back to the static region config if the
 database is unavailable.
+
+## Capability toggles: Open Social Web
+
+Three capabilities ship **off by default** behind global toggles and are gated
+at the route layer by `featureToggleMiddleware`
+(`apps/api/src/lib/feature-gate-middleware.ts`). While a toggle is off, its
+entire route set responds **404** — indistinguishable from a route that does
+not exist, so no information leaks about the feature — and resolution **fails
+closed** to disabled if the toggle cannot be read.
+
+| Toggle key | Enables | Notes |
+|---|---|---|
+| `email_subscriptions_enabled` | Anonymous follow-by-email (`/api/subscriptions/email…`, owner subscriber counts) | **Also requires the two `EMAIL_SUB_*` secrets** (see the [Operations guide](../getting-started/for-operations.md)); with the toggle on but secrets absent, the subscribe path returns a generic 500 by design. |
+| `collections_enabled` | Curated collections / lists (`/api/collections…`) | — |
+| `year_in_review_enabled` | Year-in-review recap (`/api/recap/…`) | — |
+
+Enable one per environment by setting it `true` in that environment's
+`FEATURE_FLAGS` config (the seed source of truth) and re-running
+`seed:feature-toggles`, or per tenant via a tenant-scoped `setToggle` override.
+All three default to `false` in `apps/api/scripts/seed-feature-toggles.ts`, and
+each also requires its schema migration to be applied.
