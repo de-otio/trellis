@@ -686,6 +686,25 @@ export class InvitationHandler {
         },
       );
 
+      // AUTH GATE: write the raw DynamoDB record the Cognito PreSignUp trigger
+      // reads. Without this the invited user can NEVER pass the (fail-closed)
+      // gate — PreSignUp reads only this item and cannot see the Prisma row.
+      // Keyed off the same code the user presents at signup (see the casing
+      // note in invitation-presignup-record.ts). Done AFTER the Prisma create
+      // so the failure mode is fail-closed: if this throws, the outer catch
+      // returns 500 and the (now-orphaned, un-redeemable) Prisma row can be
+      // deleted/recreated — far safer than handing out a code that can't be
+      // used, and safer than a Dynamo-first order that could leave a usable
+      // code with no Prisma tracking.
+      const { writePreSignUpInvitationRecord } = await import(
+        "./invitation-presignup-record.js"
+      );
+      await writePreSignUpInvitationRecord({
+        code: invitation.code,
+        expiresAt: expiresAt!,
+        email: invitation.email,
+      });
+
       return this.securityHeaders.createSecureResponse(
         JSON.stringify({
           invitation: {

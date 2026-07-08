@@ -231,6 +231,31 @@ export const handler: PostConfirmationTriggerHandler = async (event) => {
 
   await primeClaimsCache(cognitoSub, result);
 
+  // AUTH GATE: burn the PreSignUp invitation record so the code cannot be
+  // redeemed a second time — PreSignUp (pre-signup.ts) rejects `used` items,
+  // and it reads ONLY this DynamoDB record (never Prisma). Best-effort AFTER
+  // the provisioning transaction: the account is already committed and a
+  // DynamoDB hiccup must never roll it back (same doctrine as the pseudonym /
+  // security-event steps above). This still fails closed on a lost marker —
+  // PreSignUp rejects a missing item too, and the record carries a TTL. A
+  // persistent failure is logged loudly (ops-visible) rather than swallowed.
+  if (invitationCode) {
+    try {
+      const { markPreSignUpInvitationRecordUsed } = await import(
+        "../lib/invitation-presignup-record.js"
+      );
+      await markPreSignUpInvitationRecordUsed({
+        code: invitationCode,
+        usedBy: result.userId,
+      });
+    } catch (err) {
+      logger.error("postconfirm.invitation_record_mark_used_failed", {
+        cognitoSub,
+        reason: (err as { name?: string }).name ?? "unknown",
+      });
+    }
+  }
+
   // Signup-metadata SecurityEvent (P3). Emitted AFTER the provisioning
   // transaction commits so a telemetry hiccup can never roll back account
   // creation; the helper itself also fails open. Cognito's PostConfirmation

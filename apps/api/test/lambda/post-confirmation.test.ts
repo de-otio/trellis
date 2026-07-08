@@ -21,6 +21,7 @@ const {
   mockTenantMemberUpsert,
   mockTenantDomainFindUnique,
   mockParentalLinkUpsert,
+  mockInvitationFindUnique,
   mockDdbSend,
 } = vi.hoisted(() => ({
   mockSecretsSend: vi.fn(),
@@ -35,6 +36,7 @@ const {
   mockTenantMemberUpsert: vi.fn(),
   mockTenantDomainFindUnique: vi.fn(),
   mockParentalLinkUpsert: vi.fn(),
+  mockInvitationFindUnique: vi.fn(),
   mockDdbSend: vi.fn(),
 }));
 
@@ -131,6 +133,9 @@ function makeTx() {
     tenantDomain: {
       findUnique: mockTenantDomainFindUnique,
     },
+    invitation: {
+      findUnique: mockInvitationFindUnique,
+    },
   };
 }
 
@@ -143,6 +148,7 @@ function makeEvent(opts: {
   handle?: string;
   dateOfBirth?: string;
   guardianEmail?: string;
+  invitationCode?: string;
 } = {}) {
   const attrs: Record<string, string> = {
     sub: "cognito-sub-abc123",
@@ -157,7 +163,12 @@ function makeEvent(opts: {
   return {
     triggerSource: opts.triggerSource ?? "PostConfirmation_ConfirmSignUp",
     userName: "cognito-sub-abc123",
-    request: { userAttributes: attrs },
+    request: {
+      userAttributes: attrs,
+      ...(opts.invitationCode !== undefined
+        ? { clientMetadata: { invitationCode: opts.invitationCode } }
+        : {}),
+    },
     response: {},
   } as any;
 }
@@ -214,6 +225,7 @@ beforeEach(() => {
   mockTenantDomainFindUnique.mockResolvedValue(null);
   mockUserFindUnique.mockResolvedValue(null);
   mockParentalLinkUpsert.mockResolvedValue({});
+  mockInvitationFindUnique.mockResolvedValue(null);
   mockDdbSend.mockResolvedValue({});
 });
 
@@ -700,5 +712,52 @@ describe("PostConfirmation Lambda — idempotency and failure", () => {
     });
     const handler = await loadHandler();
     await expect(handler(makeEvent(), {} as any, () => {})).resolves.toBeDefined();
+  });
+});
+
+describe("PostConfirmation Lambda — invitation gate", () => {
+  it("burns the PreSignUp invitation record (used:true) when a code was presented", async () => {
+    const handler = await loadHandler();
+    await handler(
+      makeEvent({ invitationCode: "invite99" }),
+      {} as any,
+      () => {},
+    );
+
+    // A PutItem must target the PreSignUp record, keyed to the (upper-cased)
+    // code, marking it used — so the code cannot be redeemed a second time.
+    const burnCall = mockDdbSend.mock.calls.find(
+      (c) => c[0]?.kind === "PUT" && c[0]?.input?.Item?.pk?.S?.startsWith("invitations:"),
+    );
+    expect(burnCall).toBeDefined();
+    expect(burnCall![0].input.Item.pk).toEqual({ S: "invitations:INVITE99" });
+    expect(burnCall![0].input.Item.sk).toEqual({ S: "v" });
+    expect(burnCall![0].input.Item.usedBy).toEqual({
+      S: "u_clxxxxxxxxxxxxxxxxxxxxxx",
+    });
+  });
+
+  it("does not touch the invitation record when no code was presented", async () => {
+    const handler = await loadHandler();
+    await handler(makeEvent(), {} as any, () => {});
+    const burnCall = mockDdbSend.mock.calls.find(
+      (c) => c[0]?.kind === "PUT" && c[0]?.input?.Item?.pk?.S?.startsWith("invitations:"),
+    );
+    expect(burnCall).toBeUndefined();
+  });
+
+  it("does not fail issuance when burning the invitation record fails", async () => {
+    // Account provisioning has already committed; a DynamoDB hiccup here must
+    // never roll it back (best-effort, logged).
+    mockDdbSend.mockImplementation(async (cmd: any) => {
+      if (cmd?.input?.Item?.pk?.S?.startsWith("invitations:")) {
+        throw new Error("DDB throttled");
+      }
+      return {};
+    });
+    const handler = await loadHandler();
+    await expect(
+      handler(makeEvent({ invitationCode: "invite99" }), {} as any, () => {}),
+    ).resolves.toBeDefined();
   });
 });
