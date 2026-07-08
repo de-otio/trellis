@@ -1,6 +1,6 @@
 {
   "name": "@de-otio/trellis-extension-api",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Shared types for Trellis extensions: TrellisExtension, Route, strategy interfaces",
   "type": "module",
   "main": "./lib/index.js",
