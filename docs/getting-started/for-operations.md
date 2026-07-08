@@ -79,11 +79,36 @@ rather than silently degrading:
 | `EMAIL_SUB_HMAC_SECRET` | Signs the confirm/unsubscribe capability tokens and keys the email lookup-hash (via HKDF sub-keys) | High-entropy string, **≥ 32 characters**. Rotating it invalidates in-flight confirm/unsubscribe links issued under the old value. |
 | `EMAIL_SUB_ENC_KEY` | Key-encryption key for the per-record envelope encryption of stored email addresses | **Base64 that decodes to exactly 32 bytes** (256-bit). Provision from your secret store; do **not** reuse `SESSION_SECRET`. |
 
-Provision both the same way as your other secrets (parameter/secret store →
-environment). Environments that leave `email_subscriptions_enabled` off do not
-need them. Every other operational parameter for these features (rate limits,
-token TTLs, retention windows, collection caps) is env-driven with a safe
-default — see the `EMAIL_SUB_*` and `COLLECTION_*` entries in
+### Storing the secrets
+
+Store both as **encrypted secrets**, following the same convention as
+`session-secret` and the RDS `db-secret-arn` (`/{appName}/{stage}/…`):
+
+- Use **SSM Parameter Store `SecureString`** (simplest, and parity with
+  `session-secret`) or **AWS Secrets Manager** if you want its rotation tooling.
+  Never store them plaintext in a task definition, a config file, or the repo.
+- **Inject them via the ECS task definition's `secrets:` block**, which resolves
+  the SSM/Secrets Manager value at container start and exposes it as the env var
+  Trellis reads. The value originates in the secret store; it only becomes an env
+  var inside the running task. (Trellis itself has no secret-store client — it is
+  cloud-agnostic and reads `process.env`, exactly like `SESSION_SECRET`.)
+- For **`EMAIL_SUB_ENC_KEY`** specifically — the key that decrypts the entire
+  stored-email table — consider **KMS-backing it** rather than a plaintext
+  `SecureString`. The bundled `oauth/envelope-crypto.ts` already supports a KMS
+  KEK fetcher (`…_KMS_KEY_ID` → `KMS:Decrypt`, key held only in a memory buffer),
+  so the raw 256-bit key need never sit recoverable in the environment or a
+  memory dump. A `SecureString` is acceptable MVP parity with `SESSION_SECRET`;
+  KMS is the stronger option for an at-rest decryption key.
+
+Rotation is a **deliberate operation, not auto-rotate**: rotating
+`EMAIL_SUB_HMAC_SECRET` invalidates in-flight confirm/unsubscribe links, and
+rotating `EMAIL_SUB_ENC_KEY` requires a staged re-encrypt (the `keyVersion`
+prefix on the stored `email_hash`/`email_enc` values exists for exactly this).
+
+Environments that leave `email_subscriptions_enabled` off do not need either
+secret. Every other operational parameter for these features (rate limits, token
+TTLs, retention windows, collection caps) is env-driven with a safe default —
+see the `EMAIL_SUB_*` and `COLLECTION_*` entries in
 [`apps/api/src/env.ts`](https://github.com/de-otio/trellis/blob/main/apps/api/src/env.ts).
 
 ## Monitoring conventions
