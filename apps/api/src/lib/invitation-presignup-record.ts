@@ -26,7 +26,11 @@
  * the user PRESENTS at signup. A casing mismatch silently reintroduces the bug.
  */
 
-import { DynamoDBClient, PutItemCommand } from "@aws-sdk/client-dynamodb";
+import {
+  DeleteItemCommand,
+  DynamoDBClient,
+  PutItemCommand,
+} from "@aws-sdk/client-dynamodb";
 import { marshall } from "@aws-sdk/util-dynamodb";
 
 function defaultClient(): DynamoDBClient {
@@ -79,6 +83,41 @@ export async function writePreSignUpInvitationRecord(
   };
   await client.send(
     new PutItemCommand({ TableName: table, Item: marshall(item) }),
+  );
+}
+
+export interface DeletePreSignUpInvitationRecordInput {
+  /** The invitation code whose PreSignUp record should be removed. */
+  code: string;
+  /** Injectable for tests. */
+  client?: DynamoDBClient;
+  /** Injectable for tests. */
+  tableName?: string;
+}
+
+/**
+ * Remove the PreSignUp record for an invitation that is being deleted.
+ *
+ * Without this, deleting an invitation via the API leaves its fail-closed
+ * DynamoDB item behind, so the deleted code stays redeemable until its `ttl`
+ * lapses. Deleting the item here revokes the code immediately (PreSignUp then
+ * rejects the missing item, failing closed).
+ *
+ * Best-effort: callers should treat a failure as non-fatal (log, don't throw)
+ * so it never breaks the overall invitation-delete response — the Prisma row
+ * and session token are removed regardless. Keyed off the same upper-cased pk
+ * the record was written under (see the casing note above).
+ */
+export async function deletePreSignUpInvitationRecord(
+  input: DeletePreSignUpInvitationRecordInput,
+): Promise<void> {
+  const client = input.client ?? defaultClient();
+  const table = input.tableName ?? defaultTable();
+  await client.send(
+    new DeleteItemCommand({
+      TableName: table,
+      Key: marshall({ pk: preSignUpInvitationPk(input.code), sk: "v" }),
+    }),
   );
 }
 

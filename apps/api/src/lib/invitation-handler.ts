@@ -1193,6 +1193,24 @@ export class InvitationHandler {
         }
       }
 
+      // AUTH GATE: remove the raw DynamoDB PreSignUp record too, otherwise a
+      // deleted invite's code stays redeemable until its ttl lapses (PreSignUp
+      // reads only this item, not the now-deleted Prisma row). Same
+      // dynamodb:DeleteItem the API task role already uses for the session KV
+      // above, so no IAM/CDK change is needed. Best-effort: a failure here must
+      // not fail the delete response — the Prisma row + session token are gone.
+      try {
+        const { deletePreSignUpInvitationRecord } = await import(
+          "./invitation-presignup-record.js"
+        );
+        await deletePreSignUpInvitationRecord({ code: invitation.code });
+      } catch (error) {
+        this.logger.warn(
+          "[InvitationHandler] Failed to delete PreSignUp record:",
+          error,
+        );
+      }
+
       return this.securityHeaders.createSecureResponse(
         JSON.stringify({
           success: true,

@@ -16,6 +16,7 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  deletePreSignUpInvitationRecord,
   markPreSignUpInvitationRecordUsed,
   preSignUpInvitationPk,
   writePreSignUpInvitationRecord,
@@ -23,9 +24,11 @@ import {
 
 // One in-memory DynamoDB table shared by the writer and the PreSignUp reader.
 // Items are stored in their raw (marshalled) form, keyed by pk|sk — exactly how
-// DynamoDB would.
-const { store } = vi.hoisted(() => ({
+// DynamoDB would. `deletes` captures the raw DeleteItemCommand inputs so tests
+// can assert the exact {TableName, Key} sent.
+const { store, deletes } = vi.hoisted(() => ({
   store: new Map<string, Record<string, any>>(),
+  deletes: [] as any[],
 }));
 
 vi.mock("@aws-sdk/client-dynamodb", () => {
@@ -39,6 +42,11 @@ vi.mock("@aws-sdk/client-dynamodb", () => {
       if (cmd.__kind === "get") {
         const item = store.get(keyOf(cmd.input.Key));
         return item ? { Item: item } : {};
+      }
+      if (cmd.__kind === "delete") {
+        deletes.push(cmd.input);
+        store.delete(keyOf(cmd.input.Key));
+        return {};
       }
       throw new Error(`unexpected DynamoDB command: ${cmd?.__kind}`);
     }
@@ -57,7 +65,14 @@ vi.mock("@aws-sdk/client-dynamodb", () => {
       this.input = input;
     }
   }
-  return { DynamoDBClient, PutItemCommand, GetItemCommand };
+  class DeleteItemCommand {
+    input: any;
+    __kind = "delete";
+    constructor(input: any) {
+      this.input = input;
+    }
+  }
+  return { DynamoDBClient, PutItemCommand, GetItemCommand, DeleteItemCommand };
 });
 
 // PreSignUp reads DYNAMODB_TABLE at module load; set it before the dynamic
@@ -87,6 +102,7 @@ function preSignUpEvent(invitationCode: string) {
 describe("invitation-only signup gate (writer + PreSignUp reader)", () => {
   beforeEach(() => {
     store.clear();
+    deletes.length = 0;
   });
 
   it("write → PreSignUp accepts → PostConfirmation marks used → PreSignUp rejects reuse", async () => {
@@ -147,6 +163,44 @@ describe("invitation-only signup gate (writer + PreSignUp reader)", () => {
     await expect(
       handler(preSignUpEvent(code), {} as any, () => {}),
     ).rejects.toThrow("expired");
+  });
+
+  it("deletePreSignUpInvitationRecord sends a DeleteItemCommand for the canonical {pk,sk} and removes the record", async () => {
+    const handler = await loadPreSignUp();
+    const code = "DELETEME01";
+
+    // Create the record, then delete it (invitation-delete cleanup path).
+    await writePreSignUpInvitationRecord({
+      code,
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+      email: null,
+    });
+    expect(store.get(`invitations:${code}|v`)).toBeDefined();
+
+    await deletePreSignUpInvitationRecord({ code });
+
+    // The DeleteItemCommand carried the canonical upper-cased pk, sk "v", and
+    // the env-resolved table name.
+    expect(deletes).toHaveLength(1);
+    expect(deletes[0]).toEqual({
+      TableName: "test-trellis",
+      Key: { pk: { S: "invitations:DELETEME01" }, sk: { S: "v" } },
+    });
+
+    // Record is gone → PreSignUp now fails closed for the deleted code.
+    expect(store.get(`invitations:${code}|v`)).toBeUndefined();
+    await expect(
+      handler(preSignUpEvent(code), {} as any, () => {}),
+    ).rejects.toThrow("Invalid or expired invitation code");
+  });
+
+  it("deletePreSignUpInvitationRecord canonicalizes casing (lower-case code → upper-case pk)", async () => {
+    await deletePreSignUpInvitationRecord({ code: "lowercode1" });
+    expect(deletes).toHaveLength(1);
+    expect(deletes[0].Key).toEqual({
+      pk: { S: "invitations:LOWERCODE1" },
+      sk: { S: "v" },
+    });
   });
 
   it("pk is canonicalized upper-case so it matches the code the user presents", () => {
