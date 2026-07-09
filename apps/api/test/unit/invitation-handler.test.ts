@@ -105,6 +105,19 @@ vi.mock("../../src/lib/feature-toggle-service", () => ({
   },
 }));
 
+// Mock the PreSignUp DynamoDB record writer so create-path unit tests don't
+// make real AWS calls. The real writer's shape/casing is covered end-to-end by
+// invitation-presignup-gate.test.ts; here we only assert the handler invokes it
+// with the created code + the invite's expiry/email.
+const { mockWritePreSignUpInvitationRecord } = vi.hoisted(() => ({
+  mockWritePreSignUpInvitationRecord: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("../../src/lib/invitation-presignup-record", () => ({
+  writePreSignUpInvitationRecord: mockWritePreSignUpInvitationRecord,
+  markPreSignUpInvitationRecordUsed: vi.fn().mockResolvedValue(undefined),
+  preSignUpInvitationPk: (code: string) => `invitations:${code.toUpperCase()}`,
+}));
+
 // Don't mock RateLimiter - we'll use vi.spyOn to intercept method calls
 // This is more reliable than module mocking for instance methods
 
@@ -238,6 +251,13 @@ describe("InvitationHandler", () => {
       expect(data.invitation).toBeDefined();
       expect(data.invitation.code).toBe("ABC12345");
       expect(data.invitation.email).toBeNull();
+
+      // AUTH GATE: the create flow must write the PreSignUp DynamoDB record,
+      // keyed off the same code, or invited signup is impossible.
+      expect(mockWritePreSignUpInvitationRecord).toHaveBeenCalledTimes(1);
+      expect(mockWritePreSignUpInvitationRecord).toHaveBeenCalledWith(
+        expect.objectContaining({ code: "ABC12345", email: null }),
+      );
     });
 
     it("should create invitation with email restriction", async () => {
@@ -275,6 +295,13 @@ describe("InvitationHandler", () => {
 
       expect(response.status).toBe(201);
       expect(data.invitation.email).toBe("invited@example.com");
+      // Email restriction must be carried onto the PreSignUp record.
+      expect(mockWritePreSignUpInvitationRecord).toHaveBeenCalledWith(
+        expect.objectContaining({
+          code: "ABC12345",
+          email: "invited@example.com",
+        }),
+      );
     });
 
     it("should reject invitation creation when sign-up is disabled", async () => {
