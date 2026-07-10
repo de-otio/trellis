@@ -32,6 +32,10 @@ const PHASE0_INTEGRATION = [
   // R1 — Events primitive: RSVP capacity/waitlist under real Postgres, incl.
   // the N-parallel-RSVP concurrency proof of no-over-capacity (§4.3, §7).
   "test/integration/events.integration.test.ts",
+  // R1 — Events primitive: CRUD lifecycle, visibility matrix, notifications,
+  // cancellation, quota, authorization, and shift/RSVP status semantics
+  // complement to events.integration.test.ts's concurrency proofs.
+  "test/integration/events-lifecycle.integration.test.ts",
 ];
 
 export default defineConfig({

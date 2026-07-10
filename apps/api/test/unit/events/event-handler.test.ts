@@ -217,6 +217,36 @@ describe("EventHandler", () => {
       expect(res.status).toBe(404);
       expect(mockDb.event.findFirst).not.toHaveBeenCalled();
     });
+
+    it("returns 404 from handleList when events_enabled is disabled", async () => {
+      isEnabledMock.mockResolvedValue(false);
+      const res = await handler.handleList(
+        new Request("https://api.example.com/api/events"),
+        makeAuth(),
+        env,
+      );
+      expect(res.status).toBe(404);
+      expect(mockDb.event.findMany).not.toHaveBeenCalled();
+    });
+
+    it("returns 404 from handleUpdate when events_enabled is disabled", async () => {
+      isEnabledMock.mockResolvedValue(false);
+      const res = await handler.handleUpdate(
+        "event-1",
+        jsonRequest("PATCH", { title: "New title" }),
+        makeAuth(),
+        env,
+      );
+      expect(res.status).toBe(404);
+      expect(mockDb.event.findFirst).not.toHaveBeenCalled();
+    });
+
+    it("returns 404 from handleDelete when events_enabled is disabled", async () => {
+      isEnabledMock.mockResolvedValue(false);
+      const res = await handler.handleDelete("event-1", makeAuth(), env);
+      expect(res.status).toBe(404);
+      expect(mockDb.event.findFirst).not.toHaveBeenCalled();
+    });
   });
 
   // ── create ──────────────────────────────────────────────────────────────
@@ -349,6 +379,74 @@ describe("EventHandler", () => {
       );
       expect(res.status).toBe(409);
     });
+
+    it("creates a GROUP_ONLY event when the group resolves in the tenant", async () => {
+      mockDb.group.findFirst.mockResolvedValue({ id: "group-1" });
+      mockDb.event.create.mockResolvedValue(
+        makeEventRow({ visibility: "GROUP_ONLY", groupId: "group-1" }),
+      );
+      const res = await handler.handleCreate(
+        jsonRequest("POST", {
+          title: "X",
+          startsAt: "2026-08-01T12:00:00.000Z",
+          visibility: "GROUP_ONLY",
+          groupId: "group-1",
+        }),
+        makeAuth(),
+        env,
+      );
+      expect(res.status).toBe(201);
+      expect(mockDb.event.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ groupId: "group-1" }) }),
+      );
+    });
+
+    it("stores an explicit endsAt as a Date", async () => {
+      mockDb.event.create.mockResolvedValue(
+        makeEventRow({ endsAt: new Date("2026-08-01T14:00:00.000Z") }),
+      );
+      const res = await handler.handleCreate(
+        jsonRequest("POST", {
+          title: "X",
+          startsAt: "2026-08-01T12:00:00.000Z",
+          endsAt: "2026-08-01T14:00:00.000Z",
+        }),
+        makeAuth(),
+        env,
+      );
+      expect(res.status).toBe(201);
+      expect(mockDb.event.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ endsAt: new Date("2026-08-01T14:00:00.000Z") }),
+        }),
+      );
+    });
+
+    it("falls back to latitude-only fuzz scaling near the poles (cosLat <= 1e-6)", async () => {
+      const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0.5);
+      try {
+        mockDb.event.create.mockResolvedValue(
+          makeEventRow({ locationPrecision: "NEIGHBORHOOD", lat: 90, lng: 0 }),
+        );
+        const res = await handler.handleCreate(
+          jsonRequest("POST", {
+            title: "X",
+            startsAt: "2026-08-01T12:00:00.000Z",
+            locationPrecision: "NEIGHBORHOOD",
+            lat: 90,
+            lng: 0,
+          }),
+          makeAuth(),
+          env,
+        );
+        expect(res.status).toBe(201);
+        const [{ data }] = mockDb.event.create.mock.calls[0];
+        expect(Number.isFinite(data.displayLat)).toBe(true);
+        expect(Number.isFinite(data.displayLng)).toBe(true);
+      } finally {
+        randomSpy.mockRestore();
+      }
+    });
   });
 
   // ── get (read-side visibility) ───────────────────────────────────────────
@@ -467,6 +565,55 @@ describe("EventHandler", () => {
       expect(res.status).toBe(404);
     });
 
+    it("denies a DRAFT event found via the cross-tenant PUBLIC fallback (draft trumps visibility)", async () => {
+      // Tenant-scoped lookup misses; the PUBLIC-visibility fallback finds a
+      // DRAFT event that happens to be in a different tenant — DRAFT status
+      // must still deny it regardless of `visibility: PUBLIC`.
+      mockDb.event.findFirst
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(
+          makeEventRow({
+            tenantId: TENANT_B,
+            status: "DRAFT",
+            visibility: "PUBLIC",
+            creatorId: "someone-else",
+          }),
+        );
+      const res = await handler.handleGet(
+        "event-1",
+        makeAuth({ activeTenantId: TENANT_A }),
+        env,
+      );
+      expect(res.status).toBe(404);
+    });
+
+    it("denies GROUP_ONLY read when the event has no groupId (defensive, inconsistent data)", async () => {
+      mockDb.event.findFirst.mockResolvedValue(
+        makeEventRow({ status: "PUBLISHED", visibility: "GROUP_ONLY", groupId: null }),
+      );
+      const res = await handler.handleGet("event-1", makeAuth(), env);
+      expect(res.status).toBe(404);
+      expect(isMemberMock).not.toHaveBeenCalled();
+    });
+
+    it("allows GROUP_ONLY read for a SUPER_ADMIN without querying GroupService", async () => {
+      mockDb.event.findFirst.mockResolvedValue(
+        makeEventRow({
+          status: "PUBLISHED",
+          visibility: "GROUP_ONLY",
+          groupId: "group-1",
+          creatorId: "someone-else",
+        }),
+      );
+      const res = await handler.handleGet(
+        "event-1",
+        makeAuth({ globalRole: "SUPER_ADMIN" as UserRole, tenantRole: "MEMBER" as TenantRole }),
+        env,
+      );
+      expect(res.status).toBe(200);
+      expect(isMemberMock).not.toHaveBeenCalled();
+    });
+
     it("maps a P2025 database error to 404", async () => {
       mockDb.event.findFirst.mockRejectedValue({ code: "P2025", message: "not found" });
       const res = await handler.handleGet("event-1", makeAuth(), env);
@@ -571,6 +718,53 @@ describe("EventHandler", () => {
         env,
       );
       expect(res.status).toBe(500);
+    });
+
+    it("applies status/groupId/upcoming query filters to the where clause", async () => {
+      mockDb.event.findMany.mockResolvedValue([]);
+      const res = await handler.handleList(
+        new Request(
+          "https://api.example.com/api/events?status=PUBLISHED&groupId=group-9&upcoming=true",
+        ),
+        makeAuth(),
+        env,
+      );
+      expect(res.status).toBe(200);
+      const { where } = mockDb.event.findMany.mock.calls[0][0];
+      expect(where.status).toBe("PUBLISHED");
+      expect(where.groupId).toBe("group-9");
+      expect(where.startsAt).toEqual({ gte: new Date("2026-07-10T10:00:00.000Z") });
+    });
+
+    it("uses an empty draft filter for a moderator (ADMIN sees DRAFT events by others)", async () => {
+      mockDb.event.findMany.mockResolvedValue([]);
+      const res = await handler.handleList(
+        new Request("https://api.example.com/api/events"),
+        makeAuth({ tenantRole: "ADMIN" as TenantRole }),
+        env,
+      );
+      expect(res.status).toBe(200);
+      const { where } = mockDb.event.findMany.mock.calls[0][0];
+      // draftFilter is the second AND clause; a moderator's is {} (no
+      // status/creator restriction), unlike a non-moderator's OR-guard.
+      expect(where.AND[1]).toEqual({});
+    });
+
+    it("ignores a cursor whose startsAt does not parse to a valid date", async () => {
+      mockDb.event.findMany.mockResolvedValue([]);
+      const cursor = Buffer.from(
+        JSON.stringify({ startsAt: "not-a-real-date", eventId: "event-0" }),
+      ).toString("base64");
+      const res = await handler.handleList(
+        new Request(`https://api.example.com/api/events?cursor=${encodeURIComponent(cursor)}`),
+        makeAuth(),
+        env,
+      );
+      expect(res.status).toBe(200);
+      const { where } = mockDb.event.findMany.mock.calls[0][0];
+      // Invalid date inside an otherwise well-formed cursor → treated as no
+      // cursor (first page), same as the malformed-cursor case.
+      expect(where.AND[2]).toEqual({});
     });
   });
 
@@ -693,6 +887,22 @@ describe("EventHandler", () => {
         env,
       );
       expect(res.status).toBe(500);
+    });
+
+    it("applies status/groupId/upcoming query filters to the where clause", async () => {
+      mockDb.event.findMany.mockResolvedValue([]);
+      const res = await handler.handleListMine(
+        new Request(
+          "https://api.example.com/api/events/mine?status=PUBLISHED&groupId=group-9&upcoming=true",
+        ),
+        makeAuth(),
+        env,
+      );
+      expect(res.status).toBe(200);
+      const { where } = mockDb.event.findMany.mock.calls[0][0];
+      expect(where.status).toBe("PUBLISHED");
+      expect(where.groupId).toBe("group-9");
+      expect(where.startsAt).toEqual({ gte: new Date("2026-07-10T10:00:00.000Z") });
     });
   });
 
@@ -875,6 +1085,107 @@ describe("EventHandler", () => {
       );
       expect(res.status).toBe(500);
     });
+
+    it("applies title/visibility/timezone/capacity/lat/lng/locationName/endsAt when provided", async () => {
+      // existing.endsAt is null (makeEventRow default) — patching to a real
+      // value exercises both the existing-null and next-truthy arms of the
+      // endsAt change-detection ternaries.
+      const existing = makeEventRow({ status: "PUBLISHED" });
+      mockDb.event.findFirst.mockResolvedValue(existing);
+      mockDb.event.update.mockResolvedValue({ ...existing, title: "Renamed" });
+
+      const res = await handler.handleUpdate(
+        "event-1",
+        jsonRequest("PATCH", {
+          title: "Renamed",
+          visibility: "PUBLIC",
+          timezone: "America/New_York",
+          capacity: 42,
+          lat: 41.0,
+          lng: -74.0,
+          locationName: "New Spot",
+          endsAt: "2026-08-01T15:00:00.000Z",
+        }),
+        makeAuth(),
+        env,
+      );
+
+      expect(res.status).toBe(200);
+      expect(mockDb.event.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            title: "Renamed",
+            visibility: "PUBLIC",
+            timezone: "America/New_York",
+            capacity: 42,
+            lat: 41.0,
+            lng: -74.0,
+            locationName: "New Spot",
+            endsAt: new Date("2026-08-01T15:00:00.000Z"),
+          }),
+        }),
+      );
+    });
+
+    it("clears endsAt when the patch explicitly sets it to null", async () => {
+      const existing = makeEventRow({
+        status: "PUBLISHED",
+        endsAt: new Date("2026-08-01T16:00:00.000Z"),
+      });
+      mockDb.event.findFirst.mockResolvedValue(existing);
+      mockDb.event.update.mockResolvedValue({ ...existing, endsAt: null });
+
+      const res = await handler.handleUpdate(
+        "event-1",
+        jsonRequest("PATCH", { endsAt: null }),
+        makeAuth(),
+        env,
+      );
+
+      expect(res.status).toBe(200);
+      expect(mockDb.event.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ endsAt: null }) }),
+      );
+      const [notifyInput] = (notificationProducer.notifyEventUpdated as any).mock.calls[0];
+      expect(notifyInput.changedFields).toEqual(["endsAt"]);
+    });
+
+    it("cancels a DRAFT event via PATCH status=CANCELLED without retract/notify", async () => {
+      const existing = makeEventRow({ status: "DRAFT" });
+      mockDb.event.findFirst.mockResolvedValue(existing);
+      mockDb.event.update.mockResolvedValue({ ...existing, status: "CANCELLED" });
+
+      const res = await handler.handleUpdate(
+        "event-1",
+        jsonRequest("PATCH", { status: "CANCELLED" }),
+        makeAuth(),
+        env,
+      );
+
+      expect(res.status).toBe(200);
+      // A DRAFT event was never announced, so cancelling it must not retract
+      // a companion post or emit an EVENT_CANCELLED notification.
+      expect(feedAnnouncer.retract).not.toHaveBeenCalled();
+      expect(notificationProducer.notifyEventCancelled).not.toHaveBeenCalled();
+    });
+
+    it("skips FeedAnnouncer.update (but still notifies) when the event was never announced", async () => {
+      const existing = makeEventRow({ status: "PUBLISHED", announcePostId: null });
+      mockDb.event.findFirst.mockResolvedValue(existing);
+      const updatedRow = { ...existing, startsAt: new Date("2026-08-02T12:00:00.000Z") };
+      mockDb.event.update.mockResolvedValue(updatedRow);
+
+      const res = await handler.handleUpdate(
+        "event-1",
+        jsonRequest("PATCH", { startsAt: "2026-08-02T12:00:00.000Z" }),
+        makeAuth(),
+        env,
+      );
+
+      expect(res.status).toBe(200);
+      expect(feedAnnouncer.update).not.toHaveBeenCalled();
+      expect(notificationProducer.notifyEventUpdated).toHaveBeenCalledTimes(1);
+    });
   });
 
   // ── delete (soft cancel) ─────────────────────────────────────────────────
@@ -910,6 +1221,23 @@ describe("EventHandler", () => {
       expect(res.status).toBe(200);
       expect(feedAnnouncer.retract).not.toHaveBeenCalled();
       expect(notificationProducer.notifyEventCancelled).not.toHaveBeenCalled();
+    });
+
+    it("cancels a PUBLISHED event that was never announced: notifies but does not retract", async () => {
+      // A PUBLISHED event with announcePostId=null (the FeedAnnouncer declined
+      // to create a companion post at publish time — see the GROUP_ONLY
+      // "announce() returns null" case in handleUpdate) still gets the
+      // EVENT_CANCELLED notification, but there is no companion post to
+      // retract.
+      const existing = makeEventRow({ status: "PUBLISHED", announcePostId: null });
+      mockDb.event.findFirst.mockResolvedValue(existing);
+      mockDb.event.update.mockResolvedValue({ ...existing, status: "CANCELLED" });
+
+      const res = await handler.handleDelete("event-1", makeAuth(), env);
+
+      expect(res.status).toBe(200);
+      expect(feedAnnouncer.retract).not.toHaveBeenCalled();
+      expect(notificationProducer.notifyEventCancelled).toHaveBeenCalledTimes(1);
     });
 
     it("is idempotent for an already-CANCELLED event", async () => {

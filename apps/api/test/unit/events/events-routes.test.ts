@@ -363,6 +363,36 @@ describe("item routes (/api/events/:id)", () => {
     const res = await route.handler(req("GET", "/nope"), env, ctx("/nope"));
     expect(res.status).toBe(400);
   });
+
+  it("401 when unauthenticated on PATCH /:id", async () => {
+    mockAuthMiddleware.mockResolvedValue(null);
+    const res = await invoke("PATCH", "/api/events/ev123", { title: "y" });
+    expect(res.status).toBe(401);
+    expect(eventSpies.handleUpdate).not.toHaveBeenCalled();
+    // No point checking the rate limiter for an unauthenticated caller.
+    expect(mockApplyRateLimitKV).not.toHaveBeenCalled();
+  });
+
+  it("400 on a path that does not match the id capture (PATCH)", async () => {
+    const route = routeFor("PATCH", "/api/events/ev123");
+    const res = await route.handler(req("PATCH", "/nope", { title: "y" }), env, ctx("/nope"));
+    expect(res.status).toBe(400);
+    expect(eventSpies.handleUpdate).not.toHaveBeenCalled();
+  });
+
+  it("401 when unauthenticated on DELETE /:id", async () => {
+    mockAuthMiddleware.mockResolvedValue(null);
+    const res = await invoke("DELETE", "/api/events/ev123");
+    expect(res.status).toBe(401);
+    expect(eventSpies.handleDelete).not.toHaveBeenCalled();
+  });
+
+  it("400 on a path that does not match the id capture (DELETE)", async () => {
+    const route = routeFor("DELETE", "/api/events/ev123");
+    const res = await route.handler(req("DELETE", "/nope"), env, ctx("/nope"));
+    expect(res.status).toBe(400);
+    expect(eventSpies.handleDelete).not.toHaveBeenCalled();
+  });
 });
 
 describe("RSVP routes", () => {
@@ -439,6 +469,45 @@ describe("RSVP routes", () => {
   it("400 on a bad rsvp path", async () => {
     const route = routeFor("POST", "/api/events/ev1/rsvp");
     const res = await route.handler(req("POST", "/x"), env, ctx("/x"));
+    expect(res.status).toBe(400);
+  });
+
+  it("401 when unauthenticated on POST /rsvp (session present, auth missing)", async () => {
+    mockAuthMiddleware.mockResolvedValue(null);
+    const res = await invoke("POST", "/api/events/ev1/rsvp", { status: "GOING" });
+    expect(res.status).toBe(401);
+    expect(rsvpSpies.handleRsvp).not.toHaveBeenCalled();
+  });
+
+  it("401 when there is no session on DELETE /rsvp", async () => {
+    mockGetSession.mockResolvedValue(null);
+    const res = await invoke("DELETE", "/api/events/ev1/rsvp");
+    expect(res.status).toBe(401);
+    expect(rsvpSpies.handleWithdraw).not.toHaveBeenCalled();
+  });
+
+  it("400 on a bad DELETE-rsvp path", async () => {
+    const route = routeFor("DELETE", "/api/events/ev1/rsvp");
+    const res = await route.handler(req("DELETE", "/x"), env, ctx("/x"));
+    expect(res.status).toBe(400);
+  });
+
+  it("401 when there is no session on GET /attendees", async () => {
+    mockGetSession.mockResolvedValue(null);
+    const res = await invoke("GET", "/api/events/ev1/attendees");
+    expect(res.status).toBe(401);
+    expect(rsvpSpies.handleAttendees).not.toHaveBeenCalled();
+  });
+
+  it("401 when session present but auth missing on GET /attendees", async () => {
+    mockAuthMiddleware.mockResolvedValue(null);
+    const res = await invoke("GET", "/api/events/ev1/attendees");
+    expect(res.status).toBe(401);
+  });
+
+  it("400 on a bad attendees path", async () => {
+    const route = routeFor("GET", "/api/events/ev1/attendees");
+    const res = await route.handler(req("GET", "/x"), env, ctx("/x"));
     expect(res.status).toBe(400);
   });
 });
@@ -518,6 +587,59 @@ describe("shift routes", () => {
   it("400 on a bad shifts-collection path", async () => {
     const route = routeFor("POST", "/api/events/ev1/shifts");
     const res = await route.handler(req("POST", "/x"), env, ctx("/x"));
+    expect(res.status).toBe(400);
+  });
+
+  it("401 when unauthenticated on GET /shifts", async () => {
+    mockAuthMiddleware.mockResolvedValue(null);
+    const res = await invoke("GET", "/api/events/ev1/shifts");
+    expect(res.status).toBe(401);
+    expect(shiftSpies.handleList).not.toHaveBeenCalled();
+  });
+
+  it("400 on a bad GET-shifts-collection path", async () => {
+    const route = routeFor("GET", "/api/events/ev1/shifts");
+    const res = await route.handler(req("GET", "/x"), env, ctx("/x"));
+    expect(res.status).toBe(400);
+  });
+
+  it("401 when unauthenticated on POST /shifts/:shiftId/signup", async () => {
+    mockAuthMiddleware.mockResolvedValue(null);
+    const res = await invoke("POST", "/api/events/ev1/shifts/s1/signup", {});
+    expect(res.status).toBe(401);
+    expect(shiftSpies.handleSignup).not.toHaveBeenCalled();
+  });
+
+  it("401 when unauthenticated on DELETE /shifts/:shiftId/signup", async () => {
+    mockAuthMiddleware.mockResolvedValue(null);
+    const res = await invoke("DELETE", "/api/events/ev1/shifts/s1/signup");
+    expect(res.status).toBe(401);
+    expect(shiftSpies.handleWithdraw).not.toHaveBeenCalled();
+  });
+
+  it("400 on a bad DELETE-shift-signup path", async () => {
+    const route = routeFor("DELETE", "/api/events/ev1/shifts/s1/signup");
+    const res = await route.handler(req("DELETE", "/x"), env, ctx("/x"));
+    expect(res.status).toBe(400);
+  });
+
+  it("401 when unauthenticated on PATCH /shifts/:shiftId", async () => {
+    mockAuthMiddleware.mockResolvedValue(null);
+    const res = await invoke("PATCH", "/api/events/ev1/shifts/s1", { title: "z" });
+    expect(res.status).toBe(401);
+    expect(shiftSpies.handleUpdate).not.toHaveBeenCalled();
+  });
+
+  it("401 when unauthenticated on DELETE /shifts/:shiftId", async () => {
+    mockAuthMiddleware.mockResolvedValue(null);
+    const res = await invoke("DELETE", "/api/events/ev1/shifts/s1");
+    expect(res.status).toBe(401);
+    expect(shiftSpies.handleDelete).not.toHaveBeenCalled();
+  });
+
+  it("400 on a bad DELETE-shift-item path", async () => {
+    const route = routeFor("DELETE", "/api/events/ev1/shifts/s1");
+    const res = await route.handler(req("DELETE", "/x"), env, ctx("/x"));
     expect(res.status).toBe(400);
   });
 });

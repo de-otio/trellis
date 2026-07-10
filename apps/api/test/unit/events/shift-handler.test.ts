@@ -219,6 +219,35 @@ describe("ShiftHandler", () => {
       const body = await response.json();
       expect(body.error).toBe("LIMIT_EXCEEDED");
     });
+
+    it("stores explicit startsAt/endsAt as Dates when provided", async () => {
+      mockDb.event.findFirst.mockResolvedValue(makeEvent());
+      mockDb.eventShift.count.mockResolvedValue(0);
+      mockDb.eventShift.create.mockResolvedValue(
+        makeShift({
+          startsAt: new Date("2026-02-01T09:00:00.000Z"),
+          endsAt: new Date("2026-02-01T17:00:00.000Z"),
+        }),
+      );
+
+      const request = jsonRequest({
+        title: "Setup crew",
+        capacity: 2,
+        startsAt: "2026-02-01T09:00:00.000Z",
+        endsAt: "2026-02-01T17:00:00.000Z",
+      });
+      const response = await handler.handleCreate("event_1", request, makeAuth(), env);
+
+      expect(response.status).toBe(201);
+      expect(mockDb.eventShift.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            startsAt: new Date("2026-02-01T09:00:00.000Z"),
+            endsAt: new Date("2026-02-01T17:00:00.000Z"),
+          }),
+        }),
+      );
+    });
   });
 
   describe("handleList", () => {
@@ -353,6 +382,115 @@ describe("ShiftHandler", () => {
       const response = await handler.handleUpdate("event_1", "nope", request, makeAuth(), env);
       expect(response.status).toBe(404);
     });
+
+    it("403s a non-creator MEMBER", async () => {
+      mockDb.event.findFirst.mockResolvedValue(makeEvent({ creatorId: "other_user" }));
+      mockDb.eventShift.findFirst.mockResolvedValue(makeShift());
+
+      const request = new Request("https://api.example.com/x", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title: "Cleanup crew" }),
+      });
+
+      const response = await handler.handleUpdate(
+        "event_1",
+        "shift_1",
+        request,
+        makeAuth(),
+        env,
+      );
+
+      expect(response.status).toBe(403);
+      expect(mockDb.eventShift.update).not.toHaveBeenCalled();
+    });
+
+    it("applies a capacity increase atomically (affected-rows=1) and updates remaining fields", async () => {
+      mockDb.event.findFirst.mockResolvedValue(makeEvent());
+      mockDb.eventShift.findFirst.mockResolvedValue(makeShift({ capacity: 2, filledCount: 1 }));
+      // Race-safe guard (F-8): affected-rows=1 means the conditional UPDATE
+      // matched → capacity applied, proceed to the remaining Prisma update.
+      mockDb.$executeRaw.mockResolvedValue(1);
+      mockDb.eventShift.update.mockResolvedValue(makeShift({ capacity: 10 }));
+
+      const request = new Request("https://api.example.com/x", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ capacity: 10 }),
+      });
+
+      const response = await handler.handleUpdate(
+        "event_1",
+        "shift_1",
+        request,
+        makeAuth(),
+        env,
+      );
+
+      expect(response.status).toBe(200);
+      expect(mockDb.$executeRaw).toHaveBeenCalledTimes(1);
+      expect(mockDb.eventShift.update).toHaveBeenCalledTimes(1);
+    });
+
+    it("applies startsAt and endsAt when both are provided with valid ordering", async () => {
+      mockDb.event.findFirst.mockResolvedValue(makeEvent());
+      mockDb.eventShift.findFirst.mockResolvedValue(makeShift());
+      mockDb.eventShift.update.mockResolvedValue(
+        makeShift({
+          startsAt: new Date("2026-02-01T10:00:00.000Z"),
+          endsAt: new Date("2026-02-01T12:00:00.000Z"),
+        }),
+      );
+
+      const request = new Request("https://api.example.com/x", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          startsAt: "2026-02-01T10:00:00.000Z",
+          endsAt: "2026-02-01T12:00:00.000Z",
+        }),
+      });
+
+      const response = await handler.handleUpdate(
+        "event_1",
+        "shift_1",
+        request,
+        makeAuth(),
+        env,
+      );
+
+      expect(response.status).toBe(200);
+      expect(mockDb.eventShift.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            startsAt: new Date("2026-02-01T10:00:00.000Z"),
+            endsAt: new Date("2026-02-01T12:00:00.000Z"),
+          }),
+        }),
+      );
+    });
+
+    it("maps an unexpected database error to 500", async () => {
+      mockDb.event.findFirst.mockResolvedValue(makeEvent());
+      mockDb.eventShift.findFirst.mockResolvedValue(makeShift());
+      mockDb.eventShift.update.mockRejectedValue(new Error("boom"));
+
+      const request = new Request("https://api.example.com/x", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title: "Cleanup crew" }),
+      });
+
+      const response = await handler.handleUpdate(
+        "event_1",
+        "shift_1",
+        request,
+        makeAuth(),
+        env,
+      );
+
+      expect(response.status).toBe(500);
+    });
   });
 
   describe("handleDelete", () => {
@@ -372,6 +510,18 @@ describe("ShiftHandler", () => {
 
       const response = await handler.handleDelete("event_1", "shift_1", makeAuth(), env);
       expect(response.status).toBe(403);
+      expect(mockDb.eventShift.delete).not.toHaveBeenCalled();
+    });
+
+    /** §4.4 SEC-7 nested IDOR, delete side. */
+    it("404s the nested IDOR case: shift from a different event", async () => {
+      mockDb.event.findFirst.mockResolvedValue(makeEvent({ id: "event_A" }));
+      mockDb.eventShift.findFirst.mockResolvedValue(
+        makeShift({ id: "shift_from_b", eventId: "event_B" }),
+      );
+
+      const response = await handler.handleDelete("event_A", "shift_from_b", makeAuth(), env);
+      expect(response.status).toBe(404);
       expect(mockDb.eventShift.delete).not.toHaveBeenCalled();
     });
   });
@@ -608,6 +758,77 @@ describe("ShiftHandler", () => {
       expect(response.status).toBe(400);
     });
 
+    /**
+     * shiftSignupSchema = z.object({}) — valid JSON that parses to a
+     * non-object (e.g. an array) fails `safeParse` even though the body is
+     * syntactically valid JSON, exercising the VALIDATION_ERROR branch
+     * distinct from the malformed-JSON case above.
+     */
+    it("400s when the signup body parses to a non-object value", async () => {
+      mockDb.eventShift.findFirst.mockResolvedValue(makeShift());
+      mockDb.event.findFirst.mockResolvedValue(makeEvent());
+
+      const request = new Request("https://api.example.com/x", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "[]",
+      });
+      const response = await handler.handleSignup(
+        "event_1",
+        "shift_1",
+        request,
+        makeAuth(),
+        env,
+      );
+
+      expect(response.status).toBe(400);
+      const body = await response.json();
+      expect(body.error).toBe("VALIDATION_ERROR");
+    });
+
+    it("maps a non-P2002 error thrown during the seat-claim transaction to 500", async () => {
+      mockDb.eventShift.findFirst.mockResolvedValue(makeShift({ capacity: 2, filledCount: 0 }));
+      mockDb.event.findFirst.mockResolvedValue(makeEvent());
+      mockDb.shiftSignup.findUnique.mockResolvedValue(null);
+      mockDb.$transaction.mockRejectedValue(new Error("connection reset"));
+
+      const request = new Request("https://api.example.com/x", { method: "POST" });
+      const response = await handler.handleSignup(
+        "event_1",
+        "shift_1",
+        request,
+        makeAuth(),
+        env,
+      );
+
+      expect(response.status).toBe(500);
+    });
+
+    it("falls back to 409 when the P2002 recovery re-fetch resolves null (row genuinely gone)", async () => {
+      mockDb.eventShift.findFirst.mockResolvedValue(makeShift({ capacity: 2, filledCount: 0 }));
+      mockDb.event.findFirst.mockResolvedValue(makeEvent());
+      // Pre-check: no existing row. Post-P2002 recovery lookup: still nothing
+      // (resolves null rather than rejecting) — falls through to mapError,
+      // which still maps the original P2002 to 409.
+      mockDb.shiftSignup.findUnique
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(null);
+      mockDb.$executeRaw.mockResolvedValue(1);
+      const err = Object.assign(new Error("dup"), { code: "P2002" });
+      mockDb.shiftSignup.create.mockRejectedValue(err);
+
+      const request = new Request("https://api.example.com/x", { method: "POST" });
+      const response = await handler.handleSignup(
+        "event_1",
+        "shift_1",
+        request,
+        makeAuth(),
+        env,
+      );
+
+      expect(response.status).toBe(409);
+    });
+
     it("recovers a concurrent duplicate signup (P2002) idempotently", async () => {
       mockDb.eventShift.findFirst.mockResolvedValue(makeShift({ capacity: 2, filledCount: 0 }));
       mockDb.event.findFirst.mockResolvedValue(makeEvent());
@@ -742,6 +963,33 @@ describe("ShiftHandler", () => {
       const response = await handler.handleWithdraw("event_A", "shift_from_b", makeAuth(), env);
       expect(response.status).toBe(404);
     });
+
+    it("skips promotion when the seat release loses the race (updateMany count!==1)", async () => {
+      mockDb.event.findFirst.mockResolvedValue(makeEvent());
+      mockDb.eventShift.findFirst.mockResolvedValue(makeShift({ capacity: 1, filledCount: 1 }));
+      mockDb.shiftSignup.findUnique.mockResolvedValue(makeSignup({ status: "CONFIRMED" }));
+      mockDb.shiftSignup.update.mockResolvedValue(makeSignup({ status: "CANCELLED" }));
+      // A concurrent withdrawal already released this seat first — our
+      // conditional decrement matches no row, so we must not attempt to
+      // promote a waitlisted signup on top of it.
+      mockDb.eventShift.updateMany.mockResolvedValue({ count: 0 });
+
+      const response = await handler.handleWithdraw("event_1", "shift_1", makeAuth(), env);
+
+      expect(response.status).toBe(204);
+      expect(mockDb.$executeRaw).not.toHaveBeenCalled();
+      expect(mockDb.eventShift.update).not.toHaveBeenCalled();
+    });
+
+    it("maps an unexpected error to 500", async () => {
+      mockDb.event.findFirst.mockResolvedValue(makeEvent());
+      mockDb.eventShift.findFirst.mockResolvedValue(makeShift());
+      mockDb.shiftSignup.findUnique.mockResolvedValue(makeSignup({ status: "CONFIRMED" }));
+      mockDb.$transaction.mockRejectedValue(new Error("boom"));
+
+      const response = await handler.handleWithdraw("event_1", "shift_1", makeAuth(), env);
+      expect(response.status).toBe(500);
+    });
   });
 
   describe("error mapping", () => {
@@ -772,6 +1020,16 @@ describe("ShiftHandler", () => {
 
       const response = await handler.handleList("event_1", makeAuth(), env);
       expect(response.status).toBe(500);
+    });
+
+    it("maps a thrown SyntaxError to a 400 'Invalid JSON body' response", async () => {
+      mockDb.event.findFirst.mockResolvedValue(makeEvent());
+      mockDb.eventShift.findMany.mockRejectedValue(new SyntaxError("Unexpected token"));
+
+      const response = await handler.handleList("event_1", makeAuth(), env);
+      expect(response.status).toBe(400);
+      const body = await response.json();
+      expect(body).toEqual({ error: "VALIDATION_ERROR", message: "Invalid JSON body" });
     });
   });
 });
