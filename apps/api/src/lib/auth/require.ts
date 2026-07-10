@@ -81,6 +81,10 @@ const OWN_ONLY_FALLBACK: Partial<Record<CapabilityValue, CapabilityValue>> = {
   [Capability.PostDelete]: Capability.PostModerate,
   [Capability.EntityUpdate]: Capability.PostModerate,
   [Capability.EntityDelete]: Capability.PostModerate,
+  // Events primitive (R1): own events for MEMBER; EventModerate (ADMIN+) is the
+  // cross-user variant — same shape as the post/entity own-only verbs above.
+  [Capability.EventUpdate]: Capability.EventModerate,
+  [Capability.EventDelete]: Capability.EventModerate,
 };
 
 function isOwnedBy(

@@ -38,6 +38,15 @@ export const Capability = {
   PostModerate: "post.moderate",
   PostView: "post.view",
 
+  // Events primitive (R1). Create = MEMBER+ (policy floor). Update/Delete are
+  // own-only for MEMBER, unconditional for holders of EventModerate (ADMIN+),
+  // mirroring the post.update/post.moderate pair. Wired in role-grants.ts +
+  // require.ts (own-only fallback).
+  EventCreate: "event.create",
+  EventUpdate: "event.update",
+  EventDelete: "event.delete",
+  EventModerate: "event.moderate",
+
   AuditView: "audit.view",
 
   // Org classification + public directory (org-classification-and-discovery).

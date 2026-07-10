@@ -38,6 +38,9 @@ export default defineConfig({
       // Run separately: npm run test:integration:ci (CI lane added in P1).
       "test/integration/interaction-events.integration.test.ts",
       "test/integration/report-migration.integration.test.ts",
+      // Events primitive integration test — live Postgres only.
+      // Run separately: npm run test:integration:ci (registered in PHASE0_INTEGRATION).
+      "test/integration/events.integration.test.ts",
     ],
     setupFiles: ["test/setup.ts"],
     globalTeardown: "test/teardown.ts",

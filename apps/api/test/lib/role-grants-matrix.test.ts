@@ -44,6 +44,11 @@ const MATRIX: Record<CapabilityValue, RoleCell> = {
   [Capability.PostModerate]:    { OWNER: true,  ADMIN: true,  MEMBER: false, GUEST: false },
   [Capability.PostView]:        { OWNER: true,  ADMIN: true,  MEMBER: true,  GUEST: true  },
 
+  [Capability.EventCreate]:     { OWNER: true,  ADMIN: true,  MEMBER: true,  GUEST: false },
+  [Capability.EventUpdate]:     { OWNER: true,  ADMIN: true,  MEMBER: true,  GUEST: false },
+  [Capability.EventDelete]:     { OWNER: true,  ADMIN: true,  MEMBER: true,  GUEST: false },
+  [Capability.EventModerate]:   { OWNER: true,  ADMIN: true,  MEMBER: false, GUEST: false },
+
   [Capability.AuditView]:       { OWNER: true,  ADMIN: true,  MEMBER: false, GUEST: false },
 
   [Capability.ClassificationEdit]: { OWNER: true, ADMIN: true, MEMBER: false, GUEST: false },
@@ -87,7 +92,7 @@ describe("Capability catalog completeness", () => {
     expect(Object.keys(MATRIX).sort()).toEqual([...ALL_CAPABILITIES].sort());
   });
 
-  it("ALL_CAPABILITIES has 28 entries (snapshot of MVP catalog)", () => {
-    expect(ALL_CAPABILITIES.length).toBe(28);
+  it("ALL_CAPABILITIES has 32 entries (snapshot of MVP catalog + events primitive)", () => {
+    expect(ALL_CAPABILITIES.length).toBe(32);
   });
 });

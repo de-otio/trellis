@@ -1690,6 +1690,13 @@ enum NotificationType {
   ENTITY_RELATIONSHIP_PROPOSED
   ENTITY_RELATIONSHIP_CONFIRMED
   CONNECTION_CODE_REDEEMED
+  // Events primitive (R1). EVENT_UPDATED / EVENT_CANCELLED wire in M1;
+  // EVENT_INVITE / EVENT_REMINDER ship but wire in M2 (see
+  // plans/events-primitive/README.md §4.6).
+  EVENT_INVITE
+  EVENT_REMINDER
+  EVENT_UPDATED
+  EVENT_CANCELLED
 }
 
 // Notification model (poll-based, never pushed)
@@ -1725,6 +1732,10 @@ model NotificationPreference {
   digestEnabled       Boolean @default(true) @map("digest_enabled")
   systemEnabled       Boolean @default(true) @map("system_enabled")
   relationshipEnabled Boolean @default(true) @map("relationship_enabled")
+  // Events primitive (R1) — gates EVENT_UPDATED / EVENT_CANCELLED (and the
+  // M2 EVENT_INVITE / EVENT_REMINDER). Default on, like the other opt-out
+  // notification categories.
+  eventEnabled        Boolean @default(true) @map("event_enabled")
 
   user User @relation(fields: [userId], references: [id])
 
@@ -1830,6 +1841,7 @@ model Tenant {
   connectionCodeRedemptions ConnectionCodeRedemption[]
   notifications             Notification[]
   blockedUsers              BlockedUser[]
+  events                    Event[]
 
   // Denormalized tenant_id on by-relation children (P1 — for direct RLS).
   postMedia           PostMedia[]
@@ -2362,4 +2374,163 @@ enum CollectionVisibility {
   PUBLIC // browsable + discoverable
   UNLISTED // link-shareable, not surfaced in discovery
   PRIVATE // owner only
+}
+
+// ============================================================================
+// EVENTS PRIMITIVE (R1 — plans/events-primitive/README.md §4.2)
+//
+// A first-class scheduled object with RSVP (capacity + waitlist), volunteer
+// shift slots (Dienstplan), optional feed companion Post, and EVENT_* domain
+// notifications. Model shape mirrors Group (tenant-owned, optionally
+// group-scoped). Every child carries a DENORMALIZED tenantId (P1 direct-RLS
+// convention, GroupMember.tenantId) and is classified in TENANT_SCOPED_MODELS.
+// Location privacy reuses LocationPrecision + the fuzzed displayLat/displayLng
+// pair (TenantDirectoryProfile). No RLS policy (consistent with all existing
+// migrations); enforcement = tenant-scope + mandatory handler-level filter.
+// ============================================================================
+
+enum EventStatus {
+  DRAFT
+  PUBLISHED
+  CANCELLED
+}
+
+enum EventVisibility {
+  TENANT_ONLY // any member of the event's tenant
+  GROUP_ONLY // only members of event.groupId
+  PUBLIC // any authenticated caller (companion Post federates)
+}
+
+enum RsvpStatus {
+  GOING
+  MAYBE
+  NOT_GOING
+  WAITLISTED
+}
+
+enum ShiftSignupStatus {
+  CONFIRMED
+  WAITLISTED
+  CANCELLED
+}
+
+model Event {
+  id          String          @id @default(cuid())
+  // Multi-tenancy — event is owned by exactly one tenant (cascade on delete).
+  tenantId    String          @map("tenant_id")
+  // Optional group ownership. Bare scalar (app-code cascade), mirroring the
+  // shape of Post.groupId; no Prisma relation to avoid a Group back-relation.
+  groupId     String?         @map("group_id")
+  // Creator — references User.id. Bare scalar (denormalized, app-code cascade),
+  // matching the recent Collection.ownerUserId convention.
+  creatorId   String          @map("creator_id")
+  title       String
+  description String?         @db.Text
+  status      EventStatus     @default(DRAFT)
+  visibility  EventVisibility @default(TENANT_ONLY)
+
+  startsAt DateTime  @map("starts_at")
+  endsAt   DateTime? @map("ends_at")
+  // IANA timezone (per event); default matches the platform's primary region.
+  timezone String    @default("Europe/Berlin")
+
+  // Location (privacy-graded). `lat`/`lng` are the true coordinates;
+  // `displayLat`/`displayLng` are the fuzzed/snapped pair safe to return for
+  // NEIGHBORHOOD-level display. The serializer returns display* for non-EXACT
+  // precision, never raw lat/lng (§4.6 SEC-6).
+  locationName      String?           @map("location_name")
+  lat               Float?
+  lng               Float?
+  displayLat        Float?            @map("display_lat")
+  displayLng        Float?            @map("display_lng")
+  locationPrecision LocationPrecision @default(CITY) @map("location_precision")
+
+  // Capacity + waitlist. null capacity = unlimited. Counts are denormalized and
+  // maintained in the handler via atomic conditional SQL (§4.3).
+  capacity      Int?
+  rsvpCount     Int @default(0) @map("rsvp_count")
+  waitlistCount Int @default(0) @map("waitlist_count")
+
+  // Companion feed Post created through the PostHandler seam on publish
+  // (FeedAnnouncer). Unique 1:1 back-reference; null when no companion exists
+  // (e.g. GROUP_ONLY events get no Post — §4.6).
+  announcePostId String? @unique @map("announce_post_id")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  tenant Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  rsvps  Rsvp[]
+  shifts EventShift[]
+
+  @@index([tenantId, startsAt])
+  @@index([tenantId, status, startsAt])
+  @@index([groupId, startsAt])
+  @@map("events")
+}
+
+model Rsvp {
+  id String @id @default(cuid())
+  // Denormalized from the parent event (P1 direct-RLS convention).
+  tenantId String @map("tenant_id")
+  eventId  String @map("event_id")
+  // References User.id (bare scalar, app-code cascade).
+  userId   String @map("user_id")
+  status   RsvpStatus
+  // Additional attendees the RSVP brings. Party size = 1 + guests; clamped at
+  // the Zod boundary to env.event.maxGuestsPerRsvp (§4.3 SEC-1).
+  guests   Int    @default(0)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@unique([eventId, userId])
+  @@index([tenantId, eventId, status])
+  @@index([userId])
+  @@map("event_rsvps")
+}
+
+model EventShift {
+  id String @id @default(cuid())
+  // Denormalized from the parent event (P1 direct-RLS convention).
+  tenantId String    @map("tenant_id")
+  eventId  String    @map("event_id")
+  title    String
+  startsAt DateTime? @map("starts_at")
+  endsAt   DateTime? @map("ends_at")
+  // Per-slot capacity. filledCount maintained in the handler via atomic
+  // conditional SQL (same pattern as Event.rsvpCount).
+  capacity    Int
+  filledCount Int @default(0) @map("filled_count")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  event   Event         @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  signups ShiftSignup[]
+
+  @@index([tenantId, eventId])
+  @@map("event_shifts")
+}
+
+model ShiftSignup {
+  id String @id @default(cuid())
+  // Denormalized from the parent shift's event (P1 direct-RLS convention).
+  tenantId String @map("tenant_id")
+  shiftId  String @map("shift_id")
+  // References User.id (bare scalar, app-code cascade).
+  userId   String @map("user_id")
+  status   ShiftSignupStatus
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  shift EventShift @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+
+  @@unique([shiftId, userId])
+  @@index([tenantId, shiftId])
+  @@map("event_shift_signups")
 }

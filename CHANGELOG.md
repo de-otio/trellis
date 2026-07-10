@@ -15,7 +15,31 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ## [Unreleased]
 
+## [0.22.0] — 2026-07-10
+
 ### Added
+
+- **Events primitive: events, RSVPs with capacity/waitlist, and volunteer shift
+  slots.** A new first-class core feature (feature-flagged `events_enabled`,
+  default off) for tenant-scoped events. Events carry a status
+  (DRAFT/PUBLISHED/CANCELLED), visibility (TENANT_ONLY/GROUP_ONLY/PUBLIC), and
+  privacy-graded location (EXACT/NEIGHBORHOOD/CITY/HIDDEN, with fuzzed display
+  coordinates for non-exact precision). RSVPs (GOING/MAYBE/NOT_GOING) enforce
+  optional capacity with a race-safe waitlist (atomic conditional SQL +
+  `FOR UPDATE SKIP LOCKED` promotion); named shift slots (Dienstplan) have their
+  own capacity and signups. On publish, an event surfaces in the feed via a
+  companion post (mapped from visibility; GROUP_ONLY events post nothing); GOING
+  attendees receive `EVENT_UPDATED`/`EVENT_CANCELLED` notifications (debounced).
+  New endpoints under `/api/events…` (create/list/mine/get/update/cancel;
+  rsvp/withdraw; attendees; shift CRUD; shift signup/withdraw), all gated by
+  `events_enabled` and requiring at least the `MEMBER` role. New capabilities
+  `EventCreate`/`EventUpdate`/`EventDelete`/`EventModerate`; new `EVENT_*`
+  operational env vars (per-tenant/shift/guest caps, RSVP and update rate limits,
+  notification cooldown). Reference docs: `docs/reference/events-api.md`.
+  Recurrence, ICS export, and reminders are deferred to a later release.
+  **Consumer note: ships a Prisma migration adding the events tables and four
+  `EVENT_*` `NotificationType` values — run migrations on upgrade. The feature
+  stays inert until `events_enabled` is enabled.**
 
 - **Email provider abstraction with AWS SES and Resend support.** Transactional
   emails (magic-link authentication tokens) are sent via a swappable provider
@@ -691,7 +715,8 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 Baseline release of the public Trellis package.
 
-[Unreleased]: https://github.com/de-otio/trellis/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/de-otio/trellis/compare/v0.22.0...HEAD
+[0.22.0]: https://github.com/de-otio/trellis/compare/v0.21.2...v0.22.0
 [0.13.0]: https://github.com/de-otio/trellis/compare/v0.12.3...v0.13.0
 [0.12.3]: https://github.com/de-otio/trellis/compare/v0.12.2...v0.12.3
 [0.12.2]: https://github.com/de-otio/trellis/compare/v0.12.1...v0.12.2

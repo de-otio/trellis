@@ -271,3 +271,137 @@ export const getSentimentUsersSchema = z.object({
     )
     .optional(),
 });
+
+// ============================================================================
+// Events primitive (R1 — plans/events-primitive/README.md §4.2, §4.5, §4.8)
+//
+// .trim() runs BEFORE .min()/.max() so whitespace-only strings fail length
+// validation instead of passing min(1) and then trimming to "" downstream
+// (fail-closed at the boundary — same convention as createPostSchema).
+//
+// Client-supplied enums exclude WAITLISTED: waitlist placement is decided by
+// the server's atomic capacity check (§4.3), never chosen by the caller.
+// displayLat/displayLng are DERIVED by the handler (location fuzzing), never
+// accepted from the client — the schema only takes the true lat/lng +
+// precision. Operational caps that are threshold-secret (guests-per-RSVP, the
+// list page size) arrive as parameters from env.event.* (CLAUDE.md rule 8),
+// so those two schemas are factory functions rather than module constants.
+// ============================================================================
+
+const eventVisibilitySchema = z.enum(["TENANT_ONLY", "GROUP_ONLY", "PUBLIC"]);
+const eventLocationPrecisionSchema = z.enum([
+  "EXACT",
+  "NEIGHBORHOOD",
+  "CITY",
+  "HIDDEN",
+]);
+const eventStatusSchema = z.enum(["DRAFT", "PUBLISHED", "CANCELLED"]);
+// IANA timezone identifier (e.g. "Europe/Berlin"). Kept a bounded free string
+// at the boundary; the handler validates it against Intl before persisting.
+const eventTimezoneSchema = z.string().trim().min(1).max(64);
+const eventLatSchema = z.number().min(-90).max(90);
+const eventLngSchema = z.number().min(-180).max(180);
+
+/**
+ * Create event request body. `startsAt`/`endsAt` are ISO 8601 datetimes
+ * (offsets allowed); a present `endsAt` must not precede `startsAt`.
+ */
+export const createEventSchema = z
+  .object({
+    title: z.string().trim().min(1).max(200),
+    description: z.string().trim().max(5000).optional(),
+    visibility: eventVisibilitySchema.optional(),
+    groupId: z.string().trim().min(1).max(100).optional(),
+    startsAt: z.string().datetime({ offset: true }),
+    endsAt: z.string().datetime({ offset: true }).optional(),
+    timezone: eventTimezoneSchema.optional(),
+    locationName: z.string().trim().min(1).max(300).optional(),
+    lat: eventLatSchema.optional(),
+    lng: eventLngSchema.optional(),
+    locationPrecision: eventLocationPrecisionSchema.optional(),
+    // null = unlimited; omit or send null for no cap.
+    capacity: z.number().int().min(1).max(1_000_000).nullish(),
+  })
+  .refine((v) => v.endsAt === undefined || v.endsAt >= v.startsAt, {
+    message: "endsAt must not precede startsAt",
+    path: ["endsAt"],
+  });
+
+/**
+ * Edit event request body. All fields optional (partial update). `status`
+ * carries the DRAFT→PUBLISHED publish transition (cancellation is the DELETE
+ * route). endsAt/startsAt cross-field check applies only when both are present.
+ */
+export const editEventSchema = z
+  .object({
+    title: z.string().trim().min(1).max(200).optional(),
+    description: z.string().trim().max(5000).optional(),
+    visibility: eventVisibilitySchema.optional(),
+    status: eventStatusSchema.optional(),
+    startsAt: z.string().datetime({ offset: true }).optional(),
+    endsAt: z.string().datetime({ offset: true }).nullish(),
+    timezone: eventTimezoneSchema.optional(),
+    locationName: z.string().trim().min(1).max(300).nullish(),
+    lat: eventLatSchema.nullish(),
+    lng: eventLngSchema.nullish(),
+    locationPrecision: eventLocationPrecisionSchema.optional(),
+    capacity: z.number().int().min(1).max(1_000_000).nullish(),
+  })
+  .refine(
+    (v) =>
+      v.startsAt === undefined ||
+      v.endsAt === undefined ||
+      v.endsAt === null ||
+      v.endsAt >= v.startsAt,
+    { message: "endsAt must not precede startsAt", path: ["endsAt"] },
+  );
+
+/**
+ * RSVP request body. `guests` is clamped at the boundary to the env-supplied
+ * `maxGuests` (env.event.maxGuestsPerRsvp) — a threshold-secret cap, hence a
+ * factory rather than a hardcoded max (§4.3 SEC-1, §4.8). Party size = 1 +
+ * guests. WAITLISTED is never a client-selectable status.
+ */
+export const rsvpSchema = (maxGuests: number) =>
+  z.object({
+    status: z.enum(["GOING", "MAYBE", "NOT_GOING"]),
+    guests: z.number().int().min(0).max(maxGuests).default(0),
+  });
+
+/**
+ * Shift (Dienstplan slot) create/edit body. For edits, callers apply
+ * `.partial()`. `capacity` is a positive int; its upper bound is a plain
+ * sanity guard (not a security threshold). endsAt must not precede startsAt.
+ */
+export const shiftSchema = z
+  .object({
+    title: z.string().trim().min(1).max(200),
+    startsAt: z.string().datetime({ offset: true }).optional(),
+    endsAt: z.string().datetime({ offset: true }).optional(),
+    capacity: z.number().int().min(1).max(1_000_000),
+  })
+  .refine(
+    (v) => v.startsAt === undefined || v.endsAt === undefined || v.endsAt >= v.startsAt,
+    { message: "endsAt must not precede startsAt", path: ["endsAt"] },
+  );
+
+/**
+ * Shift signup body. Signup carries no user-chosen fields — CONFIRMED vs
+ * WAITLISTED is decided by the server's atomic capacity check. Present as a
+ * boundary marker; extra properties are ignored.
+ */
+export const shiftSignupSchema = z.object({});
+
+/**
+ * Event list query parameters. `limit` is bounded by the env-supplied
+ * `listPageMax` (env.event.listPageMax) — threshold-secret, hence a factory.
+ * Keyset cursor is an opaque string decoded by the handler (§4.5).
+ */
+export const eventListQuerySchema = (listPageMax: number) =>
+  z.object({
+    limit: z.coerce.number().int().min(1).max(listPageMax).default(20),
+    cursor: z.string().optional(),
+    upcoming: z.coerce.boolean().optional(),
+    groupId: z.string().trim().min(1).max(100).optional(),
+    status: eventStatusSchema.optional(),
+  });

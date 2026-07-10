@@ -31,6 +31,11 @@ const MemberGrants: ReadonlySet<CapabilityValue> = new Set<CapabilityValue>([
   Capability.PostCreate,
   Capability.PostUpdate,
   Capability.PostDelete,
+  // Events primitive (R1). Create at the MEMBER floor; Update/Delete are
+  // own-only (require.ts fallback) unless the role also holds EventModerate.
+  Capability.EventCreate,
+  Capability.EventUpdate,
+  Capability.EventDelete,
 ]);
 
 const AdminGrants: ReadonlySet<CapabilityValue> = new Set<CapabilityValue>([
@@ -47,6 +52,7 @@ const AdminGrants: ReadonlySet<CapabilityValue> = new Set<CapabilityValue>([
   Capability.DomainVerify,
   Capability.DomainRemove,
   Capability.PostModerate,
+  Capability.EventModerate,
   Capability.AuditView,
   Capability.ClassificationEdit,
   Capability.DirectoryEdit,

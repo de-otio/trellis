@@ -505,6 +505,36 @@ export interface Env {
     maxPerUser: number;
   };
   // --- end Collections config seam ---------------------------------------------
+
+  // --- Events primitive config seam (events-primitive/README.md §4.8) ---------
+  // Threshold-secrecy seam (CLAUDE.md rule 8): every operational cap/threshold
+  // is runtime config, never a compiled constant, so no number ships in the
+  // public tarball. Handlers read env.event.* — never hardcode. Resolved by
+  // resolveEventEnv().
+  event: {
+    /** Max non-deleted events per tenant. Source: EVENT_MAX_PER_TENANT. */
+    maxPerTenant: number;
+    /** Max shift slots per event. Source: EVENT_MAX_SHIFTS_PER_EVENT. */
+    maxShiftsPerEvent: number;
+    /**
+     * Max additional guests a single RSVP may bring (party size = 1 + guests).
+     * Clamped at the Zod boundary. Source: EVENT_MAX_GUESTS_PER_RSVP.
+     */
+    maxGuestsPerRsvp: number;
+    /** Per-user RSVP writes allowed per hour. Source: EVENT_RSVP_RATE_PER_HOUR. */
+    rsvpRatePerHour: number;
+    /** Per-event update writes allowed per hour. Source: EVENT_UPDATE_RATE_PER_HOUR. */
+    updateRatePerHour: number;
+    /**
+     * Debounce window that suppresses/consolidates repeated EVENT_UPDATED
+     * notifications for one event (amplification guard, SEC-5/SEC-9).
+     * Source: EVENT_UPDATE_NOTIFY_COOLDOWN_SECONDS.
+     */
+    updateNotifyCooldownSeconds: number;
+    /** Max page size for GET /api/events. Source: EVENT_LIST_PAGE_MAX. */
+    listPageMax: number;
+  };
+  // --- end Events primitive config seam ---------------------------------------
 }
 
 /**
@@ -919,6 +949,42 @@ export function resolveCollectionEnv(
 }
 
 /**
+ * Resolve the events-primitive config block from `source` (defaults to
+ * `process.env`; tests can inject a fixture object).
+ *
+ * Single-writer: this is the ONLY place that reads the EVENT_* env vars.
+ * Threshold-secrecy seam (CLAUDE.md rule 8): every value is runtime config with
+ * a CONSERVATIVE dev-safe fallback, never a compiled constant sprinkled at call
+ * sites. Design: plans/events-primitive/README.md §4.8.
+ */
+export function resolveEventEnv(source: NodeJS.ProcessEnv = process.env): {
+  event: {
+    maxPerTenant: number;
+    maxShiftsPerEvent: number;
+    maxGuestsPerRsvp: number;
+    rsvpRatePerHour: number;
+    updateRatePerHour: number;
+    updateNotifyCooldownSeconds: number;
+    listPageMax: number;
+  };
+} {
+  return {
+    event: {
+      maxPerTenant: parsePositiveInt(source.EVENT_MAX_PER_TENANT, 500),
+      maxShiftsPerEvent: parsePositiveInt(source.EVENT_MAX_SHIFTS_PER_EVENT, 50),
+      maxGuestsPerRsvp: parsePositiveInt(source.EVENT_MAX_GUESTS_PER_RSVP, 10),
+      rsvpRatePerHour: parsePositiveInt(source.EVENT_RSVP_RATE_PER_HOUR, 60),
+      updateRatePerHour: parsePositiveInt(source.EVENT_UPDATE_RATE_PER_HOUR, 20),
+      updateNotifyCooldownSeconds: parsePositiveInt(
+        source.EVENT_UPDATE_NOTIFY_COOLDOWN_SECONDS,
+        3600,
+      ),
+      listPageMax: parsePositiveInt(source.EVENT_LIST_PAGE_MAX, 50),
+    },
+  };
+}
+
+/**
  * Assemble a Postgres URL from Secrets Manager at runtime.
  *
  * The secret is fetched with the AWS SDK. Credentials live on the returned
@@ -1203,6 +1269,8 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     ...resolveEmailSubscriptionEnv(),
     // Collections config seam (§3): resolveCollectionEnv() reads COLLECTION_* vars.
     ...resolveCollectionEnv(),
+    // Events-primitive config seam (§4.8): resolveEventEnv() reads EVENT_* vars.
+    ...resolveEventEnv(),
     DATABASE_URL: databaseUrl,
     DATABASE_URL_CN: process.env.DATABASE_URL_CN,
     DIRECT_URL: process.env.DIRECT_URL,

@@ -77,6 +77,12 @@ export const Capability = {
   PostModerate:     'post.moderate',   // any post in tenant
   PostView:         'post.view',
 
+  // Events
+  EventCreate:      'event.create',
+  EventUpdate:      'event.update',    // own event
+  EventDelete:      'event.delete',    // own event
+  EventModerate:    'event.moderate',  // any event in tenant
+
   // Audit
   AuditView:        'audit.view',
 
@@ -129,6 +135,10 @@ Conventions:
 | `post.delete` | ✅⁴ | ✅⁴ | ✅⁴ | |
 | `post.moderate` | ✅ | ✅ | | |
 | `post.view` | ✅ | ✅ | ✅ | ✅ |
+| `event.create` | ✅ | ✅ | ✅ | |
+| `event.update` | ✅⁵ | ✅⁵ | ✅⁵ | |
+| `event.delete` | ✅⁵ | ✅⁵ | ✅⁵ | |
+| `event.moderate` | ✅ | ✅ | | |
 | `audit.view` | ✅ | ✅ | | |
 | `classification.edit` | ✅ | ✅ | | |
 | `directory.edit` | ✅ | ✅ | | |
@@ -139,6 +149,10 @@ ownership.
 ² Any entity in the tenant.
 ³ Only entities the user has `EntityOwnership` on.
 ⁴ Only the user's own posts (cross-user takedowns require `post.moderate`).
+⁵ Only the user's own events (creating is a plain MEMBER capability; updating,
+cancelling, or managing the shifts of *another* member's event requires
+`event.moderate`, held by ADMIN and OWNER). RSVP-ing and signing up for shifts
+need no event capability — only the `MEMBER` role floor.
 
 Grants are defined as static role-to-capability sets in code:
 

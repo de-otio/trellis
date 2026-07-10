@@ -89,6 +89,7 @@ import { relationshipRoutes } from "./routes/relationships.js";
 // H12 — open social web (follow-by-email, collections, year-in-review)
 import { emailSubscriptionRoutes } from "./routes/email-subscriptions.js";
 import { curatedCollectionRoutes } from "./routes/collections.js";
+import { eventsRoutes } from "./routes/events.js";
 import { recapRoutes } from "./routes/recap.js";
 import { sentimentsRoutes } from "./routes/sentiments.js";
 import { settingsRoutes } from "./routes/settings.js";
@@ -419,6 +420,10 @@ const PORTED_ROUTE_SETS: ReadonlyArray<ReadonlyArray<Route>> = [
   emailSubscriptionRoutes, // /api/subscriptions/email[...] + /api/entities/:id/subscribers/summary
   curatedCollectionRoutes, // /api/collections[...]
   recapRoutes, // /api/recap/:subjectType/:subjectId
+  // R1 — Events primitive. All ([^/]+) captures (mount auto-translates); static
+  // /api/events collection routes are ordered before the bare /api/events/:id
+  // item routes within the set. Gated OFF-by-default via featureToggleMiddleware.
+  eventsRoutes, // /api/events[...] incl. rsvp/attendees/shifts sub-resources
 ];
 
 /**

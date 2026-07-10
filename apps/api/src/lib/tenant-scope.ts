@@ -79,6 +79,14 @@ export const TENANT_SCOPED_MODELS: ReadonlySet<string> = new Set([
   // "by-relation" (no own tenantId) and crosses the scope boundary via
   // the post→media join — flagged for T9/integration.
   "MediaFile",
+  // Events primitive (R1 — HIGH-3 fix). All four carry their OWN denormalized
+  // tenantId, so they are auto-scoped here (NOT by-relation). Handlers ALSO
+  // filter tenantId explicitly (§4.4 belt-and-suspenders — the auto-scope
+  // middleware is a no-op when TENANT_SCOPE_MODE is off, the default deploy).
+  "Event",
+  "Rsvp",
+  "EventShift",
+  "ShiftSignup",
 ]);
 
 /**

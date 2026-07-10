@@ -51,6 +51,30 @@ export interface CreatePostRequest {
 }
 
 /**
+ * Input to `createSystemPost` — the events primitive's FeedAnnouncer seam
+ * (R1, §4.6). Not request-driven: the caller has already resolved `radius`
+ * from the event's visibility (`planCompanionPost`) and precision-filtered the
+ * body/geo (`precisionFilteredLocation`), so this carries plain values only.
+ */
+export interface SystemPostInput {
+  /** User.id used as the companion Post's author. */
+  authorId: string;
+  /** Active tenant the post belongs to (stamped NON-NULL by DataRouter). */
+  tenantId: string;
+  /** Fully composed, precision-filtered post body. */
+  text: string;
+  /** Posting radius resolved from event visibility (SHOUT | NORMAL). */
+  radius: PostRadius;
+  /** Data-region for routing (request context region). */
+  region: string;
+  /** Origin used to build ActivityPub URIs (e.g. new URL(request.url).origin). */
+  baseUrl: string;
+  /** Optional precision-filtered coordinates for the post's geoData. */
+  geoData?: { lat: number; lng: number; place?: string };
+  contentWarnings?: string[];
+}
+
+/**
  * Legacy API visibility → PostRadius mapping.
  *
  * The Post model stores a posting radius (`radius PostRadius` — how far
@@ -1849,6 +1873,233 @@ export class PostHandler {
    * Uses cache versioning: all cache keys include a version number,
    * and incrementing the version makes all old cache entries invalid.
    */
+  /**
+   * Create a SYSTEM post through the same machinery as user posts — the seam
+   * the events primitive's FeedAnnouncer calls to publish a companion Post
+   * (R1, plans/events-primitive/README.md §4.6).
+   *
+   * Unlike {@link createPost} this is NOT request-driven. The caller
+   * (FeedAnnouncer) has already resolved the radius from the event's
+   * visibility (`planCompanionPost`) and precision-filtered the body/geo
+   * (`precisionFilteredLocation`), so this method only persists + federates:
+   * it reuses {@link DataRouter.createPost} (region routing, tenant stamp,
+   * transactional create), bumps the feed-cache version, and — when federation
+   * is enabled and the author carries ActivityPub keys — delivers a Create to
+   * the outbox. Returns the new Post id (stored on `Event.announcePostId`).
+   */
+  async createSystemPost(
+    input: SystemPostInput,
+    env: Env,
+  ): Promise<{ postId: string }> {
+    const requestId = generateRequestId();
+
+    const post = await DataRouter.createPost(
+      {
+        authorId: input.authorId,
+        text: input.text.trim(),
+        radius: input.radius,
+        tenantId: input.tenantId,
+        geoData: input.geoData,
+        contentWarnings: input.contentWarnings ?? [],
+      },
+      input.region,
+      env,
+      undefined,
+      requestId,
+    );
+
+    // Companion post must appear in feeds — bump the cache version.
+    await this.invalidateFeedCache(env);
+
+    // ActivityPub outbox delivery (no-op when federation is off / author has
+    // no AP keys). Best-effort: never fail the caller on a delivery error.
+    await this.deliverSystemPostActivity(
+      post.id,
+      input.region,
+      env,
+      input.baseUrl,
+    );
+
+    return { postId: post.id };
+  }
+
+  /**
+   * Update the text of a companion (system-authored) Post — the events
+   * primitive's FeedAnnouncer `update` seam (R1, §4.6 HIGH-1). Persists the
+   * recomposed, already precision-filtered body and bumps the feed-cache
+   * version so the change surfaces. Region-agnostic (default region) — the
+   * companion Post has no request context at this seam.
+   *
+   * NOTE: outbound ActivityPub **Update** delivery is deferred to a follow-up;
+   * this keeps LOCAL feed consistency (DB text + cache bump). Federated peers
+   * refresh on the event's next lifecycle event. See the plan §4.6 HIGH-1.
+   */
+  async updateSystemPost(
+    postId: string,
+    text: string,
+    env: Env,
+  ): Promise<void> {
+    const { createPrisma } = await import("../db.js");
+    const db = createPrisma(env);
+    await db.post.update({
+      where: { id: postId },
+      data: { text: text.trim() },
+    });
+    await this.invalidateFeedCache(env);
+  }
+
+  /**
+   * Retract a companion (system-authored) Post — the events primitive's
+   * FeedAnnouncer `retract` seam (R1, §4.6 HIGH-1). Soft-deletes the Post (sets
+   * `deletedAt`) so it stops surfacing in feeds, and bumps the feed-cache
+   * version.
+   *
+   * NOTE: outbound ActivityPub **Delete** delivery is deferred to a follow-up;
+   * this keeps LOCAL feed consistency (soft-delete + cache bump). See the plan
+   * §4.6 HIGH-1.
+   */
+  async retractSystemPost(postId: string, env: Env): Promise<void> {
+    const { createPrisma } = await import("../db.js");
+    const db = createPrisma(env);
+    await db.post.update({
+      where: { id: postId },
+      data: { deletedAt: new Date() },
+    });
+    await this.invalidateFeedCache(env);
+  }
+
+  /**
+   * Deliver a Create activity for a system-authored post to the ActivityPub
+   * outbox. Mirrors the delivery block in {@link createPost}; fully guarded and
+   * best-effort so a federation error never propagates to the event flow.
+   */
+  private async deliverSystemPostActivity(
+    postId: string,
+    region: string,
+    env: Env,
+    baseUrl: string,
+  ): Promise<void> {
+    if (!env.ACTIVITYPUB_ENABLED) return;
+
+    try {
+      const dbHelpers = await import("./db-query-helper.js");
+      const dbManager = await import("./database-connection-manager.js");
+      const { sharedDatabaseConnectionManager } = dbManager;
+      const { withQueryTimeoutAndRetry, QueryTimeoutPresets } = dbHelpers;
+
+      const postWithAuthor = await withQueryTimeoutAndRetry(
+        sharedDatabaseConnectionManager,
+        region,
+        env as any,
+        async (db) => {
+          return await db.post.findUnique({
+            where: { id: postId },
+            include: {
+              author: {
+                select: {
+                  id: true,
+                  username: true,
+                  actorUri: true,
+                  inboxUrl: true,
+                  outboxUrl: true,
+                  publicKey: true,
+                },
+              },
+            },
+          });
+        },
+        {
+          ...QueryTimeoutPresets.STANDARD,
+          maxRetries: 2,
+          baseDelayMs: 100,
+          defaultValue: null,
+          context: { operation: "createSystemPost_fetchForActivityPub", postId },
+        },
+      );
+
+      if (!postWithAuthor?.author?.actorUri || !postWithAuthor.author.publicKey) {
+        return;
+      }
+
+      const { PostActivityServiceFedify } = await import(
+        "./activitypub/services/post-service-fedify.js"
+      );
+      const { DeliveryService } = await import(
+        "./activitypub/delivery-service.js"
+      );
+      const { fedifyCreateToActivityStreams } = await import(
+        "./activitypub/services/fedify-converters.js"
+      );
+      const { UserActorDispatcher } = await import(
+        "./activitypub/dispatchers/user-actor.js"
+      );
+
+      await withQueryTimeoutAndRetry(
+        sharedDatabaseConnectionManager,
+        region,
+        env as any,
+        async (db) => {
+          const fedifyActivity =
+            await PostActivityServiceFedify.createPostActivity(
+              db,
+              postWithAuthor,
+              postWithAuthor.author as any,
+              env as any,
+              baseUrl,
+            );
+          const note = await PostActivityServiceFedify.createNote(
+            postWithAuthor,
+            postWithAuthor.author as any,
+            env as any,
+            baseUrl,
+          );
+          const uris = PostActivityServiceFedify.generatePostUris(
+            postWithAuthor.id,
+            env as any,
+            baseUrl,
+          );
+          const actorUri = UserActorDispatcher.generateActorUri(
+            postWithAuthor.author.username || "",
+            env as any,
+          );
+          const activityForDelivery = fedifyCreateToActivityStreams(
+            fedifyActivity,
+            note,
+            actorUri,
+            uris.activityId.toString(),
+            uris.objectId.toString(),
+          );
+
+          DeliveryService.deliverPost(
+            db,
+            activityForDelivery,
+            postWithAuthor,
+            postWithAuthor.author as any,
+            env as any,
+            baseUrl,
+            this.logger,
+          ).catch((error) => {
+            this.logger.error(
+              "[PostHandler] system-post ActivityPub delivery failed:",
+              error,
+            );
+          });
+        },
+        {
+          ...QueryTimeoutPresets.STANDARD,
+          maxRetries: 2,
+          baseDelayMs: 100,
+          context: { operation: "createSystemPost_activityPub", postId },
+        },
+      );
+    } catch (error: any) {
+      this.logger.error(
+        "[PostHandler] system-post ActivityPub activity creation failed:",
+        error,
+      );
+    }
+  }
+
   private async invalidateFeedCache(env: Env): Promise<void> {
     const kv = env.FEED_CACHE_KV;
     if (!kv) return;

@@ -42,6 +42,7 @@ import { feedsRoutes } from "./feeds.js";
 import { relationshipRoutes } from "./relationships.js";
 import { emailSubscriptionRoutes } from "./email-subscriptions.js";
 import { curatedCollectionRoutes } from "./collections.js";
+import { eventsRoutes } from "./events.js";
 import { recapRoutes } from "./recap.js";
 import { circleRoutes } from "./circles.js";
 import { discoveryRoutes } from "./discovery.js";
@@ -331,6 +332,9 @@ const coreRoutes: Route[] = [
   ...emailSubscriptionRoutes,
   ...curatedCollectionRoutes,
   ...recapRoutes,
+
+  // R1 — Events primitive (gated OFF-by-default via featureToggleMiddleware).
+  ...eventsRoutes,
 ];
 
 // Merge extension routes (after core, before 404)

@@ -238,6 +238,14 @@ async function seedFeatureToggles() {
       enabled: getEnabled("year_in_review_enabled", false),
       description: "Year-in-review recap (RecapService)",
     },
+    {
+      key: "events_enabled",
+      // Events primitive (R1). Global default OFF (opt-in): the route set 404s
+      // until an operator flips this per environment. Mirrors
+      // collections_enabled — no isDev auto-enable.
+      enabled: getEnabled("events_enabled", false),
+      description: "Events primitive (scheduled events, RSVP, shifts)",
+    },
   ];
 
   // Region-specific flags (from region-config.ts)

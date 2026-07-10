@@ -29,6 +29,9 @@ const PHASE0_INTEGRATION = [
   // `visibility` column); pins the legacy visibility→radius mapping and the
   // public-posting gate on radius=SHOUT.
   "test/integration/post-create-radius.integration.test.ts",
+  // R1 — Events primitive: RSVP capacity/waitlist under real Postgres, incl.
+  // the N-parallel-RSVP concurrency proof of no-over-capacity (§4.3, §7).
+  "test/integration/events.integration.test.ts",
 ];
 
 export default defineConfig({

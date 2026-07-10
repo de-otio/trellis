@@ -111,6 +111,38 @@ TTLs, retention windows, collection caps) is env-driven with a safe default —
 see the `EMAIL_SUB_*` and `COLLECTION_*` entries in
 [`apps/api/src/env.ts`](https://github.com/de-otio/trellis/blob/main/apps/api/src/env.ts).
 
+## Events
+
+The Events primitive (events, RSVPs, and volunteer shifts — see the
+[Events API](../reference/events-api.md)) ships **disabled by default** behind
+the `events_enabled` global feature toggle. Enable it exactly like the Open
+Social Web features above: apply the schema migration, then turn the toggle on
+per environment (or per tenant with a `setToggle` override). Ticketing/payments
+and recurrence/ICS are not part of this version.
+
+The events tables ship as an ordinary **Prisma migration**, applied on deploy
+like any other schema change — there is no separate provisioning step.
+
+Every operational parameter is env-driven with a conservative default, so an
+environment that enables events works without setting any of these; tune them
+only where the default does not fit. All are read once in `resolveEventEnv()`
+(`apps/api/src/env.ts`):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `EVENT_MAX_PER_TENANT` | `500` | Max live (non-cancelled) events per tenant. Create returns `409` at the cap; cancelling frees a slot. |
+| `EVENT_MAX_SHIFTS_PER_EVENT` | `50` | Max shift slots per event. |
+| `EVENT_MAX_GUESTS_PER_RSVP` | `10` | Max additional guests on one RSVP (party size = 1 + guests). Clamped at the request boundary. |
+| `EVENT_RSVP_RATE_PER_HOUR` | `60` | Per-user RSVP writes allowed per hour (bucketed per user + event). `429` when exceeded. |
+| `EVENT_UPDATE_RATE_PER_HOUR` | `20` | Per-event update writes allowed per hour (bucketed per event). `429` when exceeded. |
+| `EVENT_UPDATE_NOTIFY_COOLDOWN_SECONDS` | `3600` | Debounce window that consolidates repeated `EVENT_UPDATED` notifications for one event (notification-amplification guard). |
+| `EVENT_LIST_PAGE_MAX` | `50` | Upper bound on the `limit` query parameter for event/attendee listing. |
+
+These defaults are conservative dev-safe values; the operative production values
+are set through the environment (parameter/secret store) like every other
+Trellis setting. As with all Trellis thresholds, they are runtime config — none
+is compiled into the published package.
+
 ## Monitoring conventions
 
 Because the consuming application owns the runtime, it also owns dashboards and

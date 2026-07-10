@@ -31,6 +31,16 @@ const PHASE0_NEW_FILES = [
   "src/lib/graph/postgres/interaction-events.ts",
   // P3 — signup metadata capture
   "src/lib/signup-metadata.ts",
+  // R1 — Events primitive (new source files)
+  "src/lib/events/seams.ts",
+  "src/lib/events/event-core.ts",
+  "src/lib/events/event-visibility.ts",
+  "src/lib/events/event-handler.ts",
+  "src/lib/events/rsvp-handler.ts",
+  "src/lib/events/shift-handler.ts",
+  "src/lib/events/event-notifications.ts",
+  "src/lib/events/post-feed-announcer.ts",
+  "src/lib/routes/events.ts",
 ];
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
