@@ -10,7 +10,10 @@
  */
 
 import http from "node:http";
+import { randomUUID } from "node:crypto";
+import type { CrossTenantReadDelegate } from "@de-otio/trellis-extension-api";
 import { buildEnv, validateEnv } from "./env.js";
+import { startExtensionJobRunners } from "./lib/extension-job-runner.js";
 import { validateBootEnv } from "./env-schema.js";
 import { buildHonoApp } from "./lib/app.js";
 import { getLogger, Logger } from "./lib/logger.js";
@@ -90,6 +93,35 @@ export async function startServer(): Promise<http.Server> {
 
   logger.info(
     `Loaded ${extensions.length} extension(s): ${extensions.map((e) => e.id).join(", ")}`,
+  );
+
+  // O-1: in-process extension job runner (design §5.2/§12.4 item 2). Declared
+  // jobs run HERE (the API container is the only process that loads extensions;
+  // worker Lambdas load none), single-flighted cluster-wide by a DynamoDB
+  // conditional-put lock. Clock + uuid + DynamoDB client are injected. No-ops
+  // cleanly when no extension declares a job (the O-1 v1 reality — dogs owns no
+  // jobs yet). The L1 tenant-scoped-DB factory is wired into `scopedDbFactory`
+  // at Phase-2 integration; until then `ctx.tenant()` is unreached (no jobs).
+  const { DynamoDBClient } = await import("@aws-sdk/client-dynamodb");
+  const { sharedDatabaseConnectionManager: dbManager } = await import(
+    "./lib/database-connection-manager.js"
+  );
+  const jobRunnerHandle = startExtensionJobRunners(
+    {
+      dynamo: new DynamoDBClient({ region: env.AWS_REGION }),
+      tableName: process.env.DYNAMODB_TABLE ?? `${env.STAGE ?? "dev"}-trellis`,
+      now: () => Date.now(),
+      uuid: () => randomUUID(),
+      readDelegateSource: (model) => {
+        const { client } = dbManager.acquireClient("primary", env);
+        return (client as unknown as Record<string, CrossTenantReadDelegate | undefined>)[
+          model
+        ];
+      },
+      stage: env.STAGE ?? "dev",
+      logger,
+    },
+    extensions,
   );
 
   // Stream 2.1: Hono app coexists with the legacy router. Built once
@@ -213,6 +245,8 @@ export async function startServer(): Promise<http.Server> {
   // Graceful shutdown — drain HTTP connections, then close database pools
   async function shutdown() {
     logger.info(`Shutting down... (${activeConnections} active connections)`);
+    // Stop extension job timers first so no new tick starts mid-drain.
+    jobRunnerHandle.stop();
     server.close(async () => {
       try {
         // Shutdown extensions
