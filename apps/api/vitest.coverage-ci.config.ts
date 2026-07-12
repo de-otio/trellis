@@ -41,6 +41,11 @@ const PHASE0_NEW_FILES = [
   "src/lib/events/event-notifications.ts",
   "src/lib/events/post-feed-announcer.ts",
   "src/lib/routes/events.ts",
+  // O-1 — extension-owned schema mechanism (Phase 3 coverage gate)
+  "src/lib/extension-scoped-db.ts",
+  "src/lib/extension-schema-composer.ts",
+  "src/lib/extension-job-runner.ts",
+  "src/lib/mint-tenant-id.ts",
 ];
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
