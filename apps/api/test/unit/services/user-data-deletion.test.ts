@@ -1,8 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import type { ExtensionModelRegistryEntry } from "../../../src/lib/extension-model-registry.js";
 
-const { mockGetParameter, mockResolveSecret } = vi.hoisted(() => ({
+const { mockGetParameter, mockResolveSecret, mockRegistry } = vi.hoisted(() => ({
   mockGetParameter: vi.fn(),
   mockResolveSecret: vi.fn(),
+  // Mutable stand-in for EXTENSION_MODEL_REGISTRY (real one is empty today —
+  // O-1 is infra ahead of its first table-owner). Tests below push/clear
+  // entries to exercise the erasure loop without waiting on L2's composer.
+  mockRegistry: [] as ExtensionModelRegistryEntry[],
 }));
 
 vi.mock("@aws-lambda-powertools/parameters/ssm", () => ({
@@ -12,6 +17,10 @@ vi.mock("@aws-lambda-powertools/parameters/ssm", () => ({
 vi.mock("@de-otio/saas-foundation/secrets", () => ({
   resolveSecret: mockResolveSecret,
   secretRef: vi.fn((arn: string) => ({ arn })),
+}));
+
+vi.mock("../../../src/lib/extension-model-registry.js", () => ({
+  EXTENSION_MODEL_REGISTRY: mockRegistry,
 }));
 
 import {
@@ -25,6 +34,7 @@ describe("deleteUserData", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockRegistry.length = 0;
     mockDb = {
       commentSentiment: { deleteMany: vi.fn().mockResolvedValue({ count: 2 }) },
       postSentiment: { deleteMany: vi.fn().mockResolvedValue({ count: 3 }) },
@@ -89,6 +99,7 @@ describe("deleteUserData", () => {
       mediaFilesErased: 0,
       mediaFilesRetainedShared: 0,
       mediaStagingKeys: [],
+      extensionRowsErased: 0,
     });
 
     // Verify deletion order: sentiments before comments, comments before posts, posts before entities
@@ -279,6 +290,82 @@ describe("deleteUserData", () => {
       const userDeleteOrder = vi.mocked(mockDb.user.delete).mock.invocationCallOrder[0];
       expect(postMediaOrder).toBeLessThan(mediaScanOrder);
       expect(mediaScanOrder).toBeLessThan(userDeleteOrder);
+    });
+  });
+
+  // ── O-1 L4: extension-owned (`ext_*`) erasure participation ────────────────
+  describe("extension-owned erasure (O-1 design §6 / §12.4 item 1)", () => {
+    it("registry empty (today's default): the erasure loop is a clean no-op", async () => {
+      // mockRegistry is cleared in the outer beforeEach — assert the default
+      // shipped state (no extension owns a table yet) behaves cleanly.
+      const result = await deleteUserData(mockDb, "user-123");
+
+      expect(result.extensionRowsErased).toBe(0);
+    });
+
+    it("deletes per-subject rows for a subject-scoped model BEFORE db.user.delete()", async () => {
+      mockRegistry.push({
+        model: "dogReminder",
+        tenantField: "tenantId",
+        erasureSubjectField: "userId",
+      });
+      mockDb.dogReminder = { deleteMany: vi.fn().mockResolvedValue({ count: 3 }) };
+
+      const result = await deleteUserData(mockDb, "user-123");
+
+      expect(mockDb.dogReminder.deleteMany).toHaveBeenCalledWith({
+        where: { userId: "user-123" },
+      });
+      const eraseOrder = vi.mocked(mockDb.dogReminder.deleteMany).mock.invocationCallOrder[0];
+      const userDeleteOrder = vi.mocked(mockDb.user.delete).mock.invocationCallOrder[0];
+      expect(eraseOrder).toBeLessThan(userDeleteOrder);
+      expect(result.extensionRowsErased).toBe(3);
+    });
+
+    it("skips cascade-only models (erasureSubjectField: null) — relies on FK cascade", async () => {
+      mockRegistry.push({
+        model: "dogPhoto",
+        tenantField: "tenantId",
+        erasureSubjectField: null,
+      });
+      mockDb.dogPhoto = { deleteMany: vi.fn().mockResolvedValue({ count: 99 }) };
+
+      const result = await deleteUserData(mockDb, "user-123");
+
+      expect(mockDb.dogPhoto.deleteMany).not.toHaveBeenCalled();
+      expect(result.extensionRowsErased).toBe(0);
+    });
+
+    it("sums counts across multiple subject-scoped models", async () => {
+      mockRegistry.push(
+        { model: "dogReminder", tenantField: "tenantId", erasureSubjectField: "userId" },
+        { model: "dogNote", tenantField: "tenantId", erasureSubjectField: "authorId" },
+      );
+      mockDb.dogReminder = { deleteMany: vi.fn().mockResolvedValue({ count: 2 }) };
+      mockDb.dogNote = { deleteMany: vi.fn().mockResolvedValue({ count: 5 }) };
+
+      const result = await deleteUserData(mockDb, "user-123");
+
+      expect(mockDb.dogNote.deleteMany).toHaveBeenCalledWith({
+        where: { authorId: "user-123" },
+      });
+      expect(result.extensionRowsErased).toBe(7);
+    });
+
+    it("throws on registry/schema drift instead of silently skipping (Art. 17 safety)", async () => {
+      mockRegistry.push({
+        model: "modelNotOnClient",
+        tenantField: "tenantId",
+        erasureSubjectField: "userId",
+      });
+      // mockDb intentionally has no `modelNotOnClient` delegate.
+
+      await expect(deleteUserData(mockDb, "user-123")).rejects.toThrow(
+        /modelNotOnClient/,
+      );
+      // Must fail BEFORE the user row is deleted — otherwise a drifted
+      // registry entry would leave orphaned data with no way to retry erasure.
+      expect(mockDb.user.delete).not.toHaveBeenCalled();
     });
   });
 });

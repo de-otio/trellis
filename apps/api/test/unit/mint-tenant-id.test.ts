@@ -1,12 +1,29 @@
 import fc from "fast-check";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TenantIdValidationError } from "@de-otio/saas-foundation/tenant";
+
+const { mockDebug } = vi.hoisted(() => ({ mockDebug: vi.fn() }));
+
+vi.mock("../../src/lib/logger.js", () => ({
+  getLogger: () => ({
+    debug: mockDebug,
+    error: vi.fn(),
+    warn: vi.fn(),
+    info: vi.fn(),
+    trace: vi.fn(),
+  }),
+}));
+
 import {
   mintTenantId,
   type TenantProvenance,
 } from "../../src/lib/mint-tenant-id.js";
 
 const PROVENANCES: TenantProvenance[] = ["session", "ingress", "job"];
+
+beforeEach(() => {
+  mockDebug.mockClear();
+});
 
 // A valid tenant id: 1–256 chars, no whitespace / C0 controls / DEL.
 const validTenantId = fc
@@ -25,6 +42,31 @@ describe("mintTenantId", () => {
     for (const provenance of PROVENANCES) {
       expect(mintTenantId("tenant-1", provenance)).toBe("tenant-1");
     }
+  });
+
+  it("logs the provenance at the mint site (forensic, not a security boundary)", () => {
+    mintTenantId("tenant-logged", "ingress");
+    expect(mockDebug).toHaveBeenCalledTimes(1);
+    expect(mockDebug).toHaveBeenCalledWith(
+      "mintTenantId: tenant id minted",
+      expect.objectContaining({ provenance: "ingress", tenantId: "tenant-logged" }),
+    );
+  });
+
+  it.each(PROVENANCES)(
+    "logs provenance %s distinctly per mint call",
+    (provenance) => {
+      mintTenantId("tenant-p", provenance);
+      expect(mockDebug).toHaveBeenCalledWith(
+        "mintTenantId: tenant id minted",
+        expect.objectContaining({ provenance }),
+      );
+    },
+  );
+
+  it("does NOT log when the raw id is rejected (mint never completes)", () => {
+    expect(() => mintTenantId("", "session")).toThrow(TenantIdValidationError);
+    expect(mockDebug).not.toHaveBeenCalled();
   });
 
   it.each([
