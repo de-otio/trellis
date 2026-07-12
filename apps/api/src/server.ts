@@ -12,6 +12,7 @@
 import http from "node:http";
 import { randomUUID } from "node:crypto";
 import type { CrossTenantReadDelegate } from "@de-otio/trellis-extension-api";
+import type { RawPrismaLike } from "./lib/extension-scoped-db.js";
 import { buildEnv, validateEnv } from "./env.js";
 import { startExtensionJobRunners } from "./lib/extension-job-runner.js";
 import { validateBootEnv } from "./env-schema.js";
@@ -100,12 +101,19 @@ export async function startServer(): Promise<http.Server> {
   // worker Lambdas load none), single-flighted cluster-wide by a DynamoDB
   // conditional-put lock. Clock + uuid + DynamoDB client are injected. No-ops
   // cleanly when no extension declares a job (the O-1 v1 reality — dogs owns no
-  // jobs yet). The L1 tenant-scoped-DB factory is wired into `scopedDbFactory`
-  // at Phase-2 integration; until then `ctx.tenant()` is unreached (no jobs).
+  // jobs yet). L1's enforce-always tenant-scoped-DB factory is wired into
+  // `scopedDbFactory` below (Phase-2 integration): a declared job's
+  // `ctx.tenant(tid)` returns a scoped surface bound to that tenant. The scoped
+  // model metas are built once from the (currently empty) composed-model
+  // registry; they carry only the tenant-scoped core delegates today.
   const { DynamoDBClient } = await import("@aws-sdk/client-dynamodb");
   const { sharedDatabaseConnectionManager: dbManager } = await import(
     "./lib/database-connection-manager.js"
   );
+  const { createScopedDb, buildScopedModelMetas } = await import(
+    "./lib/extension-scoped-db.js"
+  );
+  const scopedModelMetas = buildScopedModelMetas();
   const jobRunnerHandle = startExtensionJobRunners(
     {
       dynamo: new DynamoDBClient({ region: env.AWS_REGION }),
@@ -117,6 +125,18 @@ export async function startServer(): Promise<http.Server> {
         return (client as unknown as Record<string, CrossTenantReadDelegate | undefined>)[
           model
         ];
+      },
+      scopedDbFactory: (tid) => {
+        const { client } = dbManager.acquireClient("primary", env);
+        // Brand adaptation at the L3→L1 integration boundary: the runner mints
+        // the core (saas-foundation) `TenantId`, while L1's `createScopedDb`
+        // params the extension-api `TenantId` brand. Both wrap the identical
+        // runtime string; the tags are nominal-only. See ASSUMPTIONS A-P2.1.
+        return createScopedDb(
+          client as unknown as RawPrismaLike,
+          tid as unknown as Parameters<typeof createScopedDb>[1],
+          scopedModelMetas,
+        );
       },
       stage: env.STAGE ?? "dev",
       logger,
