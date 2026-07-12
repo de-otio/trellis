@@ -15,6 +15,57 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ## [Unreleased]
 
+### Added
+
+- **O-1: extension-owned schema mechanism.** Extensions can now own Postgres
+  tables and scheduled work with enforce-always tenant isolation.
+  - **Scoped extension-DB surface.** `ExtensionContext.db` is now
+    `{ tenant(tenantId): ScopedDb }` — the only way extension code touches
+    data. Every operation on the returned `ScopedDb` is tenant-bound by
+    construction: by-id ops (`findUnique`/`update`/`delete`) are rewritten to
+    tenant-merged `findFirst`/`updateMany`/`deleteMany` with an
+    affected-count assertion, FK-target ownership is validated
+    read-before-write, cross-model nested writes and relation
+    `include`/`select` are rejected, and `queryRaw`/`executeRaw` are not part
+    of the surface. Isolation holds independent of core's
+    `TENANT_SCOPE_MODE` rollout flag. The prior raw 9-delegate `any` bag on
+    `ExtensionDb` is removed (no consumer read it).
+  - **In-process extension job runner.** New optional `jobs` field on
+    `TrellisExtension`. Declared jobs run inside the API container (never a
+    worker Lambda — those load no extensions), single-flighted cluster-wide
+    by a DynamoDB conditional-put lock keyed by `job:<extId>:<jobId>`, with a
+    TTL sized to the job's own timeout (not a flat hour), a `lockToken` +
+    conditional release to prevent lock-stealing after a TTL-expired
+    overrun, and a `Promise.race`/`AbortController` timeout on the job body.
+    `ExtensionJobContext` exposes cross-tenant read only on the models a job
+    declares in `crossTenantRead`, plus `tenant(tid)` for correctly-scoped
+    per-row writes. See
+    [`doc/02-technical/operations/extension-job-runner.md`](doc/02-technical/operations/extension-job-runner.md).
+  - **Fragment composer.** New `trellis-schema compose` build step merges
+    extension-owned `.prisma` fragments into the core schema, injects the
+    Prisma-required back-relations into core models, validates fragment
+    declarations (tenant/entity FK shape, `@@map`/`@map` targets, an explicit
+    GDPR `erasure:` directive per model), and can emit a fresh replay
+    baseline that preserves core's non-DSL SQL (extensions, expression/GIN
+    indexes) via migration replay plus a linted raw-SQL sidecar.
+  - **GDPR erasure** now iterates the composed extension-model registry as
+    part of the existing per-subject deletion flow, so an extension's
+    `erasureSubjectField`-declared rows are deleted with zero extension code.
+  - No extension in this repository declares an owned model or a job yet
+    (`@skybber/ext-dogs` owns routes and taxonomy seed data, not tables) —
+    this release ships the mechanism ahead of its first consumer.
+
+### Changed
+
+- **`@de-otio/trellis-extension-api` 0.6.0.** Additive minor bump (from
+  0.5.0): adds `ExtensionDb.tenant(tid)` / `ScopedDb` / `ScopedDelegate`, the
+  opaque `TenantId` brand (no exported constructor — extension code cannot
+  forge one), and `jobs` / `ExtensionJobDecl` / `ExtensionJobContext` /
+  `ExtensionJobSchedule` / `CrossTenantReadDelegate` to the `TrellisExtension`
+  contract. See the
+  [Extension API reference](docs/reference/extension-api.md#scheduled-jobs)
+  for the author-facing contract.
+
 ## [0.22.0] — 2026-07-10
 
 ### Added

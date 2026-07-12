@@ -34,10 +34,17 @@ import { EXTENSION_API_VERSION } from "@de-otio/trellis-extension-api";
 ```
 
 The package re-exports the `TrellisExtension` contract, the `ExtensionContext`
-and its scoped `ExtensionDb` / `ExtensionGraphService`, the route and hook
-types, the strategy interfaces, taxonomy-seed types, and the
-`EXTENSION_API_VERSION` constant. An extension may read `EXTENSION_API_VERSION`
-at startup to verify it is running against the expected contract version.
+and its scoped `ExtensionDb` / `ExtensionGraphService`, the job types
+(`ExtensionJobDecl`, `ExtensionJobContext`, `ExtensionJobSchedule`), the
+opaque `TenantId` brand, the route and hook types, the strategy interfaces,
+taxonomy-seed types, and the `EXTENSION_API_VERSION` constant. An extension
+may read `EXTENSION_API_VERSION` at startup to verify it is running against
+the expected contract version.
+
+> **Current version: `0.6.0`.** The `0.5.0 → 0.6.0` bump added the scoped
+> `ExtensionDb.tenant(tid)` surface (replacing the earlier raw-delegate
+> shape) and the `jobs` / `ExtensionJobDecl` / `ExtensionJobContext` surface
+> described below — both additive, so it is a minor bump.
 
 ## Registering an extension
 
@@ -75,6 +82,7 @@ omitted when the vertical has no interest in that surface.
 | `entityRelationshipTypes` | no | Entity-to-entity relationship type names declared globally for this entity type, e.g. `["PACK_MATE", "WALK_BUDDY"]`. |
 | `discoveryFacets` | no | Metadata fields that are filterable in discovery. |
 | `recommendationStrategy` | no | Domain-specific recommendation generation. |
+| `jobs` | no | Scheduled work the extension declares, run in-process in the API container (see [Scheduled jobs](#scheduled-jobs)). |
 | `extensionRoutes` | no | Core-wrapped route definitions — **preferred over raw `routes`**. |
 | `configSchema` | no | A Zod schema declaring the env-var keys this extension requires. Validated against the extension's scoped config values only. |
 | `activityPub` | no | Display-only ActivityPub Actor enrichment (`enrichActor`). |
@@ -214,12 +222,68 @@ interface ExtensionContext {
 
 ### `db` — scoped database access
 
-`ExtensionDb` exposes only extension-relevant tables: `entity`, `post`,
-`postEntity`, `postMedia`, the taxonomy tables (`taxonomyTaxon`,
-`taxonomyCategory`, `taxonomyDimension`), `productTaxonomyTag`, and `activity`.
-Security-sensitive tables — `user`, `securityEvent`, `featureToggle`,
-`mfaEnrollment`, `encryptionKey`, `session`, and admin tables — are **not**
-reachable.
+`ExtensionDb` has exactly one member — there is no raw delegate bag:
+
+```ts
+interface ExtensionDb {
+  tenant(tenantId: TenantId): ScopedDb;
+}
+```
+
+`tenant(tenantId)` returns a `ScopedDb` whose every operation is bound to that
+tenant **by construction**. `TenantId` is an opaque branded string with no
+exported constructor in this package — an extension receives one (from the
+session-bound `ExtensionContext.db` or from `ExtensionJobContext.tenant`, see
+below) and cannot forge one from a user-supplied string.
+
+`ScopedDb` exposes the tenant-carrying core delegates (`entity`, `post`,
+`postMedia`, the taxonomy tables — `taxonomyTaxon`, `taxonomyCategory`,
+`taxonomyDimension` — and `productTaxonomyTag`) by name, plus the extension's
+own composed (`ext_*`) models via an index signature. Security-sensitive
+tables (`user`, `securityEvent`, `featureToggle`, `mfaEnrollment`,
+`encryptionKey`, `session`, admin tables) and two delegates that cannot carry
+a per-tenant column (`activity`, which is global/federation data, and
+`postEntity`, which has no corresponding model) are **not** reachable — any
+access to them throws.
+
+Every delegate on `ScopedDb` is a `ScopedDelegate`: `findMany`, `findFirst`,
+`findUnique`, `create`, `createMany`, `update`, `updateMany`, `upsert`,
+`delete`, `deleteMany`, `count`, `aggregate`, `groupBy`. Two things distinguish
+it from a raw Prisma delegate:
+
+- **Injection, not convention.** Every op has the bound tenant column merged
+  into its `where`/`data` before it reaches the database — `findMany({})`
+  returns only that tenant's rows. This holds **enforce-always**, independent
+  of core's own `TENANT_SCOPE_MODE` rollout flag: an extension-owned table
+  always holds tenant data.
+- **By-id ops are rewritten, not passed through.** A raw Prisma `findUnique`,
+  `update`, or `delete` selects by a unique id that cannot be AND-merged with
+  a non-unique tenant column. The scoped surface rewrites them instead:
+  `findUnique` becomes `findFirst` with the tenant merged in (a cross-tenant
+  id returns `null`); `update`/`delete` become `updateMany`/`deleteMany` with
+  the tenant merged in, followed by an assert that exactly one row was
+  affected (a cross-tenant id is a 0-count failure, never a silent
+  cross-tenant write). `upsert` by id is emulated the same way
+  (read-before-write).
+
+A few further guarantees, useful when debugging a rejected call:
+
+- Writes may **not** set the tenant column directly — the tenant is bound
+  solely through `tenant(tenantId)`.
+- A write with FK fields the model declared against a core model (its
+  `entityField`, or another allow-listed FK) is validated read-before-write:
+  the referenced row must belong to the same tenant, or the op throws.
+- Nested relation writes (`connect`, `create`, `connectOrCreate`, `update`,
+  `upsert`, `delete`, `disconnect`, and their `*Many` forms nested inside
+  `data`) are rejected — extension models are shallow in this release.
+- `include`, and a `select` of a relation field, are rejected — a relation
+  join is not tenant-filtered and could leak another tenant's rows. Query the
+  related model separately through the scoped surface instead.
+- `queryRaw`/`executeRaw` are not part of `ScopedDelegate` at all — there is
+  no raw-SQL escape hatch from extension code.
+
+All violations throw a `ScopedDbError` (or the corresponding not-found
+condition for a by-id op) rather than silently narrowing or widening scope.
 
 ### `graphService` — read-only graph access
 
@@ -245,6 +309,55 @@ The hook interface is a **versioned contract**: any change to a hook signature,
 or removal of a hook, is breaking for consumers and requires a coordinated
 release of `@de-otio/trellis-extension-api`. Adding a new optional hook is a
 minor change.
+
+## Scheduled jobs
+
+An extension declares recurring work via the optional `jobs` field instead of
+being handed a cross-tenant database client:
+
+```ts
+type ExtensionJobSchedule = "hourly" | "daily";
+
+interface ExtensionJobDecl {
+  /** Stable job id, unique within the extension (e.g. "reminder-sweep"). */
+  id: string;
+  schedule: ExtensionJobSchedule;
+  /** The extension's OWN models this job may scan cross-tenant. Never core models. */
+  crossTenantRead: string[];
+  run(jobCtx: ExtensionJobContext): Promise<void>;
+}
+```
+
+```ts
+interface ExtensionJobContext {
+  /** Cross-tenant read access, keyed by model name — exactly the models
+   *  declared in `crossTenantRead`, nothing else. */
+  read: Record<string, CrossTenantReadDelegate>;
+  /** Bind a tenant for correctly-scoped per-row work (core + own models). */
+  tenant(tenantId: TenantId): ScopedDb;
+  /** Deployment stage — for logging/metrics. */
+  stage: string;
+}
+```
+
+A job's manifest is its audit surface: the **only** cross-tenant reads it can
+perform are the models named in `crossTenantRead`, each exposed as a
+`CrossTenantReadDelegate` (`findMany`, `findFirst`, `count`, `aggregate`,
+`groupBy` — read-only, no writes). Naming a model the runtime has no read
+delegate for (a typo, or a core model) fails loudly when the context is built,
+before the job body ever runs — it is never a silently `undefined` delegate.
+
+To act on a row a job scans, call `tenant(tenantId)` with that row's tenant id
+to get a fully tenant-scoped `ScopedDb` for the write — the same scoped
+surface described above. There is no other way for a job to reach a core
+model or perform a write.
+
+Jobs run **in-process inside the API container** — never as a worker Lambda —
+and are single-flighted across every running API task by a shared lock, so a
+job manifest is all an extension author needs to reason about; the
+in-process/no-Lambda distinction and the lock/timeout mechanics are documented
+operationally in
+[`doc/02-technical/operations/extension-job-runner.md`](../../doc/02-technical/operations/extension-job-runner.md).
 
 ## Strategy and enrichment interfaces
 
