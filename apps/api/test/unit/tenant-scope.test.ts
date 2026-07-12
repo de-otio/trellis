@@ -9,12 +9,15 @@
 import { describe, it, expect } from "vitest";
 import { Prisma } from "@prisma/client";
 import {
+  delegateKeyToModelName,
+  extensionScopedModelNames,
   planTenantScope,
   resolveTenantScopeMode,
   runUnscoped,
   TENANT_SCOPED_MODELS,
   UNSCOPED_MODELS,
 } from "../../src/lib/tenant-scope.js";
+import { EXTENSION_MODEL_REGISTRY } from "../../src/lib/extension-model-registry.js";
 
 const base = {
   model: "Post",
@@ -176,5 +179,38 @@ describe("model classification coverage (no silent holes)", () => {
   it("scoped and unscoped sets are disjoint", () => {
     const overlap = [...TENANT_SCOPED_MODELS].filter((m) => UNSCOPED_MODELS.has(m));
     expect(overlap).toEqual([]);
+  });
+});
+
+describe("extension-owned (ext_*) model registration (O-1 §12.3 H1)", () => {
+  it("maps a camelCase delegate key to its PascalCase model name", () => {
+    expect(delegateKeyToModelName("dogReminder")).toBe("DogReminder");
+    expect(delegateKeyToModelName("entity")).toBe("Entity");
+    expect(delegateKeyToModelName("")).toBe("");
+  });
+
+  it("derives PascalCase model names from a (sample) registry", () => {
+    const names = extensionScopedModelNames([
+      { model: "dogReminder", tenantField: "tenantId", erasureSubjectField: "userId" },
+      { model: "dogRecord", tenantField: "tenantId", erasureSubjectField: null },
+    ]);
+    expect(names).toEqual(["DogReminder", "DogRecord"]);
+  });
+
+  it("registers every real ext_* model as scoped, never unscoped", () => {
+    // Empty today (dogs owns no tables); teeth arrive when L2 populates the
+    // registry — but the invariant is asserted now so a future entry that lands
+    // unclassified fails CI here rather than silently leaking.
+    for (const entry of EXTENSION_MODEL_REGISTRY) {
+      const name = delegateKeyToModelName(entry.model);
+      expect(TENANT_SCOPED_MODELS.has(name)).toBe(true);
+      expect(UNSCOPED_MODELS.has(name)).toBe(false);
+    }
+  });
+
+  it("includes the registry's derived names in TENANT_SCOPED_MODELS", () => {
+    for (const name of extensionScopedModelNames()) {
+      expect(TENANT_SCOPED_MODELS.has(name)).toBe(true);
+    }
   });
 });

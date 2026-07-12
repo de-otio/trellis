@@ -61,26 +61,34 @@ const mockEnv = {
 } as any;
 
 describe("createExtensionContext", () => {
-  it("exposes only extension-safe database tables", () => {
+  const tid = (t: string) => t as any;
+
+  it("exposes ONLY the tenant()-scoped surface, not a raw delegate bag (O-1 §5.3)", () => {
     const ctx = createExtensionContext(makeExtension(), mockEnv, mockPrisma, mockGraph);
 
-    // Should be accessible
-    expect(ctx.db.entity).toBeDefined();
-    expect(ctx.db.post).toBeDefined();
-    expect(ctx.db.postEntity).toBeDefined();
-    expect(ctx.db.postMedia).toBeDefined();
-    expect(ctx.db.taxonomyTaxon).toBeDefined();
-    expect(ctx.db.taxonomyCategory).toBeDefined();
-    expect(ctx.db.taxonomyDimension).toBeDefined();
-    expect(ctx.db.productTaxonomyTag).toBeDefined();
-    expect(ctx.db.activity).toBeDefined();
+    // The raw unscoped delegate bag is gone — data is reachable only via tenant().
+    expect(typeof ctx.db.tenant).toBe("function");
+    expect((ctx.db as any).entity).toBeUndefined();
+    expect((ctx.db as any).post).toBeUndefined();
 
-    // Should NOT be accessible
-    expect((ctx.db as any).user).toBeUndefined();
-    expect((ctx.db as any).securityEvent).toBeUndefined();
-    expect((ctx.db as any).featureToggle).toBeUndefined();
-    expect((ctx.db as any).mfaEnrollment).toBeUndefined();
-    expect((ctx.db as any).encryptionKey).toBeUndefined();
+    const scoped = ctx.db.tenant(tid("t-acme"));
+    // Tenant-carrying core delegates expose the op surface.
+    expect(typeof scoped.entity.findMany).toBe("function");
+    expect(typeof scoped.post.create).toBe("function");
+    // No raw-SQL escape hatch: $queryRaw/$executeRaw are not callable client
+    // methods on the scoped surface (the proxy exposes only tenant-bound
+    // delegate objects, never the raw-SQL functions).
+    expect(typeof (scoped as any).$queryRaw).not.toBe("function");
+    expect(typeof (scoped as any).$executeRaw).not.toBe("function");
+  });
+
+  it("blocks security-sensitive / non-tenant models fail-closed on the scoped surface", async () => {
+    const ctx = createExtensionContext(makeExtension(), mockEnv, mockPrisma, mockGraph);
+    const scoped = ctx.db.tenant(tid("t-acme"));
+    // user / securityEvent / activity are not on the scoped surface — their ops reject.
+    await expect(scoped.user.findMany({})).rejects.toThrow();
+    await expect((scoped as any).securityEvent.findMany({})).rejects.toThrow();
+    await expect(scoped.activity.findMany({})).rejects.toThrow();
   });
 
   it("exposes app domain and URL", () => {

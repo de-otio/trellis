@@ -35,6 +35,10 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { Prisma } from "@prisma/client";
 import { getCurrentTenantId } from "@de-otio/saas-foundation/tenant";
+import {
+  EXTENSION_MODEL_REGISTRY,
+  type ExtensionModelRegistryEntry,
+} from "./extension-model-registry.js";
 import { getLogger } from "./logger.js";
 
 export type TenantScopeMode = "off" | "shadow" | "enforce";
@@ -47,10 +51,36 @@ export function resolveTenantScopeMode(
 }
 
 /**
- * Models that carry their own `tenantId` and are safe to auto-scope by the
- * active tenant (doc/14 §04 group B). Keep in sync with the schema.
+ * Convert a camelCase Prisma delegate key to its PascalCase model name, e.g.
+ * `"dogReminder"` → `"DogReminder"`. Prisma lower-cases only the first character
+ * of the model name to form the delegate key, so the inverse upper-cases it.
  */
-export const TENANT_SCOPED_MODELS: ReadonlySet<string> = new Set([
+export function delegateKeyToModelName(key: string): string {
+  return key.length === 0 ? key : key[0].toUpperCase() + key.slice(1);
+}
+
+/**
+ * The PascalCase model NAMES of the composed extension-owned (`ext_*`) models
+ * that MUST be tenant-scoped (O-1 design §12.3 H1). Derived from the generated
+ * {@link EXTENSION_MODEL_REGISTRY} (empty today — dogs owns no tables yet). Once
+ * L2's composer populates the registry these join {@link TENANT_SCOPED_MODELS},
+ * which (i) keeps the coverage tripwire green and (ii) gives defense-in-depth if
+ * core ever flips to `enforce` (the L1 proxy's injection is idempotent under a
+ * second AND-merge).
+ */
+export function extensionScopedModelNames(
+  registry: readonly ExtensionModelRegistryEntry[] = EXTENSION_MODEL_REGISTRY,
+): string[] {
+  return registry.map((entry) => delegateKeyToModelName(entry.model));
+}
+
+/**
+ * Models that carry their own `tenantId` and are safe to auto-scope by the
+ * active tenant (doc/14 §04 group B). Keep in sync with the schema. The
+ * composed `ext_*` models (O-1) are appended from the registry so an extension
+ * table is never an unclassified hole in the coverage meta-test.
+ */
+export const TENANT_SCOPED_MODELS: ReadonlySet<string> = new Set<string>([
   "Post",
   "PostComment",
   "Entity",
@@ -87,6 +117,9 @@ export const TENANT_SCOPED_MODELS: ReadonlySet<string> = new Set([
   "Rsvp",
   "EventShift",
   "ShiftSignup",
+  // Composed extension-owned (`ext_*`) models — appended from the generated
+  // registry (O-1 design §12.3 H1). Empty today; L2's composer populates it.
+  ...extensionScopedModelNames(),
 ]);
 
 /**

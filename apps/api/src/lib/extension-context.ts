@@ -8,8 +8,15 @@
 import type {
   ExtensionContext,
   ExtensionGraphService,
+  ScopedDb,
+  TenantId,
   TrellisExtension,
 } from "@de-otio/trellis-extension-api";
+import {
+  buildScopedModelMetas,
+  createScopedDb,
+  type RawPrismaLike,
+} from "./extension-scoped-db.js";
 import type { GraphService } from "./graph/index.js";
 import type { Env } from "../env.js";
 
@@ -50,20 +57,18 @@ function createReadOnlyGraphService(graph: GraphService): ExtensionGraphService 
 export function createExtensionContext(
   ext: TrellisExtension,
   env: Env,
-  prisma: any,
+  prisma: unknown,
   graph?: GraphService,
 ): ExtensionContext {
+  // Metadata for the tenant-carrying core delegates + composed ext_* models,
+  // assembled once per context. The `tenant(tid)` proxy is the ONLY data surface
+  // (O-1 design §5.3) — the raw unscoped delegate bag is not shipped.
+  const metas = buildScopedModelMetas();
+  const rawPrisma = prisma as RawPrismaLike;
   return {
     db: {
-      entity: prisma.entity,
-      post: prisma.post,
-      postEntity: prisma.postEntity,
-      postMedia: prisma.postMedia,
-      taxonomyTaxon: prisma.taxonomyTaxon,
-      taxonomyCategory: prisma.taxonomyCategory,
-      taxonomyDimension: prisma.taxonomyDimension,
-      productTaxonomyTag: prisma.productTaxonomyTag,
-      activity: prisma.activity,
+      tenant: (tenantId: TenantId): ScopedDb =>
+        createScopedDb(rawPrisma, tenantId, metas),
     },
     graphService: graph ? createReadOnlyGraphService(graph) : undefined,
     appDomain: env.APP_DOMAIN ?? "",

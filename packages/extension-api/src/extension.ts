@@ -92,36 +92,21 @@ export interface ScopedDb {
 }
 
 /**
- * Scoped Prisma access — excludes security-sensitive tables.
+ * Scoped Prisma access for extensions (O-1 design §5.1 / §5.3).
  *
- * Extensions can access entity, post, follow, and taxonomy tables.
- * They CANNOT access: user, securityEvent, featureToggle, mfaEnrollment,
- * encryptionKey, session, or admin tables.
+ * The **only** way to touch data: `tenant(tenantId)` returns a {@link ScopedDb}
+ * whose every operation is tenant-bound by construction. There is deliberately
+ * no raw delegate bag — the pre-launch unscoped-delegate wiring
+ * (`extension-context.ts:57-67`) is not shipped at all (greenfield, §5.3): the
+ * existing isolation hole is closed by construction, not migrated away from.
+ * `queryRaw`/`executeRaw` are structurally absent from the scoped surface.
  *
- * This uses `any` for the delegate types because the actual PrismaClient
- * type comes from the app's generated client. Extensions only interact
- * with this through the concrete object they receive at runtime.
- *
- * O-1 (additive): `tenant(tenantId)` returns a {@link ScopedDb} whose every
- * operation is tenant-bound — the sanctioned surface (design §5.1). Optional in
- * this phase so the existing `createExtensionContext` factory keeps compiling;
- * core's L1 lane makes it the required (and only) surface.
+ * Relationship data is available read-only via `ExtensionContext.graphService`;
+ * extensions never query the social graph tables directly.
  */
 export interface ExtensionDb {
-  entity: any;
-  post: any;
-  postEntity: any;
-  postMedia: any;
-  taxonomyTaxon: any;
-  taxonomyCategory: any;
-  taxonomyDimension: any;
-  productTaxonomyTag: any;
-  activity: any;
-  // Relationship queries are available via GraphService (read-only access)
-  // Extensions should not directly query relationship data from Postgres
-
   /** The sanctioned, tenant-bound data surface (O-1 design §5.1). */
-  tenant?(tenantId: TenantId): ScopedDb;
+  tenant(tenantId: TenantId): ScopedDb;
 }
 
 /**
