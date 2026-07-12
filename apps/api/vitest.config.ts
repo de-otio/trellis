@@ -42,6 +42,10 @@ export default defineConfig({
       // Run separately: npm run test:integration:ci (registered in PHASE0_INTEGRATION).
       "test/integration/events.integration.test.ts",
       "test/integration/events-lifecycle.integration.test.ts",
+      // O-1 L2 replay-baseline integration test — needs a live local Postgres
+      // (ephemeral shadow DBs). Self-skips without the env vars, but excluded
+      // here too so the default suite never spawns the prisma CLI.
+      "test/integration/extension-schema-baseline.integration.test.ts",
     ],
     setupFiles: ["test/setup.ts"],
     globalTeardown: "test/teardown.ts",

@@ -1,0 +1,21 @@
+// Minimal core-schema stub for O-1 L2 composer unit tests. Contains only the
+// three FK-target models a fragment may reference, so back-relation injection
+// is deterministic and the test asserts exact injected output. NOT the real
+// core schema (that is exercised by the Docker-gated replay-baseline test).
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Tenant {
+  id String @id @default(cuid())
+}
+
+model Entity {
+  id       String @id @default(cuid())
+  tenantId String @map("tenant_id")
+}
+
+model User {
+  id String @id @default(cuid())
+}

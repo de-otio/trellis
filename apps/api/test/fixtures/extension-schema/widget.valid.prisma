@@ -1,0 +1,36 @@
+// Synthetic extension fragment (neutral names) for the O-1 L2 composer tests.
+// Extension id: "widget". Two models exercise both erasure policies:
+//   - ext_widget__records   : subject-attributable (erasure: subject=createdBy)
+//   - ext_widget__reminders : cascade-only (all core FKs onDelete: Cascade)
+
+/// erasure: subject=createdBy
+model ext_widget__records {
+  id        String   @id @default(cuid())
+  tenantId  String   @map("tenant_id")
+  entityId  String   @map("entity_id")
+  createdBy String   @map("created_by")
+  kind      String
+  data      Json?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  entity Entity @relation(fields: [entityId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, entityId, kind, createdAt])
+  @@map("ext_widget__records")
+}
+
+/// erasure: cascade-only
+model ext_widget__reminders {
+  id        String   @id @default(cuid())
+  tenantId  String   @map("tenant_id")
+  entityId  String   @map("entity_id")
+  status    String
+  dueAt     DateTime @map("due_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  entity Entity @relation(fields: [entityId], references: [id], onDelete: Cascade)
+
+  @@index([status, dueAt])
+  @@map("ext_widget__reminders")
+}
