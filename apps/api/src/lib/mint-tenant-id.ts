@@ -11,12 +11,19 @@
  * to import a way to forge a `TenantId` from a user-supplied string (Sec-15 /
  * confused-deputy defense).
  *
- * Phase 0 (this file) is the skeleton: signature + brand wrapping only. The
- * real provenance logging is wired by the L4 lane (`mintTenantId` impl +
- * provenance logging + erasure participation).
+ * Provenance is logged at every mint site (L4, this module) as
+ * defense-in-depth / forensic audit trail — it is **NOT a security
+ * boundary**. The boundary is the brand constructor itself (`tenantId`,
+ * unreachable outside this module) plus the scoped-DB proxy (L1) that
+ * enforces isolation on every op. Logging provenance lets an operator
+ * reconstruct, after the fact, whether a given tenant id reached a scoped
+ * op via a verified session, a request-ingress boundary, or a background
+ * job row — useful for incident forensics, never load-bearing for
+ * correctness.
  */
 
 import { tenantId, type TenantId } from "@de-otio/saas-foundation/tenant";
+import { getLogger } from "./logger.js";
 
 export type { TenantId };
 
@@ -37,10 +44,17 @@ export type TenantProvenance = "session" | "ingress" | "job";
  * where an invalid tenant id is rejected.
  *
  * @param raw        The unbranded tenant id string.
- * @param provenance Where the id came from — logged (L4) for forensic audit.
+ * @param provenance Where the id came from — logged for forensic audit.
+ *                    NOT a security boundary (see module doc).
  */
 export function mintTenantId(raw: string, provenance: TenantProvenance): TenantId {
-  // Provenance is accepted and typed now; forensic logging is wired in L4.
-  void provenance;
-  return tenantId(raw);
+  const branded = tenantId(raw);
+  // Logged AFTER a successful brand — an invalid raw never reaches here
+  // (the foundation constructor throws first), so this line only fires for
+  // tenant ids that actually got minted.
+  getLogger().debug("mintTenantId: tenant id minted", {
+    provenance,
+    tenantId: branded,
+  });
+  return branded;
 }

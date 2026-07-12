@@ -24,10 +24,11 @@
  */
 
 import { Hono, type Context, type MiddlewareHandler } from "hono";
-import { runWithTenantContext, tenantId } from "@de-otio/saas-foundation/tenant";
+import { runWithTenantContext } from "@de-otio/saas-foundation/tenant";
 
 import { getExtensions } from "../extensions.js";
 import { extractVerifiedTenantId } from "./auth/auth-middleware.js";
+import { mintTenantId } from "./mint-tenant-id.js";
 import { resolveTenantScopeMode } from "./tenant-scope.js";
 import type { Env } from "../env.js";
 import { wrapExtensionRoutes } from "./extension-route-wrapper.js";
@@ -489,7 +490,7 @@ export function buildHonoApp(): Hono<AppEnv> {
     app.use("*", async (c, next) => {
       const tid = await extractVerifiedTenantId(c.req.raw, c.env.trellisEnv);
       if (!tid) return next();
-      return runWithTenantContext(tenantId(tid), () => next());
+      return runWithTenantContext(mintTenantId(tid, "session"), () => next());
     });
   }
 
