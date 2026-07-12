@@ -354,10 +354,39 @@ describe("job context (by construction)", () => {
     const job = makeJob({ crossTenantRead: ["dogReminder"] });
     const ctx = buildJobContext(deps, job, new AbortController().signal);
 
-    expect(ctx.read.dogReminder).toBe(readDelegate);
+    // A read-only facade (not the raw delegate) whose read methods delegate through.
+    expect(typeof ctx.read.dogReminder.findMany).toBe("function");
     // Undeclared model is absent (null-prototype object → undefined, not a throw-on-read proxy).
     expect(ctx.read.dogDocument).toBeUndefined();
     expect(Object.keys(ctx.read)).toEqual(["dogReminder"]);
+  });
+
+  it("SECURITY (Finding 1): write methods on the raw delegate are NOT reachable via ctx.read", () => {
+    // A raw Prisma delegate carries write methods; the facade must strip them so a
+    // job body cannot perform an unscoped cross-tenant write.
+    let wrote = false;
+    const rawDelegate = {
+      findMany: async () => [{ id: "row" }],
+      findFirst: async () => null,
+      count: async () => 0,
+      aggregate: async () => ({}),
+      groupBy: async () => [],
+      deleteMany: async () => { wrote = true; return { count: 999 }; },
+      create: async () => { wrote = true; return {}; },
+      update: async () => { wrote = true; return {}; },
+    };
+    const deps = makeDeps(makeFakeDynamo().dynamo, {
+      readDelegateSource: (model) => (model === "dogReminder" ? rawDelegate : undefined),
+    });
+    const ctx = buildJobContext(deps, makeJob({ crossTenantRead: ["dogReminder"] }), new AbortController().signal);
+
+    const surface = ctx.read.dogReminder as unknown as Record<string, unknown>;
+    expect(surface.deleteMany).toBeUndefined();
+    expect(surface.create).toBeUndefined();
+    expect(surface.update).toBeUndefined();
+    // The read path still works and delegates to the raw object.
+    expect(typeof surface.findMany).toBe("function");
+    expect(wrote).toBe(false);
   });
 
   it("throws UndeclaredJobModelError when a declared model has no delegate", () => {

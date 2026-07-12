@@ -180,6 +180,41 @@ export type InternalJobContext = ExtensionJobContext & { readonly signal: AbortS
  * tenant id with `"job"` provenance before handing to the scoped-DB factory, so
  * per-row work is correctly tenant-scoped and audited.
  */
+/**
+ * The five cross-tenant READ methods a job delegate may expose. Anything else
+ * (create/update/delete/…) must be unreachable at runtime.
+ */
+const READ_DELEGATE_METHODS = [
+  "findMany",
+  "findFirst",
+  "count",
+  "aggregate",
+  "groupBy",
+] as const;
+
+/**
+ * Wrap a raw delegate so ONLY the read methods above are reachable at runtime.
+ * `readDelegateSource` may return a full Prisma delegate (which also carries
+ * create/update/delete/deleteMany); `CrossTenantReadDelegate` is a *type-only*
+ * restriction, so without this facade a job body could call
+ * `(ctx.read.model as any).deleteMany({})` — an unscoped cross-tenant write.
+ * (Security review 2026-07-12, Finding 1: type-only read restriction.)
+ */
+function toReadOnlyDelegate(raw: CrossTenantReadDelegate): CrossTenantReadDelegate {
+  const source = raw as unknown as Record<string, unknown>;
+  const facade: Record<string, unknown> = Object.create(null);
+  for (const method of READ_DELEGATE_METHODS) {
+    const fn = source[method];
+    if (typeof fn !== "function") {
+      throw new TypeError(
+        `[extension-job-runner] read delegate is missing method: ${method}`,
+      );
+    }
+    facade[method] = (fn as (...args: unknown[]) => unknown).bind(raw);
+  }
+  return Object.freeze(facade) as unknown as CrossTenantReadDelegate;
+}
+
 export function buildJobContext(
   deps: JobRunnerDeps,
   job: ExtensionJobDecl,
@@ -189,7 +224,9 @@ export function buildJobContext(
   for (const model of job.crossTenantRead) {
     const delegate = deps.readDelegateSource(model);
     if (!delegate) throw new UndeclaredJobModelError(model);
-    read[model] = delegate;
+    // Runtime read-only facade — the raw delegate carries write methods the
+    // read-only type hides (security review Finding 1).
+    read[model] = toReadOnlyDelegate(delegate);
   }
   Object.freeze(read);
 
