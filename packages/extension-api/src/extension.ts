@@ -27,6 +27,71 @@ import type {
 // ---------------------------------------------------------------------------
 
 /**
+ * Opaque tenant identifier — a branded string **minted only by core**.
+ *
+ * The brand is a zero-runtime-cost nominal marker (erases to a plain string).
+ * There is deliberately **no constructor exported from this package**: extension
+ * code receives a `TenantId` from core (e.g. via `ExtensionJobContext.tenant`)
+ * and physically cannot forge one from a user-supplied string. Core mints it
+ * through its private `mintTenantId(...)` and passes it across this boundary.
+ *
+ * (This package does not depend on `@de-otio/saas-foundation`, by design — the
+ * foundation brand constructor must stay unreachable to extensions. Core casts
+ * its foundation-branded value to this brand at the boundary; both erase to
+ * `string`.)
+ */
+declare const ExtensionTenantIdBrand: unique symbol;
+export type TenantId = string & { readonly [ExtensionTenantIdBrand]: true };
+
+/**
+ * A single tenant-bound model delegate on the scoped surface.
+ *
+ * Every operation is guaranteed tenant-bound by construction (core's scoped
+ * proxy injects `tenantField = tenantId` on reads/writes and rewrites by-id ops
+ * — O-1 design §5.1/§12.3). Args/returns are `unknown` at this contract layer
+ * (not `any`): extensions pass the ordinary Prisma delegate argument shapes; the
+ * concrete generated types are refined by core where available.
+ */
+export interface ScopedDelegate {
+  findMany(args?: unknown): Promise<unknown[]>;
+  findFirst(args?: unknown): Promise<unknown | null>;
+  findUnique(args: unknown): Promise<unknown | null>;
+  create(args: unknown): Promise<unknown>;
+  createMany(args: unknown): Promise<{ count: number }>;
+  update(args: unknown): Promise<unknown>;
+  updateMany(args: unknown): Promise<{ count: number }>;
+  upsert(args: unknown): Promise<unknown>;
+  delete(args: unknown): Promise<unknown>;
+  deleteMany(args?: unknown): Promise<{ count: number }>;
+  count(args?: unknown): Promise<number>;
+  aggregate(args: unknown): Promise<unknown>;
+  groupBy(args: unknown): Promise<unknown[]>;
+}
+
+/**
+ * Tenant-scoped database surface — the ONLY way to touch data in request
+ * context (O-1 design §5.1). Every delegate here is bound to the `TenantId`
+ * passed to `ExtensionDb.tenant(tid)`; `findMany({})` returns only that tenant's
+ * rows by construction. `queryRaw`/`executeRaw` are deliberately absent.
+ *
+ * Exposes the 9 core delegates (named) plus this extension's own (`ext_*`)
+ * models via the index signature (keyed by camelCase model name).
+ */
+export interface ScopedDb {
+  entity: ScopedDelegate;
+  post: ScopedDelegate;
+  postEntity: ScopedDelegate;
+  postMedia: ScopedDelegate;
+  taxonomyTaxon: ScopedDelegate;
+  taxonomyCategory: ScopedDelegate;
+  taxonomyDimension: ScopedDelegate;
+  productTaxonomyTag: ScopedDelegate;
+  activity: ScopedDelegate;
+  /** Extension-owned models, keyed by camelCase model name. */
+  [model: string]: ScopedDelegate;
+}
+
+/**
  * Scoped Prisma access — excludes security-sensitive tables.
  *
  * Extensions can access entity, post, follow, and taxonomy tables.
@@ -36,6 +101,11 @@ import type {
  * This uses `any` for the delegate types because the actual PrismaClient
  * type comes from the app's generated client. Extensions only interact
  * with this through the concrete object they receive at runtime.
+ *
+ * O-1 (additive): `tenant(tenantId)` returns a {@link ScopedDb} whose every
+ * operation is tenant-bound — the sanctioned surface (design §5.1). Optional in
+ * this phase so the existing `createExtensionContext` factory keeps compiling;
+ * core's L1 lane makes it the required (and only) surface.
  */
 export interface ExtensionDb {
   entity: any;
@@ -49,6 +119,9 @@ export interface ExtensionDb {
   activity: any;
   // Relationship queries are available via GraphService (read-only access)
   // Extensions should not directly query relationship data from Postgres
+
+  /** The sanctioned, tenant-bound data surface (O-1 design §5.1). */
+  tenant?(tenantId: TenantId): ScopedDb;
 }
 
 /**
@@ -207,6 +280,86 @@ export interface ExtensionHooks {
   ) => Promise<void>;
 }
 
+// ---------------------------------------------------------------------------
+// Extension Jobs — extension-declared scheduled work (O-1 design §5.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Cadence at which a declared job runs.
+ *
+ * O-1 v1 ships the two coarse presets the lane-02 reminder sweep needs; the
+ * deferred integration fabric (06) widens this union to minute-level presets.
+ * Keep it a named alias so widening it is a non-breaking additive change.
+ */
+export type ExtensionJobSchedule = "hourly" | "daily";
+
+/**
+ * A single tenant-bound model delegate exposing READ operations only —
+ * the shape of each entry in {@link ExtensionJobContext.read}.
+ *
+ * These reads are intentionally cross-tenant (a job scans across tenants, e.g.
+ * a due-date sweep), so results are NOT tenant-filtered. Exposure is restricted
+ * BY CONSTRUCTION to the models the job named in `crossTenantRead` — no write
+ * ops, no core-model access here (core models are reachable only via
+ * {@link ExtensionJobContext.tenant}).
+ */
+export interface CrossTenantReadDelegate {
+  findMany(args?: unknown): Promise<unknown[]>;
+  findFirst(args?: unknown): Promise<unknown | null>;
+  count(args?: unknown): Promise<number>;
+  aggregate(args: unknown): Promise<unknown>;
+  groupBy(args: unknown): Promise<unknown[]>;
+}
+
+/**
+ * The restricted context a declared job receives when it runs.
+ *
+ * Two capabilities, both auditable from the manifest (design §5.2):
+ * - `read` — cross-tenant READ on the job's own declared models only.
+ * - `tenant(tid)` — a fully tenant-scoped {@link ScopedDb} for per-row work,
+ *   once a scanned row identifies its tenant. This is the only path to core
+ *   models and to any write.
+ */
+export interface ExtensionJobContext {
+  /**
+   * Cross-tenant read access, keyed by model name. Contains exactly the models
+   * the job declared in `crossTenantRead` — nothing else is present.
+   */
+  read: Record<string, CrossTenantReadDelegate>;
+
+  /** Bind a tenant for correctly-scoped per-row work (core + own models). */
+  tenant(tenantId: TenantId): ScopedDb;
+
+  /** Deployment stage (dev, prod) — for logging/metrics. */
+  stage: string;
+}
+
+/**
+ * An extension-declared scheduled job (O-1 design §5.2).
+ *
+ * The runner is in-process in the API container (NOT the worker Lambdas, which
+ * load no extensions); cluster-wide single-flight is enforced by a DynamoDB
+ * conditional-put lock keyed by job id. The manifest is the audit surface: the
+ * only cross-tenant reads a job may perform are the models listed in
+ * `crossTenantRead`.
+ */
+export interface ExtensionJobDecl {
+  /** Stable job id, unique within the extension (e.g. "reminder-sweep"). */
+  id: string;
+
+  /** How often the job runs. */
+  schedule: ExtensionJobSchedule;
+
+  /**
+   * The extension's OWN models this job may scan cross-tenant. Never core
+   * models. Enforced by construction when the job context is built.
+   */
+  crossTenantRead: string[];
+
+  /** The job body. Receives the restricted {@link ExtensionJobContext}. */
+  run(jobCtx: ExtensionJobContext): Promise<void>;
+}
+
 /**
  * The current version of the extension API contract.
  *
@@ -222,7 +375,7 @@ export interface ExtensionHooks {
  *   - Bump alongside every `package.json` version change.
  *   - Never change one without changing the other.
  */
-export const EXTENSION_API_VERSION = "0.4.0" as const;
+export const EXTENSION_API_VERSION = "0.6.0" as const;
 
 // ---------------------------------------------------------------------------
 // Strategy Interfaces — pluggable domain-specific behavior
@@ -398,6 +551,13 @@ export interface TrellisExtension {
 
   /** Lifecycle hooks — core calls these after operations complete */
   hooks?: ExtensionHooks;
+
+  /**
+   * Scheduled jobs this extension declares (O-1 design §5.2).
+   * Run in-process in the API container with cluster-wide single-flight.
+   * Additive/optional — omit if the extension has no scheduled work.
+   */
+  jobs?: ExtensionJobDecl[];
 
   /**
    * Domain-specific relationship scoring signals.
