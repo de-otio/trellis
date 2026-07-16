@@ -148,11 +148,22 @@ export const BASELINE_COMPLIANCE: ComplianceDoc = {
         regions: ["eu-central-1"],
         url: "https://aws.amazon.com",
       },
+      // Moderation providers are consumer-injected (setTextModerationProvider /
+      // setMediaModerationProvider), so the third-party entry below is
+      // deployment-specific, not a core invariant. It documents the reference
+      // deployment's choice: hosted OpenAI Moderation API for posting-flow
+      // TEXT (posts/comments); image/video moderation runs on Amazon
+      // Rekognition and is covered by the AWS entry. A deployment that
+      // injects an AWS-native text provider instead should drop this entry.
+      // TODO(compliance): make subprocessors.platform consumer-configurable
+      // so deployments don't have to fork the baseline to correct it.
       {
         name: "OpenAI",
-        purpose: "Image moderation API",
+        purpose:
+          "Text moderation API (posting-flow text: posts and comments)",
         url: "https://openai.com/policies/",
-        scope: "image content only; no user PII passed",
+        scope:
+          "user-submitted text only; no account identifiers passed; deployment-specific (provider is consumer-injected)",
       },
       {
         name: "Microsoft (per tenant via federation)",
