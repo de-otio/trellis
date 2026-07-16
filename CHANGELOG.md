@@ -15,6 +15,8 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ## [Unreleased]
 
+## [0.23.0] — 2026-07-16
+
 ### Added
 
 - **O-1: extension-owned schema mechanism.** Extensions can now own Postgres
