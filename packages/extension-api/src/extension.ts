@@ -107,6 +107,34 @@ export interface ScopedDb {
 export interface ExtensionDb {
   /** The sanctioned, tenant-bound data surface (O-1 design §5.1). */
   tenant(tenantId: TenantId): ScopedDb;
+
+  /**
+   * Cross-tenant READ-ONLY access to the models declared in
+   * {@link TrellisExtension.crossTenantRead} (05a Part B). Every call runs
+   * inside core's `runUnscoped` audit with reason `ext:<extensionId>:<reason>`,
+   * results carry a mandatory per-model visibility floor (public/SHOUT content,
+   * caller region), relation `where`/`include` traversal to non-declared models
+   * is rejected, and columns are restricted to a per-model allow-list.
+   *
+   * Use for social/catalog discovery that is cross-tenant by construction (a
+   * caller's feed candidates live in other users' personal tenants). For
+   * anything owned or writable, use {@link tenant}.
+   *
+   * @param reason short machine-greppable slug, `/^[a-z0-9][a-z0-9-]{2,63}$/`.
+   */
+  discover(reason: string): DiscoverDb;
+}
+
+/**
+ * Cross-tenant READ-ONLY surface (05a Part B). Keyed by model name; contains
+ * exactly the models the extension declared in
+ * {@link TrellisExtension.crossTenantRead}. Undeclared models resolve to a
+ * fail-closed delegate that throws. Same read-only method set as the job
+ * facade ({@link CrossTenantReadDelegate}) — no write op is reachable, at
+ * runtime, not just in the type.
+ */
+export interface DiscoverDb {
+  readonly [model: string]: CrossTenantReadDelegate;
 }
 
 /**
@@ -564,6 +592,16 @@ export interface TrellisExtension {
    * Additive/optional — omit if the extension has no scheduled work.
    */
   jobs?: ExtensionJobDecl[];
+
+  /**
+   * Models this extension may read cross-tenant from routes, hooks, and
+   * strategies via `ctx.db.discover(reason)` (05a Part B). Validated at
+   * registration against the core discover allow-list ∪ this extension's own
+   * (`ext_*`) models; an undeclarable model FAILS STARTUP. Jobs keep their own
+   * per-job `crossTenantRead` (own-models-only) — this is the route/strategy
+   * surface. Omit if the extension performs no cross-tenant reads.
+   */
+  crossTenantRead?: string[];
 
   /**
    * Domain-specific relationship scoring signals.

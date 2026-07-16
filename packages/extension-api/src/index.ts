@@ -21,6 +21,7 @@ export type {
   ExtensionHandler,
   ExtensionSession,
   ExtensionResponse,
+  DiscoverDb,
   RelationshipSignalProvider,
   RelationshipSignalContext,
   DiscoveryFacet,

@@ -45,6 +45,7 @@ import type {
   TrellisExtension,
 } from "@de-otio/trellis-extension-api";
 import { mintTenantId, type TenantId } from "./mint-tenant-id.js";
+import { buildReadOnlyFacade } from "./extension-read-delegate.js";
 import type { Logger } from "./logger.js";
 
 // ---------------------------------------------------------------------------
@@ -181,19 +182,7 @@ export type InternalJobContext = ExtensionJobContext & { readonly signal: AbortS
  * per-row work is correctly tenant-scoped and audited.
  */
 /**
- * The five cross-tenant READ methods a job delegate may expose. Anything else
- * (create/update/delete/…) must be unreachable at runtime.
- */
-const READ_DELEGATE_METHODS = [
-  "findMany",
-  "findFirst",
-  "count",
-  "aggregate",
-  "groupBy",
-] as const;
-
-/**
- * Wrap a raw delegate so ONLY the read methods above are reachable at runtime.
+ * Wrap a raw delegate so ONLY the five read methods are reachable at runtime.
  * `readDelegateSource` may return a full Prisma delegate (which also carries
  * create/update/delete/deleteMany); `CrossTenantReadDelegate` is a *type-only*
  * restriction, so without this facade a job body could call
@@ -202,17 +191,12 @@ const READ_DELEGATE_METHODS = [
  */
 function toReadOnlyDelegate(raw: CrossTenantReadDelegate): CrossTenantReadDelegate {
   const source = raw as unknown as Record<string, unknown>;
-  const facade: Record<string, unknown> = Object.create(null);
-  for (const method of READ_DELEGATE_METHODS) {
+  return buildReadOnlyFacade((method) => {
     const fn = source[method];
-    if (typeof fn !== "function") {
-      throw new TypeError(
-        `[extension-job-runner] read delegate is missing method: ${method}`,
-      );
-    }
-    facade[method] = (fn as (...args: unknown[]) => unknown).bind(raw);
-  }
-  return Object.freeze(facade) as unknown as CrossTenantReadDelegate;
+    return typeof fn === "function"
+      ? (fn as (...args: unknown[]) => unknown).bind(raw)
+      : fn;
+  }, "extension-job-runner");
 }
 
 export function buildJobContext(

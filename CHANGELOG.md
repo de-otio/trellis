@@ -72,15 +72,46 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   - **The extension session is now whitelist-built**, not the internal session
     passed through — `csrfToken`/`mfaVerified`/`dataRegion`/`ageTier` no longer
     leak past the extension boundary (pre-existing over-exposure, fixed here).
-  - (05a Part B — the `discover()` cross-tenant read path — lands next; dogs'
-    call-site migration is Part C.)
+
+- **05a Part B: sanctioned cross-tenant read path (`ctx.db.discover(reason)`).**
+  A named, audited, allow-listed READ-ONLY surface for content that is
+  cross-tenant by construction (a caller's feed candidates live in other users'
+  personal tenants) — the mirror of L1's `tenant(tid)`. Every guarantee is
+  enforced at runtime:
+  - **Read-only + audited.** Only the five read methods exist on the facade
+    (no write op reachable); each executes inside
+    `runUnscoped("ext:<id>:<reason>", …)`, so every cross-tenant read is
+    warn-logged and attributable, and `runUnscoped` finally has production
+    callers.
+  - **Model gate.** Only models the extension declared in the new
+    `TrellisExtension.crossTenantRead` (validated at registration against a
+    core allow-list — catalog/content only, never user/tenant/entity/auth — ∪
+    its own `ext_*` models; **fails startup** otherwise) resolve to a delegate;
+    everything else is fail-closed.
+  - **Baseline visibility floor**, AND-merged and non-overridable (public/SHOUT
+    content, active catalog, caller region) — applied on every read method.
+  - **Projection + relation-`where` + column guards.** No `include`/relation
+    `select`; relation traversal in `where` to any non-declared model is
+    rejected (closing the `author`/`tenant` field-oracle); results are
+    restricted to a per-model column allow-list that strips
+    `tenantId`/`authorId`/`geoData`/`uri`.
+  - **Abuse caps.** `take` clamped (default 50, max 200), deep `skip` rejected;
+    the route wrapper attaches rate limiting to every route of an extension
+    that declares `crossTenantRead` (discover is reachable from anonymous
+    routes).
+  - The shared read-only-facade primitive is factored out of the O-1 job runner
+    (`extension-read-delegate.ts`) and reused here.
+  - (Part C — migrating `@skybber/ext-dogs`' 10 call sites onto `tenant()` /
+    `discover()` — lands in skybber against the published 0.7.0.)
 
 ### Changed
 
 - **`@de-otio/trellis-extension-api` 0.7.0.** Additive minor bump (from
   0.6.0): adds the named `ExtensionSession` interface (the route-handler
-  session param) with its optional `tenantId?: TenantId`. 0.6.0 (unreleased in
-  this same window) added `ExtensionDb.tenant(tid)` / `ScopedDb` /
+  session param) with its optional `tenantId?: TenantId` (05a Part A), and the
+  cross-tenant read surface — `ExtensionDb.discover(reason)`, the `DiscoverDb`
+  type, and `TrellisExtension.crossTenantRead?` (05a Part B). 0.6.0 (unreleased
+  in this same window) added `ExtensionDb.tenant(tid)` / `ScopedDb` /
   `ScopedDelegate`, the opaque `TenantId` brand (no exported constructor —
   extension code cannot forge one), and `jobs` / `ExtensionJobDecl` /
   `ExtensionJobContext` / `ExtensionJobSchedule` / `CrossTenantReadDelegate` to

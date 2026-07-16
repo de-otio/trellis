@@ -10,6 +10,8 @@
 
 import type { TrellisExtension } from "@de-otio/trellis-extension-api";
 import { getLogger, Logger } from "./logger.js";
+import { invalidCrossTenantReadModels } from "./extension-discover-db.js";
+import { EXTENSION_MODEL_REGISTRY } from "./extension-model-registry.js";
 
 const RESERVED_IDS = ["user", "admin", "system", "internal", ""];
 const RESERVED_ROUTE_PREFIXES = [
@@ -60,6 +62,17 @@ export function validateExtensions(
           );
         }
       }
+    }
+
+    // Validate the cross-tenant discover declaration (05a §4.4(1)) — fail
+    // startup, not first request, on any model not in the core discover
+    // allow-list ∪ this extension's own (ext_*) models.
+    const ownModels = EXTENSION_MODEL_REGISTRY.map((e) => e.model);
+    const invalid = invalidCrossTenantReadModels(ext.crossTenantRead, ownModels);
+    if (invalid.length > 0) {
+      throw new Error(
+        `Extension "${ext.id}" declares crossTenantRead model(s) not permitted for cross-tenant discovery: ${invalid.join(", ")}`,
+      );
     }
 
     // Warn about routes without auth middleware

@@ -8,6 +8,7 @@
 import type {
   ExtensionContext,
   ExtensionGraphService,
+  DiscoverDb,
   ScopedDb,
   TenantId,
   TrellisExtension,
@@ -17,6 +18,7 @@ import {
   createScopedDb,
   type RawPrismaLike,
 } from "./extension-scoped-db.js";
+import { createDiscoverDb } from "./extension-discover-db.js";
 import type { GraphService } from "./graph/index.js";
 import type { Env } from "../env.js";
 
@@ -59,16 +61,27 @@ export function createExtensionContext(
   env: Env,
   prisma: unknown,
   graph?: GraphService,
+  callerRegion?: string,
 ): ExtensionContext {
   // Metadata for the tenant-carrying core delegates + composed ext_* models,
   // assembled once per context. The `tenant(tid)` proxy is the ONLY data surface
   // (O-1 design §5.3) — the raw unscoped delegate bag is not shipped.
   const metas = buildScopedModelMetas();
   const rawPrisma = prisma as RawPrismaLike;
+  // discover() exposes EXACTLY the models this extension declared (05a §5); a
+  // model in the core allow-list it did not declare is still blocked for it.
+  // Registration (extension-validator) already guaranteed the declaration is a
+  // subset of the core allow-list ∪ this extension's own models.
+  const declaredCrossTenant = new Set<string>(ext.crossTenantRead ?? []);
+  // Region floor for discover reads (§4.4(3)): the caller's data region when
+  // authenticated, else the deployment primary — fail-closed to one region.
+  const region = callerRegion ?? env.DEFAULT_REGION ?? "EU";
   return {
     db: {
       tenant: (tenantId: TenantId): ScopedDb =>
         createScopedDb(rawPrisma, tenantId, metas),
+      discover: (reason: string): DiscoverDb =>
+        createDiscoverDb(rawPrisma, ext.id, reason, declaredCrossTenant, region),
     },
     graphService: graph ? createReadOnlyGraphService(graph) : undefined,
     appDomain: env.APP_DOMAIN ?? "",

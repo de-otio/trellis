@@ -82,6 +82,21 @@ describe("createExtensionContext", () => {
     expect(typeof (scoped as any).$executeRaw).not.toBe("function");
   });
 
+  it("exposes discover() honoring the extension's crossTenantRead declaration (05a Part B)", async () => {
+    const ext = makeExtension({ crossTenantRead: ["post", "taxonomyTaxon"] });
+    const ctx = createExtensionContext(ext, mockEnv, mockPrisma, mockGraph, "EU");
+
+    expect(typeof ctx.db.discover).toBe("function");
+    const d = ctx.db.discover("product-reco");
+    // A declared model resolves to a working read-only delegate...
+    await d.post.findMany();
+    expect(mockPrisma.post.findMany).toHaveBeenCalled();
+    // ...an undeclared model is blocked, even though it is in the core allow-list.
+    expect(() => (d as any).productTaxonomyTag.findMany()).toThrow();
+    // ...and a never-allowed model is blocked.
+    expect(() => (d as any).user.findMany()).toThrow();
+  });
+
   it("blocks security-sensitive / non-tenant models fail-closed on the scoped surface", async () => {
     const ctx = createExtensionContext(makeExtension(), mockEnv, mockPrisma, mockGraph);
     const scoped = ctx.db.tenant(tid("t-acme"));

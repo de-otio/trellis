@@ -15,7 +15,7 @@ import type { TrellisExtension,
   TenantId as ExtensionTenantId,
 } from "@de-otio/trellis-extension-api";
 import type { Route } from "./routes/types.js";
-import { corsMiddleware, csrfMiddleware } from "./middleware.js";
+import { corsMiddleware, csrfMiddleware, rateLimitMiddleware } from "./middleware.js";
 import { SecurityHeaders } from "./security-headers.js";
 import { SessionManager, type Session } from "./session-cookie.js";
 import { getLogger, Logger } from "./logger.js";
@@ -75,12 +75,20 @@ export function wrapExtensionRoute(
 ): Route {
   const authLevel = routeDef.auth ?? "required";
 
+  // Rate-limit EVERY route of an extension that can read cross-tenant (05a
+  // §4.4(7)(a)): discover() is reachable from authLevel:"none" routes, i.e.
+  // unauthenticated cross-tenant scans. The limiter IP-keys anonymous callers.
+  const middleware = authLevel === "none"
+    ? [corsMiddleware()]
+    : [corsMiddleware(), csrfMiddleware()];
+  if (ext.crossTenantRead && ext.crossTenantRead.length > 0) {
+    middleware.push(rateLimitMiddleware());
+  }
+
   return {
     path: `/api/ext/${ext.id}/${routeDef.path}`,
     method: routeDef.method,
-    middleware: authLevel === "none"
-      ? [corsMiddleware()]
-      : [corsMiddleware(), csrfMiddleware()],
+    middleware,
     description: routeDef.description,
     handler: async (request, env, { params, requestContext }) => {
       const securityHeaders = new SecurityHeaders(env);
@@ -109,7 +117,10 @@ export function wrapExtensionRoute(
       const prisma = managed.client;
       const graph = await createGraphServiceFromEnv(env);
 
-      const ctx = createExtensionContext(ext, env, prisma, graph);
+      // discover()'s region floor: the caller's verified data region when
+      // authenticated, else the deployment primary (fail-closed to one region).
+      const callerRegion = session?.dataRegion ?? env.DEFAULT_REGION ?? region;
+      const ctx = createExtensionContext(ext, env, prisma, graph, callerRegion);
 
       try {
         // Resolve the caller's verified tenant and build the extension-facing

@@ -17,6 +17,26 @@ function makeExtension(overrides: Partial<TrellisExtension> = {}): TrellisExtens
 }
 
 describe("validateExtensions", () => {
+  describe("crossTenantRead validation (05a Part B)", () => {
+    it("accepts a declaration within the core discover allow-list", () => {
+      expect(() =>
+        validateExtensions([
+          makeExtension({ id: "dog", crossTenantRead: ["post", "postTaxonomyTag", "taxonomyTaxon"] }),
+        ]),
+      ).not.toThrow();
+    });
+
+    it("fails startup on a model outside the allow-list", () => {
+      expect(() =>
+        validateExtensions([makeExtension({ id: "dog", crossTenantRead: ["user"] })]),
+      ).toThrow(/not permitted for cross-tenant discovery: user/);
+    });
+
+    it("accepts an absent declaration", () => {
+      expect(() => validateExtensions([makeExtension({ id: "dog" })])).not.toThrow();
+    });
+  });
+
   describe("ID validation", () => {
     it("accepts valid extension IDs", () => {
       expect(() => validateExtensions([makeExtension({ id: "dog" })])).not.toThrow();
