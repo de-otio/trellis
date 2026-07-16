@@ -11,14 +11,60 @@
 
 import type { TrellisExtension,
   ExtensionRouteDefinition,
+  ExtensionSession,
+  TenantId as ExtensionTenantId,
 } from "@de-otio/trellis-extension-api";
 import type { Route } from "./routes/types.js";
 import { corsMiddleware, csrfMiddleware } from "./middleware.js";
 import { SecurityHeaders } from "./security-headers.js";
-import { SessionManager } from "./session-cookie.js";
+import { SessionManager, type Session } from "./session-cookie.js";
 import { getLogger, Logger } from "./logger.js";
 import { createExtensionContext } from "./extension-context.js";
+import { mintTenantId } from "./mint-tenant-id.js";
+import { CUID_RE } from "./auth/cuid.js";
 import type { Env } from "../env.js";
+import type { PrismaClient } from "@prisma/client";
+
+/**
+ * Resolve the caller's verified active tenant for an extension route handler.
+ *
+ * The tenant id must be *verified* — from a Cognito-signed claim or a
+ * server-side DB read — never from a client-supplied value. Two sources, in
+ * order (05a §3.3):
+ *   (b) `session.activeTenantId` — the verified JWT claim surfaced by
+ *       `SessionManager.getSession` Strategy 1a (already CUID-validated there).
+ *   (c) cookie-only fallback — a pure cookie session has no active-tenant
+ *       claim, so read the user's `personalTenantId` server-side (one indexed
+ *       read, only on the cookie path). The personal tenant is the correct
+ *       default for cookie (web) sessions; B2B tenant-switching clients use JWTs.
+ *
+ * The raw id is CUID-validated then minted through the core-private
+ * `mintTenantId(·, "session")`, so provenance is audited and the brand chain
+ * stays core-only. Returns `undefined` when no tenant can be verified (e.g. a
+ * legacy cookie whose user row is gone) — a typed, explicit absence, never a
+ * throw.
+ */
+async function resolveTenantId(
+  session: Session,
+  prisma: PrismaClient,
+): Promise<ExtensionTenantId | undefined> {
+  let raw = session.activeTenantId; // (b) verified JWT claim
+  if (!raw) {
+    // (c) cookie-only fallback — server-authoritative personal tenant.
+    const user = await prisma.user.findUnique({
+      where: { id: session.userId },
+      select: { personalTenantId: true },
+    });
+    raw = user?.personalTenantId ?? undefined;
+  }
+  if (raw && CUID_RE.test(raw)) {
+    // Mint through core's private minter (foundation brand + audited
+    // provenance), then cast to the extension-api brand at this boundary — both
+    // erase to `string` (extension.ts TenantId doc). This is the sole crossing.
+    return mintTenantId(raw, "session") as unknown as ExtensionTenantId;
+  }
+  return undefined;
+}
 
 /**
  * Wrap an extension route definition with core HTTP infrastructure.
@@ -41,7 +87,7 @@ export function wrapExtensionRoute(
       const logger = getLogger();
 
       // Auth check — enforced by core
-      let session: any = null;
+      let session: Session | null = null;
       if (authLevel !== "none") {
         const sessionManager = new SessionManager();
         const secret = env.SESSION_SECRET;
@@ -66,7 +112,24 @@ export function wrapExtensionRoute(
       const ctx = createExtensionContext(ext, env, prisma, graph);
 
       try {
-        const result = await routeDef.handle(request, params, session, ctx);
+        // Resolve the caller's verified tenant and build the extension-facing
+        // session by explicit whitelist. Never spread the internal `Session` —
+        // it carries `csrfToken`/`mfaVerified`/`dataRegion`/`ageTier`/
+        // `activeTenantId` that must not cross the extension boundary.
+        // `tenantId` is the only path by which a handler obtains a branded
+        // `TenantId`. Inside the try so a fallback DB error yields a clean 500.
+        let extSession: ExtensionSession | null = null;
+        if (session) {
+          const tenantId = await resolveTenantId(session, prisma);
+          extSession = {
+            userId: session.userId,
+            email: session.email,
+            role: session.role ?? "END_USER",
+            ...(tenantId ? { tenantId } : {}),
+          };
+        }
+
+        const result = await routeDef.handle(request, params, extSession, ctx);
 
         return securityHeaders.addSecurityHeaders(
           new Response(JSON.stringify(result.body), {

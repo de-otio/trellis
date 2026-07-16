@@ -11,10 +11,7 @@ import type { TenantRole, UserRole, TenantMember, Tenant } from "@prisma/client"
 import type { Env } from "../../env.js";
 import type { AuthContext } from "./auth-context.js";
 import { extractBearerToken, verifyCognitoJwt } from "./cognito-jwt.js";
-
-// cuid v1 is `c[a-z0-9]{24}`. Allow up to 40 chars to absorb future widening
-// and any cuid v2 / nanoid variants without re-issuing every JWT.
-const CUID_RE = /^c[a-z0-9]{24,40}$/;
+import { CUID_RE } from "./cuid.js";
 
 /**
  * Extract and verify the Bearer token from the request, then assemble an

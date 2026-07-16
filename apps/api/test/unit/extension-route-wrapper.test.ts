@@ -26,9 +26,13 @@ vi.mock("../../src/lib/session-cookie", () => ({
 }));
 
 
+// Cookie-fallback tenant read (extension-route-wrapper resolveTenantId).
+// Defaults to no personal tenant → extSession carries no tenantId, which keeps
+// the pre-05a behavioural assertions (session passthrough) intact.
+const mockUserFindUnique = vi.fn().mockResolvedValue({ personalTenantId: null });
 vi.mock("../../src/lib/database-connection-manager", () => ({
   sharedDatabaseConnectionManager: {
-    acquireClient: () => ({ client: {} }),
+    acquireClient: () => ({ client: { user: { findUnique: mockUserFindUnique } } }),
   },
 }));
 
@@ -75,6 +79,7 @@ describe("wrapExtensionRoute", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockGetSession.mockResolvedValue(null);
+    mockUserFindUnique.mockResolvedValue({ personalTenantId: null });
   });
 
   it("wraps handler at /api/ext/{id}/{path}", () => {
@@ -153,6 +158,125 @@ describe("wrapExtensionRoute", () => {
       mockSession,
       expect.objectContaining({ appDomain: "test.com" }),
     );
+  });
+
+  it("mints tenantId from a verified JWT session's activeTenantId", async () => {
+    mockGetSession.mockResolvedValue({
+      userId: "u1",
+      email: "a@b.com",
+      role: "END_USER",
+      activeTenantId: "cmtaxonaaa000000000000001",
+    });
+
+    const handler = vi.fn(async (_req, _params, session) => ({
+      status: 200,
+      body: { tenantId: session?.tenantId },
+    }));
+    const route = wrapExtensionRoute(makeExt(), {
+      path: "me",
+      method: "GET",
+      auth: "required",
+      handle: handler,
+    });
+
+    await route.handler(new Request("https://test.com/api/ext/dog/me"), {} as any, {
+      url: new URL("https://test.com/api/ext/dog/me"),
+      pathname: "/api/ext/dog/me",
+      params: {},
+    });
+
+    // No DB fallback when the JWT already carried the tenant.
+    expect(mockUserFindUnique).not.toHaveBeenCalled();
+    expect(handler.mock.calls[0][2].tenantId).toBe("cmtaxonaaa000000000000001");
+  });
+
+  it("falls back to personalTenantId for a cookie session (no JWT claim)", async () => {
+    mockGetSession.mockResolvedValue({ userId: "u1", email: "a@b.com", role: "END_USER" });
+    mockUserFindUnique.mockResolvedValue({ personalTenantId: "cmtaxonaaa000000000000001" });
+
+    const handler = vi.fn(async () => ({ status: 200, body: {} }));
+    const route = wrapExtensionRoute(makeExt(), {
+      path: "me", method: "GET", auth: "required", handle: handler,
+    });
+
+    await route.handler(new Request("https://test.com/api/ext/dog/me"), {} as any, {
+      url: new URL("https://test.com/api/ext/dog/me"),
+      pathname: "/api/ext/dog/me",
+      params: {},
+    });
+
+    expect(mockUserFindUnique).toHaveBeenCalledOnce();
+    expect(handler.mock.calls[0][2].tenantId).toBe("cmtaxonaaa000000000000001");
+  });
+
+  it("yields no tenantId when the fallback personalTenantId is malformed/absent", async () => {
+    mockGetSession.mockResolvedValue({ userId: "u1", email: "a@b.com", role: "END_USER" });
+    mockUserFindUnique.mockResolvedValue({ personalTenantId: "not-a-cuid" });
+
+    const handler = vi.fn(async () => ({ status: 200, body: {} }));
+    const route = wrapExtensionRoute(makeExt(), {
+      path: "me", method: "GET", auth: "required", handle: handler,
+    });
+
+    await route.handler(new Request("https://test.com/api/ext/dog/me"), {} as any, {
+      url: new URL("https://test.com/api/ext/dog/me"),
+      pathname: "/api/ext/dog/me",
+      params: {},
+    });
+
+    expect(handler.mock.calls[0][2].tenantId).toBeUndefined();
+  });
+
+  it("whitelists the extension session — internal fields never cross the boundary", async () => {
+    // getSession returns a full internal Session with sensitive fields.
+    mockGetSession.mockResolvedValue({
+      userId: "u1",
+      email: "a@b.com",
+      role: "END_USER",
+      activeTenantId: "cmtaxonaaa000000000000001",
+      csrfToken: "secret-csrf",
+      mfaVerified: true,
+      dataRegion: "EU",
+      ageTier: "ADULT",
+      expiresAt: Date.now() + 3_600_000,
+    });
+
+    const handler = vi.fn(async () => ({ status: 200, body: {} }));
+    const route = wrapExtensionRoute(makeExt(), {
+      path: "me", method: "GET", auth: "required", handle: handler,
+    });
+
+    await route.handler(new Request("https://test.com/api/ext/dog/me"), {} as any, {
+      url: new URL("https://test.com/api/ext/dog/me"),
+      pathname: "/api/ext/dog/me",
+      params: {},
+    });
+
+    const passed = handler.mock.calls[0][2];
+    expect(Object.keys(passed).sort()).toEqual(["email", "role", "tenantId", "userId"]);
+    expect(passed.csrfToken).toBeUndefined();
+    expect(passed.mfaVerified).toBeUndefined();
+    expect(passed.dataRegion).toBeUndefined();
+    expect(passed.ageTier).toBeUndefined();
+  });
+
+  it("returns 500 (clean envelope) when the fallback tenant read throws", async () => {
+    mockGetSession.mockResolvedValue({ userId: "u1", email: "a@b.com", role: "END_USER" });
+    mockUserFindUnique.mockRejectedValue(new Error("db down"));
+
+    const route = wrapExtensionRoute(makeExt(), {
+      path: "me", method: "GET", auth: "required",
+      handle: async () => ({ status: 200, body: {} }),
+    });
+
+    const response = await route.handler(new Request("https://test.com/api/ext/dog/me"), {} as any, {
+      url: new URL("https://test.com/api/ext/dog/me"),
+      pathname: "/api/ext/dog/me",
+      params: {},
+    });
+
+    expect(response.status).toBe(500);
+    expect((await response.json()).error).toBe("Internal server error");
   });
 
   it("returns 500 when handler throws", async () => {

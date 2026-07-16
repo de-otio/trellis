@@ -55,14 +55,36 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
     (`@skybber/ext-dogs` owns routes and taxonomy seed data, not tables) —
     this release ships the mechanism ahead of its first consumer.
 
+- **05a Part A: verified tenant context for extension route handlers.** An
+  extension route handler now receives its caller's verified active tenant as
+  `session.tenantId` (a branded `TenantId`), the only way it can obtain one for
+  `ctx.db.tenant(tid)`. Resolution is fresh-per-request and verified: the
+  active-tenant claim already validated on a Cognito JWT (surfaced from
+  `getSession` Strategy 1a) or, for pure cookie sessions, the caller's
+  `personalTenantId` read server-side — never a client-supplied value. Minted
+  through core's private `mintTenantId(·, "session")` for audited provenance.
+  - **`activeTenantId` is verified-per-request only, by construction.** It is
+    stripped from all sealed material at the single seal chokepoint
+    (`encryptSession`), so the CSRF-refresh and MFA-verify re-seal paths can
+    never bake a ≤1h-verified tenant into a 90-day cookie, and it is stripped
+    from every decrypted cookie/localStorage payload (`narrowSession`,
+    `narrowSessionForAuthHeader`) so a sealed session can never supply one.
+  - **The extension session is now whitelist-built**, not the internal session
+    passed through — `csrfToken`/`mfaVerified`/`dataRegion`/`ageTier` no longer
+    leak past the extension boundary (pre-existing over-exposure, fixed here).
+  - (05a Part B — the `discover()` cross-tenant read path — lands next; dogs'
+    call-site migration is Part C.)
+
 ### Changed
 
-- **`@de-otio/trellis-extension-api` 0.6.0.** Additive minor bump (from
-  0.5.0): adds `ExtensionDb.tenant(tid)` / `ScopedDb` / `ScopedDelegate`, the
-  opaque `TenantId` brand (no exported constructor — extension code cannot
-  forge one), and `jobs` / `ExtensionJobDecl` / `ExtensionJobContext` /
-  `ExtensionJobSchedule` / `CrossTenantReadDelegate` to the `TrellisExtension`
-  contract. See the
+- **`@de-otio/trellis-extension-api` 0.7.0.** Additive minor bump (from
+  0.6.0): adds the named `ExtensionSession` interface (the route-handler
+  session param) with its optional `tenantId?: TenantId`. 0.6.0 (unreleased in
+  this same window) added `ExtensionDb.tenant(tid)` / `ScopedDb` /
+  `ScopedDelegate`, the opaque `TenantId` brand (no exported constructor —
+  extension code cannot forge one), and `jobs` / `ExtensionJobDecl` /
+  `ExtensionJobContext` / `ExtensionJobSchedule` / `CrossTenantReadDelegate` to
+  the `TrellisExtension` contract. See the
   [Extension API reference](docs/reference/extension-api.md#scheduled-jobs)
   for the author-facing contract.
 

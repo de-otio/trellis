@@ -25,6 +25,7 @@ import {
   serializeSetCookie,
 } from "@de-otio/saas-foundation/session";
 import { getLogger } from "./logger.js";
+import { CUID_RE } from "./auth/cuid.js";
 
 export type UserRole =
   | "END_USER"
@@ -68,10 +69,62 @@ export interface Session {
 
   // Age tier for child safety feature gating (Safer Social Design)
   ageTier?: AgeTier;
+
+  // O-1 / 05a: the caller's verified active tenant.
+  //
+  // Populated ONLY from a verified Cognito JWT (getSession Strategy 1a), where
+  // `custom:activeTenantId` was signed by Cognito and written by the
+  // pre-token-generation Lambda after an ACTIVE-membership check. It is
+  // deliberately NEVER read from the decrypted cookie/localStorage payload
+  // (`narrowSession`/`narrowSessionForAuthHeader` strip it) and NEVER written
+  // into sealed material (`encryptSession` strips it) — so a stale or
+  // client-tampered tenant can never ride a 90-day cookie. The extension route
+  // wrapper is the sole consumer: it mints this into a branded `TenantId`.
+  //
+  // Freshness is a security property here (scope, not just identity): trusting
+  // it only from a ≤1h token is what keeps a removed-from-tenant user from
+  // retaining scoped access for a cookie lifetime.
+  activeTenantId?: string;
 }
 
 /** Minimum session-secret length. Mirrors foundation's MIN_SECRET_LENGTH. */
 const SESSION_SECRET_MIN_LENGTH = MIN_SECRET_LENGTH;
+
+/**
+ * Session fields that must NEVER be persisted in sealed material (cookie /
+ * localStorage token). Trusted only from a freshly-verified JWT per request.
+ * See the `Session.activeTenantId` doc and `encryptSession`'s `[SR:H3]` note.
+ */
+const SEAL_FORBIDDEN_FIELDS = ["activeTenantId"] as const;
+
+/**
+ * Remove {@link SEAL_FORBIDDEN_FIELDS} from a to-be-sealed JSON payload string.
+ *
+ * Operates on the JSON string `encryptSession` receives. If the payload does not
+ * parse as a JSON object (no current caller — every seal path stringifies a
+ * `Session`), it is returned unchanged: the strip is a session-scope invariant,
+ * not a general transform, and must not corrupt a non-session payload.
+ */
+function stripSealForbiddenFields(data: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return data;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return data;
+  }
+  const obj = parsed as Record<string, unknown>;
+  let mutated = false;
+  for (const field of SEAL_FORBIDDEN_FIELDS) {
+    if (field in obj) {
+      delete obj[field];
+      mutated = true;
+    }
+  }
+  return mutated ? JSON.stringify(obj) : data;
+}
 
 /**
  * Build the cache key for a derived `SessionCookie`. Keyed by the
@@ -208,13 +261,24 @@ export class SessionManager {
    *
    * `salt` is required (mirrors foundation MIN_SALT_LENGTH); omitting
    * it fails closed with a SESSION_SALT error.
+   *
+   * O-1 / 05a `[SR:H3]`: this is the single seal chokepoint (every seal path —
+   * `setSession`, and the CSRF/MFA re-seal sites — routes its payload through
+   * here), so it is also the single place that guarantees `activeTenantId` is
+   * never persisted in sealed material. A JWT-derived `Session` carries a
+   * trusted `activeTenantId`; if that object is fed back into a 90-day cookie /
+   * localStorage token (as the CSRF-refresh and MFA-verify handlers do), the
+   * tenant would outlive the ≤1h token it was verified from — letting a user
+   * removed from a tenant keep minting a scoped handle for it. Stripping here
+   * enforces "verified-per-request only" for every caller, present and future,
+   * instead of relying on each seal site to remember.
    */
   async encryptSession(
     data: string,
     secret: string,
     salt?: string,
   ): Promise<string> {
-    return this.getCookie(secret, salt).seal(data);
+    return this.getCookie(secret, salt).seal(stripSealForbiddenFields(data));
   }
 
   /**
@@ -265,6 +329,13 @@ export class SessionManager {
       typeof session.email === "string" &&
       session.email
     ) {
+      // O-1 / 05a `[SR:H3]`: the cast below passes the whole decrypted JSON
+      // through at runtime, so any `activeTenantId` present in the sealed
+      // payload would become a trusted tenant. It must only ever come from a
+      // freshly-verified JWT (Strategy 1a). Strip it here so the sealed-cookie
+      // path can never supply one — defense-in-depth behind `encryptSession`'s
+      // seal-time strip.
+      for (const field of SEAL_FORBIDDEN_FIELDS) delete session[field];
       return session as unknown as Session;
     }
 
@@ -337,6 +408,21 @@ export class SessionManager {
           }
 
           const claimsRecord = claims as unknown as Record<string, unknown>;
+          // O-1 / 05a: surface the already-verified active-tenant claim. The JWT
+          // was just cryptographically verified above, so this is zero extra
+          // crypto. Validate it against the same cuid shape the JWT auth
+          // middleware applies (auth-middleware.ts:50) and normalize the
+          // empty-string claim pre-token-generation writes for a user with no
+          // active membership to `undefined` — otherwise `"" ?? fallback` would
+          // short-circuit the wrapper's personal-tenant fallback. A malformed
+          // claim is dropped (undefined), never trusted.
+          const rawActiveTenant = claimsRecord["custom:activeTenantId"];
+          const activeTenantId =
+            typeof rawActiveTenant === "string" &&
+            rawActiveTenant !== "" &&
+            CUID_RE.test(rawActiveTenant)
+              ? rawActiveTenant
+              : undefined;
           return {
             // Prefer the cuid in `custom:userId` (the DB `User.id`, written by
             // pre-token-generation) over the Cognito `sub`. The app looks up the
@@ -353,6 +439,7 @@ export class SessionManager {
             profileContext: "primary",
             ageTier:
               (claimsRecord["custom:ageTier"] as AgeTier) || "ADULT",
+            ...(activeTenantId ? { activeTenantId } : {}),
           } satisfies Session;
         } catch (jwtErr) {
           logger.debug(
@@ -488,6 +575,10 @@ export class SessionManager {
       typeof session.email === "string" &&
       session.email
     ) {
+      // O-1 / 05a `[SR:H3]`: localStorage tokens are sealed sessions too — apply
+      // the same strip as `narrowSession`. `activeTenantId` is trusted ONLY from
+      // a verified JWT (Strategy 1a), never from a decrypted token payload.
+      for (const field of SEAL_FORBIDDEN_FIELDS) delete session[field];
       return session as unknown as Session;
     }
     return null;

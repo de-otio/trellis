@@ -360,7 +360,7 @@ export interface ExtensionJobDecl {
  *   - Bump alongside every `package.json` version change.
  *   - Never change one without changing the other.
  */
-export const EXTENSION_API_VERSION = "0.6.0" as const;
+export const EXTENSION_API_VERSION = "0.7.0" as const;
 
 // ---------------------------------------------------------------------------
 // Strategy Interfaces — pluggable domain-specific behavior
@@ -486,6 +486,27 @@ export interface ExtensionResponse {
 }
 
 /**
+ * The authenticated caller, as seen by an extension route handler.
+ *
+ * Core builds this by whitelist (never by spreading its internal session), so
+ * only these fields cross the boundary — `csrfToken`, `mfaVerified`,
+ * `dataRegion`, `ageTier`, etc. stay core-private.
+ */
+export interface ExtensionSession {
+  userId: string;
+  email: string;
+  role: string;
+  /**
+   * The caller's verified active tenant, minted by core with `"session"`
+   * provenance. Populated from a verified Cognito JWT claim, or (for pure
+   * cookie sessions) from the caller's personal tenant read server-side.
+   * Absent when the session has no verifiable tenant. This is the ONLY way a
+   * route handler obtains a `TenantId` — pass it to `ctx.db.tenant(tid)`.
+   */
+  tenantId?: TenantId;
+}
+
+/**
  * Extension route handler function.
  * Receives parsed request, params, session, and scoped context.
  * Returns a data object — core handles HTTP wiring.
@@ -493,7 +514,7 @@ export interface ExtensionResponse {
 export type ExtensionHandler = (
   request: Request,
   params: Record<string, string>,
-  session: { userId: string; email: string; role: string } | null,
+  session: ExtensionSession | null,
   ctx: ExtensionContext,
 ) => Promise<ExtensionResponse>;
 

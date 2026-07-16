@@ -19,6 +19,7 @@ export type {
   CrossTenantReadDelegate,
   ExtensionRouteDefinition,
   ExtensionHandler,
+  ExtensionSession,
   ExtensionResponse,
   RelationshipSignalProvider,
   RelationshipSignalContext,
