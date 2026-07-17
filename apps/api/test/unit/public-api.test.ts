@@ -29,6 +29,18 @@ const EXPECTED_EXPORTS = [
   "setReportTemplates",
   "REPORT_TEMPLATE_KEYS",
   "setOperatorAlertHook",
+  // Compliance enforcement (plan 08 Phase 2 / spec 07 §4 — Lane A2). Value
+  // exports only; the accompanying type exports are erased at runtime.
+  "restrictContent",
+  "evidenceHoldExemptWhere",
+  "setComplianceAlarmHook",
+  "setStatementDelivery",
+  "ILLEGAL_SUSPECTED_LABEL",
+  "deriveBlockClass",
+  "isAppealable",
+  "createPendingAuthorityReport",
+  "markAuthorityReportSubmitted",
+  "markAuthorityReportClosed",
 ].sort();
 
 describe("public API surface (@de-otio/trellis)", () => {

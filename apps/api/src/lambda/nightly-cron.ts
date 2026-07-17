@@ -47,8 +47,14 @@ export const handler = async (): Promise<void> => {
     const deletionCutoff = new Date();
     deletionCutoff.setDate(deletionCutoff.getDate() - 7);
 
+    // Evidence-hold guard (compliance plan 08 §2.3 item 5): never hard-delete an
+    // original that is under a live evidence/legal hold — the case is open. The
+    // exempt predicate is the single source of truth in restrict-content.ts.
+    const { evidenceHoldExemptWhere } = await import(
+      "../lib/compliance/restrict-content.js"
+    );
     const mediaToDelete = await db.mediaFile.findMany({
-      where: { deletedAt: { lte: deletionCutoff } },
+      where: { deletedAt: { lte: deletionCutoff }, ...evidenceHoldExemptWhere() },
       select: { id: true, originalKey: true, thumbnailKey: true, optimizedKey: true },
       take: 200,
     });

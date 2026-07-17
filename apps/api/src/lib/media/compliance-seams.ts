@@ -114,6 +114,13 @@ export interface ModerationFeedbackRecord {
   readonly description?: string;
   readonly includeContent: boolean;
   /**
+   * Deterministic idempotency key for (user, resource). The sink adapter keys
+   * its (per-user-prefixed) object name on this so N identical submits from one
+   * user collapse to ONE stored record (spec 07 §6.1 + the dedup test). Stable
+   * across retries; never contains raw content.
+   */
+  readonly dedupKey: string;
+  /**
    * The server-re-derived block class. Defense-in-depth (plan 09 §6.5): the
    * concrete sink adapter MUST refuse to write an `illegal-suspected` record —
    * illegal content never lands in the analysis sink even if core mis-routes.

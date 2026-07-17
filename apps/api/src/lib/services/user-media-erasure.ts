@@ -51,7 +51,7 @@ import { hasOtherLiveCasReference } from "../media/storage-accounting.js";
 export interface UserMediaErasureDb {
   mediaFile: {
     findMany(args: {
-      where: { uploadedBy: string };
+      where: { uploadedBy: string; evidenceHold?: false };
       select: {
         id: true;
         tenantId: true;
@@ -127,7 +127,12 @@ export async function eraseUserMedia(
 
   for (let page = 0; page < MAX_PAGES; page++) {
     const rows = await db.mediaFile.findMany({
-      where: { uploadedBy: userId },
+      // Evidence-hold guard (compliance plan 08 §2.3 item 5 / §2.3 GDPR-vs-
+      // evidence): rows under a live evidence hold are NEITHER soft-deleted NOR
+      // scrubbed here — legal preservation lawfully overrides erasure while a
+      // case is open. They keep their uploader link (the evidence chain needs
+      // it) until the hold is released on case closure.
+      where: { uploadedBy: userId, evidenceHold: false },
       select: {
         id: true,
         tenantId: true,

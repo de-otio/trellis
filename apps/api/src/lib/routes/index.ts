@@ -55,6 +55,7 @@ import { invitationsRoutes } from "./invitations.js";
 import { linkReportRoutes } from "./link-reports.js";
 import { reportRoutes } from "./reports.js";
 import { reportCategoryAdminRoutes } from "./report-category-admin.js";
+import { moderationFeedbackRoutes } from "./moderation-feedback.js";
 import { mapRoutes } from "./map.js";
 import { mediaRoutes } from "./media.js";
 import { mediaReviewRoutes } from "./media-review.js";
@@ -305,6 +306,9 @@ const coreRoutes: Route[] = [
 
   // Report-category admin (SUPER_ADMIN-only, data-driven category vocabulary)
   ...reportCategoryAdminRoutes,
+
+  // Moderation feedback + owner-scoped disposition (spec 07 §4 / plan 08 Phase 2)
+  ...moderationFeedbackRoutes,
 
   // Out Redirector (public endpoint, must be before 404 handler)
   ...outRoutes,

@@ -66,3 +66,35 @@ export type {
   OperatorAlert,
   OperatorAlertHook,
 } from "./lib/report-operator-alert.js";
+// Compliance enforcement (plan 08 Phase 2 / spec 07 §4 — Lane A2).
+// - `restrictContent` orchestrates takedown (hide → preserve → statement → audit).
+// - The deployment injects the affected-user statement delivery transport and an
+//   alarm hook for repeated evidence-preservation failure.
+// - `ILLEGAL_SUSPECTED_LABEL` is the reserved, provider-neutral token a
+//   deployment's moderation adapter emits to signal the illegal-suspected class.
+// - Authority-report lifecycle: created `pending` (NEVER auto-submitted);
+//   operator confirms `submitted`; `closed` releases the evidence hold.
+export {
+  restrictContent,
+  evidenceHoldExemptWhere,
+  setComplianceAlarmHook,
+} from "./lib/compliance/restrict-content.js";
+export type {
+  RestrictContentRef,
+  RestrictContentOpts,
+  RestrictContentResult,
+  ComplianceAlarm,
+  ComplianceAlarmHook,
+} from "./lib/compliance/restrict-content.js";
+export { setStatementDelivery } from "./lib/compliance/statement-of-reasons.js";
+export type { StatementDelivery } from "./lib/compliance/statement-of-reasons.js";
+export {
+  ILLEGAL_SUSPECTED_LABEL,
+  deriveBlockClass,
+  isAppealable,
+} from "./lib/compliance/block-class.js";
+export {
+  createPendingAuthorityReport,
+  markAuthorityReportSubmitted,
+  markAuthorityReportClosed,
+} from "./lib/compliance/authority-report.js";
