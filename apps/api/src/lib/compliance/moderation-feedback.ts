@@ -39,12 +39,35 @@ import {
 } from "../media/compliance-seams.js";
 import { deriveBlockClass } from "./block-class.js";
 import { getTextModerationProvider } from "../media/request-text-moderation.js";
+import { processingKey, isCasKeyError } from "../media/cas-keys.js";
 import {
   createPendingAuthorityReport,
   type AuthorityReportDb,
 } from "./authority-report.js";
 
 const JSON_HEADERS = { "content-type": "application/json" } as const;
+
+/**
+ * The literal placeholder that MUST NEVER be used as an evidence copy-source
+ * bucket. `"processing"` is a CAS key PREFIX inside the media bucket (see
+ * cas-keys.ts), not a bucket name — handing it to the evidence store's
+ * `CopyObject` as the source bucket fails `NoSuchBucket` and the WORM criminal-
+ * evidence bytes silently fail to preserve (V2 Finding G).
+ */
+const PLACEHOLDER_EVIDENCE_BUCKET = "processing";
+
+/**
+ * Thrown when the evidence copy-source cannot be resolved to a REAL configured
+ * bucket. Surfaces as a generic 500 (not an illegal oracle — any internal fault
+ * looks identical), and — critically — happens BEFORE any preserve/mutation, so
+ * an illegal item is never half-preserved (manifest without bytes).
+ */
+export class ComplianceConfigurationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ComplianceConfigurationError";
+  }
+}
 
 export const FEEDBACK_RESOURCE_TYPES = ["post", "comment", "media"] as const;
 export type FeedbackResourceType = (typeof FEEDBACK_RESOURCE_TYPES)[number];
@@ -125,13 +148,16 @@ export class ModerationFeedbackHandler {
         parsedBody;
 
       // Re-derive the block class SERVER-SIDE. On not-found / non-owner for
-      // media, return the neutral 202 (never reveal existence/ownership).
+      // media/post/comment, return the neutral 202 (never reveal existence/
+      // ownership). The evidence copy-source bucket comes from the SAME single
+      // env value the media pipeline/moderation read path uses.
       const derivation = await this.rederiveBlockClass(
         db,
         session.userId,
         resourceType,
         resourceId,
         content,
+        env.MEDIA_BUCKET_NAME,
       );
       if (derivation.kind === "not-owned") {
         return neutralAccepted();
@@ -172,11 +198,31 @@ export class ModerationFeedbackHandler {
       }
 
       // LAWFUL false-positive: write exactly ONE record to the sink.
+      //
+      // Secondary LOW (V2): `description` is user free text that reaches the
+      // write-only analysis sink. The sink adapter's illegal-record refusal keys
+      // on the RESOURCE blockClass, not on this field — so a lawful record could
+      // still smuggle attacker-supplied illegal text through the description
+      // channel. Moderate it with the SAME provider and DROP it fail-closed
+      // (illegal-suspected OR a moderation fault) so illegal bytes can never
+      // enter the analysis corpus via `description`.
+      let safeDescription = description;
+      if (safeDescription) {
+        try {
+          const dVerdict =
+            await getTextModerationProvider().moderateText(safeDescription);
+          if (deriveBlockClass(dVerdict) === "illegal-suspected") {
+            safeDescription = undefined;
+          }
+        } catch {
+          safeDescription = undefined;
+        }
+      }
       await getModerationFeedbackSink().store({
         resourceType,
         resourceId,
         reporterUserId: session.userId,
-        ...(description ? { description } : {}),
+        ...(safeDescription ? { description: safeDescription } : {}),
         includeContent,
         dedupKey: feedbackDedupKey(session.userId, resourceType, resourceId),
         blockClass,
@@ -210,7 +256,8 @@ export class ModerationFeedbackHandler {
   /**
    * Re-derive the server-only block class. NEVER trusts a client-supplied class.
    * - media: read stored MediaFile.blockClass, owner-scoped (uploadedBy).
-   * - text : re-run the injected text provider over `content` (if provided).
+   * - text : classify the STORED post/comment loaded by resourceId, owner-scoped
+   *          — NEVER the client-supplied `content` (see the text branch below).
    */
   private async rederiveBlockClass(
     db: ReturnType<typeof DataRouter.getDatabaseForRegion>,
@@ -218,6 +265,7 @@ export class ModerationFeedbackHandler {
     resourceType: FeedbackResourceType,
     resourceId: string,
     content: string | undefined,
+    mediaBucketName: string,
   ): Promise<
     | { kind: "ok"; blockClass: BlockClass; bytesLocation?: { bucket: string; key: string } }
     | { kind: "not-owned" }
@@ -236,22 +284,74 @@ export class ModerationFeedbackHandler {
         return { kind: "not-owned" };
       }
       const blockClass = (media.blockClass as BlockClass | null) ?? "lawful-flagged";
-      // Bytes live in the tenant-scoped processing/CAS space; pass a REF only.
-      const bytesLocation =
-        media.contentHash != null
-          ? { bucket: "processing", key: `${media.tenantId}/${media.contentHash}` }
-          : undefined;
+      // Evidence copy-source (V2 Finding G). The blocked item's ORIGINAL bytes
+      // live in the REAL media bucket under the canonical `processing/{tenantId}/
+      // {hash}` staging key (cleaned-but-unapproved bytes — see cas-keys.ts).
+      // Source the bucket from the SAME single env value the media pipeline and
+      // the moderation read path use (MEDIA_BUCKET_NAME) — NEVER a hardcoded
+      // placeholder, which would make the WORM evidence CopyObject fail and the
+      // criminal-evidence bytes silently not preserve. A null hash / invalid key
+      // yields no bytesLocation; the illegal path then fails LOUD (see
+      // routeIllegalToPreserveAndReport) rather than half-preserving.
+      let bytesLocation: { bucket: string; key: string } | undefined;
+      if (media.contentHash != null) {
+        const key = processingKey(media.tenantId, media.contentHash);
+        if (!isCasKeyError(key)) {
+          bytesLocation = { bucket: mediaBucketName, key };
+        }
+      }
       return { kind: "ok", blockClass, ...(bytesLocation ? { bytesLocation } : {}) };
     }
 
-    // Text (post/comment): re-run moderation over the submitted content. No
-    // content to classify → lawful-flagged (nothing to route as illegal, and
-    // nothing to preserve).
+    // Text (post/comment): classify the STORED resource loaded by resourceId,
+    // owner-scoped — NEVER the client-supplied `content` (V2 HOLE #2). Deriving
+    // the class from client text lets an attacker relabel an illegal STORED
+    // resource `lawful-flagged` by submitting benign `content` for its
+    // resourceId; that mislabelled pointer (with includeContent) is a latent
+    // trap for any future sink consumer that resolves resourceId back to bytes.
+    // Mirrors the media branch's stored + owner-scoped read.
+    const stored = await this.loadStoredText(db, resourceType, resourceId);
+    if (stored) {
+      if (stored.authorId !== userId) {
+        return { kind: "not-owned" };
+      }
+      const verdict = await getTextModerationProvider().moderateText(stored.text);
+      return { kind: "ok", blockClass: deriveBlockClass(verdict) };
+    }
+
+    // No stored resource for this id (e.g. text rejected AT CREATION and never
+    // persisted). The client `content` is then the ONLY text that exists, and
+    // there is no stored resource a downstream consumer could resolve resourceId
+    // back to — so classifying it here carries no relabel/mislabel risk. No
+    // content at all → lawful-flagged (nothing to route illegal, nothing to
+    // preserve).
     if (content && content.length > 0) {
       const verdict = await getTextModerationProvider().moderateText(content);
       return { kind: "ok", blockClass: deriveBlockClass(verdict) };
     }
     return { kind: "ok", blockClass: "lawful-flagged" };
+  }
+
+  /**
+   * Load the STORED text + owner of a post/comment by id (owner-scoping and
+   * classification target for the text branch). Returns null when no row exists
+   * (e.g. rejected-at-creation, never persisted).
+   */
+  private async loadStoredText(
+    db: ReturnType<typeof DataRouter.getDatabaseForRegion>,
+    resourceType: "post" | "comment",
+    resourceId: string,
+  ): Promise<{ authorId: string; text: string } | null> {
+    if (resourceType === "post") {
+      return db.post.findUnique({
+        where: { id: resourceId },
+        select: { authorId: true, text: true },
+      });
+    }
+    return db.postComment.findUnique({
+      where: { id: resourceId },
+      select: { authorId: true, text: true },
+    });
   }
 
   /**
@@ -273,6 +373,24 @@ export class ModerationFeedbackHandler {
   ): Promise<void> {
     if (!isEvidencePreservationConfigured()) {
       throw new ComplianceSeamNotConfiguredError("EvidencePreservationStore");
+    }
+
+    // Fail LOUD (V2 Finding G): an illegal MEDIA item MUST have a resolvable,
+    // REAL evidence copy-source before we preserve. A missing/placeholder source
+    // bucket would make the WORM content copy fail (NoSuchBucket) and preserve
+    // ONLY the manifest — silently losing the criminal-evidence bytes. Refuse
+    // (throw, before any preserve/mutation) rather than half-preserve. Text has
+    // no S3 bytes to copy, so this guard is media-only.
+    if (ref.resourceType === "media") {
+      const loc = ref.bytesLocation;
+      if (!loc || !loc.bucket || loc.bucket === PLACEHOLDER_EVIDENCE_BUCKET) {
+        throw new ComplianceConfigurationError(
+          "Evidence copy-source bucket for illegal media is unset or a " +
+            `placeholder (got: ${loc?.bucket ?? "<none>"}). MEDIA_BUCKET_NAME ` +
+            "must resolve to the real media bucket so the WORM evidence copy can " +
+            "read the original bytes. Refusing to preserve manifest-only.",
+        );
+      }
     }
 
     const bundle: EvidenceBundle = {

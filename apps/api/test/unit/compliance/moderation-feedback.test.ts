@@ -22,11 +22,18 @@ vi.mock("../../../src/lib/audit-composer.js", () => ({
 
 const mockDb = {
   mediaFile: { findUnique: vi.fn(), update: vi.fn(async () => ({ id: "m1" })) },
+  post: { findUnique: vi.fn() },
+  postComment: { findUnique: vi.fn() },
   authorityReport: { create: vi.fn(async () => ({ id: "ar1", status: "pending" })) },
 };
 vi.mock("../../../src/lib/data-router.js", () => ({
   DataRouter: { getDatabaseForRegion: vi.fn(() => mockDb) },
 }));
+
+// Valid CAS inputs so the evidence copy-source resolves to a real
+// `processing/{tenantId}/{hash}` key (cas-keys.ts validators are strict).
+const VALID_TENANT = "c" + "a".repeat(24); // matches /^c[a-z0-9]{24}$/
+const VALID_HASH = "a".repeat(64); // matches /^[0-9a-f]{64}$/
 
 import { ModerationFeedbackHandler } from "../../../src/lib/compliance/moderation-feedback.js";
 import {
@@ -42,7 +49,12 @@ import {
 import { MockTextModerationProvider } from "../../../src/lib/media/text-moderation.js";
 import { ILLEGAL_SUSPECTED_LABEL } from "../../../src/lib/compliance/block-class.js";
 
-const env = { DEFAULT_REGION: "EU" } as unknown as Env;
+const env = {
+  DEFAULT_REGION: "EU",
+  // The real media bucket — the evidence copy-source (V2 Finding G). Never the
+  // literal placeholder "processing".
+  MEDIA_BUCKET_NAME: "dev-skybber-media",
+} as unknown as Env;
 const requestContext = { region: "EU" } as any;
 const OWNER = "owner-1";
 const session = { userId: OWNER, email: "o@example.com" } as any;
@@ -84,8 +96,8 @@ describe("ModerationFeedbackHandler — the illegal carve-out", () => {
     mockDb.mediaFile.findUnique.mockResolvedValue({
       uploadedBy: OWNER,
       blockClass: "illegal-suspected",
-      tenantId: "t1",
-      contentHash: "h1",
+      tenantId: VALID_TENANT,
+      contentHash: VALID_HASH,
     });
 
     const res = await handler.handleSubmit(
@@ -98,6 +110,11 @@ describe("ModerationFeedbackHandler — the illegal carve-out", () => {
     // THE load-bearing assertions.
     expect(store).not.toHaveBeenCalled(); // sink never touched
     expect(preserve).toHaveBeenCalledTimes(1); // preserved in place
+    // The evidence copy-source is the REAL media bucket + canonical processing
+    // key — NEVER the placeholder "processing" (V2 Finding G).
+    const bundle = preserve.mock.calls[0][0];
+    expect(bundle.bytesLocation.bucket).toBe("dev-skybber-media");
+    expect(bundle.bytesLocation.key).toBe(`processing/${VALID_TENANT}/${VALID_HASH}`);
     expect(mockDb.authorityReport.create).toHaveBeenCalledTimes(1);
     expect(mockDb.authorityReport.create.mock.calls[0][0].data.status).toBe("pending");
     expect(channelSubmit).not.toHaveBeenCalled(); // NEVER auto-submits
@@ -118,8 +135,8 @@ describe("ModerationFeedbackHandler — the illegal carve-out", () => {
     mockDb.mediaFile.findUnique.mockResolvedValue({
       uploadedBy: OWNER,
       blockClass: "illegal-suspected",
-      tenantId: "t1",
-      contentHash: "h1",
+      tenantId: VALID_TENANT,
+      contentHash: VALID_HASH,
     });
     const illegal = await handler.handleSubmit(
       req({ resourceType: "media", resourceId: "m1", includeContent: true, consent: true }),
@@ -144,9 +161,13 @@ describe("ModerationFeedbackHandler — the illegal carve-out", () => {
     expect(await illegal.json()).toEqual(await lawful.json());
   });
 
-  it("re-derives illegal class SERVER-SIDE for text (client class is never trusted)", async () => {
+  it("re-derives illegal class SERVER-SIDE for text over the STORED resource (client class is never trusted)", async () => {
     const { store, preserve } = wireSeams();
-    // The provider flags the reserved illegal token on the submitted content.
+    // Stored post owned by the caller, with illegal text.
+    mockDb.post.findUnique.mockResolvedValue({
+      authorId: OWNER,
+      text: "stored illegal text",
+    });
     const provider = new MockTextModerationProvider({
       decision: "quarantine",
       labels: [{ category: ILLEGAL_SUSPECTED_LABEL, confidence: 0.99 }],
@@ -167,10 +188,99 @@ describe("ModerationFeedbackHandler — the illegal carve-out", () => {
       requestContext,
     );
 
-    expect(provider.calls).toContain("some submitted text"); // re-ran moderation
+    // Classified the STORED text, NOT the client-supplied content.
+    expect(provider.calls).toContain("stored illegal text");
+    expect(provider.calls).not.toContain("some submitted text");
     expect(store).not.toHaveBeenCalled(); // illegal → not the sink
     expect(preserve).toHaveBeenCalledTimes(1);
     expect(res.status).toBe(202);
+  });
+
+  it("HOLE #2 CLOSURE: benign client content for an illegal STORED post is NOT labelled lawful (no relabel)", async () => {
+    const { store, preserve } = wireSeams();
+    // Stored post is illegal; the attacker submits benign `content` for its id.
+    mockDb.post.findUnique.mockResolvedValue({
+      authorId: OWNER,
+      text: "ILLEGAL stored text the attacker wants relabelled",
+    });
+    // Content-aware provider: illegal iff the text contains the ILLEGAL marker.
+    const calls: string[] = [];
+    setTextModerationProvider({
+      async moderateText(text: string) {
+        calls.push(text);
+        const flagged = text.includes("ILLEGAL");
+        return {
+          decision: flagged ? ("quarantine" as const) : ("approved" as const),
+          labels: flagged
+            ? [{ category: ILLEGAL_SUSPECTED_LABEL, confidence: 0.99 }]
+            : [],
+          provider: "mock",
+        };
+      },
+    });
+
+    const res = await handler.handleSubmit(
+      req({
+        resourceType: "post",
+        resourceId: "p1",
+        includeContent: true,
+        consent: true,
+        content: "cute puppy", // benign decoy
+      }),
+      session,
+      env,
+      requestContext,
+    );
+
+    // The STORED (illegal) text was classified — not the benign decoy — so the
+    // record is routed to the carve-out, NOT written to the sink as lawful.
+    expect(calls).toContain("ILLEGAL stored text the attacker wants relabelled");
+    expect(calls).not.toContain("cute puppy");
+    expect(store).not.toHaveBeenCalled(); // never labelled lawful → never sunk
+    expect(preserve).toHaveBeenCalledTimes(1); // routed to preserve instead
+    expect(res.status).toBe(202);
+  });
+
+  it("ANTI-ORACLE: feedback for a post owned by SOMEONE ELSE → neutral 202, no sink, no preserve", async () => {
+    const { store, preserve } = wireSeams();
+    mockDb.post.findUnique.mockResolvedValue({
+      authorId: "someone-else",
+      text: "not your post",
+    });
+    const res = await handler.handleSubmit(
+      req({ resourceType: "post", resourceId: "p1", includeContent: true, consent: true, content: "x" }),
+      session,
+      env,
+      requestContext,
+    );
+    expect(res.status).toBe(202);
+    expect(await res.json()).toEqual({ received: true });
+    expect(store).not.toHaveBeenCalled();
+    expect(preserve).not.toHaveBeenCalled();
+  });
+
+  it("FINDING G FAIL-LOUD: illegal media with a placeholder/unset source bucket THROWS (500) — never preserves manifest-only", async () => {
+    const { store, preserve } = wireSeams();
+    mockDb.mediaFile.findUnique.mockResolvedValue({
+      uploadedBy: OWNER,
+      blockClass: "illegal-suspected",
+      tenantId: VALID_TENANT,
+      contentHash: VALID_HASH,
+    });
+    // Env with NO real media bucket configured.
+    const envNoBucket = { DEFAULT_REGION: "EU" } as unknown as Env;
+
+    const res = await handler.handleSubmit(
+      req({ resourceType: "media", resourceId: "m1", includeContent: true, consent: true }),
+      session,
+      envNoBucket,
+      requestContext,
+    );
+
+    // Fail-loud: generic 500, and NOTHING preserved (no half-preserve).
+    expect(res.status).toBe(500);
+    expect(preserve).not.toHaveBeenCalled();
+    expect(store).not.toHaveBeenCalled();
   });
 });
 
