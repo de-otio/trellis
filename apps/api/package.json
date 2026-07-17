@@ -44,7 +44,8 @@
     "prisma:migrate:dev": "prisma migrate dev",
     "prisma:migrate:deploy": "prisma migrate deploy",
     "seed:feature-toggles": "tsx scripts/seed-feature-toggles.ts",
-    "seed:platform-categories": "tsx scripts/seed-platform-categories.ts"
+    "seed:platform-categories": "tsx scripts/seed-platform-categories.ts",
+    "seed:report-categories": "tsx scripts/seed-report-categories.ts"
   },
   "dependencies": {
     "@aws-lambda-powertools/logger": "^2.32.0",

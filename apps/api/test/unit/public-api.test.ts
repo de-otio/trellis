@@ -21,6 +21,14 @@ const EXPECTED_EXPORTS = [
   "setRealtimeProvider",
   "setTextModerationProvider",
   "startServer",
+  // Compliance seams + reporter-notification wiring (plan 08 §2.5 / §2.2).
+  // Type-only exports don't appear as runtime keys; only these value exports do.
+  "setEvidencePreservationStore",
+  "setAuthorityReportChannel",
+  "setModerationFeedbackSink",
+  "setReportTemplates",
+  "REPORT_TEMPLATE_KEYS",
+  "setOperatorAlertHook",
 ].sort();
 
 describe("public API surface (@de-otio/trellis)", () => {
@@ -42,5 +50,14 @@ describe("public API surface (@de-otio/trellis)", () => {
 
   it("exposes the push-transport injection hook as a callable (T8)", () => {
     expect(typeof publicApi.setPushTransportProvider).toBe("function");
+  });
+
+  it("exposes the compliance-seam injection hooks as callables (plan 08 §2.5)", () => {
+    expect(typeof publicApi.setEvidencePreservationStore).toBe("function");
+    expect(typeof publicApi.setAuthorityReportChannel).toBe("function");
+    expect(typeof publicApi.setModerationFeedbackSink).toBe("function");
+    expect(typeof publicApi.setReportTemplates).toBe("function");
+    expect(typeof publicApi.setOperatorAlertHook).toBe("function");
+    expect(typeof publicApi.REPORT_TEMPLATE_KEYS).toBe("object");
   });
 });

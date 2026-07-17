@@ -101,6 +101,13 @@ export const PLATFORM_CATEGORY_CREATED: AuditAction = "platform_category.created
 export const PLATFORM_CATEGORY_DEACTIVATED: AuditAction = "platform_category.deactivated";
 export const PLATFORM_CATEGORY_REPARENTED: AuditAction = "platform_category.reparented";
 
+// ── Report-category admin actions (compliance plan 08 §2.1) ────────────
+// SUPER_ADMIN mutations of the data-driven ReportCategory vocabulary that the
+// deployment seeds and core routes on (by routingClass only).
+export const REPORT_CATEGORY_CREATED: AuditAction = "report_category.created";
+export const REPORT_CATEGORY_UPDATED: AuditAction = "report_category.updated";
+export const REPORT_CATEGORY_DEACTIVATED: AuditAction = "report_category.deactivated";
+
 // ── Media-moderation review-queue actions (T9) ────────────────────────
 // Every human moderator decision on a REVIEW/QUARANTINED media item writes
 // one of these. The audited moderator VIEW bypass writes MEDIA_MODERATION_VIEWED

@@ -71,6 +71,8 @@ import { healthRoutes } from "./routes/health.js";
 import { internaldocsRoutes } from "./routes/internal-docs.js";
 import { invitationsRoutes } from "./routes/invitations.js";
 import { linkReportRoutes } from "./routes/link-reports.js";
+import { reportRoutes } from "./routes/reports.js";
+import { reportCategoryAdminRoutes } from "./routes/report-category-admin.js";
 import { mapRoutes } from "./routes/map.js";
 import { mediaRoutes } from "./routes/media.js";
 import { mediaReviewRoutes } from "./routes/media-review.js";
@@ -367,6 +369,8 @@ const PORTED_ROUTE_SETS: ReadonlyArray<ReadonlyArray<Route>> = [
   commentsRoutes,
   entitiesRoutes,
   linkReportRoutes,
+  reportRoutes, // compliance plan 08 §2.2 — /api/reports[...]
+  reportCategoryAdminRoutes, // compliance plan 08 §2.1 — /api/admin/report-categories[...]
   notificationsRoutes,
   oauthRoutes,
   parentalControlRoutes,

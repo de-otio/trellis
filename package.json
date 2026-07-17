@@ -21,6 +21,7 @@
     "prisma:migrate:dev": "npm run -w @de-otio/trellis prisma:migrate:dev",
     "prisma:migrate:deploy": "npm run -w @de-otio/trellis prisma:migrate:deploy",
     "seed:feature-toggles": "npm run -w @de-otio/trellis seed:feature-toggles",
+    "seed:report-categories": "npm run -w @de-otio/trellis seed:report-categories",
     "test:agents": "STAGE=dev AWS_REGION=eu-central-1 AWS_PROFILE=dot-dev npx vitest run --config apps/api/vitest.agents.config.ts"
   },
   "devDependencies": {

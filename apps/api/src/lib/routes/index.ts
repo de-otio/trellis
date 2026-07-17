@@ -53,6 +53,8 @@ import { healthRoutes } from "./health.js";
 import { internaldocsRoutes } from "./internal-docs.js";
 import { invitationsRoutes } from "./invitations.js";
 import { linkReportRoutes } from "./link-reports.js";
+import { reportRoutes } from "./reports.js";
+import { reportCategoryAdminRoutes } from "./report-category-admin.js";
 import { mapRoutes } from "./map.js";
 import { mediaRoutes } from "./media.js";
 import { mediaReviewRoutes } from "./media-review.js";
@@ -297,6 +299,12 @@ const coreRoutes: Route[] = [
 
   // Link Reports
   ...linkReportRoutes,
+
+  // Content reports (compliance plan 08 §2.2 — Art. 16 notice path)
+  ...reportRoutes,
+
+  // Report-category admin (SUPER_ADMIN-only, data-driven category vocabulary)
+  ...reportCategoryAdminRoutes,
 
   // Out Redirector (public endpoint, must be before 404 handler)
   ...outRoutes,

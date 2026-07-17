@@ -30,3 +30,39 @@ export { setMediaModerationProvider } from "./lib/media/request-moderation.js";
 // deploys hold text for review and never auto-approve). Gates post/comment
 // create + edit text.
 export { setTextModerationProvider } from "./lib/media/request-text-moderation.js";
+// Compliance seams (plan 08 §2.5 / plan 07 §4.2) — a consuming app injects
+// concrete adapters (S3 WORM evidence store, manual BKA channel, S3 analysis
+// sink) before enabling any ILLEGAL_* report category. Fail-safe defaults throw
+// (evidence + sink) or return a manual no-op (authority channel). Lane A ships
+// the interface stubs; Lane A2 wires the enforcement flow to them.
+export {
+  setEvidencePreservationStore,
+  setAuthorityReportChannel,
+  setModerationFeedbackSink,
+} from "./lib/media/compliance-seams.js";
+export type {
+  EvidencePreservationStore,
+  AuthorityReportChannel,
+  ModerationFeedbackSink,
+  EvidenceBundle,
+  AuthorityReportBundle,
+  AuthorityReportResult,
+  ModerationFeedbackRecord,
+  BlockClass,
+} from "./lib/media/compliance-seams.js";
+// Reporter-notification templates (plan 08 §2.2 §3.3) — deployment injects
+// localized, counsel-approved Art. 16(4)/(5) copy; core ships a neutral fallback.
+export {
+  setReportTemplates,
+  REPORT_TEMPLATE_KEYS,
+} from "./lib/report-templates.js";
+export type { ReportTemplate, ReportTemplateMap } from "./lib/report-templates.js";
+// Operator-alert hook (plan 08 §2.2) — ILLEGAL_* reports alert the operator;
+// the deployment can inject a richer hook (default emails MODERATOR_EMAILS).
+export {
+  setOperatorAlertHook,
+} from "./lib/report-operator-alert.js";
+export type {
+  OperatorAlert,
+  OperatorAlertHook,
+} from "./lib/report-operator-alert.js";
