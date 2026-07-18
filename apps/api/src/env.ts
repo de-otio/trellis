@@ -65,6 +65,15 @@ export interface Env {
   COGNITO_HOSTED_UI_DOMAIN?: string;
   COGNITO_REDIRECT_URI?: string;
 
+  // Generic OIDC verification (WS-3.1). All default-derived from COGNITO_* so
+  // existing deployments need ZERO config change (see lib/auth/auth-config.ts).
+  /** Exact `iss` to pin + JWKS discovery base. Default: the Cognito issuer. */
+  AUTH_ISSUER_URL?: string;
+  /** Expected `aud`. Default: COGNITO_APP_CLIENT_ID. */
+  AUTH_AUDIENCE?: string;
+  /** Explicit JWKS override (air-gapped / fixture tests). Default: unset. */
+  AUTH_JWKS_URL?: string;
+
   // OAuth device-authorization adapter (T9b-d)
   /** Public Cognito app client used by `trellis-agent-cli` (no secret, PKCE). */
   COGNITO_AGENT_CLIENT_ID?: string;
@@ -1289,6 +1298,11 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     COGNITO_REGION: process.env.COGNITO_REGION || process.env.AWS_REGION || "us-east-1",
     COGNITO_HOSTED_UI_DOMAIN: process.env.COGNITO_HOSTED_UI_DOMAIN,
     COGNITO_REDIRECT_URI: process.env.COGNITO_REDIRECT_URI,
+
+    // Generic OIDC verification (WS-3.1) — additive, default-derived from COGNITO_*.
+    AUTH_ISSUER_URL: process.env.AUTH_ISSUER_URL,
+    AUTH_AUDIENCE: process.env.AUTH_AUDIENCE,
+    AUTH_JWKS_URL: process.env.AUTH_JWKS_URL,
 
     // OAuth device-authorization adapter (T9b-d)
     COGNITO_AGENT_CLIENT_ID: process.env.COGNITO_AGENT_CLIENT_ID,

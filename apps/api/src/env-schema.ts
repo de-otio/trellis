@@ -181,6 +181,16 @@ export function buildBootEnvSchema(stage: BootStage) {
       COGNITO_USER_POOL_ID: z.string().min(1).optional(),
       COGNITO_APP_CLIENT_ID: z.string().min(1).optional(),
 
+      // Generic OIDC verification (WS-3.1) — additive, default-derived from
+      // COGNITO_*. Requiredness/SSRF rules live in superRefine + the SEC-4 boot
+      // guard (lib/auth/auth-config.ts).
+      AUTH_ISSUER_URL: z
+        .string()
+        .url({ message: "must be a valid https:// URL" })
+        .optional(),
+      AUTH_AUDIENCE: z.string().min(1).optional(),
+      AUTH_JWKS_URL: z.string().url({ message: "must be a valid URL" }).optional(),
+
       // Tier 2/3 — media pipeline gate + format-checked optionals
       MEDIA_THRESHOLDS_JSON: mediaThresholdsJson(prod).optional(),
       MEDIA_MAX_BYTES_IMAGE: positiveIntString.optional(),
@@ -251,6 +261,25 @@ export function buildBootEnvSchema(stage: BootStage) {
           code: "custom",
           path: ["COGNITO_APP_CLIENT_ID"],
           message: "required — Cognito app client id",
+        });
+      }
+
+      // ── [SEC-6] non-Cognito issuer requires an explicit audience ─────────
+      // The AUTH_AUDIENCE = COGNITO_APP_CLIENT_ID default is only correct for a
+      // Cognito issuer. A Keycloak/Zitadel AUTH_ISSUER_URL without AUTH_AUDIENCE
+      // would silently reject every token — fail closed at boot with a clear
+      // message instead. (In WS-3.1 only the Cognito path is deployed, so this
+      // never fires in practice yet; it prevents a WS-3.3 footgun.)
+      if (
+        env.AUTH_ISSUER_URL !== undefined &&
+        !/^https:\/\/cognito-idp\.[a-z0-9-]+\.amazonaws\.com\/[^/]+$/.test(env.AUTH_ISSUER_URL) &&
+        env.AUTH_AUDIENCE === undefined
+      ) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["AUTH_AUDIENCE"],
+          message:
+            "required when AUTH_ISSUER_URL is a non-Cognito issuer (the COGNITO_APP_CLIENT_ID default would reject every token)",
         });
       }
 
