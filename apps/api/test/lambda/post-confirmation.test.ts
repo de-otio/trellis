@@ -267,16 +267,24 @@ describe("PostConfirmation Lambda — native sign-up", () => {
     );
   });
 
-  it("primes the DDB claims cache after a successful transaction", async () => {
-    const handler = await loadHandler();
-    await handler(makeEvent(), {} as any, () => {});
-    const putCalls = mockDdbSend.mock.calls.filter(
-      (c) => c[0].kind === "PUT",
-    );
-    expect(putCalls.length).toBeGreaterThanOrEqual(1);
-    const item = putCalls[0][0].input.Item;
-    expect(item.userId.S).toBe("u_clxxxxxxxxxxxxxxxxxxxxxx");
-    expect(item.tenantRole.S).toBe("OWNER");
+  it("primes the claims cache after a successful transaction (outcome-equivalence)", async () => {
+    // The write now goes through @de-otio/saas-foundation's KvStore port
+    // (putIfFresher), not a raw DynamoDB PutItem, so assert the OUTCOME: inject
+    // a MemoryKvStore-backed ClaimsCache and read back the primed claims.
+    const { ClaimsCache } = await import("../../src/lib/auth/claims-cache.js");
+    const { MemoryKvStore } = await import("@de-otio/saas-foundation/kv");
+    const { __setClaimsCacheForTest } = await import("../../src/lambda/post-confirmation.js");
+    const injected = new ClaimsCache(new MemoryKvStore());
+    __setClaimsCacheForTest(injected);
+    try {
+      const handler = await loadHandler();
+      await handler(makeEvent(), {} as any, () => {});
+      const primed = await injected.get("cognito-sub-abc123");
+      expect(primed?.userId).toBe("u_clxxxxxxxxxxxxxxxxxxxxxx");
+      expect(primed?.tenantRole).toBe("OWNER");
+    } finally {
+      __setClaimsCacheForTest(null);
+    }
   });
 
   it("skips for unsupported trigger source", async () => {

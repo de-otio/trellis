@@ -61,6 +61,16 @@ function getCache(): ClaimsCache {
   return cache;
 }
 
+/**
+ * Test seam (WS-1 §3.6): inject a `ClaimsCache` (e.g. backed by a
+ * `MemoryKvStore`) so the claims-priming path can be asserted by OUTCOME
+ * (`cache.get(sub)`) rather than by spying on raw DynamoDB commands — the write
+ * now happens inside `@de-otio/saas-foundation`'s port. Pass `null` to reset.
+ */
+export function __setClaimsCacheForTest(c: ClaimsCache | null): void {
+  cache = c;
+}
+
 function computeAgeTier(dateOfBirth: Date): AgeTier {
   const now = new Date();
   let age = now.getUTCFullYear() - dateOfBirth.getUTCFullYear();
