@@ -231,6 +231,18 @@ beforeEach(() => {
 
 async function loadHandler() {
   const mod = await import("../../src/lambda/post-confirmation.js");
+  // Hermetic by default: route the claims cache + invitation record through
+  // MemoryKvStores so a handler run never reaches real AWS (the KvStore port
+  // lives in @de-otio/saas-foundation, which the raw-SDK mock does not
+  // intercept). Tests that assert on these stores override the seam AFTER
+  // loadHandler with their own instance.
+  const { ClaimsCache } = await import("../../src/lib/auth/claims-cache.js");
+  const { MemoryKvStore } = await import("@de-otio/saas-foundation/kv");
+  const { __setInvitationStoreForTest } = await import(
+    "../../src/lib/invitation-presignup-record.js"
+  );
+  mod.__setClaimsCacheForTest(new ClaimsCache(new MemoryKvStore()));
+  __setInvitationStoreForTest(new MemoryKvStore());
   return mod.handler;
 }
 
@@ -275,9 +287,9 @@ describe("PostConfirmation Lambda — native sign-up", () => {
     const { MemoryKvStore } = await import("@de-otio/saas-foundation/kv");
     const { __setClaimsCacheForTest } = await import("../../src/lambda/post-confirmation.js");
     const injected = new ClaimsCache(new MemoryKvStore());
-    __setClaimsCacheForTest(injected);
     try {
       const handler = await loadHandler();
+      __setClaimsCacheForTest(injected); // override loadHandler's hermetic default
       await handler(makeEvent(), {} as any, () => {});
       const primed = await injected.get("cognito-sub-abc123");
       expect(primed?.userId).toBe("u_clxxxxxxxxxxxxxxxxxxxxxx");
@@ -724,48 +736,64 @@ describe("PostConfirmation Lambda — idempotency and failure", () => {
 });
 
 describe("PostConfirmation Lambda — invitation gate", () => {
+  // The PreSignUp invitation record now goes through @de-otio/saas-foundation's
+  // KvStore port (not a raw DynamoDB PutItem), which the SDK mock cannot
+  // intercept — so inject a MemoryKvStore and assert OUTCOME equivalence.
   it("burns the PreSignUp invitation record (used:true) when a code was presented", async () => {
-    const handler = await loadHandler();
-    await handler(
-      makeEvent({ invitationCode: "invite99" }),
-      {} as any,
-      () => {},
+    const { MemoryKvStore } = await import("@de-otio/saas-foundation/kv");
+    const { __setInvitationStoreForTest } = await import(
+      "../../src/lib/invitation-presignup-record.js"
     );
-
-    // A PutItem must target the PreSignUp record, keyed to the (upper-cased)
-    // code, marking it used — so the code cannot be redeemed a second time.
-    const burnCall = mockDdbSend.mock.calls.find(
-      (c) => c[0]?.kind === "PUT" && c[0]?.input?.Item?.pk?.S?.startsWith("invitations:"),
-    );
-    expect(burnCall).toBeDefined();
-    expect(burnCall![0].input.Item.pk).toEqual({ S: "invitations:INVITE99" });
-    expect(burnCall![0].input.Item.sk).toEqual({ S: "v" });
-    expect(burnCall![0].input.Item.usedBy).toEqual({
-      S: "u_clxxxxxxxxxxxxxxxxxxxxxx",
-    });
+    const invStore = new MemoryKvStore();
+    try {
+      const handler = await loadHandler();
+      __setInvitationStoreForTest(invStore); // override loadHandler's hermetic default
+      await handler(makeEvent({ invitationCode: "invite99" }), {} as any, () => {});
+      // The record is keyed to the UPPER-CASED code and marked used, so it
+      // cannot be redeemed a second time.
+      const rec = await invStore.get<{ used: boolean; usedBy?: string }>("INVITE99");
+      expect(rec?.value.used).toBe(true);
+      expect(rec?.value.usedBy).toBe("u_clxxxxxxxxxxxxxxxxxxxxxx");
+    } finally {
+      __setInvitationStoreForTest(null);
+    }
   });
 
   it("does not touch the invitation record when no code was presented", async () => {
-    const handler = await loadHandler();
-    await handler(makeEvent(), {} as any, () => {});
-    const burnCall = mockDdbSend.mock.calls.find(
-      (c) => c[0]?.kind === "PUT" && c[0]?.input?.Item?.pk?.S?.startsWith("invitations:"),
+    const { MemoryKvStore } = await import("@de-otio/saas-foundation/kv");
+    const { __setInvitationStoreForTest } = await import(
+      "../../src/lib/invitation-presignup-record.js"
     );
-    expect(burnCall).toBeUndefined();
+    const invStore = new MemoryKvStore();
+    try {
+      const handler = await loadHandler();
+      __setInvitationStoreForTest(invStore); // override loadHandler's hermetic default
+      await handler(makeEvent(), {} as any, () => {});
+      expect(await invStore.get("INVITE99")).toBeNull();
+    } finally {
+      __setInvitationStoreForTest(null);
+    }
   });
 
   it("does not fail issuance when burning the invitation record fails", async () => {
-    // Account provisioning has already committed; a DynamoDB hiccup here must
-    // never roll it back (best-effort, logged).
-    mockDdbSend.mockImplementation(async (cmd: any) => {
-      if (cmd?.input?.Item?.pk?.S?.startsWith("invitations:")) {
-        throw new Error("DDB throttled");
-      }
-      return {};
-    });
-    const handler = await loadHandler();
-    await expect(
-      handler(makeEvent({ invitationCode: "invite99" }), {} as any, () => {}),
-    ).resolves.toBeDefined();
+    // Account provisioning has already committed; a store hiccup here must never
+    // roll it back (best-effort, logged).
+    const { MemoryKvStore } = await import("@de-otio/saas-foundation/kv");
+    const { __setInvitationStoreForTest } = await import(
+      "../../src/lib/invitation-presignup-record.js"
+    );
+    const failing = {
+      ...new MemoryKvStore(),
+      put: () => Promise.reject(new Error("KV store throttled")),
+    } as unknown as import("@de-otio/saas-foundation/kv").KvStore;
+    try {
+      const handler = await loadHandler();
+      __setInvitationStoreForTest(failing); // override loadHandler's hermetic default
+      await expect(
+        handler(makeEvent({ invitationCode: "invite99" }), {} as any, () => {}),
+      ).resolves.toBeDefined();
+    } finally {
+      __setInvitationStoreForTest(null);
+    }
   });
 });
