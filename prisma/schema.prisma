@@ -2534,3 +2534,25 @@ model ShiftSignup {
   @@index([tenantId, shiftId])
   @@map("event_shift_signups")
 }
+
+// WS-1 KV port (ws1-kv-port-plan §4.2). Backs the PostgresKvStore adapter
+// (@de-otio/saas-foundation/kv/postgres) for the 10 hot-spot namespaces when
+// KV_PROVIDER=postgres. GLOBAL, not tenant-scoped: the KV pool bypasses the
+// tenant-scoping Prisma extension (KV keys are namespace-scoped, never
+// tenant-scoped). `value` holds the record object; `version` is the CAS token;
+// `expires_at` (timestamptz) is the port's epoch-seconds expiry; `indexed_key`
+// powers queryByIndex. Expired rows are filtered on read and reclaimed by the
+// sweep (sweepExpiredKvEntries) — the expires_at index powers that sweep.
+model KvEntry {
+  namespace  String
+  key        String
+  value      Json
+  version    BigInt    @default(1)
+  expiresAt  DateTime? @map("expires_at") @db.Timestamptz(6)
+  indexedKey String?   @map("indexed_key")
+
+  @@id([namespace, key])
+  @@index([namespace, indexedKey]) // powers queryByIndex
+  @@index([expiresAt]) // powers the TTL sweep
+  @@map("kv_entries")
+}
