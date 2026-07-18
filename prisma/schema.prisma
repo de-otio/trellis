@@ -2559,3 +2559,17 @@ model KvEntry {
   @@index([expiresAt]) // powers the TTL sweep
   @@map("kv_entries")
 }
+
+/// WS-1 rate-limit port (ws1-kv-port-plan §3.10/§4.2, security fix F5). Backs the
+/// PostgresTokenBucketLimiter (@de-otio/saas-foundation/rate-limit). GLOBAL, NOT
+/// tenant-scoped — every bucket_key is `<namespace>#<key>`-scoped, and the
+/// dedicated KV/rate-limit pool bypasses the tenant Prisma extension. No RLS.
+model RateLimitBucket {
+  bucketKey    String    @id @map("bucket_key")
+  tokens       Float
+  lastRefillMs BigInt    @map("last_refill_ms")
+  expiresAt    DateTime? @map("expires_at") @db.Timestamptz(6)
+
+  @@index([expiresAt]) // powers the TTL sweep
+  @@map("rate_limit_buckets")
+}

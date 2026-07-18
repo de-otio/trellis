@@ -124,6 +124,11 @@ export function setKvSqlExecutor(executor: SqlExecutor | undefined): void {
   _kvSqlExecutor = executor;
 }
 
+/** The shared KV SQL executor, or undefined if the postgres path is not wired. */
+export function getKvSqlExecutor(): SqlExecutor | undefined {
+  return _kvSqlExecutor;
+}
+
 /**
  * Build the shared KV SQL executor — a small dedicated `pg.Pool` (KV is GLOBAL,
  * not tenant-scoped, so it must bypass the tenant-scoping Prisma extension).

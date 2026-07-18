@@ -234,6 +234,11 @@ export const UNSCOPED_MODELS: ReadonlyMap<string, string> = new Map([
   // the tenant Prisma extension entirely (it must not be auto-filtered by an
   // active tenant). See ws1-kv-port-plan §4.2.
   ["KvEntry", "global"],
+  // WS-1 rate-limit port: the PostgresTokenBucketLimiter backing table. GLOBAL,
+  // never tenant-scoped — every bucket_key is `<namespace>#<key>`-scoped, and the
+  // dedicated rate-limit/KV pool bypasses the tenant Prisma extension. See
+  // ws1-kv-port-plan §3.10/§4.2, security fix F5.
+  ["RateLimitBucket", "global"],
 ]);
 
 // Operations whose `where` can safely have `{ tenantId }` AND-merged in.
