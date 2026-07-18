@@ -203,7 +203,7 @@ beforeEach(() => {
     id: "u_clxxxxxxxxxxxxxxxxxxxxxx",
     role: args.data.role,
     handle: args.data.handle,
-    cognitoSub: args.data.cognitoSub,
+    subject: args.data.subject,
     email: args.data.email,
     personalTenantId: null,
   }));
@@ -211,7 +211,7 @@ beforeEach(() => {
     id: args.where.id,
     role: "B2B_PARTNER",
     handle: "alice",
-    cognitoSub: args.data.cognitoSub ?? "cognito-sub-abc123",
+    subject: args.data.subject ?? "cognito-sub-abc123",
     email: "alice@example.com",
     personalTenantId: args.data.personalTenantId ?? null,
   }));
@@ -243,7 +243,7 @@ describe("PostConfirmation Lambda — native sign-up", () => {
 
     expect(mockUserCreate).toHaveBeenCalledTimes(1);
     expect(mockUserCreate.mock.calls[0][0].data).toMatchObject({
-      cognitoSub: "cognito-sub-abc123",
+      subject: "cognito-sub-abc123",
       email: "alice@example.com",
       role: "END_USER",
     });
@@ -584,7 +584,7 @@ describe("PostConfirmation Lambda — idempotency and failure", () => {
     const existingUser = {
       id: "u_existing",
       email: "alice@example.com",
-      cognitoSub: "cognito-sub-abc123",
+      subject: "cognito-sub-abc123",
       handle: "alice",
       role: "END_USER",
       personalTenantId: "t_existing_personal",
@@ -664,11 +664,11 @@ describe("PostConfirmation Lambda — idempotency and failure", () => {
     expect(mockTransaction).toHaveBeenCalledTimes(1);
   });
 
-  it("links cognitoSub to an existing email-only user", async () => {
+  it("links subject to an existing email-only user", async () => {
     mockUserFindFirst.mockResolvedValueOnce({
       id: "u_existing",
       email: "alice@example.com",
-      cognitoSub: null,
+      subject: null,
       handle: "alice",
       role: "END_USER",
       personalTenantId: null,
@@ -677,7 +677,7 @@ describe("PostConfirmation Lambda — idempotency and failure", () => {
     await handler(makeEvent(), {} as any, () => {});
     expect(mockUserUpdate).toHaveBeenCalled();
     const updateArgs = mockUserUpdate.mock.calls[0][0];
-    expect(updateArgs.data.cognitoSub).toBe("cognito-sub-abc123");
+    expect(updateArgs.data.subject).toBe("cognito-sub-abc123");
   });
 
   it("derives a handle for an existing user that has none", async () => {
@@ -685,7 +685,7 @@ describe("PostConfirmation Lambda — idempotency and failure", () => {
       .mockResolvedValueOnce({
         id: "u_existing",
         email: "alice@example.com",
-        cognitoSub: "cognito-sub-abc123",
+        subject: "cognito-sub-abc123",
         handle: null,
         role: "END_USER",
         personalTenantId: "t_personal",

@@ -62,7 +62,7 @@ vi.mock("@aws-sdk/client-cognito-identity-provider", () => ({
 // ── Helpers ──────────────────────────────────────────────────────────────────
 function makeAuth(overrides: Partial<AuthContext> = {}): AuthContext {
   return {
-    cognitoSub: "owner-sub",
+    sub: "owner-sub",
     userId: "owner-id",
     globalRole: "B2B_PARTNER" as UserRole,
     activeTenantId: "tenant-id",
@@ -181,7 +181,7 @@ describe("MemberHandler.handlePatchRole", () => {
       userId: "u1",
       role: "MEMBER",
       status: "ACTIVE",
-      user: { cognitoSub: "u1-sub" },
+      user: { subject: "u1-sub" },
     });
     mockDb.tenantMember.update.mockResolvedValue({
       id: "m1",
@@ -201,7 +201,7 @@ describe("MemberHandler.handlePatchRole", () => {
       userId: "u1",
       role: "MEMBER",
       status: "ACTIVE",
-      user: { cognitoSub: "u1-sub" },
+      user: { subject: "u1-sub" },
     });
 
     const response = await handler.handlePatchRole("tenant-id", "m1", patchRequest("OWNER"), makeAuth(), mockEnv);
@@ -218,7 +218,7 @@ describe("MemberHandler.handlePatchRole", () => {
       userId: "owner-u",
       role: "OWNER",
       status: "ACTIVE",
-      user: { cognitoSub: "owner-sub" },
+      user: { subject: "owner-sub" },
     });
 
     const response = await handler.handlePatchRole("tenant-id", "owner-m", patchRequest("ADMIN"), makeAuth(), mockEnv);
@@ -234,7 +234,7 @@ describe("MemberHandler.handlePatchRole", () => {
       userId: "owner-id",
       role: "OWNER",
       status: "ACTIVE",
-      user: { cognitoSub: "owner-sub" },
+      user: { subject: "owner-sub" },
     });
 
     const response = await handler.handlePatchRole("tenant-id", "owner-m", patchRequest("ADMIN"), makeAuth(), mockEnv);
@@ -260,7 +260,7 @@ describe("MemberHandler.handlePatchRole", () => {
       userId: "u1",
       role: "ADMIN",
       status: "ACTIVE",
-      user: { cognitoSub: "u1-sub" },
+      user: { subject: "u1-sub" },
     });
     const response = await handler.handlePatchRole("tenant-id", "m1", patchRequest("ADMIN"), makeAuth(), mockEnv);
     expect(response.status).toBe(200);
@@ -303,7 +303,7 @@ describe("MemberHandler.handlePatchRole", () => {
       userId: "u1",
       role: "MEMBER",
       status: "ACTIVE",
-      user: { cognitoSub: "u1-sub" },
+      user: { subject: "u1-sub" },
     });
     mockDb.tenantMember.update.mockResolvedValue({
       id: "m1",
@@ -332,7 +332,7 @@ describe("MemberHandler.handleRemove", () => {
       userId: "u1",
       role: "MEMBER",
       status: "ACTIVE",
-      user: { cognitoSub: "u1-sub", email: "user1@test.example.com" },
+      user: { subject: "u1-sub", email: "user1@test.example.com" },
     });
     mockDb.tenantMember.update.mockResolvedValue({});
 
@@ -351,7 +351,7 @@ describe("MemberHandler.handleRemove", () => {
       userId: "u1",
       role: "MEMBER",
       status: "REMOVED",
-      user: { cognitoSub: "u1-sub", email: "u1@test.example.com" },
+      user: { subject: "u1-sub", email: "u1@test.example.com" },
     });
 
     const response = await handler.handleRemove("tenant-id", "m1", makeAuth(), mockEnv);
@@ -367,7 +367,7 @@ describe("MemberHandler.handleRemove", () => {
       userId: "owner-u",
       role: "OWNER",
       status: "ACTIVE",
-      user: { cognitoSub: "owner-sub", email: "owner@test.example.com" },
+      user: { subject: "owner-sub", email: "owner@test.example.com" },
     });
 
     const response = await handler.handleRemove("tenant-id", "owner-m", makeAuth(), mockEnv);
@@ -383,7 +383,7 @@ describe("MemberHandler.handleRemove", () => {
       userId: "owner-id",
       role: "OWNER",
       status: "ACTIVE",
-      user: { cognitoSub: "owner-sub", email: "owner@test.example.com" },
+      user: { subject: "owner-sub", email: "owner@test.example.com" },
     });
 
     const response = await handler.handleRemove("tenant-id", "owner-m", makeAuth(), mockEnv);
@@ -409,7 +409,7 @@ describe("MemberHandler.handleRemove", () => {
       userId: "u1",
       role: "MEMBER",
       status: "ACTIVE",
-      user: { cognitoSub: "u1-sub", email: "u1@test.example.com" },
+      user: { subject: "u1-sub", email: "u1@test.example.com" },
     });
     mockDb.tenantMember.update.mockResolvedValue({});
     mockCognitoSend.mockRejectedValueOnce(new Error("Cognito down"));
@@ -424,7 +424,7 @@ describe("MemberHandler.handleRemove", () => {
       userId: "u1",
       role: "MEMBER",
       status: "ACTIVE",
-      user: { cognitoSub: "u1-sub", email: "u1@test.example.com" },
+      user: { subject: "u1-sub", email: "u1@test.example.com" },
     });
     mockDb.tenantMember.update.mockResolvedValue({});
     const env = { ...mockEnv, COGNITO_USER_POOL_ID: undefined } as unknown as Env;
@@ -462,8 +462,8 @@ describe("MemberHandler.handleTransferOwnership", () => {
 
   it("atomic swap: owner→ADMIN, candidate→OWNER, both caches invalidated", async () => {
     mockDb.tenantMember.findUnique
-      .mockResolvedValueOnce({ status: "ACTIVE", user: { cognitoSub: "new-sub" } })
-      .mockResolvedValueOnce({ role: "OWNER", user: { cognitoSub: "owner-sub" } });
+      .mockResolvedValueOnce({ status: "ACTIVE", user: { subject: "new-sub" } })
+      .mockResolvedValueOnce({ role: "OWNER", user: { subject: "owner-sub" } });
 
     const response = await handler.handleTransferOwnership("tenant-id", transferRequest("new-owner"), makeAuth(), mockEnv);
     expect(response.status).toBe(200);
@@ -481,8 +481,8 @@ describe("MemberHandler.handleTransferOwnership", () => {
 
   it("SUPER_ADMIN can perform the transfer regardless of tenantRole", async () => {
     mockDb.tenantMember.findUnique
-      .mockResolvedValueOnce({ status: "ACTIVE", user: { cognitoSub: "new-sub" } })
-      .mockResolvedValueOnce({ role: "OWNER", user: { cognitoSub: "owner-sub" } });
+      .mockResolvedValueOnce({ status: "ACTIVE", user: { subject: "new-sub" } })
+      .mockResolvedValueOnce({ role: "OWNER", user: { subject: "owner-sub" } });
 
     const auth = makeAuth({ tenantRole: "GUEST" as TenantRole, globalRole: "SUPER_ADMIN" as UserRole });
     const response = await handler.handleTransferOwnership("tenant-id", transferRequest("new-owner"), auth, mockEnv);
@@ -503,7 +503,7 @@ describe("MemberHandler.handleTransferOwnership", () => {
   it("returns 404 when candidate is INACTIVE", async () => {
     mockDb.tenantMember.findUnique.mockResolvedValueOnce({
       status: "SUSPENDED",
-      user: { cognitoSub: "new-sub" },
+      user: { subject: "new-sub" },
     });
     const response = await handler.handleTransferOwnership("tenant-id", transferRequest("suspended"), makeAuth(), mockEnv);
     expect(response.status).toBe(404);
@@ -531,8 +531,8 @@ describe("MemberHandler.handleTransferOwnership", () => {
 
   it("simulated mid-transaction failure leaves no partial state", async () => {
     mockDb.tenantMember.findUnique
-      .mockResolvedValueOnce({ status: "ACTIVE", user: { cognitoSub: "new-sub" } })
-      .mockResolvedValueOnce({ role: "OWNER", user: { cognitoSub: "owner-sub" } });
+      .mockResolvedValueOnce({ status: "ACTIVE", user: { subject: "new-sub" } })
+      .mockResolvedValueOnce({ role: "OWNER", user: { subject: "owner-sub" } });
     // First update (demote) fails before the second update (promote) runs:
     // the transaction wrapper rejects with the error, so cache invalidation
     // and audit emission must NOT run.

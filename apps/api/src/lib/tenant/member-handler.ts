@@ -44,17 +44,17 @@ function unprocessable(message: string, remediation?: string): Response {
   });
 }
 
-async function invalidateCache(env: Env, cognitoSub: string | null | undefined): Promise<void> {
-  if (!cognitoSub) return;
+async function invalidateCache(env: Env, sub: string | null | undefined): Promise<void> {
+  if (!sub) return;
   try {
     const cache = createClaimsCacheFromEnv();
-    await cache.invalidate(cognitoSub);
+    await cache.invalidate(sub);
   } catch (err) {
     console.warn(
       JSON.stringify({
         level: "warn",
         msg: "Cache invalidation failed",
-        cognitoSub,
+        sub,
         error: String(err),
       }),
     );
@@ -199,7 +199,7 @@ export class MemberHandler {
         userId: true,
         role: true,
         status: true,
-        user: { select: { cognitoSub: true } },
+        user: { select: { subject: true } },
       },
     });
 
@@ -231,7 +231,7 @@ export class MemberHandler {
       select: { id: true, userId: true, role: true, status: true },
     });
 
-    await invalidateCache(env, target.user.cognitoSub);
+    await invalidateCache(env, target.user.subject);
 
     emitTenantAudit(
       {
@@ -270,7 +270,7 @@ export class MemberHandler {
         userId: true,
         role: true,
         status: true,
-        user: { select: { cognitoSub: true, email: true } },
+        user: { select: { subject: true, email: true } },
       },
     });
 
@@ -301,7 +301,7 @@ export class MemberHandler {
       data: { status: "REMOVED", removedAt: new Date() },
     });
 
-    await invalidateCache(env, target.user.cognitoSub);
+    await invalidateCache(env, target.user.subject);
     await bestEffortGlobalSignOut(env, target.user.email);
 
     emitTenantAudit(

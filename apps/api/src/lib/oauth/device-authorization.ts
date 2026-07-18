@@ -73,7 +73,7 @@ export interface DeviceAuthRecord {
   /** Cognito user id of the admin who approved, for audit. */
   approvedByUserId?: string;
   /** Cognito sub bound to the issued tokens, used for revocation. */
-  cognitoSub?: string;
+  sub?: string;
   /** Tenant id from the admin's session at approval time. */
   tenantId?: string;
   /** Agent label (User-Agent of the polling client). */
@@ -321,7 +321,7 @@ export async function invalidateDeviceCode(deviceCode: string): Promise<void> {
 export interface ApprovalContext {
   deviceCode: string;
   approvedByUserId: string;
-  cognitoSub: string;
+  sub: string;
   tenantId: string;
   tokens: TokenSet;
   /** A new session id; used as the refresh-table key after first poll. */
@@ -353,7 +353,7 @@ export async function approveDeviceAuth(ctx: ApprovalContext): Promise<void> {
     status: "approved",
     envelope: JSON.stringify(envelope),
     approvedByUserId: ctx.approvedByUserId,
-    cognitoSub: ctx.cognitoSub,
+    sub: ctx.sub,
     tenantId: ctx.tenantId,
     sessionId: ctx.sessionId,
     expiresAt: newTtl,
@@ -423,7 +423,7 @@ function rawToRecord(raw: Record<string, unknown>): DeviceAuthRecord {
     lastPolledAt: raw.lastPolledAt as number | undefined,
     envelope: raw.envelope ? (JSON.parse(raw.envelope as string) as SealedEnvelope) : undefined,
     approvedByUserId: raw.approvedByUserId as string | undefined,
-    cognitoSub: raw.cognitoSub as string | undefined,
+    sub: raw.sub as string | undefined,
     tenantId: raw.tenantId as string | undefined,
     agentLabel: raw.agentLabel as string | undefined,
     sourceIp: raw.sourceIp as string | undefined,

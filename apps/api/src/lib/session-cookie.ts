@@ -388,8 +388,8 @@ export class SessionManager {
       // Strategy 1a: If the token looks like a JWT (3 dot-separated parts), try Cognito verification
       if (token.split(".").length === 3) {
         try {
-          const { verifyCognitoJwt } = await import("./auth/cognito-jwt.js");
-          const claims = await verifyCognitoJwt(token);
+          const { verifyLegacyCognitoClaims } = await import("./auth/cognito-jwt.js");
+          const claims = await verifyLegacyCognitoClaims(token);
           logger.debug("[SessionManager] Cognito JWT verified", {
             sub: claims.sub,
             username: claims.username,

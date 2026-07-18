@@ -43,7 +43,7 @@ export async function transferOwnership(
   return db.$transaction(async (tx): Promise<TransferResult> => {
     const candidate = await tx.tenantMember.findUnique({
       where: { tenantId_userId: { tenantId, userId: newOwnerUserId } },
-      select: { status: true, user: { select: { cognitoSub: true } } },
+      select: { status: true, user: { select: { subject: true } } },
     });
 
     if (!candidate) return { ok: false, code: "NOT_MEMBER" };
@@ -51,7 +51,7 @@ export async function transferOwnership(
 
     const currentOwner = await tx.tenantMember.findUnique({
       where: { tenantId_userId: { tenantId, userId: currentOwnerUserId } },
-      select: { role: true, user: { select: { cognitoSub: true } } },
+      select: { role: true, user: { select: { subject: true } } },
     });
 
     if (!currentOwner || currentOwner.role !== "OWNER") {
@@ -70,8 +70,8 @@ export async function transferOwnership(
 
     return {
       ok: true,
-      oldOwnerCognitoSub: currentOwner.user.cognitoSub,
-      newOwnerCognitoSub: candidate.user.cognitoSub,
+      oldOwnerCognitoSub: currentOwner.user.subject,
+      newOwnerCognitoSub: candidate.user.subject,
     };
   }) as Promise<TransferResult>;
 }

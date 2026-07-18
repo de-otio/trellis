@@ -16,7 +16,7 @@
  *  - DDB or RDS error: bubble up; Cognito treats the issuance as failed.
  *
  * No PII is logged. We log counts and decisions ("cache_hit", "drift",
- * "role_refreshed") and the opaque cognitoSub.
+ * "role_refreshed") and the opaque sub.
  */
 
 import type {
@@ -101,12 +101,12 @@ interface RdsClaimsLoad {
 
 async function loadFromRds(
   db: PrismaClient,
-  cognitoSub: string,
+  sub: string,
   preferOrgTenant: boolean,
   preferredTenantId: string | null,
 ): Promise<RdsClaimsLoad> {
   const user = await db.user.findUnique({
-    where: { cognitoSub },
+    where: { subject: sub },
     select: {
       id: true,
       role: true,
@@ -193,25 +193,25 @@ export const handler: PreTokenGenerationV2TriggerHandler = async (event) => {
   // same key PostConfirmation writes and the value carried in the token's `sub`
   // claim. `event.userName` is NOT stable across triggers (it can be the
   // sign-up username here vs the sub there), which caused every lookup to miss.
-  const cognitoSub = event.request.userAttributes.sub;
+  const sub = event.request.userAttributes.sub;
   const claimsCache = getCache();
   const federated = isFederatedEvent(event);
   const idpGroups = parseIdpGroups(event.request.userAttributes["custom:idpGroups"]);
 
   // Cache hits skip the user-suspension and tenant-status checks below
   // (RDS is only consulted on miss). The mitigation is *active invalidation*:
-  //   - User suspension paths MUST call `claimsCache.invalidate(cognitoSub)`.
+  //   - User suspension paths MUST call `claimsCache.invalidate(sub)`.
   //   - TODO(T3): tenant-suspension API must invalidate caches for all members.
   // Without invalidation, suspended users keep valid claims for up to one
   // cache TTL (DEFAULT_CACHE_TTL_SECONDS = 3600s). Tracked as G2 finding H3.
-  let claims = await claimsCache.get(cognitoSub);
+  let claims = await claimsCache.get(sub);
   // A cached entry with an empty userId is never legitimate: a real user's
   // claims always carry the cuid, and the drift sentinel is never written to
   // the cache (both `put` sites guard on a truthy userId). Treat such an entry
   // as a miss so the RDS fallback can recover the real userId rather than
   // serving a token with an empty `custom:userId`.
   if (claims && !claims.userId) {
-    logger.warn("pretoken.empty_cache_entry", { cognitoSub });
+    logger.warn("pretoken.empty_cache_entry", { sub });
     claims = null;
   }
   let cacheHit = !!claims;
@@ -221,16 +221,16 @@ export const handler: PreTokenGenerationV2TriggerHandler = async (event) => {
     // a miss-rate metric can be derived (a miss storm — post-deploy, correlated
     // TTL expiry, or the first-login wave after a signup burst — is the path
     // that can exhaust DB connections; the warm cache is the primary defence).
-    logger.info("pretoken.cache_miss", { cognitoSub, federated });
+    logger.info("pretoken.cache_miss", { sub, federated });
     const db = await getPrisma();
     // Read the user's last explicit tenant preference, even from an expired
     // cache row, so an admin-side switch-tenant call survives cache TTL.
     let preferredTenantId: string | null = null;
     try {
-      preferredTenantId = await claimsCache.getActiveTenantPreference(cognitoSub);
+      preferredTenantId = await claimsCache.getActiveTenantPreference(sub);
     } catch (err) {
       logger.warn("pretoken.preference_lookup_failed", {
-        cognitoSub,
+        sub,
         error: (err as { code?: string })?.code ?? "unknown",
       });
     }
@@ -250,14 +250,14 @@ export const handler: PreTokenGenerationV2TriggerHandler = async (event) => {
       Number(process.env.PRETOKEN_RDS_RETRY_DELAY_MS ?? DEFAULT_RDS_RETRY_DELAY_MS),
     );
     let loaded = await withLambdaDbBreaker(
-      () => loadFromRds(db, cognitoSub, federated, preferredTenantId),
+      () => loadFromRds(db, sub, federated, preferredTenantId),
       "pretoken.load_from_rds",
     );
     let rdsAttempts = 1;
     while (!loaded.user && rdsAttempts < retryMax) {
       await sleep(retryDelayMs);
       loaded = await withLambdaDbBreaker(
-        () => loadFromRds(db, cognitoSub, federated, preferredTenantId),
+        () => loadFromRds(db, sub, federated, preferredTenantId),
         "pretoken.load_from_rds",
       );
       rdsAttempts++;
@@ -267,14 +267,14 @@ export const handler: PreTokenGenerationV2TriggerHandler = async (event) => {
       // distinguishes the read-after-write window from steady state, and shows
       // whether the retry recovered the row.
       logger.warn("pretoken.rds_retry", {
-        cognitoSub,
+        sub,
         rdsAttempts,
         recovered: !!loaded.user,
       });
     }
 
     if (!loaded.user) {
-      logger.warn("pretoken.drift", { cognitoSub, rdsAttempts });
+      logger.warn("pretoken.drift", { sub, rdsAttempts });
       claims = { ...DRIFT_CLAIMS };
       writeTokenClaims(event, claims);
       return event;
@@ -285,7 +285,7 @@ export const handler: PreTokenGenerationV2TriggerHandler = async (event) => {
     // value when present). Treat either signal as suspension. Defense-in-depth:
     // even if a writer forgets one column, the other still blocks issuance.
     if (loaded.user.suspended || loaded.user.suspendedAt !== null) {
-      logger.warn("pretoken.suspended", { cognitoSub });
+      logger.warn("pretoken.suspended", { sub });
       claims = { ...DRIFT_CLAIMS };
       writeTokenClaims(event, claims);
       return event;
@@ -325,7 +325,7 @@ export const handler: PreTokenGenerationV2TriggerHandler = async (event) => {
           persisted = true;
         } catch (err) {
           logger.warn("pretoken.role_refresh_persist_failed", {
-            cognitoSub,
+            sub,
             error: (err as { code?: string })?.code ?? "unknown",
           });
         }
@@ -333,21 +333,21 @@ export const handler: PreTokenGenerationV2TriggerHandler = async (event) => {
           claims = { ...claims, tenantRole: refreshed };
           cacheHit = false;
           logger.info("pretoken.role_refreshed", {
-            cognitoSub,
+            sub,
             tenantId: claims.activeTenantId,
           });
         }
       }
     } catch (err) {
       logger.warn("pretoken.role_refresh_failed", {
-        cognitoSub,
+        sub,
         error: (err as { code?: string }).code ?? "unknown",
       });
     }
   }
 
   if (!cacheHit && claims.userId) {
-    await claimsCache.put(cognitoSub, claims, DEFAULT_CACHE_TTL_SECONDS);
+    await claimsCache.put(sub, claims, DEFAULT_CACHE_TTL_SECONDS);
   }
 
   writeTokenClaims(event, claims);

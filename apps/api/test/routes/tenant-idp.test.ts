@@ -101,7 +101,7 @@ const PROVIDER_NAME = "tenant-ctest1tenant";
 
 function makeAuth(overrides: Partial<AuthContext> = {}): AuthContext {
   return {
-    cognitoSub: "owner-sub",
+    sub: "owner-sub",
     userId: "owner-id",
     globalRole: "B2B_PARTNER" as UserRole,
     activeTenantId: TENANT_ID,
@@ -850,8 +850,8 @@ describe("IdpHandler.handlePatch (status)", () => {
       cognitoIdpName: PROVIDER_NAME,
     });
     mockDb.tenantMember.findMany.mockResolvedValue([
-      { user: { cognitoSub: "sub-1" } },
-      { user: { cognitoSub: "sub-2" } },
+      { user: { subject: "sub-1" } },
+      { user: { subject: "sub-2" } },
     ]);
     const idp = makeIdpStub();
     const invalidate = vi.fn().mockResolvedValue(undefined);
@@ -1048,7 +1048,7 @@ describe("IdpHandler.handleDelete", () => {
       kind: "OIDC",
     });
     mockDb.tenantMember.findMany.mockResolvedValue([
-      { user: { cognitoSub: "sub-1", email: "a@e.com" } },
+      { user: { subject: "sub-1", email: "a@e.com" } },
     ]);
     const idp = makeIdpStub();
     const secrets = makeSecretsStub();
@@ -1189,8 +1189,8 @@ describe("IdpHandler.handleDelete", () => {
       kind: "OIDC",
     });
     mockDb.tenantMember.findMany.mockResolvedValue([
-      { user: { cognitoSub: "sub-1", email: "a@e.com" } },
-      { user: { cognitoSub: "sub-2", email: "b@e.com" } },
+      { user: { subject: "sub-1", email: "a@e.com" } },
+      { user: { subject: "sub-2", email: "b@e.com" } },
     ]);
     const idp = makeIdpStub();
     const secrets = makeSecretsStub();

@@ -8,7 +8,7 @@
  * `request.userAttributes.identities` JSON string is the disambiguator.
  *
  * Responsibilities (atomic, single Prisma transaction):
- *  1. Upsert the `User` row (link `cognitoSub` to an existing email match,
+ *  1. Upsert the `User` row (link `sub` to an existing email match,
  *     otherwise create with a derived handle).
  *  2. Ensure a personal `Tenant` of `type=PERSONAL` exists for the user,
  *     plus a `TenantMember` with `role=OWNER`.
@@ -148,10 +148,10 @@ export const handler: PostConfirmationTriggerHandler = async (event) => {
   // PreTokenGeneration on alias (email) sign-in receives the `sub` — so keying
   // the User row and the claims cache on it silently breaks the cache lookup
   // (the claim is written under one key and read under another → 401s).
-  const cognitoSub = attrs.sub;
+  const sub = attrs.sub;
   const email = attrs.email?.toLowerCase();
   if (!email) {
-    logger.warn("postconfirm.no_email", { cognitoSub });
+    logger.warn("postconfirm.no_email", { sub });
     return event;
   }
 
@@ -191,7 +191,7 @@ export const handler: PostConfirmationTriggerHandler = async (event) => {
       withHandleConflictRetry(() =>
         db.$transaction(
           async (tx) => provisionUserAndTenancy(tx, {
-            cognitoSub,
+            sub,
             email,
             emailVerified: attrs.email_verified,
             federated,
@@ -229,7 +229,7 @@ export const handler: PostConfirmationTriggerHandler = async (event) => {
   // we skip — never an unkeyed fallback. See lib/PSEUDONYM.md.
   await populateAnonymousId(db, result.userId);
 
-  await primeClaimsCache(cognitoSub, result);
+  await primeClaimsCache(sub, result);
 
   // AUTH GATE: burn the PreSignUp invitation record so the code cannot be
   // redeemed a second time — PreSignUp (pre-signup.ts) rejects `used` items,
@@ -250,7 +250,7 @@ export const handler: PostConfirmationTriggerHandler = async (event) => {
       });
     } catch (err) {
       logger.error("postconfirm.invitation_record_mark_used_failed", {
-        cognitoSub,
+        sub,
         reason: (err as { name?: string }).name ?? "unknown",
       });
     }
@@ -273,7 +273,7 @@ export const handler: PostConfirmationTriggerHandler = async (event) => {
   });
 
   logger.info("postconfirm.ok", {
-    cognitoSub,
+    sub,
     userId: result.userId,
     personalTenantId: result.personalTenantId,
     orgTenantId: result.orgTenantId,
@@ -284,7 +284,7 @@ export const handler: PostConfirmationTriggerHandler = async (event) => {
 };
 
 interface ProvisioningInput {
-  cognitoSub: string;
+  sub: string;
   email: string;
   emailVerified: string | undefined;
   federated: boolean;
@@ -355,7 +355,7 @@ async function provisionUserAndTenancy(
   input: ProvisioningInput,
 ): Promise<ProvisioningResult> {
   const {
-    cognitoSub,
+    sub,
     email,
     federated,
     idpGroups,
@@ -367,7 +367,7 @@ async function provisionUserAndTenancy(
   } = input;
 
   const existing = await tx.user.findFirst({
-    where: { OR: [{ cognitoSub }, { email }] },
+    where: { OR: [{ subject: sub }, { email }] },
   });
 
   // Signup-metadata (P3): resolve the redeemed Prisma Invitation (if the code
@@ -401,7 +401,7 @@ async function provisionUserAndTenancy(
       }));
     user = await tx.user.create({
       data: {
-        cognitoSub,
+        subject: sub,
         email,
         handle: initialHandle,
         // S-CP2: lock in the AP-actor-shaped URI from the stable handle at
@@ -421,7 +421,7 @@ async function provisionUserAndTenancy(
     });
   } else {
     const updates: Prisma.UserUpdateInput = {};
-    if (!user.cognitoSub) updates.cognitoSub = cognitoSub;
+    if (!user.subject) updates.subject = sub;
     if (!user.handle) {
       const backfilledHandle = await deriveHandle(email, async (h) => {
         const found = await tx.user.findFirst({
@@ -500,7 +500,7 @@ async function provisionUserAndTenancy(
     // creation above is unaffected — Cognito has already authenticated them.
     const emailVerified = input.emailVerified === "true";
     if (!emailVerified) {
-      logger.warn("postconfirm.federated.email_unverified", { cognitoSub });
+      logger.warn("postconfirm.federated.email_unverified", { sub });
       return {
         userId: user.id,
         globalRole: user.role,
@@ -516,7 +516,7 @@ async function provisionUserAndTenancy(
     }
     const domain = deriveEmailDomain(email);
     if (!domain) {
-      logger.warn("postconfirm.federated.invalid_email", { cognitoSub });
+      logger.warn("postconfirm.federated.invalid_email", { sub });
     } else {
       const tenantDomain = await tx.tenantDomain.findUnique({
         where: { domain },
@@ -535,10 +535,10 @@ async function provisionUserAndTenancy(
       });
 
       if (!tenantDomain) {
-        logger.warn("postconfirm.federated.no_domain_match", { cognitoSub });
+        logger.warn("postconfirm.federated.no_domain_match", { sub });
       } else if (!tenantDomain.verifiedAt) {
         logger.warn("postconfirm.federated.unverified_domain", {
-          cognitoSub,
+          sub,
           tenantId: tenantDomain.tenantId,
         });
       } else if (
@@ -546,7 +546,7 @@ async function provisionUserAndTenancy(
         tenantDomain.tenant.identityProvider.status !== "ACTIVE"
       ) {
         logger.warn("postconfirm.federated.inactive_idp", {
-          cognitoSub,
+          sub,
           tenantId: tenantDomain.tenantId,
         });
       } else {
@@ -557,7 +557,7 @@ async function provisionUserAndTenancy(
         );
         if (!role) {
           logger.warn("postconfirm.federated.no_role", {
-            cognitoSub,
+            sub,
             tenantId: tenantDomain.tenantId,
           });
         } else {
@@ -635,7 +635,7 @@ async function populateAnonymousId(db: PrismaClient, userId: string): Promise<vo
   }
 }
 
-async function primeClaimsCache(cognitoSub: string, result: ProvisioningResult): Promise<void> {
+async function primeClaimsCache(sub: string, result: ProvisioningResult): Promise<void> {
   const activeTenantId = result.orgTenantId ?? result.personalTenantId;
   const activeTenantSlug = result.orgTenantSlug ?? result.personalTenantSlug;
   const activeTenantRole = result.orgTenantRole ?? "OWNER";
@@ -648,10 +648,10 @@ async function primeClaimsCache(cognitoSub: string, result: ProvisioningResult):
     handle: result.handle,
   };
   try {
-    await getCache().put(cognitoSub, claims);
+    await getCache().put(sub, claims);
   } catch (err) {
     logger.warn("postconfirm.cache_prime_failed", {
-      cognitoSub,
+      sub,
       error: (err as { code?: string }).code ?? "unknown",
     });
   }

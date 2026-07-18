@@ -10,7 +10,7 @@
 import type { TenantRole, UserRole, TenantMember, Tenant } from "@prisma/client";
 import type { Env } from "../../env.js";
 import type { AuthContext } from "./auth-context.js";
-import { extractBearerToken, verifyCognitoJwt } from "./cognito-jwt.js";
+import { extractBearerToken, verifyJwt } from "./cognito-jwt.js";
 import { CUID_RE } from "./cuid.js";
 
 /**
@@ -31,13 +31,13 @@ export async function authMiddleware(
 
   let claims;
   try {
-    claims = await verifyCognitoJwt(token);
+    claims = await verifyJwt(token);
   } catch {
     return null;
   }
 
-  const userId = claims["custom:userId"];
-  const activeTenantId = claims["custom:activeTenantId"];
+  const userId = claims.userId;
+  const activeTenantId = claims.activeTenantId;
 
   // Both are non-negotiable — pre-token-gen Lambda always writes them.
   if (!userId || !activeTenantId) return null;
@@ -46,14 +46,15 @@ export async function authMiddleware(
   // to 40 chars to leave headroom for the slug-max widening done in T3.
   if (!CUID_RE.test(userId) || !CUID_RE.test(activeTenantId)) return null;
 
-  // Support both the T2-era single "custom:role" and the T3+ "custom:globalRole".
-  const globalRole = (claims["custom:globalRole"] ?? claims["custom:role"] ?? "END_USER") as UserRole;
+  // globalRole normalization already folds the T2-era "custom:role" into the
+  // T3+ "custom:globalRole"; default to END_USER when neither was present.
+  const globalRole = (claims.globalRole ?? "END_USER") as UserRole;
   // Default to GUEST (least privilege) when the tenantRole claim is missing,
   // so a malformed token never silently confers MEMBER capabilities.
-  const tenantRole = (claims["custom:tenantRole"] ?? "GUEST") as TenantRole;
-  const tenantSlug = claims["custom:tenantSlug"] ?? "";
-  const handle = claims["custom:handle"] ?? "";
-  const cognitoSub = claims.sub;
+  const tenantRole = (claims.tenantRole ?? "GUEST") as TenantRole;
+  const tenantSlug = claims.tenantSlug ?? "";
+  const handle = claims.handle ?? "";
+  const sub = claims.sub;
 
   // Memberships are loaded lazily — most requests don't need the full list.
   let membershipsCache: (TenantMember & { tenant: Tenant })[] | null = null;
@@ -70,7 +71,7 @@ export async function authMiddleware(
   };
 
   return {
-    cognitoSub,
+    sub,
     userId,
     globalRole,
     activeTenantId,
@@ -103,12 +104,12 @@ export async function extractVerifiedTenantId(
 
   let claims;
   try {
-    claims = await verifyCognitoJwt(token);
+    claims = await verifyJwt(token);
   } catch {
     return null;
   }
 
-  const activeTenantId = claims["custom:activeTenantId"];
+  const activeTenantId = claims.activeTenantId;
   if (!activeTenantId || !CUID_RE.test(activeTenantId)) return null;
   return activeTenantId;
 }

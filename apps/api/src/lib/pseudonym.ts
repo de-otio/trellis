@@ -11,7 +11,7 @@
  *     the MAC so the same KMS key reused for another purpose can never collide
  *     with a user pseudonym.
  *   - INPUT is `user.id` (the immutable cuid PK) ONLY. We NEVER hash PII
- *     (email / cognitoSub / handle) — those are mutable and dictionary-
+ *     (email / sub / handle) — those are mutable and dictionary-
  *     reversible.
  *   - KEY is a KMS HMAC key (HMAC_SHA_256). The key lives in a FIPS HSM and
  *     never leaves KMS; we call `GenerateMac` so plaintext key material is

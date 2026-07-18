@@ -154,7 +154,7 @@ describe("startDeviceAuthorization → pollDeviceAuth", () => {
     await approveDeviceAuth({
       deviceCode: issued.device_code,
       approvedByUserId: "u_admin",
-      cognitoSub: "sub-123",
+      sub: "sub-123",
       tenantId: "t_abc",
       tokens: { access_token: "AT", refresh_token: "RT", token_type: "Bearer", expires_in: 3600 },
       sessionId: "s_xyz",
@@ -178,7 +178,7 @@ describe("startDeviceAuthorization → pollDeviceAuth", () => {
     await approveDeviceAuth({
       deviceCode: issued.device_code,
       approvedByUserId: "u_admin",
-      cognitoSub: "sub-123",
+      sub: "sub-123",
       tenantId: "t_abc",
       tokens: { access_token: "AT", refresh_token: "RT", token_type: "Bearer", expires_in: 3600 },
       sessionId: "s_xyz",
@@ -263,7 +263,7 @@ describe("envelope binding to device_code (sec finding #1)", () => {
     await approveDeviceAuth({
       deviceCode: issued.device_code,
       approvedByUserId: "u_admin",
-      cognitoSub: "sub-123",
+      sub: "sub-123",
       tenantId: "t_abc",
       tokens: { access_token: "AT", refresh_token: "RT", token_type: "Bearer", expires_in: 3600 },
       sessionId: "s_xyz",

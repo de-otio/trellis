@@ -44,8 +44,8 @@ describe("transferOwnership", () => {
 
   it("swaps roles atomically when candidate is ACTIVE and current owner is OWNER", async () => {
     mock.tx.tenantMember.findUnique
-      .mockResolvedValueOnce({ status: "ACTIVE", user: { cognitoSub: "new-sub" } })
-      .mockResolvedValueOnce({ role: "OWNER", user: { cognitoSub: "old-sub" } });
+      .mockResolvedValueOnce({ status: "ACTIVE", user: { subject: "new-sub" } })
+      .mockResolvedValueOnce({ role: "OWNER", user: { subject: "old-sub" } });
 
     const result = await transferOwnership({
       db: mock.db,
@@ -91,7 +91,7 @@ describe("transferOwnership", () => {
   it("returns INACTIVE when candidate is SUSPENDED", async () => {
     mock.tx.tenantMember.findUnique.mockResolvedValueOnce({
       status: "SUSPENDED",
-      user: { cognitoSub: "new-sub" },
+      user: { subject: "new-sub" },
     });
     const result = await transferOwnership({
       db: mock.db,
@@ -105,7 +105,7 @@ describe("transferOwnership", () => {
 
   it("returns OWNER_NOT_FOUND when current owner row missing", async () => {
     mock.tx.tenantMember.findUnique
-      .mockResolvedValueOnce({ status: "ACTIVE", user: { cognitoSub: "new-sub" } })
+      .mockResolvedValueOnce({ status: "ACTIVE", user: { subject: "new-sub" } })
       .mockResolvedValueOnce(null);
     const result = await transferOwnership({
       db: mock.db,
@@ -119,8 +119,8 @@ describe("transferOwnership", () => {
 
   it("returns OWNER_NOT_FOUND when 'current owner' is actually ADMIN (drift)", async () => {
     mock.tx.tenantMember.findUnique
-      .mockResolvedValueOnce({ status: "ACTIVE", user: { cognitoSub: "new-sub" } })
-      .mockResolvedValueOnce({ role: "ADMIN", user: { cognitoSub: "drifted-sub" } });
+      .mockResolvedValueOnce({ status: "ACTIVE", user: { subject: "new-sub" } })
+      .mockResolvedValueOnce({ role: "ADMIN", user: { subject: "drifted-sub" } });
     const result = await transferOwnership({
       db: mock.db,
       tenantId: "t",
@@ -133,8 +133,8 @@ describe("transferOwnership", () => {
 
   it("propagates a thrown error from inside the transaction (atomicity)", async () => {
     mock.tx.tenantMember.findUnique
-      .mockResolvedValueOnce({ status: "ACTIVE", user: { cognitoSub: "new-sub" } })
-      .mockResolvedValueOnce({ role: "OWNER", user: { cognitoSub: "old-sub" } });
+      .mockResolvedValueOnce({ status: "ACTIVE", user: { subject: "new-sub" } })
+      .mockResolvedValueOnce({ role: "OWNER", user: { subject: "old-sub" } });
     mock.tx.tenantMember.update.mockRejectedValueOnce(new Error("DB lock"));
 
     await expect(

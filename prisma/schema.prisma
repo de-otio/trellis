@@ -172,7 +172,7 @@ model RoleMetadata {
 }
 
 // User model for feed posts
-// Using Cognito sub (UUID) as primary key via cognitoSub field
+// The opaque IdP subject (`sub`) is stored on the `subject` field.
 // actorUri is the ActivityPub actor identifier
 model User {
   id        String   @id @default(cuid())
@@ -189,8 +189,11 @@ model User {
   handle    String   @unique
   createdAt DateTime @default(now()) @map("created_at")
 
-  // Cognito Auth integration
-  cognitoSub String? @unique @map("cognito_sub") // Cognito user pool sub (UUID), nullable for migration safety
+  // IdP identity: opaque subject (`sub`). Code-only rename cognitoSub→subject
+  // (WS-3.1); the physical column stays `cognito_sub` via @map so there is NO
+  // SQL migration and no data movement. `sub` is treated as opaque — no format
+  // assumption — so a non-Cognito issuer's sub round-trips unchanged.
+  subject String? @unique @map("cognito_sub") // opaque IdP subject, nullable for migration safety
 
   // User Deprovisioning
   suspended       Boolean   @default(false)
@@ -371,7 +374,7 @@ model User {
   acceptedInvitations  TenantInvitation[] @relation("TenantInvitationAcceptedBy")
 
   // AR10 prune: dropped the single-column indexes duplicating @unique fields
-  // (username, actorUri, anonymousId, cognitoSub, personalTenantId — a unique
+  // (username, actorUri, anonymousId, subject, personalTenantId — a unique
   // constraint already creates the index), the low-cardinality boolean/flag
   // indexes never used as scan predicates (suspended, emailVerified,
   // identityVerified), the region/dataRegion indexes (no user-table scan

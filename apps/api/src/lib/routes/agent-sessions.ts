@@ -137,7 +137,7 @@ export const agentSessionsRoutes: Route[] = [
       await revokeAgentSession({
         sessionId,
         userPoolId,
-        cognitoUsername: session.cognitoSub,
+        cognitoUsername: session.sub,
         cognito,
         audit: {
           emit: async (input) => audit.emit(input as never, prisma as never),

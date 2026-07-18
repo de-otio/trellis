@@ -3,7 +3,7 @@
  * on the `@de-otio/saas-foundation` `KvStore` port (WS-1 §3.6).
  *
  * Storage (unchanged on AWS — DynamoKvStore byte-compat layout `claims`):
- *   pk = `claims:{cognitoSub}`, sk = `meta`, ttl = epoch seconds. The port's
+ *   pk = `claims:{sub}`, sk = `meta`, ttl = epoch seconds. The port's
  *   `get` applies the same on-read expiry filter DynamoDB TTL lags behind, so a
  *   stale row never counts as a hit.
  *
@@ -59,8 +59,8 @@ export class ClaimsCache {
    * (ttl in the past) are filtered by the port's on-read expiry check; a row
    * carrying no expiry is treated as a miss (matches the pre-port `!ttl`).
    */
-  async get(cognitoSub: string): Promise<CachedClaims | null> {
-    const rec = await this.store.get<Partial<CachedClaims>>(cognitoSub);
+  async get(sub: string): Promise<CachedClaims | null> {
+    const rec = await this.store.get<Partial<CachedClaims>>(sub);
     if (rec === null || rec.expiresAt === undefined) return null;
     return normalizeClaims(rec.value);
   }
@@ -72,8 +72,8 @@ export class ClaimsCache {
    * first-org-tenant heuristic. Reads with `includeExpired` so an expired-
    * but-uncleaned row still yields the preference (as the raw DDB read did).
    */
-  async getActiveTenantPreference(cognitoSub: string): Promise<string | null> {
-    const rec = await this.store.get<Partial<CachedClaims>>(cognitoSub, { includeExpired: true });
+  async getActiveTenantPreference(sub: string): Promise<string | null> {
+    const rec = await this.store.get<Partial<CachedClaims>>(sub, { includeExpired: true });
     const activeTenantId = rec?.value.activeTenantId ?? "";
     return activeTenantId || null;
   }
@@ -86,12 +86,17 @@ export class ClaimsCache {
    * rethrow of non-conditional failures).
    */
   async put(
-    cognitoSub: string,
+    sub: string,
     claims: CachedClaims,
     ttlSeconds: number = DEFAULT_CACHE_TTL_SECONDS,
   ): Promise<void> {
+    // [SEC-8] defense in depth: the key is `claims:{sub}` verbatim, so an empty
+    // sub would collapse to the shared collision bucket `claims:`. verifyJwt's
+    // normalizeClaims already throws on an empty sub before any identity is
+    // built; guard here too so no code path can ever write that bucket.
+    if (!sub) throw new Error("ClaimsCache.put: sub must be a non-empty string");
     const expiresAt = nowSeconds() + ttlSeconds;
-    await this.store.putIfFresher(cognitoSub, claims, { expiresAt });
+    await this.store.putIfFresher(sub, claims, { expiresAt });
   }
 
   /**
@@ -99,8 +104,8 @@ export class ClaimsCache {
    * role change, OWNER transfer) to make sure the next token refresh hits
    * RDS rather than serving a stale role.
    */
-  async invalidate(cognitoSub: string): Promise<void> {
-    await this.store.delete(cognitoSub);
+  async invalidate(sub: string): Promise<void> {
+    await this.store.delete(sub);
   }
 }
 

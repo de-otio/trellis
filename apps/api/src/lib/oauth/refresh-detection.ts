@@ -40,7 +40,7 @@ export interface AgentSessionRecord {
   /** Owning user's trellis user id. */
   userId: string;
   /** Cognito sub bound to the issued refresh token. */
-  cognitoSub: string;
+  sub: string;
   /** Tenant id from the session at approval time. */
   tenantId: string;
   /** Currently-active refresh-token JTI (null after revoke). */
@@ -59,7 +59,7 @@ export interface RefreshJtiRecord {
   jti: string;
   sessionId: string;
   userId: string;
-  cognitoSub: string;
+  sub: string;
   status: "active" | "consumed";
   issuedAt: number;
   consumedAt?: number;
@@ -169,7 +169,7 @@ export async function recordAgentSession(input: {
     jti: input.initialJti,
     sessionId: input.session.sessionId,
     userId: input.session.userId,
-    cognitoSub: input.session.cognitoSub,
+    sub: input.session.sub,
     status: "active",
     issuedAt: nowSeconds(),
   };
@@ -220,7 +220,7 @@ export async function consumeRefreshJti(jti: string): Promise<{
  *
  * Hardening (G4 CRITICAL-1, CRITICAL-2):
  *   - The Cognito username used for revocation is read directly from
- *     `jtiRecord.cognitoSub` (the value bound at session-creation time).
+ *     `jtiRecord.sub` (the value bound at session-creation time).
  *     Callers may not supply an alternate identity.
  *   - The audit event is emitted FIRST so a downstream Cognito or store
  *     failure cannot suppress the `auth.refresh_replay` signal.
@@ -234,7 +234,7 @@ export async function handleRefreshReplay(input: {
   sourceIp?: string;
 }): Promise<void> {
   // Source the Cognito username from the stored jti record only.
-  const cognitoUsername = input.jtiRecord.cognitoSub;
+  const cognitoUsername = input.jtiRecord.sub;
 
   // Step 1: emit the audit event before any mutation.
   await input.audit.emit({
@@ -274,7 +274,7 @@ async function tombstoneSession(sessionId: string, fallbackUserId: string): Prom
   const merged: AgentSessionRecord = {
     sessionId,
     userId,
-    cognitoSub: base?.cognitoSub ?? "",
+    sub: base?.sub ?? "",
     tenantId: base?.tenantId ?? "",
     currentJti: null,
     status: "revoked",
@@ -293,7 +293,7 @@ async function tombstoneSession(sessionId: string, fallbackUserId: string): Prom
 export async function rotateRefreshJti(input: {
   sessionId: string;
   userId: string;
-  cognitoSub: string;
+  sub: string;
   newJti: string;
 }): Promise<void> {
   const { jti: jtiStore, session } = stores();
@@ -302,7 +302,7 @@ export async function rotateRefreshJti(input: {
     jti: input.newJti,
     sessionId: input.sessionId,
     userId: input.userId,
-    cognitoSub: input.cognitoSub,
+    sub: input.sub,
     status: "active",
     issuedAt: nowSeconds(),
   };

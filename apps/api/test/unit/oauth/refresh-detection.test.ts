@@ -45,7 +45,7 @@ function makeSession(over: Partial<AgentSessionRecord> = {}): AgentSessionRecord
   return {
     sessionId: "s_one",
     userId: "u_alice",
-    cognitoSub: "sub-alice",
+    sub: "sub-alice",
     tenantId: "t_one",
     currentJti: "j_initial",
     status: "active",
@@ -110,7 +110,7 @@ describe("rotateRefreshJti", () => {
     await rotateRefreshJti({
       sessionId: "s_one",
       userId: "u_alice",
-      cognitoSub: "sub-alice",
+      sub: "sub-alice",
       newJti: "j_two",
     });
     const session = await getAgentSession("s_one");

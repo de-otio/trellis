@@ -16,7 +16,7 @@ import type { TenantMember, Tenant } from "@prisma/client";
 export interface TenantFixtureUser {
   id: string;
   email: string;
-  cognitoSub: string;
+  sub: string;
   personalTenantId: string;
 }
 
@@ -37,7 +37,7 @@ function makeAuth(
   globalRole: UserRole = "B2B_PARTNER",
 ): AuthContext {
   return {
-    cognitoSub: user.cognitoSub,
+    sub: user.sub,
     userId: user.id,
     globalRole,
     activeTenantId: tenantId,
@@ -59,13 +59,13 @@ export function buildTwoTenantFixture(): TenantFixture {
   const userA: TenantFixtureUser = {
     id: "user-a-id",
     email: "alice@test.example.com",
-    cognitoSub: "cognito-sub-a",
+    sub: "cognito-sub-a",
     personalTenantId: "personal-tenant-a",
   };
   const userB: TenantFixtureUser = {
     id: "user-b-id",
     email: "bob@test.example.com",
-    cognitoSub: "cognito-sub-b",
+    sub: "cognito-sub-b",
     personalTenantId: "personal-tenant-b",
   };
 
