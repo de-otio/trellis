@@ -20,6 +20,7 @@ const { mockVerifyCognitoJwt } = vi.hoisted(() => ({
 }));
 vi.mock("../../src/lib/auth/cognito-jwt", () => ({
   verifyCognitoJwt: mockVerifyCognitoJwt,
+  verifyLegacyCognitoClaims: mockVerifyCognitoJwt,
 }));
 
 // Mock session-config - simple mock that returns default config

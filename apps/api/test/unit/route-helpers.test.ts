@@ -34,6 +34,7 @@ const { mockGetSession, mockCreateSecureResponse, mockAddSecurityHeaders, mockSa
 
 // Mock Cognito JWT verification (the Bearer-token auth strategy)
 vi.mock("../../src/lib/auth/cognito-jwt", () => ({
+  verifyJwt: mockVerifyCognitoJwt,
   verifyCognitoJwt: mockVerifyCognitoJwt,
 }));
 
@@ -131,8 +132,8 @@ describe("RouteHelpers", () => {
       // mismatched the cuid-keyed row and broke those lookups (e.g. media
       // tenant resolution → "Tenant resolution failed").
       mockVerifyCognitoJwt.mockResolvedValue({
-        sub: "23643892-00c1-7057-551c-aed44aed1f13", // Cognito sub (UUID)
-        "custom:userId": "cmqurmq7x000002i80nqmgfr8", // DB User.id (cuid)
+        sub: "23643892-00c1-7057-551c-aed44aed1f13", // opaque IdP sub
+        userId: "cmqurmq7x000002i80nqmgfr8", // DB User.id (cuid), was custom:userId
         email: "user@example.com",
         username: "user@example.com",
       });
