@@ -1,0 +1,18 @@
+# OpenTofu local state (this spike uses local state deliberately — see
+# infra/versions.tf for why the real WS-0 path differs).
+infra/*.tfstate
+infra/*.tfstate.*
+infra/.terraform/
+infra/*.tfvars
+infra/*.tfvars.json
+infra/crash.log
+infra/crash.*.log
+
+# tofu output -json dump consumed by the harness — contains sensitive
+# outputs (DB password, SQS credentials) so it must never be committed.
+infra/outputs.json
+
+# Harness
+harness/node_modules/
+harness/.env
+harness/*.log
