@@ -107,6 +107,7 @@ export async function startServer(): Promise<http.Server> {
   // model metas are built once from the (currently empty) composed-model
   // registry; they carry only the tenant-scoped core delegates today.
   const { DynamoDBClient } = await import("@aws-sdk/client-dynamodb");
+  const { DynamoKvStore } = await import("@de-otio/saas-foundation/kv");
   const { sharedDatabaseConnectionManager: dbManager } = await import(
     "./lib/database-connection-manager.js"
   );
@@ -116,8 +117,19 @@ export async function startServer(): Promise<http.Server> {
   const scopedModelMetas = buildScopedModelMetas();
   const jobRunnerHandle = startExtensionJobRunners(
     {
-      dynamo: new DynamoDBClient({ region: env.AWS_REGION }),
-      tableName: process.env.DYNAMODB_TABLE ?? `${env.STAGE ?? "dev"}-trellis`,
+      // Single-flight lock via the KvStore port (WS-1 §3.9). Default DynamoKvStore
+      // over the byte-compat `job` layout (pk `job:{extId}:{jobId}`, sk `lock`)
+      // — zero AWS behavior change; only the additive `_v` version attribute.
+      kvStore: new DynamoKvStore(new DynamoDBClient({ region: env.AWS_REGION }), {
+        tableName: process.env.DYNAMODB_TABLE ?? `${env.STAGE ?? "dev"}-trellis`,
+        pkPrefix: "job",
+        pkSeparator: ":",
+        skName: "sk",
+        skValue: "lock",
+        ttlAttr: "ttl",
+        versionAttr: "_v",
+        allowSeparatorInKey: true,
+      }),
       now: () => Date.now(),
       uuid: () => randomUUID(),
       readDelegateSource: (model) => {

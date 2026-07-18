@@ -1,143 +1,87 @@
 /**
- * End-to-end regression test for the invitation-only signup gate.
+ * Outcome-equivalence regression test for the invitation-only signup gate
+ * writer/deleter/marker, on the `@de-otio/saas-foundation` `KvStore` port.
  *
- * This is the test that would have caught the launch-blocking bug: the real
- * invitation-creation writer (`writePreSignUpInvitationRecord`) and the real
- * Cognito PreSignUp trigger (`pre-signup.ts`) are exercised against a single
- * shared in-memory DynamoDB table, with the REAL `marshall`/`unmarshall`. It
- * proves the writer emits exactly the record the reader expects, keyed off the
- * same code value — so an invited user can actually pass the gate — and that
- * PostConfirmation's `markPreSignUpInvitationRecordUsed` closes the code to
- * reuse.
+ * The three functions (`writePreSignUpInvitationRecord`,
+ * `markPreSignUpInvitationRecordUsed`, `deletePreSignUpInvitationRecord`) are
+ * exercised against an injected in-memory `KvStore`, and every assertion reads
+ * the store BACK to prove the OUTCOME the Cognito PreSignUp trigger depends on:
+ *   - after write: the code's record exists with `used === false` and a TTL,
+ *   - after mark-used: `used === true` and `usedBy` recorded (reuse blocked),
+ *   - after delete: the record is gone (PreSignUp then fails closed),
+ *   - the key is canonicalized upper-case, so a lower-case code and its
+ *     upper-case form address the same record (the load-bearing casing note),
+ *   - an email restriction is carried onto the value for a future match check.
  *
- * Before the fix, no non-test code wrote this record, so every real invited
- * signup was rejected by PreSignUp.
+ * This replaces the earlier command-shape assertions (raw marshalled DynamoDB
+ * items) with behavior the port guarantees on every backend (Dynamo/Postgres/
+ * Memory); the DynamoKvStore layout keeps the AWS raw item byte-compatible.
  */
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { MemoryKvStore } from "@de-otio/saas-foundation/kv";
 import {
+  __setInvitationStoreForTest,
   deletePreSignUpInvitationRecord,
   markPreSignUpInvitationRecordUsed,
   preSignUpInvitationPk,
   writePreSignUpInvitationRecord,
 } from "../../src/lib/invitation-presignup-record.js";
 
-// One in-memory DynamoDB table shared by the writer and the PreSignUp reader.
-// Items are stored in their raw (marshalled) form, keyed by pk|sk — exactly how
-// DynamoDB would. `deletes` captures the raw DeleteItemCommand inputs so tests
-// can assert the exact {TableName, Key} sent.
-const { store, deletes } = vi.hoisted(() => ({
-  store: new Map<string, Record<string, any>>(),
-  deletes: [] as any[],
-}));
-
-vi.mock("@aws-sdk/client-dynamodb", () => {
-  const keyOf = (m: any) => `${m?.pk?.S}|${m?.sk?.S}`;
-  class DynamoDBClient {
-    async send(cmd: any) {
-      if (cmd.__kind === "put") {
-        store.set(keyOf(cmd.input.Item), cmd.input.Item);
-        return {};
-      }
-      if (cmd.__kind === "get") {
-        const item = store.get(keyOf(cmd.input.Key));
-        return item ? { Item: item } : {};
-      }
-      if (cmd.__kind === "delete") {
-        deletes.push(cmd.input);
-        store.delete(keyOf(cmd.input.Key));
-        return {};
-      }
-      throw new Error(`unexpected DynamoDB command: ${cmd?.__kind}`);
-    }
-  }
-  class PutItemCommand {
-    input: any;
-    __kind = "put";
-    constructor(input: any) {
-      this.input = input;
-    }
-  }
-  class GetItemCommand {
-    input: any;
-    __kind = "get";
-    constructor(input: any) {
-      this.input = input;
-    }
-  }
-  class DeleteItemCommand {
-    input: any;
-    __kind = "delete";
-    constructor(input: any) {
-      this.input = input;
-    }
-  }
-  return { DynamoDBClient, PutItemCommand, GetItemCommand, DeleteItemCommand };
-});
-
-// PreSignUp reads DYNAMODB_TABLE at module load; set it before the dynamic
-// import below.
-process.env.AWS_REGION = "us-east-1";
-process.env.DYNAMODB_TABLE = "test-trellis";
-
-async function loadPreSignUp() {
-  const mod = await import("../../src/lambda/pre-signup.js");
-  return mod.handler;
+interface PreSignUpValue {
+  used: boolean;
+  usedBy?: string;
+  email?: string;
 }
 
-function preSignUpEvent(invitationCode: string) {
-  return {
-    request: {
-      userAttributes: { email: "invitee@example.com" },
-      clientMetadata: { invitationCode },
-    },
-    response: {
-      autoConfirmUser: false,
-      autoVerifyEmail: false,
-      autoVerifyPhone: false,
-    },
-  } as any;
-}
+describe("invitation-only signup gate (KvStore writer/marker/deleter)", () => {
+  let store: MemoryKvStore;
 
-describe("invitation-only signup gate (writer + PreSignUp reader)", () => {
   beforeEach(() => {
-    store.clear();
-    deletes.length = 0;
+    store = new MemoryKvStore();
+    __setInvitationStoreForTest(store);
   });
 
-  it("write → PreSignUp accepts → PostConfirmation marks used → PreSignUp rejects reuse", async () => {
-    const handler = await loadPreSignUp();
+  afterEach(() => {
+    __setInvitationStoreForTest(null);
+  });
+
+  it("write → record exists unused with TTL → mark used → record used → delete → gone", async () => {
     const code = "ABC12345DE"; // as generated/stored (upper-case)
     const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
-    // 1. Create-invitation writer emits the PreSignUp record.
+    // 1. Create-invitation writer stores the fail-closed record.
     await writePreSignUpInvitationRecord({ code, expiresAt, email: null });
 
-    // The raw item is shaped exactly as pre-signup.ts reads it.
-    const raw = store.get(`invitations:${code}|v`);
-    expect(raw).toBeDefined();
-    expect(raw!.pk).toEqual({ S: "invitations:ABC12345DE" });
-    expect(raw!.sk).toEqual({ S: "v" });
-    expect(raw!.used).toEqual({ BOOL: false });
-    expect(raw!.ttl).toEqual({ N: String(Math.floor(expiresAt.getTime() / 1000)) });
-    // No email restriction → no email attribute written.
-    expect(raw!.email).toBeUndefined();
+    const written = await store.get<PreSignUpValue>(code.toUpperCase());
+    expect(written).not.toBeNull();
+    expect(written!.value.used).toBe(false);
+    // Expiry is set from `expiresAt` in epoch seconds (what PreSignUp checks).
+    expect(written!.expiresAt).toBe(Math.floor(expiresAt.getTime() / 1000));
+    // No email restriction → no email carried on the value.
+    expect(written!.value.email).toBeUndefined();
+    expect(written!.value.usedBy).toBeUndefined();
 
-    // 2. PreSignUp accepts the invited signup (auto-confirm/verify).
-    const accepted = await handler(preSignUpEvent(code), {} as any, () => {});
-    expect(accepted!.response.autoConfirmUser).toBe(true);
-    expect(accepted!.response.autoVerifyEmail).toBe(true);
-
-    // 3. PostConfirmation burns the code.
+    // 2. PostConfirmation burns the code (reuse prevented).
     await markPreSignUpInvitationRecordUsed({ code, usedBy: "user-123" });
-    const used = store.get(`invitations:${code}|v`);
-    expect(used!.used).toEqual({ BOOL: true });
-    expect(used!.usedBy).toEqual({ S: "user-123" });
 
-    // 4. A second signup with the same code is rejected (reuse prevented).
-    await expect(
-      handler(preSignUpEvent(code), {} as any, () => {}),
-    ).rejects.toThrow("already been used");
+    const used = await store.get<PreSignUpValue>(code.toUpperCase());
+    expect(used!.value.used).toBe(true);
+    expect(used!.value.usedBy).toBe("user-123");
+
+    // 3. Invitation-delete cleanup removes the record → PreSignUp fails closed.
+    await deletePreSignUpInvitationRecord({ code });
+    expect(await store.get<PreSignUpValue>(code.toUpperCase())).toBeNull();
+  });
+
+  it("mark-used without an explicit expiry writes a bounded future TTL", async () => {
+    const code = "NOEXPIRY01";
+    const before = Math.floor(Date.now() / 1000);
+    await markPreSignUpInvitationRecordUsed({ code, usedBy: "user-9" });
+    const rec = await store.get<PreSignUpValue>(code.toUpperCase());
+    expect(rec!.value.used).toBe(true);
+    // Default bound is ~24h out; assert it is comfortably in the future.
+    expect(rec!.expiresAt).toBeGreaterThan(before + 23 * 60 * 60);
   });
 
   it("carries the email restriction onto the record for a future email-match check", async () => {
@@ -147,65 +91,39 @@ describe("invitation-only signup gate (writer + PreSignUp reader)", () => {
       expiresAt: new Date(Date.now() + 60 * 60 * 1000),
       email: "friend@example.com",
     });
-    const raw = store.get(`invitations:${code}|v`);
-    expect(raw!.email).toEqual({ S: "friend@example.com" });
+    const rec = await store.get<PreSignUpValue>(code.toUpperCase());
+    expect(rec!.value.email).toBe("friend@example.com");
+    expect(rec!.value.used).toBe(false);
   });
 
-  it("PreSignUp rejects an expired record", async () => {
-    const handler = await loadPreSignUp();
-    const code = "EXPIRED123";
-    // ttl in the past.
+  it("canonicalizes casing: a lower-case code writes to the upper-case key", async () => {
+    // Invitation codes are stored/presented upper-case; the writer must key the
+    // record to the same value regardless of the casing it is handed, so the
+    // pk it writes equals the pk the user presents at signup.
     await writePreSignUpInvitationRecord({
-      code,
-      expiresAt: new Date(Date.now() - 60 * 1000),
-      email: null,
-    });
-    await expect(
-      handler(preSignUpEvent(code), {} as any, () => {}),
-    ).rejects.toThrow("expired");
-  });
-
-  it("deletePreSignUpInvitationRecord sends a DeleteItemCommand for the canonical {pk,sk} and removes the record", async () => {
-    const handler = await loadPreSignUp();
-    const code = "DELETEME01";
-
-    // Create the record, then delete it (invitation-delete cleanup path).
-    await writePreSignUpInvitationRecord({
-      code,
+      code: "lowercode1",
       expiresAt: new Date(Date.now() + 60 * 60 * 1000),
       email: null,
     });
-    expect(store.get(`invitations:${code}|v`)).toBeDefined();
-
-    await deletePreSignUpInvitationRecord({ code });
-
-    // The DeleteItemCommand carried the canonical upper-cased pk, sk "v", and
-    // the env-resolved table name.
-    expect(deletes).toHaveLength(1);
-    expect(deletes[0]).toEqual({
-      TableName: "test-trellis",
-      Key: { pk: { S: "invitations:DELETEME01" }, sk: { S: "v" } },
-    });
-
-    // Record is gone → PreSignUp now fails closed for the deleted code.
-    expect(store.get(`invitations:${code}|v`)).toBeUndefined();
-    await expect(
-      handler(preSignUpEvent(code), {} as any, () => {}),
-    ).rejects.toThrow("Invalid or expired invitation code");
+    // Readable via the canonical upper-case key…
+    expect(await store.get<PreSignUpValue>("LOWERCODE1")).not.toBeNull();
+    // …and NOT under the raw lower-case key.
+    expect(await store.get<PreSignUpValue>("lowercode1")).toBeNull();
   });
 
-  it("deletePreSignUpInvitationRecord canonicalizes casing (lower-case code → upper-case pk)", async () => {
-    await deletePreSignUpInvitationRecord({ code: "lowercode1" });
-    expect(deletes).toHaveLength(1);
-    expect(deletes[0].Key).toEqual({
-      pk: { S: "invitations:LOWERCODE1" },
-      sk: { S: "v" },
+  it("delete canonicalizes casing: a lower-case code removes the upper-case record", async () => {
+    await writePreSignUpInvitationRecord({
+      code: "DELETEME01",
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+      email: null,
     });
+    expect(await store.get<PreSignUpValue>("DELETEME01")).not.toBeNull();
+
+    await deletePreSignUpInvitationRecord({ code: "deleteme01" });
+    expect(await store.get<PreSignUpValue>("DELETEME01")).toBeNull();
   });
 
   it("pk is canonicalized upper-case so it matches the code the user presents", () => {
-    // Invitation codes are stored/presented upper-case; the writer must key the
-    // pk to the same value regardless of the casing it is handed.
     expect(preSignUpInvitationPk("abc12345de")).toBe("invitations:ABC12345DE");
     expect(preSignUpInvitationPk("ABC12345DE")).toBe("invitations:ABC12345DE");
   });

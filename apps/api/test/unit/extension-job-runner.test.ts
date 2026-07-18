@@ -7,11 +7,7 @@
  * and the timeout test drives vitest fake timers. No wall-clock, no real AWS.
  */
 
-import {
-  DeleteItemCommand,
-  PutItemCommand,
-} from "@aws-sdk/client-dynamodb";
-import { marshall, unmarshall } from "@aws-sdk/util-dynamodb";
+import { MemoryKvStore } from "@de-otio/saas-foundation/kv";
 import type {
   ExtensionJobDecl,
   ScopedDb,
@@ -22,7 +18,6 @@ import fc from "fast-check";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   type InternalJobContext,
-  type JobLockDynamo,
   type JobRunnerDeps,
   JobTimeoutError,
   UndeclaredJobModelError,
@@ -39,69 +34,20 @@ import {
 // Test doubles
 // ---------------------------------------------------------------------------
 
-/** DynamoDB's conditional-check error — matched by `name`. */
-class ConditionalCheckFailedException extends Error {
-  constructor() {
-    super("The conditional request failed");
-    this.name = "ConditionalCheckFailedException";
-  }
-}
-
-interface LockItem {
-  pk: string;
-  sk: string;
-  ttl: number;
-  lockedAt: number;
-  lockToken: string;
+/** The MemoryKvStore key for a lock (the segment after the `job` prefix). */
+function lockKey(extId: string, jobId: string): string {
+  return `${extId}:${jobId}`;
 }
 
 /**
- * A fake DynamoDB honoring the exact ConditionExpressions the runner issues, so
- * lock semantics (single-flight, TTL expiry, token-guarded release) are really
- * exercised rather than stubbed.
+ * A real `MemoryKvStore` bound to a shared clock, so lock semantics
+ * (single-flight, TTL expiry via `putIfAbsent`/`overwriteExpired`, version-
+ * guarded release) are actually exercised rather than stubbed. The clock is
+ * shared with the runner's injected `now` so frozen-clock takeover is
+ * deterministic.
  */
-function makeFakeDynamo() {
-  const store = new Map<string, LockItem>();
-  const calls = { put: 0, delete: 0 };
-
-  const dynamo = {
-    async send(
-      command: PutItemCommand | DeleteItemCommand,
-    ): Promise<{ $metadata: Record<string, never> }> {
-      if (command instanceof PutItemCommand) {
-        calls.put++;
-        const input = command.input;
-        const item = unmarshall(input.Item ?? {}) as LockItem;
-        const values = unmarshall(input.ExpressionAttributeValues ?? {});
-        const nowVal = values[":now"] as number;
-        const key = `${item.pk}|${item.sk}`;
-        const existing = store.get(key);
-        // attribute_not_exists(pk) OR #ttl < :now
-        const passes = existing === undefined || existing.ttl < nowVal;
-        if (!passes) throw new ConditionalCheckFailedException();
-        store.set(key, item);
-        return { $metadata: {} };
-      }
-      if (command instanceof DeleteItemCommand) {
-        calls.delete++;
-        const input = command.input;
-        const dkey = unmarshall(input.Key ?? {}) as { pk: string; sk: string };
-        const values = unmarshall(input.ExpressionAttributeValues ?? {});
-        const myToken = values[":myToken"] as string;
-        const key = `${dkey.pk}|${dkey.sk}`;
-        const existing = store.get(key);
-        // lockToken = :myToken
-        if (existing === undefined || existing.lockToken !== myToken) {
-          throw new ConditionalCheckFailedException();
-        }
-        store.delete(key);
-        return { $metadata: {} };
-      }
-      throw new Error("unexpected command");
-    },
-  } as unknown as JobLockDynamo;
-
-  return { dynamo, store, calls };
+function makeStore(now: () => number = () => 1_000_000): MemoryKvStore {
+  return new MemoryKvStore({ now });
 }
 
 function silentLogger(): Pick<JobRunnerDeps["logger"], "info" | "error"> {
@@ -124,12 +70,11 @@ interface DepsOverrides {
 }
 
 function makeDeps(
-  dynamo: JobLockDynamo,
+  kvStore: MemoryKvStore,
   overrides: DepsOverrides = {},
 ): JobRunnerDeps {
   return {
-    dynamo,
-    tableName: "test-trellis",
+    kvStore,
     now: overrides.nowMs ?? (() => 1_000_000),
     uuid: overrides.uuid ?? seqUuid(),
     readDelegateSource: overrides.readDelegateSource ?? (() => undefined),
@@ -178,8 +123,8 @@ describe("pure helpers", () => {
 
 describe("single-flight under concurrent ticks", () => {
   it("only one of two concurrent ticks runs the body; the other skips", async () => {
-    const { dynamo, calls } = makeFakeDynamo();
-    const deps = makeDeps(dynamo, { uuid: seqUuid() });
+    const store = makeStore();
+    const deps = makeDeps(store);
     let bodyRuns = 0;
     const job = makeJob({ run: async () => { bodyRuns++; } });
 
@@ -191,9 +136,8 @@ describe("single-flight under concurrent ticks", () => {
     expect(bodyRuns).toBe(1);
     expect(outcomes.filter((o) => o === "ran")).toHaveLength(1);
     expect(outcomes.filter((o) => o === "skipped")).toHaveLength(1);
-    // Two acquire attempts, exactly one release (from the holder).
-    expect(calls.put).toBe(2);
-    expect(calls.delete).toBe(1);
+    // The holder released its lock; nothing is held afterwards.
+    expect(await store.get(lockKey("dogs", job.id))).toBeNull();
   });
 });
 
@@ -203,70 +147,60 @@ describe("single-flight under concurrent ticks", () => {
 
 describe("lock lifecycle", () => {
   it("conditional release is a no-op after a TTL steal (anti lock-stealing)", async () => {
-    const { dynamo, store, calls } = makeFakeDynamo();
     // Holder A acquires at t=1000s with a 300s timeout + 60s margin (ttl=1360s).
-    const clockA = { ms: 1_000_000 };
-    const depsA = makeDeps(dynamo, {
-      nowMs: () => clockA.ms,
-      uuid: () => "token-A",
+    const clock = { ms: 1_000_000 };
+    const store = makeStore(() => clock.ms);
+    const deps = makeDeps(store, {
+      nowMs: () => clock.ms,
       timeoutSeconds: 300,
       marginSeconds: 60,
     });
-    const tokenA = await acquireJobLock(depsA, "dogs", "sweep");
-    expect(tokenA).toBe("token-A");
+    const tokenA = await acquireJobLock(deps, "dogs", "sweep");
+    expect(tokenA).not.toBeNull();
 
-    // Time jumps past A's ttl (1361s). Holder B legitimately re-acquires.
-    const depsB = makeDeps(dynamo, {
-      nowMs: () => 1_361_000,
-      uuid: () => "token-B",
-      timeoutSeconds: 300,
-      marginSeconds: 60,
-    });
-    const tokenB = await acquireJobLock(depsB, "dogs", "sweep");
-    expect(tokenB).toBe("token-B");
+    // Time jumps past A's ttl (1361s). The lock is now expired → legitimate
+    // re-acquire (expired-takeover bumps the version → a new token).
+    clock.ms = 1_361_000;
+    const tokenB = await acquireJobLock(deps, "dogs", "sweep");
+    expect(tokenB).not.toBeNull();
+    expect(tokenB).not.toBe(tokenA);
 
-    // A finally tries to release its (long-dead) lock — must NOT delete B's.
-    const released = await releaseJobLock(depsA, "dogs", "sweep", "token-A");
+    // A finally tries to release its (long-dead) lock — version mismatch → no-op.
+    const released = await releaseJobLock(deps, "dogs", "sweep", tokenA!);
     expect(released).toBe(false);
-    const held = store.get(`${jobLockPk("dogs", "sweep")}|lock`);
-    expect(held?.lockToken).toBe("token-B");
-    expect(calls.delete).toBe(1); // A's release attempt reached Dynamo (and no-op'd)
+    const held = await store.get(lockKey("dogs", "sweep"));
+    expect(held).not.toBeNull();
+    expect(String(held!.version)).toBe(tokenB);
   });
 
   it("recovers a crashed holder's lock only after its TTL expires", async () => {
-    const { dynamo } = makeFakeDynamo();
+    const clock = { ms: 1_000_000 };
+    const store = makeStore(() => clock.ms);
     // Holder A acquires and crashes (never releases). ttl = 1000 + 300 + 60.
-    const depsA = makeDeps(dynamo, {
-      nowMs: () => 1_000_000,
-      uuid: () => "token-A",
+    const deps = makeDeps(store, {
+      nowMs: () => clock.ms,
       timeoutSeconds: 300,
       marginSeconds: 60,
     });
-    expect(await acquireJobLock(depsA, "dogs", "sweep")).toBe("token-A");
+    expect(await acquireJobLock(deps, "dogs", "sweep")).not.toBeNull();
 
     // Before expiry: another task cannot acquire.
-    const depsEarly = makeDeps(dynamo, {
-      nowMs: () => 1_359_000, // < ttl (1_360_000)
-      uuid: () => "token-early",
-    });
-    expect(await acquireJobLock(depsEarly, "dogs", "sweep")).toBeNull();
+    clock.ms = 1_359_000; // < ttl (1_360_000)
+    expect(await acquireJobLock(deps, "dogs", "sweep")).toBeNull();
 
     // After expiry: recovery succeeds.
-    const depsLate = makeDeps(dynamo, {
-      nowMs: () => 1_361_000, // > ttl
-      uuid: () => "token-late",
-    });
-    expect(await acquireJobLock(depsLate, "dogs", "sweep")).toBe("token-late");
+    clock.ms = 1_361_000; // > ttl
+    expect(await acquireJobLock(deps, "dogs", "sweep")).not.toBeNull();
   });
 
   it("skips (and does not release) when the lock is already held", async () => {
-    const { dynamo, calls } = makeFakeDynamo();
-    const holder = makeDeps(dynamo, { uuid: () => "token-holder" });
+    const store = makeStore();
+    const holder = makeDeps(store);
     // Pre-acquire and hold (no release).
-    expect(await acquireJobLock(holder, "dogs", "sweep")).toBe("token-holder");
+    expect(await acquireJobLock(holder, "dogs", "sweep")).not.toBeNull();
 
     let bodyRuns = 0;
-    const deps = makeDeps(dynamo, { uuid: () => "token-other" });
+    const deps = makeDeps(store);
     const outcome = await runJobOnce(deps, "dogs", makeJob({
       id: "sweep",
       run: async () => { bodyRuns++; },
@@ -274,16 +208,17 @@ describe("lock lifecycle", () => {
 
     expect(outcome).toBe("skipped");
     expect(bodyRuns).toBe(0);
-    // Held lock: one prior put, the failed acquire, and NO delete (never held it).
-    expect(calls.put).toBe(2);
-    expect(calls.delete).toBe(0);
+    // The held lock is still present — the skipper never held it, so never released it.
+    expect(await store.get(lockKey("dogs", "sweep"))).not.toBeNull();
   });
 
   it("propagates a non-conditional acquire error as a skip (never crashes the tick)", async () => {
-    const dynamo = {
-      send: async () => { throw new Error("network down"); },
-    } as unknown as JobLockDynamo;
-    const deps = makeDeps(dynamo);
+    const store = makeStore();
+    const throwing = {
+      ...store,
+      putIfAbsent: () => Promise.reject(new Error("network down")),
+    } as unknown as MemoryKvStore;
+    const deps = makeDeps(throwing);
     let bodyRuns = 0;
     const outcome = await runJobOnce(deps, "dogs", makeJob({
       run: async () => { bodyRuns++; },
@@ -300,8 +235,8 @@ describe("lock lifecycle", () => {
 describe("timeout aborts the body", () => {
   it("aborts a hung body at the timeout and conditionally releases", async () => {
     vi.useFakeTimers();
-    const { dynamo, calls } = makeFakeDynamo();
-    const deps = makeDeps(dynamo, { timeoutSeconds: 2 });
+    const store = makeStore();
+    const deps = makeDeps(store, { timeoutSeconds: 2 });
 
     let observedAbort = false;
     const job = makeJob({
@@ -320,17 +255,18 @@ describe("timeout aborts the body", () => {
 
     expect(outcome).toBe("failed");
     expect(observedAbort).toBe(true);
-    expect(calls.delete).toBe(1); // lock released despite the timeout
+    // Lock released despite the timeout.
+    expect(await store.get(lockKey("dogs", "reminder-sweep"))).toBeNull();
   });
 
   it("reports a thrown body as failed and still releases the lock", async () => {
-    const { dynamo, calls } = makeFakeDynamo();
-    const deps = makeDeps(dynamo);
+    const store = makeStore();
+    const deps = makeDeps(store);
     const outcome = await runJobOnce(deps, "dogs", makeJob({
       run: async () => { throw new Error("boom"); },
     }));
     expect(outcome).toBe("failed");
-    expect(calls.delete).toBe(1);
+    expect(await store.get(lockKey("dogs", "reminder-sweep"))).toBeNull();
   });
 
   it("JobTimeoutError carries the timeout budget", () => {
@@ -348,7 +284,7 @@ describe("timeout aborts the body", () => {
 describe("job context (by construction)", () => {
   it("exposes ONLY the declared crossTenantRead models; undeclared are undefined", () => {
     const readDelegate = { findMany: async () => [], findFirst: async () => null, count: async () => 0, aggregate: async () => ({}), groupBy: async () => [] };
-    const deps = makeDeps(makeFakeDynamo().dynamo, {
+    const deps = makeDeps(makeStore(), {
       readDelegateSource: (model) => (model === "dogReminder" ? readDelegate : undefined),
     });
     const job = makeJob({ crossTenantRead: ["dogReminder"] });
@@ -375,7 +311,7 @@ describe("job context (by construction)", () => {
       create: async () => { wrote = true; return {}; },
       update: async () => { wrote = true; return {}; },
     };
-    const deps = makeDeps(makeFakeDynamo().dynamo, {
+    const deps = makeDeps(makeStore(), {
       readDelegateSource: (model) => (model === "dogReminder" ? rawDelegate : undefined),
     });
     const ctx = buildJobContext(deps, makeJob({ crossTenantRead: ["dogReminder"] }), new AbortController().signal);
@@ -390,7 +326,7 @@ describe("job context (by construction)", () => {
   });
 
   it("throws UndeclaredJobModelError when a declared model has no delegate", () => {
-    const deps = makeDeps(makeFakeDynamo().dynamo, { readDelegateSource: () => undefined });
+    const deps = makeDeps(makeStore(), { readDelegateSource: () => undefined });
     const job = makeJob({ crossTenantRead: ["ghostModel"] });
     expect(() => buildJobContext(deps, job, new AbortController().signal)).toThrow(
       UndeclaredJobModelError,
@@ -398,17 +334,18 @@ describe("job context (by construction)", () => {
   });
 
   it("a job declaring an unavailable model fails the tick (and releases the lock)", async () => {
-    const { dynamo, calls } = makeFakeDynamo();
-    const deps = makeDeps(dynamo, { readDelegateSource: () => undefined });
-    const outcome = await runJobOnce(deps, "dogs", makeJob({ crossTenantRead: ["ghostModel"] }));
+    const store = makeStore();
+    const deps = makeDeps(store, { readDelegateSource: () => undefined });
+    const outcome = await runJobOnce(deps, "dogs", makeJob({ id: "ghost", crossTenantRead: ["ghostModel"] }));
     expect(outcome).toBe("failed");
-    expect(calls.delete).toBe(1);
+    // Lock acquired then released even though the context build failed.
+    expect(await store.get(lockKey("dogs", "ghost"))).toBeNull();
   });
 
   it("tenant() mints with 'job' provenance and delegates to the scoped-DB factory", () => {
     const scopedDb = { entity: {} } as unknown as ScopedDb;
     const factory = vi.fn((_tid: string) => scopedDb) as unknown as JobRunnerDeps["scopedDbFactory"];
-    const deps = makeDeps(makeFakeDynamo().dynamo, { scopedDbFactory: factory });
+    const deps = makeDeps(makeStore(), { scopedDbFactory: factory });
     const ctx = buildJobContext(deps, makeJob(), new AbortController().signal);
 
     const result = ctx.tenant("tenant-abc" as unknown as ExtensionTenantId);
@@ -417,13 +354,13 @@ describe("job context (by construction)", () => {
   });
 
   it("tenant() rejects an invalid raw tenant id at the mint site", () => {
-    const deps = makeDeps(makeFakeDynamo().dynamo, { scopedDbFactory: () => ({} as ScopedDb) });
+    const deps = makeDeps(makeStore(), { scopedDbFactory: () => ({} as ScopedDb) });
     const ctx = buildJobContext(deps, makeJob(), new AbortController().signal);
     expect(() => ctx.tenant("bad id with spaces" as unknown as ExtensionTenantId)).toThrow();
   });
 
   it("tenant() throws when no scoped-DB factory is wired", () => {
-    const deps = makeDeps(makeFakeDynamo().dynamo); // no scopedDbFactory
+    const deps = makeDeps(makeStore()); // no scopedDbFactory
     const ctx = buildJobContext(deps, makeJob(), new AbortController().signal);
     expect(() => ctx.tenant("tenant-abc" as unknown as ExtensionTenantId)).toThrow(
       /scoped-DB factory not wired/,
@@ -436,7 +373,7 @@ describe("job context (by construction)", () => {
       fc.property(
         fc.uniqueArray(fc.string({ minLength: 1 }).filter((s) => s !== "__proto__"), { maxLength: 6 }),
         (models) => {
-          const deps = makeDeps(makeFakeDynamo().dynamo, { readDelegateSource: () => delegate });
+          const deps = makeDeps(makeStore(), { readDelegateSource: () => delegate });
           const ctx = buildJobContext(deps, makeJob({ crossTenantRead: models }), new AbortController().signal);
           expect(new Set(Object.keys(ctx.read))).toEqual(new Set(models));
         },
@@ -451,7 +388,7 @@ describe("job context (by construction)", () => {
 
 describe("startExtensionJobRunners", () => {
   it("no-ops when no extension declares a job", () => {
-    const deps = makeDeps(makeFakeDynamo().dynamo);
+    const deps = makeDeps(makeStore());
     const ext: TrellisExtension = { id: "dogs" } as TrellisExtension;
     const handle = startExtensionJobRunners(deps, [ext]);
     expect(handle.jobCount).toBe(0);
@@ -462,7 +399,7 @@ describe("startExtensionJobRunners", () => {
     vi.useFakeTimers();
     const setInterval = vi.spyOn(globalThis, "setInterval");
     const clearInterval = vi.spyOn(globalThis, "clearInterval");
-    const deps = makeDeps(makeFakeDynamo().dynamo);
+    const deps = makeDeps(makeStore());
     const ext = {
       id: "dogs",
       jobs: [makeJob({ id: "a", schedule: "hourly" }), makeJob({ id: "b", schedule: "daily" })],
@@ -480,8 +417,8 @@ describe("startExtensionJobRunners", () => {
 
   it("a ticked job runs single-flight via the lock (fake-timer driven)", async () => {
     vi.useFakeTimers();
-    const { dynamo, calls } = makeFakeDynamo();
-    const deps = makeDeps(dynamo, { uuid: seqUuid() });
+    const store = makeStore();
+    const deps = makeDeps(store);
     let bodyRuns = 0;
     const ext = {
       id: "dogs",
@@ -493,6 +430,7 @@ describe("startExtensionJobRunners", () => {
     handle.stop(); // clear the interval before it can fire again
 
     expect(bodyRuns).toBe(1);
-    expect(calls.put).toBeGreaterThanOrEqual(1);
+    // The single tick acquired and released the lock.
+    expect(await store.get(lockKey("dogs", "sweep"))).toBeNull();
   });
 });
