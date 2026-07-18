@@ -1,27 +1,22 @@
 /**
- * DynamoDB-backed claims cache for the pre-token-generation Lambda
- * (T2 — JIT provisioning).
+ * Claims cache for the pre-token-generation Lambda (T2 — JIT provisioning),
+ * on the `@de-otio/saas-foundation` `KvStore` port (WS-1 §3.6).
  *
- * Storage layout (single-table on the existing `{stage}-trellis` table):
- *   pk = `claims:{cognitoSub}`
- *   sk = `meta`
- *   ttl = epoch seconds; DynamoDB-managed expiry plus a manual check on read
- *         (DDB TTL deletes lag by up to 48h, so we never trust the row's
- *         existence alone)
+ * Storage (unchanged on AWS — DynamoKvStore byte-compat layout `claims`):
+ *   pk = `claims:{cognitoSub}`, sk = `meta`, ttl = epoch seconds. The port's
+ *   `get` applies the same on-read expiry filter DynamoDB TTL lags behind, so a
+ *   stale row never counts as a hit.
  *
- * Concurrency: writes use a `ConditionExpression` that the existing row's
- * `ttl` is missing or older than the incoming `ttl`. Two simultaneous
- * pre-token-gen invocations for the same user (rare, but possible during a
- * burst of token refreshes) cannot stale-overwrite a fresh entry.
+ * Concurrency (F2 — TTL-monotonic freshness, NOT version-CAS): writes go through
+ * `putIfFresher`, a single atomic conditional write that applies only when the
+ * incoming expiry is strictly newer than the stored one. This reproduces the
+ * original `attribute_not_exists(#ttl) OR #ttl < :incomingTtl` guard exactly —
+ * a stale (older-expiry) write can never overwrite a fresher entry, even if it
+ * carries higher-privilege claims written after a tenant-removal invalidation.
  */
 
-import {
-  DynamoDBClient,
-  GetItemCommand,
-  PutItemCommand,
-  DeleteItemCommand,
-} from "@aws-sdk/client-dynamodb";
-import { marshall, unmarshall } from "@aws-sdk/util-dynamodb";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { DynamoKvStore, type DynamoKvLayout, type KvStore } from "@de-otio/saas-foundation/kv";
 
 export interface CachedClaims {
   /** Trellis `User.id` (cuid). May be empty string for drift sentinel. */
@@ -40,70 +35,55 @@ export interface CachedClaims {
 
 export const DEFAULT_CACHE_TTL_SECONDS = 3600;
 
-function pkFor(cognitoSub: string): string {
-  return `claims:${cognitoSub}`;
-}
-
 function nowSeconds(): number {
   return Math.floor(Date.now() / 1000);
 }
 
+/** Fill missing string fields with "" (preserves the pre-port shape). */
+function normalizeClaims(value: Partial<CachedClaims> | undefined): CachedClaims {
+  return {
+    userId: value?.userId ?? "",
+    globalRole: value?.globalRole ?? "",
+    activeTenantId: value?.activeTenantId ?? "",
+    tenantSlug: value?.tenantSlug ?? "",
+    tenantRole: value?.tenantRole ?? "",
+    handle: value?.handle ?? "",
+  };
+}
+
 export class ClaimsCache {
-  constructor(
-    private readonly client: DynamoDBClient,
-    private readonly tableName: string,
-  ) {}
+  constructor(private readonly store: KvStore) {}
 
   /**
    * Returns cached claims if a fresh entry exists, else null. Stale rows
-   * (ttl in the past) are treated as a miss; we let DDB's own TTL sweep
-   * eventually delete them.
+   * (ttl in the past) are filtered by the port's on-read expiry check; a row
+   * carrying no expiry is treated as a miss (matches the pre-port `!ttl`).
    */
   async get(cognitoSub: string): Promise<CachedClaims | null> {
-    const result = await this.client.send(
-      new GetItemCommand({
-        TableName: this.tableName,
-        Key: marshall({ pk: pkFor(cognitoSub), sk: "meta" }),
-      }),
-    );
-    if (!result.Item) return null;
-    const item = unmarshall(result.Item) as Record<string, unknown>;
-    const ttl = typeof item.ttl === "number" ? item.ttl : 0;
-    if (!ttl || ttl <= nowSeconds()) return null;
-    return {
-      userId: (item.userId as string | undefined) ?? "",
-      globalRole: (item.globalRole as string | undefined) ?? "",
-      activeTenantId: (item.activeTenantId as string | undefined) ?? "",
-      tenantSlug: (item.tenantSlug as string | undefined) ?? "",
-      tenantRole: (item.tenantRole as string | undefined) ?? "",
-      handle: (item.handle as string | undefined) ?? "",
-    };
+    const rec = await this.store.get<Partial<CachedClaims>>(cognitoSub);
+    if (rec === null || rec.expiresAt === undefined) return null;
+    return normalizeClaims(rec.value);
   }
 
   /**
    * Returns the user's last-known activeTenantId, regardless of TTL. Used by
    * the pre-token-generation Lambda on cache miss so a user's explicit
    * tenant-switch survives cache expiry rather than reverting to the
-   * first-org-tenant heuristic.
+   * first-org-tenant heuristic. Reads with `includeExpired` so an expired-
+   * but-uncleaned row still yields the preference (as the raw DDB read did).
    */
   async getActiveTenantPreference(cognitoSub: string): Promise<string | null> {
-    const result = await this.client.send(
-      new GetItemCommand({
-        TableName: this.tableName,
-        Key: marshall({ pk: pkFor(cognitoSub), sk: "meta" }),
-      }),
-    );
-    if (!result.Item) return null;
-    const item = unmarshall(result.Item) as Record<string, unknown>;
-    const activeTenantId = (item.activeTenantId as string | undefined) ?? "";
+    const rec = await this.store.get<Partial<CachedClaims>>(cognitoSub, { includeExpired: true });
+    const activeTenantId = rec?.value.activeTenantId ?? "";
     return activeTenantId || null;
   }
 
   /**
-   * Writes a cache entry. Uses a `ConditionExpression` so a stale write
-   * (e.g., one that started before a newer entry was written) cannot
-   * overwrite a fresher row. On collision we silently swallow the
-   * conditional-check failure — the cache still holds an acceptable value.
+   * Writes a cache entry via `putIfFresher` so a stale write (one that started
+   * before a newer entry was written) cannot overwrite a fresher row. A
+   * rejected (not-fresher) write is swallowed — the cache still holds an
+   * acceptable value. Transient backend errors propagate (matches the original
+   * rethrow of non-conditional failures).
    */
   async put(
     cognitoSub: string,
@@ -111,31 +91,7 @@ export class ClaimsCache {
     ttlSeconds: number = DEFAULT_CACHE_TTL_SECONDS,
   ): Promise<void> {
     const expiresAt = nowSeconds() + ttlSeconds;
-    try {
-      await this.client.send(
-        new PutItemCommand({
-          TableName: this.tableName,
-          Item: marshall({
-            pk: pkFor(cognitoSub),
-            sk: "meta",
-            userId: claims.userId,
-            globalRole: claims.globalRole,
-            activeTenantId: claims.activeTenantId,
-            tenantSlug: claims.tenantSlug,
-            tenantRole: claims.tenantRole,
-            handle: claims.handle,
-            ttl: expiresAt,
-          }),
-          ConditionExpression: "attribute_not_exists(#ttl) OR #ttl < :incomingTtl",
-          ExpressionAttributeNames: { "#ttl": "ttl" },
-          ExpressionAttributeValues: marshall({ ":incomingTtl": expiresAt }),
-        }),
-      );
-    } catch (err) {
-      const name = (err as { name?: string }).name;
-      if (name === "ConditionalCheckFailedException") return;
-      throw err;
-    }
+    await this.store.putIfFresher(cognitoSub, claims, { expiresAt });
   }
 
   /**
@@ -144,19 +100,17 @@ export class ClaimsCache {
    * RDS rather than serving a stale role.
    */
   async invalidate(cognitoSub: string): Promise<void> {
-    await this.client.send(
-      new DeleteItemCommand({
-        TableName: this.tableName,
-        Key: marshall({ pk: pkFor(cognitoSub), sk: "meta" }),
-      }),
-    );
+    await this.store.delete(cognitoSub);
   }
 }
 
 /**
- * Convenience constructor used by the Lambda handler. Reads the table name
- * from `DYNAMODB_TABLE` and the region from `AWS_REGION`. Tests construct
- * a `ClaimsCache` directly with a mock client.
+ * Convenience constructor used by the Lambda handler. Builds a DynamoKvStore
+ * over the byte-compat `claims` layout (pk `claims:{sub}`, sk `meta`, ttl attr
+ * `ttl`) from `DYNAMODB_TABLE` + `AWS_REGION`. Tests construct a `ClaimsCache`
+ * directly with a `MemoryKvStore`. When KV_PROVIDER wiring lands (WS-1 T5) this
+ * factory is replaced by the injected typed store; until then it preserves the
+ * exact AWS storage behavior.
  */
 export function createClaimsCacheFromEnv(): ClaimsCache {
   const tableName = process.env.DYNAMODB_TABLE;
@@ -164,5 +118,14 @@ export function createClaimsCacheFromEnv(): ClaimsCache {
     throw new Error("DYNAMODB_TABLE env var is required for ClaimsCache");
   }
   const client = new DynamoDBClient({ region: process.env.AWS_REGION });
-  return new ClaimsCache(client, tableName);
+  const layout: DynamoKvLayout = {
+    tableName,
+    pkPrefix: "claims",
+    pkSeparator: ":",
+    skName: "sk",
+    skValue: "meta",
+    ttlAttr: "ttl",
+    versionAttr: "_v",
+  };
+  return new ClaimsCache(new DynamoKvStore(client, layout));
 }
