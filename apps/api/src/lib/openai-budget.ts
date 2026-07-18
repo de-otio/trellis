@@ -6,9 +6,8 @@
  * Fail-open: if DynamoDB is unavailable, allows the call through.
  */
 
-import { DynamoDBClient,
-  UpdateItemCommand,
-} from "@aws-sdk/client-dynamodb";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { DynamoKvStore, type DynamoKvLayout, type KvStore } from "@de-otio/saas-foundation/kv";
 import { getLogger, Logger } from "./logger.js";
 
 export interface OpenAiBudgetConfig {
@@ -25,12 +24,41 @@ export interface OpenAiBudgetStatus {
   exceeded: boolean;
 }
 
-const dynamoClient = new DynamoDBClient({
-  region: process.env.AWS_REGION || "us-east-1",
-  ...(process.env.DYNAMODB_ENDPOINT ? { endpoint: process.env.DYNAMODB_ENDPOINT } : {}),
-});
-
 const TABLE_NAME = process.env.DYNAMODB_TABLE || `${process.env.STAGE || "dev"}-trellis`;
+
+let _store: KvStore | null = null;
+
+/**
+ * Lazily build the default DynamoKvStore over the byte-compat `costbudget`
+ * layout (pk `costbudget:{key}`, sk `v`, ttl attr `ttl`, native `count`).
+ * `allowSeparatorInKey` because the key is a server-constructed
+ * `openai:hourly:{ts}` / `openai:daily:{date}` composite (ws1-kv-port-plan §3.2).
+ */
+function store(): KvStore {
+  if (_store !== null) return _store;
+  const client = new DynamoDBClient({
+    region: process.env.AWS_REGION || "us-east-1",
+    ...(process.env.DYNAMODB_ENDPOINT ? { endpoint: process.env.DYNAMODB_ENDPOINT } : {}),
+  });
+  const layout: DynamoKvLayout = {
+    tableName: TABLE_NAME,
+    pkPrefix: "costbudget",
+    pkSeparator: ":",
+    skName: "sk",
+    skValue: "v",
+    ttlAttr: "ttl",
+    versionAttr: "_v",
+    nativeNumberFields: ["count"],
+    allowSeparatorInKey: true,
+  };
+  _store = new DynamoKvStore(client, layout);
+  return _store;
+}
+
+/** Test seam: inject a `KvStore` (e.g. `MemoryKvStore`) for outcome-equivalence tests. */
+export function __setOpenAiBudgetStoreForTest(s: KvStore | null): void {
+  _store = s;
+}
 
 export class OpenAiBudget {
   private config: OpenAiBudgetConfig;
@@ -131,41 +159,16 @@ export class OpenAiBudget {
    * Returns the post-increment value.
    */
   private async atomicIncrement(key: string, ttlSeconds: number): Promise<number> {
-    const result = await dynamoClient.send(
-      new UpdateItemCommand({
-        TableName: TABLE_NAME,
-        Key: {
-          pk: { S: `costbudget:${key}` },
-          sk: { S: "v" },
-        },
-        UpdateExpression: "ADD #count :inc SET #ttl = if_not_exists(#ttl, :ttl)",
-        ExpressionAttributeNames: { "#count": "count", "#ttl": "ttl" },
-        ExpressionAttributeValues: {
-          ":inc": { N: "1" },
-          ":ttl": { N: String(Math.floor(Date.now() / 1000) + ttlSeconds) },
-        },
-        ReturnValues: "ALL_NEW",
-      }),
-    );
-    return parseInt(result.Attributes?.count?.N || "0", 10);
+    // Atomic server-side add with set-once TTL; returns the post-value
+    // (matches the pre-port `ADD #count :inc ... ReturnValues:"ALL_NEW"`).
+    return store().increment(key, "count", 1, { ttlSeconds });
   }
 
   /**
    * Read a counter value without incrementing.
    */
   private async readCounter(key: string): Promise<number> {
-    const { GetItemCommand } = await import("@aws-sdk/client-dynamodb");
-    const result = await dynamoClient.send(
-      new GetItemCommand({
-        TableName: TABLE_NAME,
-        Key: {
-          pk: { S: `costbudget:${key}` },
-          sk: { S: "v" },
-        },
-        ProjectionExpression: "#count",
-        ExpressionAttributeNames: { "#count": "count" },
-      }),
-    );
-    return parseInt(result.Item?.count?.N || "0", 10);
+    const rec = await store().get<{ count?: number }>(key);
+    return rec?.value.count ?? 0;
   }
 }

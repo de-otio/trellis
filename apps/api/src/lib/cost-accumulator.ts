@@ -8,10 +8,8 @@
  * Flush happens every 10 seconds via setTimeout.
  */
 
-import { DynamoDBClient,
-  UpdateItemCommand,
-  GetItemCommand,
-} from "@aws-sdk/client-dynamodb";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { DynamoKvStore, type DynamoKvLayout, type KvStore } from "@de-otio/saas-foundation/kv";
 import { getLogger, Logger } from "./logger.js";
 
 export interface CostEvent {
@@ -41,12 +39,41 @@ const UNIT_COSTS: Record<string, Record<string, number>> = {
   dynamodb: { write: 0.00000125, read: 0.00000025 },
 };
 
-const dynamoClient = new DynamoDBClient({
-  region: process.env.AWS_REGION || "us-east-1",
-  ...(process.env.DYNAMODB_ENDPOINT ? { endpoint: process.env.DYNAMODB_ENDPOINT } : {}),
-});
-
 const TABLE_NAME = process.env.DYNAMODB_TABLE || `${process.env.STAGE || "dev"}-trellis`;
+
+let _store: KvStore | null = null;
+
+/**
+ * Lazily build the default DynamoKvStore over the byte-compat `costtrack`
+ * layout (pk `costtrack:{date}:{service}`, sk `v`, ttl attr `ttl`, native
+ * `units`). `allowSeparatorInKey` because the key is a server-constructed
+ * `{date}:{service}` composite (ws1-kv-port-plan §3.1).
+ */
+function store(): KvStore {
+  if (_store !== null) return _store;
+  const client = new DynamoDBClient({
+    region: process.env.AWS_REGION || "us-east-1",
+    ...(process.env.DYNAMODB_ENDPOINT ? { endpoint: process.env.DYNAMODB_ENDPOINT } : {}),
+  });
+  const layout: DynamoKvLayout = {
+    tableName: TABLE_NAME,
+    pkPrefix: "costtrack",
+    pkSeparator: ":",
+    skName: "sk",
+    skValue: "v",
+    ttlAttr: "ttl",
+    versionAttr: "_v",
+    nativeNumberFields: ["units"],
+    allowSeparatorInKey: true,
+  };
+  _store = new DynamoKvStore(client, layout);
+  return _store;
+}
+
+/** Test seam: inject a `KvStore` (e.g. `MemoryKvStore`) for outcome-equivalence tests. */
+export function __setCostStoreForTest(s: KvStore | null): void {
+  _store = s;
+}
 
 let _instance: CostAccumulator | null = null;
 
@@ -180,35 +207,13 @@ export class CostAccumulator {
   }
 
   private async atomicAdd(date: string, service: string, units: number): Promise<void> {
-    await dynamoClient.send(
-      new UpdateItemCommand({
-        TableName: TABLE_NAME,
-        Key: {
-          pk: { S: `costtrack:${date}:${service}` },
-          sk: { S: "v" },
-        },
-        UpdateExpression: "ADD #units :inc SET #ttl = if_not_exists(#ttl, :ttl)",
-        ExpressionAttributeNames: { "#units": "units", "#ttl": "ttl" },
-        ExpressionAttributeValues: {
-          ":inc": { N: String(units) },
-          ":ttl": { N: String(Math.floor(Date.now() / 1000) + 172800) }, // 48h TTL
-        },
-      }),
-    );
+    // Atomic server-side add + set-once 48h TTL (matches the pre-port
+    // `ADD #units :inc SET #ttl = if_not_exists(#ttl, :ttl)`).
+    await store().increment(`${date}:${service}`, "units", units, { ttlSeconds: 172800 });
   }
 
   private async readServiceCount(date: string, service: string): Promise<number> {
-    const result = await dynamoClient.send(
-      new GetItemCommand({
-        TableName: TABLE_NAME,
-        Key: {
-          pk: { S: `costtrack:${date}:${service}` },
-          sk: { S: "v" },
-        },
-        ProjectionExpression: "#units",
-        ExpressionAttributeNames: { "#units": "units" },
-      }),
-    );
-    return parseInt(result.Item?.units?.N || "0", 10);
+    const rec = await store().get<{ units?: number }>(`${date}:${service}`);
+    return rec?.value.units ?? 0;
   }
 }
