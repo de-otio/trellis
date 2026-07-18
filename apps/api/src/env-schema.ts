@@ -171,6 +171,14 @@ export function buildBootEnvSchema(stage: BootStage) {
       DB_SECRET_PASSWORD: z.string().min(1).optional(),
       DB_SECRET_HOST: z.string().min(1).optional(),
 
+      // WS-1 KV port: selects the backend for the typed KvStore hot-spot
+      // namespaces. Default (unset) = "dynamodb" — existing AWS deployments see
+      // ZERO change. "postgres" routes them to PostgresKvStore over the shared
+      // KV pool (DATABASE_URL is already required when postgres, so no new
+      // required var). The 13 Cloudflare-compat string-KV bindings are NOT
+      // affected — they stay on DynamoKv.
+      KV_PROVIDER: z.enum(["dynamodb", "postgres"]).optional(),
+
       SESSION_SECRET: z
         .string()
         .min(32, { message: "must be at least 32 characters" })

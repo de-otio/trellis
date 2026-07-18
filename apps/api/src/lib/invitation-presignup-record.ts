@@ -26,12 +26,8 @@
  * the user PRESENTS at signup. A casing mismatch silently reintroduces the bug.
  */
 
-import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import {
-  DynamoKvStore,
-  type DynamoKvLayout,
-  type KvStore,
-} from "@de-otio/saas-foundation/kv";
+import type { KvStore } from "@de-otio/saas-foundation/kv";
+import { getKvStore } from "./kv/kv-provider.js";
 
 /** The record value stored under the invitation key (pk/sk/ttl are reserved). */
 interface PreSignUpInvitationValue {
@@ -43,32 +39,15 @@ interface PreSignUpInvitationValue {
 let _store: KvStore | null = null;
 
 /**
- * Lazily build the default DynamoKvStore over the byte-compat `invitations`
- * layout so the raw item PreSignUp reads is UNCHANGED on AWS:
- *   pk = "invitations:<CODE>", sk = "v", ttl = epoch seconds.
- * The KvStore key is the upper-cased code, so `buildPk` yields the exact same
- * `invitations:<CODE>` string. The only additive attribute is the version
- * (`_v`), which PreSignUp ignores. The record VALUE carries `{ used, usedBy?,
- * email? }` — never pk/sk/ttl, which the port owns.
+ * The `invitations` KvStore, provider-selected (KV_PROVIDER, default DynamoDB).
+ * On AWS the raw item PreSignUp reads is UNCHANGED: pk `invitations:<CODE>`, sk
+ * `v`, ttl epoch seconds (the KvStore key is the upper-cased code, so the port
+ * recomposes the exact pk; only the additive `_v` differs). The record VALUE is
+ * `{ used, usedBy?, email? }` — never pk/sk/ttl, which the port owns.
  */
 function store(): KvStore {
   if (_store !== null) return _store;
-  const client = new DynamoDBClient({
-    region: process.env.AWS_REGION || "us-east-1",
-    ...(process.env.DYNAMODB_ENDPOINT
-      ? { endpoint: process.env.DYNAMODB_ENDPOINT }
-      : {}),
-  });
-  const layout: DynamoKvLayout = {
-    tableName: process.env.DYNAMODB_TABLE || `${process.env.STAGE || "dev"}-trellis`,
-    pkPrefix: "invitations",
-    pkSeparator: ":",
-    skName: "sk",
-    skValue: "v",
-    ttlAttr: "ttl",
-    versionAttr: "_v",
-  };
-  _store = new DynamoKvStore(client, layout);
+  _store = getKvStore("invitations");
   return _store;
 }
 

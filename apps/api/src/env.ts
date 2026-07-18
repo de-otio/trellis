@@ -6,6 +6,7 @@
  */
 
 import { DynamoKv, createDefaultDynamoClient } from "@de-otio/saas-foundation/kv";
+import { resolveKvProvider, setKvSqlExecutor, makeKvSqlExecutor } from "./lib/kv/kv-provider.js";
 import { S3Storage, createDefaultS3Client } from "@de-otio/saas-foundation/storage";
 import { SqsQueue, createDefaultSqsClient } from "@de-otio/saas-foundation/queue";
 import {
@@ -1255,6 +1256,16 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
   // runtime. The resulting string stays on the returned Env object only — we do
   // NOT write it to process.env so it can't leak through env-var exposure.
   const databaseUrl = await resolveDatabaseUrl();
+
+  // WS-1 KV port provider wiring (§5). Default (unset) = "dynamodb": the typed
+  // KvStore hot-spot namespaces resolve to DynamoKvStore over their byte-compat
+  // layouts — existing AWS deployments see ZERO change. "postgres" builds a
+  // small dedicated KV pool (bypassing the tenant-scoped Prisma pool) and
+  // registers it so the same namespaces resolve to PostgresKvStore. The 13
+  // Cloudflare-compat string-KV bindings above are untouched (they stay DynamoKv).
+  if (resolveKvProvider() === "postgres") {
+    setKvSqlExecutor(await makeKvSqlExecutor(databaseUrl));
+  }
 
   return {
     // Realtime transport seam: resolveRealtimeEnv() reads the REALTIME_* vars

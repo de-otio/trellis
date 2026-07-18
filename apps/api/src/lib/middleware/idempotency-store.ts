@@ -18,7 +18,8 @@ import {
   ConditionalCheckFailedException,
 } from "@aws-sdk/client-dynamodb";
 import { marshall, unmarshall } from "@aws-sdk/util-dynamodb";
-import { DynamoKvStore, type KvStore } from "@de-otio/saas-foundation/kv";
+import type { KvStore } from "@de-otio/saas-foundation/kv";
+import { getKvStore } from "../kv/kv-provider.js";
 
 /** Status of an in-flight request being processed by another worker. */
 export const IN_FLIGHT_SENTINEL = "__IN_FLIGHT__" as const;
@@ -199,23 +200,15 @@ export class KvStoreIdempotencyStore implements IdempotencyStoreInterface {
 }
 
 /**
- * Lazy-default factory: build a `KvStoreIdempotencyStore` over a `DynamoKvStore`
- * whose layout is byte-compat with the pre-port single-attr-pk idempotency table
- * (ttl attr `expiresAt`, no sort key). Preserves the exact AWS storage behavior;
- * the middleware constructs this by default so wiring stays zero-behavior-change.
+ * Lazy-default factory: build a `KvStoreIdempotencyStore` over the `idem`
+ * KvStore resolved by the central provider factory (KV_PROVIDER, default the
+ * byte-compat DynamoKvStore — single-attr pk, ttl attr `expiresAt`). The
+ * middleware constructs this by default so wiring stays zero-behavior-change.
+ * `tableName` is retained for signature compatibility; the concrete table (or
+ * Postgres pool) is resolved by the factory from `IDEMPOTENCY_TABLE`.
  */
-export function createIdempotencyStoreFromEnv(tableName: string): IdempotencyStoreInterface {
-  const client = new DynamoDBClient({ region: process.env.AWS_REGION ?? "eu-central-1" });
-  return new KvStoreIdempotencyStore(
-    new DynamoKvStore(client, {
-      tableName,
-      pkPrefix: "idem",
-      pkSeparator: "#",
-      ttlAttr: "expiresAt",
-      versionAttr: "_v",
-      allowSeparatorInKey: true,
-    }),
-  );
+export function createIdempotencyStoreFromEnv(_tableName?: string): IdempotencyStoreInterface {
+  return new KvStoreIdempotencyStore(getKvStore("idem"));
 }
 
 /**

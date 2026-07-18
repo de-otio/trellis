@@ -8,8 +8,8 @@
  * Flush happens every 10 seconds via setTimeout.
  */
 
-import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoKvStore, type DynamoKvLayout, type KvStore } from "@de-otio/saas-foundation/kv";
+import type { KvStore } from "@de-otio/saas-foundation/kv";
+import { getKvStore } from "./kv/kv-provider.js";
 import { getLogger, Logger } from "./logger.js";
 
 export interface CostEvent {
@@ -39,34 +39,12 @@ const UNIT_COSTS: Record<string, Record<string, number>> = {
   dynamodb: { write: 0.00000125, read: 0.00000025 },
 };
 
-const TABLE_NAME = process.env.DYNAMODB_TABLE || `${process.env.STAGE || "dev"}-trellis`;
-
 let _store: KvStore | null = null;
 
-/**
- * Lazily build the default DynamoKvStore over the byte-compat `costtrack`
- * layout (pk `costtrack:{date}:{service}`, sk `v`, ttl attr `ttl`, native
- * `units`). `allowSeparatorInKey` because the key is a server-constructed
- * `{date}:{service}` composite (ws1-kv-port-plan §3.1).
- */
+/** The `costtrack` KvStore, provider-selected (KV_PROVIDER, default DynamoDB). */
 function store(): KvStore {
   if (_store !== null) return _store;
-  const client = new DynamoDBClient({
-    region: process.env.AWS_REGION || "us-east-1",
-    ...(process.env.DYNAMODB_ENDPOINT ? { endpoint: process.env.DYNAMODB_ENDPOINT } : {}),
-  });
-  const layout: DynamoKvLayout = {
-    tableName: TABLE_NAME,
-    pkPrefix: "costtrack",
-    pkSeparator: ":",
-    skName: "sk",
-    skValue: "v",
-    ttlAttr: "ttl",
-    versionAttr: "_v",
-    nativeNumberFields: ["units"],
-    allowSeparatorInKey: true,
-  };
-  _store = new DynamoKvStore(client, layout);
+  _store = getKvStore("costtrack");
   return _store;
 }
 

@@ -20,39 +20,20 @@
  *   analysis/algorithmic-norm-misperception/02-prelaunch-actions.md §3.
  */
 
-import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoKvStore, type DynamoKvLayout, type KvStore } from "@de-otio/saas-foundation/kv";
+import type { KvStore } from "@de-otio/saas-foundation/kv";
+import { getKvStore } from "./kv/kv-provider.js";
 import { getLogger } from "./logger.js";
-
-const TABLE_NAME = process.env.DYNAMODB_TABLE || `${process.env.STAGE || "dev"}-trellis`;
 
 let _store: KvStore | null = null;
 
 /**
- * Lazily build the default DynamoKvStore over the byte-compat `discexposure`
- * layout (pk `discexposure:{yyyy-mm}:{entityId}`, sk `v`, NO TTL, native
- * `count`). These are DURABLE monthly baseline counters — no ttl is ever
- * written, so the KV sweep (which requires expires_at IS NOT NULL) never
- * touches them (F10). `allowSeparatorInKey` for the composite key (§3.3).
+ * The `discexposure` KvStore, provider-selected (KV_PROVIDER, default DynamoDB).
+ * DURABLE monthly baseline counters — no ttl is ever written, so the KV sweep
+ * (which requires expires_at IS NOT NULL) never touches them (F10).
  */
 function store(): KvStore {
   if (_store !== null) return _store;
-  const client = new DynamoDBClient({
-    region: process.env.AWS_REGION || "us-east-1",
-    ...(process.env.DYNAMODB_ENDPOINT ? { endpoint: process.env.DYNAMODB_ENDPOINT } : {}),
-  });
-  const layout: DynamoKvLayout = {
-    tableName: TABLE_NAME,
-    pkPrefix: "discexposure",
-    pkSeparator: ":",
-    skName: "sk",
-    skValue: "v",
-    ttlAttr: "ttl",
-    versionAttr: "_v",
-    nativeNumberFields: ["count"],
-    allowSeparatorInKey: true,
-  };
-  _store = new DynamoKvStore(client, layout);
+  _store = getKvStore("discexposure");
   return _store;
 }
 

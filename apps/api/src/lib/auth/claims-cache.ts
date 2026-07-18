@@ -15,8 +15,8 @@
  * carries higher-privilege claims written after a tenant-removal invalidation.
  */
 
-import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoKvStore, type DynamoKvLayout, type KvStore } from "@de-otio/saas-foundation/kv";
+import type { KvStore } from "@de-otio/saas-foundation/kv";
+import { getKvStore } from "../kv/kv-provider.js";
 
 export interface CachedClaims {
   /** Trellis `User.id` (cuid). May be empty string for drift sentinel. */
@@ -110,27 +110,11 @@ export class ClaimsCache {
 }
 
 /**
- * Convenience constructor used by the Lambda handler. Builds a DynamoKvStore
- * over the byte-compat `claims` layout (pk `claims:{sub}`, sk `meta`, ttl attr
- * `ttl`) from `DYNAMODB_TABLE` + `AWS_REGION`. Tests construct a `ClaimsCache`
- * directly with a `MemoryKvStore`. When KV_PROVIDER wiring lands (WS-1 T5) this
- * factory is replaced by the injected typed store; until then it preserves the
- * exact AWS storage behavior.
+ * Convenience constructor used by the Lambda handler. Resolves the `claims`
+ * KvStore via the central provider factory (KV_PROVIDER, default DynamoDB over
+ * the byte-compat `claims` layout — pk `claims:{sub}`, sk `meta`, ttl `ttl`).
+ * Tests construct a `ClaimsCache` directly with a `MemoryKvStore`.
  */
 export function createClaimsCacheFromEnv(): ClaimsCache {
-  const tableName = process.env.DYNAMODB_TABLE;
-  if (!tableName) {
-    throw new Error("DYNAMODB_TABLE env var is required for ClaimsCache");
-  }
-  const client = new DynamoDBClient({ region: process.env.AWS_REGION });
-  const layout: DynamoKvLayout = {
-    tableName,
-    pkPrefix: "claims",
-    pkSeparator: ":",
-    skName: "sk",
-    skValue: "meta",
-    ttlAttr: "ttl",
-    versionAttr: "_v",
-  };
-  return new ClaimsCache(new DynamoKvStore(client, layout));
+  return new ClaimsCache(getKvStore("claims"));
 }

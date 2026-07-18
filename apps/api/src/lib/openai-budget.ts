@@ -6,8 +6,8 @@
  * Fail-open: if DynamoDB is unavailable, allows the call through.
  */
 
-import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoKvStore, type DynamoKvLayout, type KvStore } from "@de-otio/saas-foundation/kv";
+import type { KvStore } from "@de-otio/saas-foundation/kv";
+import { getKvStore } from "./kv/kv-provider.js";
 import { getLogger, Logger } from "./logger.js";
 
 export interface OpenAiBudgetConfig {
@@ -24,34 +24,12 @@ export interface OpenAiBudgetStatus {
   exceeded: boolean;
 }
 
-const TABLE_NAME = process.env.DYNAMODB_TABLE || `${process.env.STAGE || "dev"}-trellis`;
-
 let _store: KvStore | null = null;
 
-/**
- * Lazily build the default DynamoKvStore over the byte-compat `costbudget`
- * layout (pk `costbudget:{key}`, sk `v`, ttl attr `ttl`, native `count`).
- * `allowSeparatorInKey` because the key is a server-constructed
- * `openai:hourly:{ts}` / `openai:daily:{date}` composite (ws1-kv-port-plan §3.2).
- */
+/** The `costbudget` KvStore, provider-selected (KV_PROVIDER, default DynamoDB). */
 function store(): KvStore {
   if (_store !== null) return _store;
-  const client = new DynamoDBClient({
-    region: process.env.AWS_REGION || "us-east-1",
-    ...(process.env.DYNAMODB_ENDPOINT ? { endpoint: process.env.DYNAMODB_ENDPOINT } : {}),
-  });
-  const layout: DynamoKvLayout = {
-    tableName: TABLE_NAME,
-    pkPrefix: "costbudget",
-    pkSeparator: ":",
-    skName: "sk",
-    skValue: "v",
-    ttlAttr: "ttl",
-    versionAttr: "_v",
-    nativeNumberFields: ["count"],
-    allowSeparatorInKey: true,
-  };
-  _store = new DynamoKvStore(client, layout);
+  _store = getKvStore("costbudget");
   return _store;
 }
 
