@@ -1,8 +1,17 @@
 /**
  * Unit tests for the PreTokenGeneration Lambda (T2 — Cognito Lambda Triggers).
+ *
+ * Cache assertions are by OUTCOME against an injected `MemoryKvStore`-backed
+ * `ClaimsCache` (WS-1 §3.6): reads/writes now happen inside
+ * `@de-otio/saas-foundation`'s `KvStore` port, so a raw `@aws-sdk/client-dynamodb`
+ * mock no longer observes them. We seed hits via `cache.put(...)`, treat an empty
+ * store (or an expired entry) as a miss, and assert writes with `cache.get(...)`
+ * plus a spy on the injected store's `putIfFresher` (the port's write primitive).
  */
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ClaimsCache, type CachedClaims } from "../../src/lib/auth/claims-cache.js";
+import { MemoryKvStore } from "@de-otio/saas-foundation/kv";
 
 const {
   mockSecretsSend,
@@ -41,6 +50,9 @@ vi.mock("@aws-lambda-powertools/parameters/secrets", () => ({
   getSecret: mockGetSecret,
 }));
 
+// Kept so the module's (unused-in-tests) DynamoDB default path resolves without
+// touching a real client. Claims reads/writes are asserted via the injected
+// MemoryKvStore, not this mock.
 vi.mock("@aws-sdk/client-dynamodb", () => {
   const DynamoDBClient = vi.fn();
   DynamoDBClient.prototype.send = mockDdbSend;
@@ -93,36 +105,38 @@ vi.mock("@prisma/client", () => {
   return { PrismaClient };
 });
 
-function freshClaimsItem(overrides: Record<string, any> = {}) {
-  const ttl = Math.floor(Date.now() / 1000) + 1800;
-  return {
-    Item: {
-      pk: { S: "claims:cognito-sub-abc123" },
-      sk: { S: "meta" },
-      userId: { S: "u_clxxx" },
-      globalRole: { S: "B2B_PARTNER" },
-      activeTenantId: { S: "t_org" },
-      tenantSlug: { S: "acme" },
-      tenantRole: { S: "MEMBER" },
-      handle: { S: "alice" },
-      ttl: { N: String(ttl) },
-      ...overrides,
-    },
-  };
-}
+const SUB = "cognito-sub-abc123";
+
+/**
+ * The claims a fresh cache hit carries — the outcome-equivalent of the old
+ * `freshClaimsItem()` DynamoDB shape. `ClaimsCache` keys on the `sub` verbatim.
+ */
+const FRESH_CLAIMS: CachedClaims = {
+  userId: "u_clxxx",
+  globalRole: "B2B_PARTNER",
+  activeTenantId: "t_org",
+  tenantSlug: "acme",
+  tenantRole: "MEMBER",
+  handle: "alice",
+};
 
 function makeEvent(opts: { idpGroups?: string; identities?: string } = {}) {
-  const attrs: Record<string, string> = { sub: "cognito-sub-abc123" };
+  const attrs: Record<string, string> = { sub: SUB };
   if (opts.idpGroups !== undefined) attrs["custom:idpGroups"] = opts.idpGroups;
   if (opts.identities !== undefined) attrs["identities"] = opts.identities;
   return {
-    userName: "cognito-sub-abc123",
+    userName: SUB,
     request: { userAttributes: attrs },
     response: {},
   } as any;
 }
 
-beforeEach(() => {
+// Injected per-test: a MemoryKvStore-backed ClaimsCache the handler reads/writes.
+let store: MemoryKvStore;
+let cache: ClaimsCache;
+let setClaimsCache: (c: ClaimsCache | null) => void;
+
+beforeEach(async () => {
   vi.clearAllMocks();
   vi.resetModules();
   process.env.AWS_REGION = "eu-central-1";
@@ -156,6 +170,20 @@ beforeEach(() => {
   mockTenantMemberUpdate.mockResolvedValue({});
   mockRoleMappingFindMany.mockResolvedValue([]);
   mockIdpFindUnique.mockResolvedValue(null);
+
+  // Inject a MemoryKvStore-backed ClaimsCache. Its clock and the module's
+  // `Math.floor(Date.now()/1000)` share the real `Date.now`, so TTL decisions
+  // agree. Import the module AFTER resetModules so loadHandler() (same call)
+  // resolves the same instance and sees the injected cache.
+  store = new MemoryKvStore({ now: () => Date.now() });
+  cache = new ClaimsCache(store);
+  const mod = await import("../../src/lambda/pre-token-generation.js");
+  setClaimsCache = mod.__setClaimsCacheForTest;
+  setClaimsCache(cache);
+});
+
+afterEach(() => {
+  setClaimsCache(null);
 });
 
 async function loadHandler() {
@@ -165,7 +193,7 @@ async function loadHandler() {
 
 describe("PreTokenGeneration — cache hit", () => {
   it("returns cached claims without RDS lookup", async () => {
-    mockDdbSend.mockResolvedValueOnce(freshClaimsItem());
+    await cache.put(SUB, FRESH_CLAIMS, 1800);
     const handler = await loadHandler();
     const event = makeEvent();
     const result = await handler(event, {} as any, () => {});
@@ -190,17 +218,20 @@ describe("PreTokenGeneration — cache hit", () => {
   });
 
   it("does NOT write to cache on a hit (no refresh)", async () => {
-    mockDdbSend.mockResolvedValueOnce(freshClaimsItem());
+    await cache.put(SUB, FRESH_CLAIMS, 1800);
+    // Spy AFTER seeding so only handler-initiated writes are counted.
+    const putSpy = vi.spyOn(store, "putIfFresher");
     const handler = await loadHandler();
     await handler(makeEvent(), {} as any, () => {});
-    const puts = mockDdbSend.mock.calls.filter((c) => c[0].kind === "PUT");
-    expect(puts.length).toBe(0);
+    expect(putSpy).not.toHaveBeenCalled();
+    // The cached entry is served unchanged.
+    expect(await cache.get(SUB)).toEqual(FRESH_CLAIMS);
   });
 });
 
 describe("PreTokenGeneration — cache miss", () => {
   it("queries RDS and writes the cache", async () => {
-    mockDdbSend.mockResolvedValueOnce({ Item: undefined });
+    // Empty store → miss.
     mockUserFindUnique.mockResolvedValueOnce({
       id: "u_clxxx",
       role: "END_USER",
@@ -220,7 +251,7 @@ describe("PreTokenGeneration — cache miss", () => {
         },
       },
     ]);
-    mockDdbSend.mockResolvedValueOnce({});
+    const putSpy = vi.spyOn(store, "putIfFresher");
 
     const handler = await loadHandler();
     const event = makeEvent();
@@ -234,12 +265,14 @@ describe("PreTokenGeneration — cache miss", () => {
     expect(claims["custom:activeTenantId"]).toBe("t_personal");
     expect(claims["custom:tenantSlug"]).toBe("personal-u_clxxx");
     expect(claims["custom:tenantRole"]).toBe("OWNER");
-    const puts = mockDdbSend.mock.calls.filter((c) => c[0].kind === "PUT");
-    expect(puts.length).toBe(1);
+    // The resolved claims were written back (empty store → now populated).
+    expect(putSpy).toHaveBeenCalledTimes(1);
+    const cached = await cache.get(SUB);
+    expect(cached?.userId).toBe("u_clxxx");
+    expect(cached?.activeTenantId).toBe("t_personal");
   });
 
   it("prefers an active ORGANIZATION tenant for federated users", async () => {
-    mockDdbSend.mockResolvedValueOnce({ Item: undefined });
     mockUserFindUnique.mockResolvedValueOnce({
       id: "u_clxxx",
       role: "B2B_PARTNER",
@@ -259,7 +292,6 @@ describe("PreTokenGeneration — cache miss", () => {
         tenant: { id: "t_org", slug: "acme", status: "ACTIVE", type: "ORGANIZATION" },
       },
     ]);
-    mockDdbSend.mockResolvedValueOnce({});
 
     const handler = await loadHandler();
     const result = await handler(
@@ -275,8 +307,8 @@ describe("PreTokenGeneration — cache miss", () => {
   });
 
   it("returns sentinel claims and does not throw on user drift", async () => {
-    mockDdbSend.mockResolvedValueOnce({ Item: undefined });
     mockUserFindUnique.mockResolvedValueOnce(null);
+    const putSpy = vi.spyOn(store, "putIfFresher");
     const handler = await loadHandler();
     const result = await handler(makeEvent(), {} as any, () => {});
     const claims =
@@ -285,8 +317,9 @@ describe("PreTokenGeneration — cache miss", () => {
     expect(claims["custom:userId"]).toBe("");
     expect(claims["custom:activeTenantId"]).toBe("");
     expect(claims["custom:tenantRole"]).toBe("");
-    const puts = mockDdbSend.mock.calls.filter((c) => c[0].kind === "PUT");
-    expect(puts.length).toBe(0);
+    // The drift sentinel is never cached.
+    expect(putSpy).not.toHaveBeenCalled();
+    expect(await cache.get(SUB)).toBeNull();
   });
 
   it("returns sentinel claims for a suspended user (suspended=true, past timestamp)", async () => {
@@ -294,7 +327,6 @@ describe("PreTokenGeneration — cache miss", () => {
     // `suspendedAt = new Date()` (always a past value when read). The
     // earlier check `suspendedAt > now` was inverted and let suspended
     // users keep issuing tokens.
-    mockDdbSend.mockResolvedValueOnce({ Item: undefined });
     mockUserFindUnique.mockResolvedValueOnce({
       id: "u_clxxx",
       role: "END_USER",
@@ -314,7 +346,6 @@ describe("PreTokenGeneration — cache miss", () => {
   it("returns sentinel when suspendedAt set but suspended=false (defense-in-depth)", async () => {
     // Either signal alone blocks issuance — protects against a writer
     // that forgets to set both columns.
-    mockDdbSend.mockResolvedValueOnce({ Item: undefined });
     mockUserFindUnique.mockResolvedValueOnce({
       id: "u_clxxx",
       role: "END_USER",
@@ -332,7 +363,6 @@ describe("PreTokenGeneration — cache miss", () => {
   });
 
   it("returns sentinel when suspended=true but suspendedAt is null", async () => {
-    mockDdbSend.mockResolvedValueOnce({ Item: undefined });
     mockUserFindUnique.mockResolvedValueOnce({
       id: "u_clxxx",
       role: "END_USER",
@@ -350,20 +380,18 @@ describe("PreTokenGeneration — cache miss", () => {
   });
 
   it("treats expired cache TTL as a miss", async () => {
-    const stale = Math.floor(Date.now() / 1000) - 100;
-    mockDdbSend.mockResolvedValueOnce({
-      Item: {
-        pk: { S: "claims:cognito-sub-abc123" },
-        sk: { S: "meta" },
-        userId: { S: "u_old" },
-        globalRole: { S: "END_USER" },
-        activeTenantId: { S: "t_old" },
-        tenantSlug: { S: "old" },
-        tenantRole: { S: "MEMBER" },
-        handle: { S: "old" },
-        ttl: { N: String(stale) },
-      },
-    });
+    // Seed an ALREADY-EXPIRED entry (negative ttl → expiresAt in the past). The
+    // port's on-read expiry filter drops it, so `cache.get` returns null and the
+    // handler falls through to RDS — the outcome-equivalent of the old stale-row.
+    const stale: CachedClaims = {
+      userId: "u_old",
+      globalRole: "END_USER",
+      activeTenantId: "t_old",
+      tenantSlug: "old",
+      tenantRole: "MEMBER",
+      handle: "old",
+    };
+    await cache.put(SUB, stale, -100);
     mockUserFindUnique.mockResolvedValueOnce({
       id: "u_new",
       role: "END_USER",
@@ -378,7 +406,6 @@ describe("PreTokenGeneration — cache miss", () => {
         tenant: { id: "t_new", slug: "personal-new", status: "ACTIVE", type: "PERSONAL" },
       },
     ]);
-    mockDdbSend.mockResolvedValueOnce({});
 
     const handler = await loadHandler();
     const result = await handler(makeEvent(), {} as any, () => {});
@@ -395,7 +422,6 @@ describe("PreTokenGeneration — read-after-write race (RDS retry)", () => {
     // The brand-new signup's first token is minted before PostConfirmation's
     // provisioning transaction is visible: attempt 1 sees no row, attempt 2
     // does. The token MUST carry the real cuid, not the drift sentinel.
-    mockDdbSend.mockResolvedValueOnce({ Item: undefined }); // cache miss
     mockUserFindUnique
       .mockResolvedValueOnce(null) // not yet committed
       .mockResolvedValueOnce({
@@ -418,6 +444,7 @@ describe("PreTokenGeneration — read-after-write race (RDS retry)", () => {
         },
       },
     ]);
+    const putSpy = vi.spyOn(store, "putIfFresher");
 
     const handler = await loadHandler();
     const result = await handler(makeEvent(), {} as any, () => {});
@@ -429,8 +456,8 @@ describe("PreTokenGeneration — read-after-write race (RDS retry)", () => {
     expect(claims["custom:userId"]).toBe("u_clxxx");
     expect(claims["custom:activeTenantId"]).toBe("t_personal");
     // The recovered claims are cached so the next issuance is a clean hit.
-    const puts = mockDdbSend.mock.calls.filter((c) => c[0].kind === "PUT");
-    expect(puts.length).toBe(1);
+    expect(putSpy).toHaveBeenCalledTimes(1);
+    expect((await cache.get(SUB))?.userId).toBe("u_clxxx");
   });
 
   it("falls through to the drift sentinel after exhausting RDS retries", async () => {
@@ -438,8 +465,8 @@ describe("PreTokenGeneration — read-after-write race (RDS retry)", () => {
     // unchanged from the single-shot case — empty claims, no cache write — but
     // now only after the bounded retry budget is spent.
     process.env.PRETOKEN_RDS_RETRY_MAX = "3";
-    mockDdbSend.mockResolvedValue({ Item: undefined });
     mockUserFindUnique.mockResolvedValue(null);
+    const putSpy = vi.spyOn(store, "putIfFresher");
 
     const handler = await loadHandler();
     const result = await handler(makeEvent(), {} as any, () => {});
@@ -449,15 +476,15 @@ describe("PreTokenGeneration — read-after-write race (RDS retry)", () => {
       result!.response.claimsAndScopeOverrideDetails!.idTokenGeneration!
         .claimsToAddOrOverride;
     expect(claims["custom:userId"]).toBe("");
-    const puts = mockDdbSend.mock.calls.filter((c) => c[0].kind === "PUT");
-    expect(puts.length).toBe(0);
+    expect(putSpy).not.toHaveBeenCalled();
+    expect(await cache.get(SUB)).toBeNull();
   });
 
   it("treats a cached entry with an empty userId as a miss and recovers from RDS", async () => {
     // No path should ever cache an empty userId, but if one is ever present
     // (a poisoned/legacy row), serving it would mint a token with an empty
     // `custom:userId`. Defensive: treat it as a miss and fall back to RDS.
-    mockDdbSend.mockResolvedValueOnce(freshClaimsItem({ userId: { S: "" } }));
+    await cache.put(SUB, { ...FRESH_CLAIMS, userId: "" }, 1800);
     mockUserFindUnique.mockResolvedValueOnce({
       id: "u_real",
       role: "END_USER",
@@ -492,13 +519,13 @@ describe("PreTokenGeneration — read-after-write race (RDS retry)", () => {
 
 describe("PreTokenGeneration — federated role refresh", () => {
   it("re-resolves role from current idpGroups on every issuance", async () => {
-    mockDdbSend.mockResolvedValueOnce(freshClaimsItem());
+    await cache.put(SUB, FRESH_CLAIMS, 1800);
     mockRoleMappingFindMany.mockResolvedValueOnce([
       { idpGroupName: "trellis-admins", tenantRole: "ADMIN", priority: 10 },
     ]);
     mockIdpFindUnique.mockResolvedValueOnce({ status: "ACTIVE", defaultRole: "MEMBER" });
     mockTenantMemberUpdate.mockResolvedValueOnce({});
-    mockDdbSend.mockResolvedValueOnce({});
+    const putSpy = vi.spyOn(store, "putIfFresher");
 
     const handler = await loadHandler();
     const result = await handler(
@@ -518,12 +545,13 @@ describe("PreTokenGeneration — federated role refresh", () => {
       where: { tenantId_userId: { tenantId: "t_org", userId: "u_clxxx" } },
       data: { role: "ADMIN" },
     });
-    const puts = mockDdbSend.mock.calls.filter((c) => c[0].kind === "PUT");
-    expect(puts.length).toBe(1);
+    // The refreshed role was written back to the cache.
+    expect(putSpy).toHaveBeenCalledTimes(1);
+    expect((await cache.get(SUB))?.tenantRole).toBe("ADMIN");
   });
 
   it("does NOT refresh when idpGroups absent (defaults applied)", async () => {
-    mockDdbSend.mockResolvedValueOnce(freshClaimsItem());
+    await cache.put(SUB, FRESH_CLAIMS, 1800);
     const handler = await loadHandler();
     const result = await handler(
       makeEvent({ identities: JSON.stringify([{ providerName: "tenant-acme" }]) }),
@@ -539,14 +567,14 @@ describe("PreTokenGeneration — federated role refresh", () => {
   });
 
   it("does NOT refresh for non-federated users even when claims have idpGroups", async () => {
-    mockDdbSend.mockResolvedValueOnce(freshClaimsItem());
+    await cache.put(SUB, FRESH_CLAIMS, 1800);
     const handler = await loadHandler();
     await handler(makeEvent({ idpGroups: "trellis-admins" }), {} as any, () => {});
     expect(mockRoleMappingFindMany).not.toHaveBeenCalled();
   });
 
   it("ignores refresh when IdP is not ACTIVE", async () => {
-    mockDdbSend.mockResolvedValueOnce(freshClaimsItem());
+    await cache.put(SUB, FRESH_CLAIMS, 1800);
     mockRoleMappingFindMany.mockResolvedValueOnce([
       { idpGroupName: "trellis-admins", tenantRole: "ADMIN", priority: 10 },
     ]);
@@ -569,7 +597,7 @@ describe("PreTokenGeneration — federated role refresh", () => {
   });
 
   it("swallows refresh-path errors without failing the issuance", async () => {
-    mockDdbSend.mockResolvedValueOnce(freshClaimsItem());
+    await cache.put(SUB, FRESH_CLAIMS, 1800);
     mockRoleMappingFindMany.mockRejectedValueOnce(new Error("RDS down"));
     const handler = await loadHandler();
     const result = await handler(
@@ -591,12 +619,13 @@ describe("PreTokenGeneration — federated role refresh", () => {
     // throws (transient DB blip). The JWT must continue to carry MEMBER —
     // promoting it to ADMIN here would oscillate the user's effective role
     // between cached-old (MEMBER) and JWT-new (ADMIN) on alternating refreshes.
-    mockDdbSend.mockResolvedValueOnce(freshClaimsItem());
+    await cache.put(SUB, FRESH_CLAIMS, 1800);
     mockRoleMappingFindMany.mockResolvedValueOnce([
       { idpGroupName: "trellis-admins", tenantRole: "ADMIN", priority: 10 },
     ]);
     mockIdpFindUnique.mockResolvedValueOnce({ status: "ACTIVE", defaultRole: "MEMBER" });
     mockTenantMemberUpdate.mockRejectedValueOnce(new Error("DB connection lost"));
+    const putSpy = vi.spyOn(store, "putIfFresher");
 
     const handler = await loadHandler();
     const result = await handler(
@@ -612,13 +641,13 @@ describe("PreTokenGeneration — federated role refresh", () => {
       result!.response.claimsAndScopeOverrideDetails!.accessTokenGeneration!
         .claimsToAddOrOverride;
     expect(claims["custom:tenantRole"]).toBe("MEMBER");
-    // No DDB cache write when the persist failed.
-    const puts = mockDdbSend.mock.calls.filter((c) => c[0].kind === "PUT");
-    expect(puts.length).toBe(0);
+    // No cache write when the persist failed; the entry keeps its MEMBER role.
+    expect(putSpy).not.toHaveBeenCalled();
+    expect((await cache.get(SUB))?.tenantRole).toBe("MEMBER");
   });
 
   it("skips refresh when resolved role equals current role", async () => {
-    mockDdbSend.mockResolvedValueOnce(freshClaimsItem());
+    await cache.put(SUB, FRESH_CLAIMS, 1800);
     mockRoleMappingFindMany.mockResolvedValueOnce([
       { idpGroupName: "trellis-employees", tenantRole: "MEMBER", priority: 100 },
     ]);
@@ -641,7 +670,7 @@ describe("PreTokenGeneration — federation detection", () => {
     // Malformed `identities` is not a federation signal we can act on.
     // Returning false avoids running the org-tenant role-resolution path
     // for what is effectively an indeterminate case.
-    mockDdbSend.mockResolvedValueOnce(freshClaimsItem());
+    await cache.put(SUB, FRESH_CLAIMS, 1800);
     const handler = await loadHandler();
     await handler(
       makeEvent({ identities: "not-json", idpGroups: "trellis-admins" }),
@@ -652,7 +681,7 @@ describe("PreTokenGeneration — federation detection", () => {
   });
 
   it("treats empty identities JSON array as native (no refresh)", async () => {
-    mockDdbSend.mockResolvedValueOnce(freshClaimsItem());
+    await cache.put(SUB, FRESH_CLAIMS, 1800);
     const handler = await loadHandler();
     await handler(
       makeEvent({ identities: "[]", idpGroups: "trellis-admins" }),
