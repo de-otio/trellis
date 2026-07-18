@@ -1,61 +1,22 @@
 /**
- * Unit tests: device-authorization.ts
+ * Unit tests: device-authorization.ts — behavior-comparison suite (WS-1 §3.8).
  *
- * Covers:
- *  - user_code generation: uniqueness over many samples + alphabet correctness.
- *  - device_code generation: 256-bit, base64url.
- *  - approval flow: approve, then poll → tokens; second poll → 410 (gone).
- *  - polling rate limit: slow_down on too-frequent polls.
- *  - expiry: expired_token after ttl elapses.
- *  - failed-lookup increment + lockout invalidation.
- *  - approveDeviceAuth seals tokens with a per-record DEK; a direct
- *    record load WITHOUT the device_code cannot decrypt.
- *  - 60-second post-approval TTL.
+ * The pre-port suite mocked `@aws-sdk/client-dynamodb`. Post-port the storage is
+ * two injected `MemoryKvStore`s (device rows + the manual user-code index row),
+ * and the status-conditioned writes are read(consistent)→compareAndSet — so this
+ * suite asserts OUTCOME EQUIVALENCE:
+ *  - user_code / device_code generation (pure helpers, unchanged).
+ *  - approve → poll → tokens; second poll → gone (read-once delete).
+ *  - slow_down on too-frequent polls; expired after the record's expiry passes.
+ *  - failed-lookup increment + lockout invalidation; missing → 0.
+ *  - envelope binding: a stored record cannot be opened without the device_code
+ *    (real seal/open, unchanged).
+ *  - 60-second post-approval TTL re-key.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { randomBytes } from "node:crypto";
-
-const { mockSend, ddbStore } = vi.hoisted(() => ({
-  mockSend: vi.fn(),
-  ddbStore: new Map<string, Record<string, unknown>>(),
-}));
-
-vi.mock("@aws-sdk/client-dynamodb", () => {
-  class FakeCmd {
-    input: Record<string, unknown>;
-    constructor(input: Record<string, unknown>) {
-      this.input = input;
-    }
-  }
-  return {
-    DynamoDBClient: class {
-      send = mockSend;
-    },
-    GetItemCommand: class extends FakeCmd {},
-    PutItemCommand: class extends FakeCmd {},
-    DeleteItemCommand: class extends FakeCmd {},
-    UpdateItemCommand: class extends FakeCmd {},
-    QueryCommand: class extends FakeCmd {},
-    ConditionalCheckFailedException: class extends Error {
-      constructor(msg = "cond-failed") {
-        super(msg);
-        this.name = "ConditionalCheckFailedException";
-      }
-    },
-  };
-});
-
-// Use the real marshall/unmarshall — they exist in node and are fast.
-vi.mock("@aws-sdk/util-dynamodb", async () => {
-  const actual =
-    await vi.importActual<typeof import("@aws-sdk/util-dynamodb")>("@aws-sdk/util-dynamodb");
-  return actual;
-});
-
-import {
-  ConditionalCheckFailedException,
-} from "@aws-sdk/client-dynamodb";
+import { MemoryKvStore, type KvStore } from "@de-otio/saas-foundation/kv";
 
 import {
   approveDeviceAuth,
@@ -74,127 +35,20 @@ import {
   USER_CODE_ALPHABET,
   USER_CODE_FAILURE_LIMIT,
   USER_CODE_LEN,
+  _setDeviceStoresForTest,
 } from "../../../src/lib/oauth/device-authorization.js";
 
 import { _resetKekCacheForTest } from "../../../src/lib/oauth/envelope-crypto.js";
 
-function key(input: Record<string, unknown>): string {
-  // Build a stable key from the marshalled DynamoDB Key object.
-  const obj = input.Key as Record<string, { S?: string; N?: string }>;
-  const parts: string[] = [];
-  for (const k of Object.keys(obj).sort()) {
-    parts.push(`${k}=${obj[k]?.S ?? obj[k]?.N ?? ""}`);
-  }
-  return parts.join("|");
-}
-
-function unmarshallAttrs(o: Record<string, { S?: string; N?: string }>): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(o)) {
-    if (v && typeof v === "object") {
-      if ("S" in v && v.S !== undefined) out[k] = v.S;
-      else if ("N" in v && v.N !== undefined) out[k] = Number(v.N);
-      else if ("BOOL" in v) out[k] = (v as { BOOL?: boolean }).BOOL;
-      else if ("NULL" in v) out[k] = null;
-      else out[k] = v;
-    } else out[k] = v;
-  }
-  return out;
-}
+let deviceStore: MemoryKvStore;
+let indexStore: MemoryKvStore;
 
 beforeEach(() => {
-  ddbStore.clear();
-  mockSend.mockReset();
+  deviceStore = new MemoryKvStore();
+  indexStore = new MemoryKvStore();
+  _setDeviceStoresForTest(deviceStore, indexStore);
   _resetKekCacheForTest();
   process.env.DEVICE_AUTH_KEK_BASE64 = randomBytes(32).toString("base64");
-
-  mockSend.mockImplementation(async (cmd: { constructor: { name: string }; input: Record<string, unknown> }) => {
-    const name = cmd.constructor.name;
-    const input = cmd.input;
-    if (name === "PutItemCommand" || name === "MockPutItemCommand") {
-      const item = input.Item as Record<string, { S?: string; N?: string }>;
-      const pk = (item.pk as { S?: string }).S ?? "";
-      const sk = (item.sk as { S?: string }).S ?? "";
-      const k = `pk=${pk}|sk=${sk}`;
-      const cond = input.ConditionExpression as string | undefined;
-      if (cond?.includes("attribute_not_exists") && ddbStore.has(k)) {
-        throw new ConditionalCheckFailedException();
-      }
-      ddbStore.set(k, item);
-      return { Attributes: item };
-    }
-    if (name === "GetItemCommand" || name === "MockGetItemCommand") {
-      const k = key(input);
-      const item = ddbStore.get(k);
-      return item ? { Item: item } : {};
-    }
-    if (name === "DeleteItemCommand" || name === "MockDeleteItemCommand") {
-      ddbStore.delete(key(input));
-      return {};
-    }
-    if (name === "UpdateItemCommand" || name === "MockUpdateItemCommand") {
-      const k = key(input);
-      const existing = ddbStore.get(k);
-      const cond = input.ConditionExpression as string | undefined;
-      if (cond?.includes("attribute_exists") && !existing) {
-        throw new ConditionalCheckFailedException();
-      }
-      const expr = (input.UpdateExpression as string) ?? "";
-      const values = (input.ExpressionAttributeValues ?? {}) as Record<string, { S?: string; N?: string; NULL?: boolean }>;
-      const names = ((input.ExpressionAttributeNames ?? {}) as Record<string, string>) || {};
-      const obj = existing ? { ...existing } : {};
-
-      // Match SET clauses (very loose, sufficient for our tests).
-      const setMatch = expr.match(/SET\s+(.+?)(?:\s+ADD|\s+REMOVE|$)/);
-      const addMatch = expr.match(/ADD\s+(.+?)(?:\s+SET|\s+REMOVE|$)/);
-      const removeMatch = expr.match(/REMOVE\s+(.+?)(?:\s+SET|\s+ADD|$)/);
-
-      if (setMatch) {
-        const parts = setMatch[1]!.split(",").map((s) => s.trim());
-        for (const p of parts) {
-          const [lhs, rhs] = p.split("=").map((s) => s.trim());
-          const attr = lhs!.startsWith("#") ? names[lhs!] ?? lhs : lhs!;
-          const value = values[rhs!];
-          obj[attr] = value;
-        }
-      }
-      if (addMatch) {
-        const parts = addMatch[1]!.split(",").map((s) => s.trim());
-        for (const p of parts) {
-          const [lhs, rhs] = p.split(/\s+/);
-          const attr = lhs!.startsWith("#") ? names[lhs!] ?? lhs : lhs!;
-          const inc = Number(values[rhs!]?.N ?? "0");
-          const current = Number((obj[attr] as { N?: string } | undefined)?.N ?? "0");
-          obj[attr] = { N: String(current + inc) };
-        }
-      }
-      if (removeMatch) {
-        const parts = removeMatch[1]!.split(",").map((s) => s.trim());
-        for (const attrRaw of parts) {
-          const attr = attrRaw.startsWith("#") ? names[attrRaw] ?? attrRaw : attrRaw;
-          delete obj[attr];
-        }
-      }
-
-      // Apply condition checks for UpdateItem.
-      if (cond?.includes("#status = :pending")) {
-        const status = (existing?.status as { S?: string } | undefined)?.S;
-        if (status !== "pending") throw new ConditionalCheckFailedException();
-      }
-      if (cond?.includes("#status = :active")) {
-        const status = (existing?.status as { S?: string } | undefined)?.S;
-        if (status !== "active") throw new ConditionalCheckFailedException();
-      }
-
-      ddbStore.set(k, obj as Record<string, { S?: string; N?: string }>);
-      return { Attributes: obj };
-    }
-    if (name === "QueryCommand" || name === "MockQueryCommand") {
-      // Not used in this test file.
-      return { Items: [] };
-    }
-    return {};
-  });
 });
 
 afterEach(() => {
@@ -203,12 +57,7 @@ afterEach(() => {
 
 describe("user_code helpers", () => {
   it("uses an unambiguous alphabet — no 0/O/1/I/2/Z", () => {
-    // The canonical RFC 8628 user_code alphabet drops 0/O/1/I (digits and
-    // visually similar letters). Z is also dropped (looks like 2). The
-    // remaining 20 letters include L by design — the spec calls out the
-    // BCDFGHJKLMNPQRSTVWXZ alphabet exactly.
     expect(USER_CODE_ALPHABET).not.toMatch(/[0OI12]/);
-    // 20 distinct characters
     expect(new Set(USER_CODE_ALPHABET).size).toBe(USER_CODE_ALPHABET.length);
     expect(USER_CODE_ALPHABET).toBe("BCDFGHJKLMNPQRSTVWXZ");
   });
@@ -223,9 +72,7 @@ describe("user_code helpers", () => {
     }
   });
 
-  it("generates highly unique codes — no dupes in 10K samples (deterministic seed subset)", () => {
-    // Use a deterministic seed by accumulating bytes from a seeded PRNG —
-    // for a 20^8 alphabet (~25.6B), 10K samples should never collide.
+  it("generates highly unique codes — no dupes in 10K samples", () => {
     const seen = new Set<string>();
     for (let i = 0; i < 10_000; i++) {
       const code = generateUserCode();
@@ -260,7 +107,6 @@ describe("generateDeviceCode", () => {
   it("produces a base64url string with at least 256 bits of entropy", () => {
     const code = generateDeviceCode();
     expect(code).toMatch(/^[A-Za-z0-9_-]+$/);
-    // base64url of 32 bytes = 43 chars (no padding).
     expect(code.length).toBeGreaterThanOrEqual(43);
   });
 });
@@ -310,12 +156,7 @@ describe("startDeviceAuthorization → pollDeviceAuth", () => {
       approvedByUserId: "u_admin",
       cognitoSub: "sub-123",
       tenantId: "t_abc",
-      tokens: {
-        access_token: "AT",
-        refresh_token: "RT",
-        token_type: "Bearer",
-        expires_in: 3600,
-      },
+      tokens: { access_token: "AT", refresh_token: "RT", token_type: "Bearer", expires_in: 3600 },
       sessionId: "s_xyz",
     });
 
@@ -324,7 +165,7 @@ describe("startDeviceAuthorization → pollDeviceAuth", () => {
     expect(ok.tokens?.access_token).toBe("AT");
     expect(ok.tokens?.refresh_token).toBe("RT");
 
-    // Second poll: row is gone; assert deleteItem was called against the dc# pk.
+    // Second poll: the row was deleted before the first returned (read-once).
     const second = await pollDeviceAuth(issued.device_code);
     expect(second.outcome).toBe("gone");
   });
@@ -339,31 +180,30 @@ describe("startDeviceAuthorization → pollDeviceAuth", () => {
       approvedByUserId: "u_admin",
       cognitoSub: "sub-123",
       tenantId: "t_abc",
-      tokens: {
-        access_token: "AT",
-        refresh_token: "RT",
-        token_type: "Bearer",
-        expires_in: 3600,
-      },
+      tokens: { access_token: "AT", refresh_token: "RT", token_type: "Bearer", expires_in: 3600 },
       sessionId: "s_xyz",
     });
     const record = await loadByDeviceCode(issued.device_code);
     expect(record).not.toBeNull();
     expect(record!.expiresAt).toBeGreaterThanOrEqual(before + POST_APPROVAL_TTL_SECONDS - 2);
     expect(record!.expiresAt).toBeLessThanOrEqual(before + POST_APPROVAL_TTL_SECONDS + 2);
+    // userCode was removed on approval.
+    expect(record!.userCode).toBeUndefined();
   });
 
   it("expired record returns `expired`", async () => {
     const issued = await startDeviceAuthorization({
       verificationUriBase: "https://example.com/agents/authorize",
-      expiresIn: 1,
+      expiresIn: 600,
     });
-    // Simulate clock drift by mutating the stored TTL backwards.
-    const k = `pk=dc#${issued.device_code}|sk=rec`;
-    const item = ddbStore.get(k)!;
-    item.expiresAt = { N: String(Math.floor(Date.now() / 1000) - 100) };
-    item.ttl = { N: String(Math.floor(Date.now() / 1000) + 60) }; // skip module-level ttl filter
-    ddbStore.set(k, item);
+    // Simulate clock drift: push the record's own expiresAt into the past while
+    // keeping the KV TTL in the future so the row is still readable.
+    const raw = await deviceStore.get<Record<string, unknown>>(issued.device_code);
+    await deviceStore.put(
+      issued.device_code,
+      { ...raw!.value, expiresAt: Math.floor(Date.now() / 1000) - 100 },
+      { expiresAt: Math.floor(Date.now() / 1000) + 60 },
+    );
     const result = await pollDeviceAuth(issued.device_code);
     expect(result.outcome).toBe("expired");
   });
@@ -399,9 +239,10 @@ describe("user_code lookup + lockout", () => {
     expect(record).toBeNull();
   });
 
-  it("incrementFailedLookup on a missing record returns 0", async () => {
+  it("incrementFailedLookup on a missing record returns 0 (no phantom row created)", async () => {
     const count = await incrementFailedLookup("does-not-exist");
     expect(count).toBe(0);
+    expect(await loadByDeviceCode("does-not-exist")).toBeNull();
   });
 
   it("invalidateDeviceCode removes the record", async () => {
@@ -424,12 +265,7 @@ describe("envelope binding to device_code (sec finding #1)", () => {
       approvedByUserId: "u_admin",
       cognitoSub: "sub-123",
       tenantId: "t_abc",
-      tokens: {
-        access_token: "AT",
-        refresh_token: "RT",
-        token_type: "Bearer",
-        expires_in: 3600,
-      },
+      tokens: { access_token: "AT", refresh_token: "RT", token_type: "Bearer", expires_in: 3600 },
       sessionId: "s_xyz",
     });
 
@@ -437,57 +273,49 @@ describe("envelope binding to device_code (sec finding #1)", () => {
     expect(record).not.toBeNull();
     expect(record!.envelope).toBeDefined();
 
-    // Attacker has the DynamoDB row but NOT the device_code.
-    const { open } = await import("../../../src/lib/oauth/envelope-crypto.js");
-    const { resolveKek } = await import("../../../src/lib/oauth/envelope-crypto.js");
+    // Attacker has the stored row but NOT the device_code.
+    const { open, resolveKek } = await import("../../../src/lib/oauth/envelope-crypto.js");
     const kek = await resolveKek();
-
     expect(() => open(record!.envelope!, "different-device-code-attempt-xx", kek)).toThrow();
     expect(() => open(record!.envelope!, "", kek)).toThrow();
   });
 });
 
 describe("error rethrow paths", () => {
-  it("incrementFailedLookup rethrows non-conditional errors", async () => {
-    mockSend.mockImplementationOnce(async () => {
-      throw new Error("network-error-1");
-    });
+  it("incrementFailedLookup rethrows non-conditional store errors", async () => {
+    const failing: KvStore = {
+      ...new MemoryKvStore(),
+      get: () => Promise.reject(new Error("network-error-1")),
+    } as unknown as KvStore;
+    _setDeviceStoresForTest(failing, indexStore);
     await expect(incrementFailedLookup("anything")).rejects.toThrow(/network-error-1/);
   });
 
-  it("pollDeviceAuth rethrows non-conditional update errors during pending update", async () => {
+  it("pollDeviceAuth rethrows non-conditional errors during the pending update", async () => {
     const issued = await startDeviceAuthorization({
       verificationUriBase: "https://example.com/agents/authorize",
     });
-
-    // Replace the implementation: GetItem succeeds, UpdateItem throws non-CCFE.
-    const original = mockSend.getMockImplementation()!;
-    let calls = 0;
-    mockSend.mockImplementation(async (cmd: { constructor: { name: string }; input: Record<string, unknown> }) => {
-      calls += 1;
-      const name = cmd.constructor.name;
-      if (calls === 2 && name.includes("UpdateItem")) {
-        throw new Error("network-error-2");
-      }
-      return original(cmd);
-    });
+    // A store that reads fine but throws on the best-effort lastPolledAt CAS.
+    const throwingCas: KvStore = {
+      ...deviceStore,
+      get: deviceStore.get.bind(deviceStore),
+      compareAndSet: () => Promise.reject(new Error("network-error-2")),
+    } as unknown as KvStore;
+    _setDeviceStoresForTest(throwingCas, indexStore);
     await expect(pollDeviceAuth(issued.device_code)).rejects.toThrow(/network-error-2/);
-    mockSend.mockImplementation(original);
   });
-
 });
 
 describe("loadByDeviceCode TTL handling", () => {
-  it("returns null for a record with expired DynamoDB ttl", async () => {
+  it("returns null for a record whose KV TTL has expired", async () => {
     const issued = await startDeviceAuthorization({
       verificationUriBase: "https://example.com/agents/authorize",
     });
-    const k = `pk=dc#${issued.device_code}|sk=rec`;
-    const item = ddbStore.get(k)!;
-    item.ttl = { N: String(Math.floor(Date.now() / 1000) - 100) };
-    ddbStore.set(k, item);
-
-    const result = await loadByDeviceCode(issued.device_code);
-    expect(result).toBeNull();
+    const raw = await deviceStore.get<Record<string, unknown>>(issued.device_code);
+    // Re-write with a KV expiry in the past → the port filters it on read.
+    await deviceStore.put(issued.device_code, raw!.value, {
+      expiresAt: Math.floor(Date.now() / 1000) - 100,
+    });
+    expect(await loadByDeviceCode(issued.device_code)).toBeNull();
   });
 });
