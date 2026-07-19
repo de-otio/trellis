@@ -164,6 +164,7 @@ interface PresignedSessionRow {
   status: string;
   mediaId: string | null;
   objectKey: string | null;
+  tenantId: string | null;
   expiresAt: Date;
 }
 
@@ -440,6 +441,52 @@ export class PresignedUploadHandler {
       return conflict("Session is incomplete; create a new one.");
     }
     if (session.status === "uploaded") {
+      // Idempotent early-return — HARDENED (WS-2 §4, finding 11 defense in
+      // depth): under the control inversion this path must SELF-HEAL any row
+      // that reached "uploaded" without an enqueued moderation job (a
+      // pre-migration session, or a flip that raced a send failure under the
+      // old ordering). Re-enqueue when no job exists; a session with a job
+      // must NOT double-enqueue.
+      if (env.MEDIA_ENQUEUE_ON_COMPLETE && env.MEDIA_PROCESSING_QUEUE) {
+        const hasJob = await withQueryTimeoutAndRetry<{ id: string } | null>(
+          sharedDatabaseConnectionManager,
+          region,
+          env as any,
+          (db: any) =>
+            db.mediaModerationJob.findFirst({
+              where: { mediaId },
+              select: { id: true },
+            }),
+          QueryTimeoutPresets.STANDARD,
+        );
+        if (!hasJob) {
+          try {
+            await env.MEDIA_PROCESSING_QUEUE.send({
+              objectKey,
+              tenantId: session.tenantId,
+              uploadId: session.id,
+            });
+            this.logger.info(
+              "presigned.complete: media processing re-enqueued (uploaded session had no moderation job)",
+              { sessionId: session.id, mediaId },
+            );
+          } catch (err) {
+            // Do NOT report success without a job enqueued: the client retry
+            // re-enters this self-heal path.
+            this.logger.error(
+              "presigned.complete: self-heal re-enqueue failed",
+              { sessionId: session.id, mediaId, error: err },
+            );
+            return {
+              ok: false,
+              status: 503,
+              error: "Enqueue failed",
+              message:
+                "Upload received but processing could not be queued; retry complete.",
+            };
+          }
+        }
+      }
       // Idempotent: a retried completion reports the current state.
       const media = await this.readMedia(mediaId, region, env);
       return {
@@ -550,6 +597,54 @@ export class PresignedUploadHandler {
       };
     }
 
+    // --- WS-2 §4 media control inversion: enqueue processing BEFORE the ---
+    // session flip (finding 11 — the placement is load-bearing). The session
+    // status is the client-visible idempotency key: if we flipped first and
+    // the send failed, the client retry would hit the idempotent early-return
+    // and report success WITHOUT a job — permanently unmoderated media (a
+    // CSAM-adjacent bypass). By enqueuing first, a send failure returns a
+    // retryable error with the session still "awaiting-upload", so the retry
+    // re-enters the full path (HEAD → lifecycle → enqueue → flip). The HEAD
+    // above already confirmed the bytes exist — the old S3-notification
+    // trigger's implicit ordering guarantee is preserved.
+    //
+    // AWS CUTOVER IS TWO DEPLOYS, NEVER ONE (finding 1): Deploy 1 turns this
+    // flag on WITH the S3 notification still enabled (double-enqueue is
+    // idempotent-safe); a monitoring gate proves the API path covers 100% of
+    // completions (count the "media processing enqueued" events against
+    // completed uploads); only then does Deploy 2 remove the notification
+    // ALONE. The flag defaults OFF on AWS until Deploy 1.
+    if (env.MEDIA_ENQUEUE_ON_COMPLETE && env.MEDIA_PROCESSING_QUEUE) {
+      try {
+        await env.MEDIA_PROCESSING_QUEUE.send({
+          objectKey,
+          tenantId: session.tenantId,
+          uploadId: session.id,
+        });
+        // Countable telemetry line — the finding-1 monitoring gate asserts
+        // count(api_media_enqueue) >= count(upload_completed) over this.
+        this.logger.info("presigned.complete: media processing enqueued", {
+          sessionId: session.id,
+          mediaId,
+          objectKey,
+        });
+      } catch (err) {
+        // Do NOT flip the session. Return an error; the session stays
+        // "awaiting-upload" so the client retry re-enters the full path.
+        this.logger.error(
+          "presigned.complete: media enqueue failed — not flipping session",
+          { sessionId: session.id, mediaId, error: err },
+        );
+        return {
+          ok: false,
+          status: 503,
+          error: "Enqueue failed",
+          message:
+            "Upload received but processing could not be queued; retry complete.",
+        };
+      }
+    }
+
     await withQueryTimeoutAndRetry(
       sharedDatabaseConnectionManager,
       region,
@@ -568,9 +663,14 @@ export class PresignedUploadHandler {
       lifecycle: applied.lifecycle,
     });
 
-    // NOTE: moderation was already enqueued by the S3 OBJECT_CREATED
-    // notification on the pending/ prefix when the bytes landed — completing
-    // here neither starts nor skips moderation (fail-closed either way).
+    // Under the inversion, `completeSession` is the SOLE moderation trigger
+    // (finding 6 invariant): an upload that never completes is never
+    // moderated and never served — `pending/` is never CDN-served (only
+    // `cas/` serves, populated exclusively by the completion worker's
+    // promote-on-approval), abandonSession best-effort deletes the staged
+    // object, and the hourly stale-media reap + nightly GC cover orphans.
+    // With the flag OFF (AWS pre-cutover) the S3 OBJECT_CREATED notification
+    // remains the trigger, exactly as before.
     return {
       ok: true,
       session: { sessionId: session.id, mediaId, status: "uploaded" },

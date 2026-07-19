@@ -257,6 +257,17 @@ export interface Env {
   FOLLOWERS_EVENTS_QUEUE: CloudflareQueue;
   LINK_CHECK_QUEUE: CloudflareQueue;
   MEDIA_PROCESSING_QUEUE: CloudflareQueue;
+  /**
+   * WS-2 §4 media control inversion: when true, `completeSession` enqueues
+   * the media-processing job explicitly (native `{ objectKey }` message)
+   * BEFORE flipping the session to "uploaded". Source:
+   * `MEDIA_ENQUEUE_ON_COMPLETE === "true"`. DEFAULT OFF on AWS — zero
+   * behavior change until the explicit TWO-DEPLOY cutover (enqueue ON with
+   * the S3 notification still live → monitoring gate → notification
+   * removal; finding 1 — a single-deploy swap is forbidden). Scaleway (no
+   * bucket notifications) runs with this ON from the start.
+   */
+  MEDIA_ENQUEUE_ON_COMPLETE: boolean;
 
   // Storage (S3-backed, same interface as Cloudflare R2)
   MEDIA_BUCKET_R2: R2Bucket;
@@ -1448,6 +1459,8 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     FOLLOWERS_EVENTS_QUEUE: new SqsQueue(sqsClient, sqsUrl("followers-events")),
     LINK_CHECK_QUEUE: new SqsQueue(sqsClient, sqsUrl("link-check")),
     MEDIA_PROCESSING_QUEUE: new SqsQueue(sqsClient, sqsUrl("media-processing")),
+    // WS-2 §4 inversion flag — default OFF (zero AWS change; finding 1).
+    MEDIA_ENQUEUE_ON_COMPLETE: process.env.MEDIA_ENQUEUE_ON_COMPLETE === "true",
 
     // S3 buckets (R2 interface)
     MEDIA_BUCKET_R2: new S3Storage(s3Client, mediaBucket),

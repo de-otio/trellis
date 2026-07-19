@@ -730,6 +730,7 @@ export async function processRecord(
     return { disposition: "ack", reason: "unparseable-body", poison: true };
   }
 
+  let sawPoison = false;
   for (const key of keys) {
     const outcome = await processObjectKey(key, deps);
     if (outcome.disposition === "fail") {
@@ -737,8 +738,16 @@ export async function processRecord(
       // started keys are idempotent on the dedupe path (deriveDedupeKey).
       return outcome;
     }
+    if (outcome.disposition === "ack" && outcome.poison === true) {
+      sawPoison = true;
+    }
   }
-  return { disposition: "ack", reason: "record-complete" };
+  // Propagate the poison marker (WS-2 §3.3): the AWS handler reads only
+  // `disposition` (unchanged), but the container dispatcher surfaces poison
+  // as an EXPLICIT returned "ack-drop" — the flag must survive aggregation.
+  return sawPoison
+    ? { disposition: "ack", reason: "record-complete", poison: true }
+    : { disposition: "ack", reason: "record-complete" };
 }
 
 // ---------------------------------------------------------------------------
