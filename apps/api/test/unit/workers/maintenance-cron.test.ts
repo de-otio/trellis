@@ -30,14 +30,18 @@ describe("runMaintenanceCron", () => {
   });
 
   function ctxWith(overrides: Record<string, unknown> = {}) {
-    return {
-      db: makeDb() as never,
+    const base: Record<string, unknown> = {
       logger: makeLogger(),
       cronLock: makeKvCronLock(kv, { owner: "A", clock }),
       cronKv: kv,
       clock,
       ...overrides,
     };
+    // Support the tests' `db:` shorthand — the core takes a LAZY getDb.
+    const db = (overrides.db as unknown) ?? makeDb();
+    delete base.db;
+    base.getDb = vi.fn(async () => db);
+    return base;
   }
 
   it("acquires the lock, ANALYZEs critical tables under the advisory lock", async () => {

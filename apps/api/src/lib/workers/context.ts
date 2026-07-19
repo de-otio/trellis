@@ -41,6 +41,13 @@ export interface QueueProducer {
 export interface WorkerContext {
   /** Prisma client (Lambda: `getLambdaPrisma()`; container: pooled). */
   readonly db: PrismaClient;
+  /**
+   * LAZY Prisma resolution — used by the cron cores so a fire that loses the
+   * single-fire lock (skip) never opens a DB connection, exactly like the old
+   * handlers (lock first, `getPrisma()` second). Queue workers, which always
+   * need the DB, use the eager `db` instead.
+   */
+  readonly getDb?: () => Promise<PrismaClient>;
   /** Neutral logger (`lib/logger.ts`, foundation/pino) — NOT powertools. */
   readonly logger: Logger;
   /** Metric emission port (§5.2). AWS: EMF adapter; container: OTel/no-op. */

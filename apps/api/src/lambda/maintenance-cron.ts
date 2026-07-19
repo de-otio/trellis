@@ -20,7 +20,7 @@ export const handler = async (): Promise<void> => {
   try {
     const cronKv = getKvStore("cron");
     await runMaintenanceCron({
-      db: await getPrisma(),
+      getDb: () => getPrisma(),
       logger: getLogger(),
       cronLock: makeKvCronLock(cronKv),
       cronKv,

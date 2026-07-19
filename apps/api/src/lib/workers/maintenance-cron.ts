@@ -28,9 +28,9 @@ const STALE_AFTER_SECONDS = 7200;
 
 export type MaintenanceCronContext = Pick<
   WorkerContext,
-  "db" | "logger" | "cronLock" | "clock"
+  "logger" | "cronLock" | "clock" | "cronKv"
 > &
-  Pick<WorkerContext, "cronKv">;
+  Required<Pick<WorkerContext, "getDb">>;
 
 export async function runMaintenanceCron(
   ctx: MaintenanceCronContext,
@@ -42,6 +42,10 @@ export async function runMaintenanceCron(
     ctx.logger,
     async (signal) => {
       ctx.logger.info("Maintenance cron started");
+
+      // Lazy: only a fire that HOLDS the lock opens a DB connection (matches
+      // the old handler's lock-then-getPrisma order).
+      const db = await ctx.getDb();
 
       // 1. Follow counts removed — relationships now live in graph DB
       // TODO: Add graph-side consistency check when reconciliation service is wired up
@@ -73,15 +77,15 @@ export async function runMaintenanceCron(
       // 3. Vacuum analyze critical tables (via advisory lock to prevent
       //    concurrent runs)
       try {
-        await ctx.db.$executeRaw`SELECT pg_advisory_lock(42)`;
+        await db.$executeRaw`SELECT pg_advisory_lock(42)`;
         try {
-          await ctx.db.$executeRawUnsafe("ANALYZE users");
-          await ctx.db.$executeRawUnsafe("ANALYZE posts");
-          await ctx.db.$executeRawUnsafe("ANALYZE media_files");
-          await ctx.db.$executeRawUnsafe("ANALYZE follows");
+          await db.$executeRawUnsafe("ANALYZE users");
+          await db.$executeRawUnsafe("ANALYZE posts");
+          await db.$executeRawUnsafe("ANALYZE media_files");
+          await db.$executeRawUnsafe("ANALYZE follows");
           ctx.logger.info("ANALYZE completed on critical tables");
         } finally {
-          await ctx.db.$executeRaw`SELECT pg_advisory_unlock(42)`;
+          await db.$executeRaw`SELECT pg_advisory_unlock(42)`;
         }
       } catch (err) {
         ctx.logger.error("ANALYZE failed", { error: err });
