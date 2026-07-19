@@ -1,29 +1,24 @@
+/**
+ * Thin AWS entrypoint for the link-check queue (WS-2 T5).
+ *
+ * The fail-closed contract lives in `lib/workers/link-check.ts`: the core
+ * throws on any payload, so the WHOLE BATCH returns to the queue (nothing
+ * acked), retries, and dead-letters onto the DLQ where the alarm pages.
+ * There is deliberately no `batchItemFailures` array here — "throw →
+ * nothing acked" IS the contract for this live security control.
+ */
+
 import type { SQSHandler } from "aws-lambda";
 import { Logger } from "@aws-lambda-powertools/logger";
+import { getLogger } from "../lib/logger.js";
+import { runLinkCheck } from "../lib/workers/link-check.js";
 
 const logger = new Logger({ serviceName: "link-check-worker" });
 
-/**
- * Link-check (link threat-intel) worker — NOT YET IMPLEMENTED.
- *
- * This queue is a LIVE SECURITY CONTROL: post/comment creation enqueues
- * async link checks here (post-handler / comment-handler /
- * link-security-handler), and the deployment wires the threat-intel API key
- * for this worker. Until the actual check is implemented, this handler
- * FAILS CLOSED: it throws, so the batch returns to the queue, is retried,
- * and dead-letters onto the DLQ where the DLQ alarm pages — instead of
- * silently acking (deleting) security work, which is what this stub used
- * to do.
- *
- * Do NOT replace the throw with a silent return; implementing the real
- * link check is the only valid way to make this handler succeed.
- */
 export const handler: SQSHandler = async (event) => {
   logger.error(
     "link-check-worker is not implemented — failing closed; batch will retry and dead-letter",
     { messageIds: event.Records.map((r) => r.messageId) },
   );
-  throw new Error(
-    "link-check-worker: not implemented — failing closed so link-security checks are not silently dropped",
-  );
+  await runLinkCheck(event.Records, { logger: getLogger() });
 };
