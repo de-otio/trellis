@@ -16,3 +16,8 @@ infra/outputs.json
 harness/node_modules/
 harness/.env
 harness/*.log
+
+# Local credential wrapper — sets non-secret IDs (org/project/access key) and
+# pulls SCW_SECRET_KEY from the macOS keychain at runtime. No secret in the
+# file, but keep the org/project/access identifiers out of git anyway.
+run.sh

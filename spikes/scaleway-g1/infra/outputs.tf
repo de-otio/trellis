@@ -6,20 +6,27 @@
 # defined neither `private_network` nor `load_balancer` blocks in
 # database.tf, so Scaleway attaches the default public load-balancer
 # endpoint and populates this computed attribute with it).
+#
+# The three `load_balancer[0]` reads are wrapped in `try(…, null)`: the
+# provider represents this computed block as a *known empty list* at plan
+# time (not "known after apply"), so a bare `[0]` index errors during plan
+# ("collection has no elements"). `try` defers to null at plan and resolves
+# the real endpoint at apply, once Scaleway has attached it. The real WS-0
+# rdb config will need the same guard on any load_balancer output.
 
 output "postgres_host" {
   description = "Public load-balancer hostname for the spike Postgres instance."
-  value       = scaleway_rdb_instance.spike.load_balancer[0].hostname
+  value       = try(scaleway_rdb_instance.spike.load_balancer[0].hostname, null)
 }
 
 output "postgres_ip" {
   description = "Public load-balancer IP for the spike Postgres instance (fallback if hostname doesn't resolve yet)."
-  value       = scaleway_rdb_instance.spike.load_balancer[0].ip
+  value       = try(scaleway_rdb_instance.spike.load_balancer[0].ip, null)
 }
 
 output "postgres_port" {
   description = "Public load-balancer port for the spike Postgres instance."
-  value       = scaleway_rdb_instance.spike.load_balancer[0].port
+  value       = try(scaleway_rdb_instance.spike.load_balancer[0].port, null)
 }
 
 output "postgres_database" {

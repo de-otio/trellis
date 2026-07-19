@@ -25,6 +25,14 @@ resource "scaleway_object_bucket" "spike" {
   tags = {
     spike = "g1"
   }
+
+  # G1 FINDING (live 2026-07-19): the harness uploads test objects (the
+  # presigned POST/PUT files), so `tofu destroy` failed with S3
+  # BucketNotEmpty (409) — Scaleway's DeleteBucket, like AWS, refuses a
+  # non-empty bucket. `force_destroy` empties it first. Any real bucket that
+  # receives objects outside OpenTofu needs this (or a lifecycle purge)
+  # before it can be torn down.
+  force_destroy = true
 }
 
 resource "scaleway_object_bucket_acl" "spike" {

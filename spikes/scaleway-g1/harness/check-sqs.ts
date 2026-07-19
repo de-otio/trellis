@@ -102,24 +102,37 @@ async function main(): Promise<Omit<CheckResult, "name">> {
   const bodiesReceived = fifoReceived.map((m) => m.Body);
   const dedupOk = bodiesReceived.filter((b) => b === a1).length === 1;
 
-  const groupABodies = fifoReceived
-    .filter((m) => m.Attributes?.MessageGroupId === groupA)
-    .map((m) => m.Body);
-  const orderingOk = groupABodies.indexOf(a1) !== -1 && groupABodies.indexOf(a1) < groupABodies.indexOf(a2);
+  // FIFO ordering is a property of DELIVERY ORDER, not of an echoed group
+  // attribute. Scaleway's MNQ SQS-compatible ReceiveMessage does not populate
+  // the MessageGroupId system attribute in the response (see the compat note
+  // below), so we assert ordering on the actual receive sequence: within
+  // group-a (the only two group-a messages), a1 must be delivered before a2.
+  const idxA1 = bodiesReceived.indexOf(a1);
+  const idxA2 = bodiesReceived.indexOf(a2);
+  const orderingOk = idxA1 !== -1 && idxA2 !== -1 && idxA1 < idxA2;
 
-  const groupBBodies = fifoReceived.filter((m) => m.Attributes?.MessageGroupId === groupB).map((m) => m.Body);
-  const groupBOk = groupBBodies.includes(b1);
+  const groupBOk = bodiesReceived.includes(b1);
+
+  // Compat data point (not pass/fail): did MNQ echo the MessageGroupId
+  // system attribute we requested? AWS SQS does; Scaleway MNQ (as of this
+  // run) does not — harmless for our usage, but worth recording.
+  const groupIdEchoed = fifoReceived.some((m) => m.Attributes?.MessageGroupId != null);
 
   const fifoOk = dedupOk && orderingOk && groupBOk;
   ok &&= fifoOk;
 
   evidence.push(
     `FIFO queue: sent A1, A2 (group-a), B1 (group-b), duplicate-A1 (should dedup). ` +
-      `Received ${fifoReceived.length} messages total: [${bodiesReceived.join(", ")}]`,
+      `Received ${fifoReceived.length} messages total, in delivery order: [${bodiesReceived.join(", ")}]`,
   );
   evidence.push(
     `  Dedup check (A1 delivered exactly once) = ${dedupOk}; ` +
-      `group-a ordering (A1 before A2) = ${orderingOk}; group-b delivered B1 = ${groupBOk} — ${fifoOk ? "PASS" : "FAIL"}`,
+      `group-a ordering (A1 before A2 in delivery order) = ${orderingOk}; ` +
+      `group-b delivered B1 = ${groupBOk} — ${fifoOk ? "PASS" : "FAIL"}`,
+  );
+  evidence.push(
+    `  Compat note: MessageGroupId echoed on receive = ${groupIdEchoed} ` +
+      `(AWS SQS returns it; Scaleway MNQ does not — ordering/dedup still work).`,
   );
 
   return { status: ok ? "PASS" : "FAIL", evidence: evidence.join("\n") };

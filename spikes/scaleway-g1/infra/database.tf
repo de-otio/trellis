@@ -51,6 +51,16 @@ resource "scaleway_rdb_instance" "spike" {
   is_ha_cluster  = false
   disable_backup = true
 
+  # The `play2` node line mandates a Block Storage volume — the default
+  # `lssd` (local SSD) is rejected by the API ("Volume type can't be a local
+  # volume for this node_type"), confirmed live 2026-07-19. The resource
+  # doc's own "Block Storage Low Latency" example pairs db-play2-pico with
+  # `sbs_15k`; we use the cheaper `sbs_5k` tier + the 10 GB the example uses.
+  # G1 FINDING: the real WS-0 rdb config must set volume_type/size explicitly
+  # for any play2/pro2 node type — it cannot rely on the lssd default.
+  volume_type       = "sbs_5k"
+  volume_size_in_gb = 10
+
   user_name = "spike_g1_admin"
   password  = random_password.db.result
 
@@ -78,4 +88,17 @@ resource "scaleway_rdb_user" "spike" {
   name        = "spike_g1_user"
   password    = random_password.db.result
   is_admin    = true
+}
+
+# G1 FINDING (live 2026-07-19): a separately-created scaleway_rdb_user does
+# NOT get access to a scaleway_rdb_database just because is_admin=true — the
+# harness connected fine but hit "permission denied for database
+# spike_g1_db". Scaleway RDB decouples user creation from per-database
+# grants; you must add an explicit scaleway_rdb_privilege. The real WS-0
+# rdb config needs a privilege grant per (user, database) pair.
+resource "scaleway_rdb_privilege" "spike" {
+  instance_id   = scaleway_rdb_instance.spike.id
+  user_name     = scaleway_rdb_user.spike.name
+  database_name = scaleway_rdb_database.spike.name
+  permission    = "all"
 }
