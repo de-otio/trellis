@@ -10,12 +10,11 @@ const { mockGetParameter, mockResolveSecret, mockRegistry } = vi.hoisted(() => (
   mockRegistry: [] as ExtensionModelRegistryEntry[],
 }));
 
-vi.mock("@aws-lambda-powertools/parameters/ssm", () => ({
-  getParameter: mockGetParameter,
-}));
-
+// WS-2 §5.3: the SSM SecureString now resolves via the foundation port
+// (resolveParameter), not powertools — one secrets path.
 vi.mock("@de-otio/saas-foundation/secrets", () => ({
   resolveSecret: mockResolveSecret,
+  resolveParameter: mockGetParameter,
   secretRef: vi.fn((arn: string) => ({ arn })),
 }));
 
@@ -461,18 +460,24 @@ describe("resolvePseudonymSecret", () => {
     expect(mockGetParameter).not.toHaveBeenCalled();
   });
 
-  it("resolves the SSM SecureString when REPORT_PSEUDONYM_SECRET_PARAM is set (production path)", async () => {
+  it("resolves the SSM SecureString when REPORT_PSEUDONYM_SECRET_PARAM is set (production path, foundation resolveParameter)", async () => {
     process.env.REPORT_PSEUDONYM_SECRET_PARAM = "/app/dev/report-pseudonym-key";
-    mockGetParameter.mockResolvedValue("ssm-secret");
+    mockGetParameter.mockResolvedValue(Buffer.from("ssm-secret", "utf-8"));
     await expect(resolvePseudonymSecret()).resolves.toBe("ssm-secret");
-    expect(mockGetParameter).toHaveBeenCalledWith("/app/dev/report-pseudonym-key", { decrypt: true });
+    expect(mockGetParameter).toHaveBeenCalledWith("/app/dev/report-pseudonym-key");
   });
 
   it("falls back to SESSION_SECRET when the SSM parameter resolves empty", async () => {
     process.env.REPORT_PSEUDONYM_SECRET_PARAM = "/app/dev/report-pseudonym-key";
     process.env.SESSION_SECRET = "session-secret";
-    mockGetParameter.mockResolvedValue("");
+    mockGetParameter.mockResolvedValue(Buffer.from("", "utf-8"));
     await expect(resolvePseudonymSecret()).resolves.toBe("session-secret");
+  });
+
+  it("a missing SSM parameter THROWS (fail-closed, unchanged semantics)", async () => {
+    process.env.REPORT_PSEUDONYM_SECRET_PARAM = "/app/dev/report-pseudonym-key";
+    mockGetParameter.mockRejectedValue(new Error("Parameter not found"));
+    await expect(resolvePseudonymSecret()).rejects.toThrow("Parameter not found");
   });
 
   it("falls back to the Secrets Manager session secret via SESSION_SECRET_ARN", async () => {

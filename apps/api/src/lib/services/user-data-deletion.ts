@@ -1,6 +1,9 @@
 import { createHmac } from "node:crypto";
-import { getParameter } from "@aws-lambda-powertools/parameters/ssm";
-import { resolveSecret, secretRef } from "@de-otio/saas-foundation/secrets";
+import {
+  resolveParameter,
+  resolveSecret,
+  secretRef,
+} from "@de-otio/saas-foundation/secrets";
 import type { PrismaClient } from "@prisma/client";
 import { EXTENSION_MODEL_REGISTRY } from "../extension-model-registry.js";
 import { getLogger } from "../logger.js";
@@ -55,7 +58,11 @@ export async function resolvePseudonymSecret(): Promise<string> {
   }
   const ssmParam = process.env.REPORT_PSEUDONYM_SECRET_PARAM;
   if (ssmParam) {
-    const value = await getParameter(ssmParam, { decrypt: true });
+    // Foundation resolver (WS-2 §5.3 — the ONE secrets port): SSM
+    // SecureString with decryption (the default). How the key is USED is
+    // unchanged; only the fetch path moved off powertools. A missing
+    // parameter throws (fail-closed), exactly as before.
+    const value = (await resolveParameter(ssmParam)).toString("utf-8");
     if (value) return value;
   }
   // Fallback: the session secret (Secrets Manager ARN or plaintext).

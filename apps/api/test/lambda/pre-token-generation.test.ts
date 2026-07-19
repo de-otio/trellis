@@ -44,10 +44,20 @@ vi.mock("@aws-sdk/client-secrets-manager", () => {
   };
 });
 
-// The DB secret is now fetched via AWS Lambda Powertools getSecret (with
-// transform:"json"), which returns the PARSED secret object directly.
-vi.mock("@aws-lambda-powertools/parameters/secrets", () => ({
-  getSecret: mockGetSecret,
+// WS-2 §5.3: lambda-prisma resolves the DB secret via the foundation secrets
+// port now (resolveSecret returns the raw JSON bytes as a Buffer).
+vi.mock("@de-otio/saas-foundation/secrets", () => ({
+  resolveSecret: mockGetSecret,
+  resolveParameter: vi.fn(),
+  secretRef: vi.fn((arn) => ({ arn })),
+  SecretCache: class {
+    get() {
+      return null;
+    }
+    set() {}
+    invalidate() {}
+    clear() {}
+  },
 }));
 
 // Kept so the module's (unused-in-tests) DynamoDB default path resolves without
@@ -156,14 +166,13 @@ beforeEach(async () => {
       dbname: "d",
     }),
   });
-  // getSecret(arn, { transform: "json" }) returns the parsed credentials.
-  mockGetSecret.mockResolvedValue({
-    username: "u",
-    password: "p",
-    host: "h",
-    port: 5432,
-    dbname: "d",
-  });
+  // The foundation resolver returns the credential JSON as bytes.
+  mockGetSecret.mockResolvedValue(
+    Buffer.from(
+      JSON.stringify({ username: "u", password: "p", host: "h", port: 5432, dbname: "d" }),
+      "utf-8",
+    ),
+  );
   mockDdbSend.mockResolvedValue({ Item: undefined });
   mockUserFindUnique.mockResolvedValue(null);
   mockTenantMemberFindMany.mockResolvedValue([]);
