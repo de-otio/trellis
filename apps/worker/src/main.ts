@@ -33,6 +33,8 @@ import { buildDispatchTable, type WorkerQueueName } from "./workers.js";
 import { validateRequiredSecrets } from "./startup-validation.js";
 import { CronScheduler } from "./scheduler.js";
 import { buildCronJobs, type WorkerProfile } from "./cron-jobs.js";
+import { startHealthServer } from "./health.js";
+import { closeDefaultResources, installShutdownHandlers } from "./shutdown.js";
 
 const stage = process.env.STAGE || "dev";
 
@@ -186,21 +188,37 @@ async function main(): Promise<void> {
   );
   scheduler.start();
 
+  // ── Health endpoint (T7c, finding 10): fixed-body, loopback/internal
+  // bind only. WORKER_HEALTH_HOST exists for pod-internal binds (e.g.
+  // 0.0.0.0 inside an isolated pod network) — WS-4 must NOT route it
+  // publicly (verified in T8's wiring inputs).
+  startHealthServer({
+    host: process.env.WORKER_HEALTH_HOST || "127.0.0.1",
+    port: Number(process.env.WORKER_HEALTH_PORT || 8081),
+    isReady: async () => {
+      // Ready = pollers exist and the DB answers. Any probe error ⇒ unready
+      // (logged, never echoed).
+      const db = await getLambdaPrisma();
+      await db.$queryRaw`SELECT 1`;
+      return pollers.length > 0;
+    },
+    logger,
+  });
+
+  // ── Graceful drain (T7c, §3.5): scheduler → pollers (bounded) → pools.
+  installShutdownHandlers({
+    scheduler,
+    pollers,
+    drainTimeoutMs: Number(process.env.WORKER_DRAIN_TIMEOUT_MS || 25_000),
+    logger,
+    closeResources: () => closeDefaultResources(logger),
+  });
+
   logger.info("worker runtime started", {
     stage,
     profile,
     queues: Object.keys(table),
   });
-
-  // Minimal drain (T7c hardens this to the server.ts-mirrored sequence).
-  const shutdown = async (signal: string): Promise<void> => {
-    logger.info("shutdown requested — stopping scheduler, draining pollers", { signal });
-    await scheduler.stop();
-    await Promise.allSettled(pollers.map((p) => p.stop()));
-    process.exit(0);
-  };
-  process.on("SIGTERM", () => void shutdown("SIGTERM"));
-  process.on("SIGINT", () => void shutdown("SIGINT"));
 }
 
 // Only run when executed directly (not when imported by tests).
