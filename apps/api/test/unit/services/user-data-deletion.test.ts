@@ -29,6 +29,10 @@ import {
   resolvePseudonymSecret,
 } from "../../../src/lib/services/user-data-deletion.js";
 
+// WS-2 findings 2+7: the tombstone key is now a REQUIRED caller-supplied
+// argument (deleteUserData never resolves secrets / reads process.env itself).
+const TEST_SECRET = "unit-test-pseudonym-secret";
+
 describe("deleteUserData", () => {
   let mockDb: any;
 
@@ -79,7 +83,7 @@ describe("deleteUserData", () => {
   });
 
   it("should delete all user data in correct order and return counts", async () => {
-    const result = await deleteUserData(mockDb, "user-123");
+    const result = await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
 
     expect(result).toEqual({
       commentSentiments: 2,
@@ -116,7 +120,7 @@ describe("deleteUserData", () => {
   });
 
   it("should delete user as the final step", async () => {
-    await deleteUserData(mockDb, "user-123");
+    await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
 
     expect(mockDb.user.delete).toHaveBeenCalledWith({
       where: { id: "user-123" },
@@ -128,7 +132,7 @@ describe("deleteUserData", () => {
     mockDb.post.findMany.mockResolvedValue([]);
     mockDb.entity.findMany.mockResolvedValue([]);
 
-    const result = await deleteUserData(mockDb, "user-empty");
+    const result = await deleteUserData(mockDb, "user-empty", { pseudonymSecret: TEST_SECRET });
 
     // Should not attempt to delete comment media or post junction tables
     expect(mockDb.postCommentMedia.deleteMany).not.toHaveBeenCalled();
@@ -150,7 +154,7 @@ describe("deleteUserData", () => {
   // Follow relationships are now handled by the graph DB (AuraDB), not Postgres.
 
   it("should delete direct messages sent and received", async () => {
-    await deleteUserData(mockDb, "user-123");
+    await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
 
     expect(mockDb.directMessage.deleteMany).toHaveBeenCalledWith({
       where: {
@@ -160,7 +164,7 @@ describe("deleteUserData", () => {
   });
 
   it("should delete invitations created and used", async () => {
-    await deleteUserData(mockDb, "user-123");
+    await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
 
     expect(mockDb.invitation.deleteMany).toHaveBeenCalledWith({
       where: {
@@ -170,7 +174,7 @@ describe("deleteUserData", () => {
   });
 
   it("erases target-side interaction events (GDPR Art. 17, P2)", async () => {
-    await deleteUserData(mockDb, "user-123");
+    await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
 
     // Actor-side rows cascade via FK on user.delete(); target-side rows (about
     // the deleted user) have no FK and need this explicit deleteMany.
@@ -180,7 +184,7 @@ describe("deleteUserData", () => {
   });
 
   it("pseudonymizes ACCOUNT reports about the deleted user (GDPR Art. 17, P4)", async () => {
-    await deleteUserData(mockDb, "user-123");
+    await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
 
     // The tombstone key is resolved at runtime (resolvePseudonymSecret), so
     // assert the where-clause exactly and the resourceId structurally.
@@ -190,10 +194,45 @@ describe("deleteUserData", () => {
     });
   });
 
+  // WS-2 finding 2: the fail-closed tombstone-key gate.
+  describe("pseudonym-secret fail-closed gate (finding 2)", () => {
+    it("throws BEFORE any deletion when the secret is empty", async () => {
+      await expect(
+        deleteUserData(mockDb, "user-123", { pseudonymSecret: "" }),
+      ).rejects.toThrow(/fail-closed/);
+
+      // Nothing was deleted and no tombstone was written.
+      expect(mockDb.commentSentiment.deleteMany).not.toHaveBeenCalled();
+      expect(mockDb.report.updateMany).not.toHaveBeenCalled();
+      expect(mockDb.user.delete).not.toHaveBeenCalled();
+    });
+
+    it("throws BEFORE any deletion when the secret is absent (untyped caller)", async () => {
+      await expect(
+        deleteUserData(mockDb, "user-123", { pseudonymSecret: undefined as unknown as string }),
+      ).rejects.toThrow(/fail-closed/);
+      expect(mockDb.user.delete).not.toHaveBeenCalled();
+    });
+
+    it("never resolves secrets itself — no SSM/Secrets Manager call from deleteUserData (finding 7)", async () => {
+      await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
+      expect(mockGetParameter).not.toHaveBeenCalled();
+      expect(mockResolveSecret).not.toHaveBeenCalled();
+    });
+
+    it("uses the caller-supplied key for the tombstone", async () => {
+      await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
+      expect(mockDb.report.updateMany).toHaveBeenCalledWith({
+        where: { reportType: "ACCOUNT", resourceType: "user", resourceId: "user-123" },
+        data: { resourceId: pseudonymizeUserId("user-123", TEST_SECRET) },
+      });
+    });
+  });
+
   it("should propagate database errors", async () => {
     mockDb.commentSentiment.deleteMany.mockRejectedValue(new Error("DB connection lost"));
 
-    await expect(deleteUserData(mockDb, "user-123")).rejects.toThrow("DB connection lost");
+    await expect(deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET })).rejects.toThrow("DB connection lost");
   });
 
   // ── AR7: GDPR media erasure ────────────────────────────────────────────────
@@ -219,7 +258,7 @@ describe("deleteUserData", () => {
         ])
         .mockResolvedValue([]);
 
-      const result = await deleteUserData(mockDb, "user-123");
+      const result = await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
 
       // The row is soft-deleted (deletedAt set) + the personal link scrubbed —
       // this is what hands the CAS object to the existing nightly GC purge.
@@ -258,7 +297,7 @@ describe("deleteUserData", () => {
       // Another user's post still references the row (dedup reference).
       mockDb.postMedia.groupBy.mockResolvedValue([{ mediaId: "media-shared" }]);
 
-      const result = await deleteUserData(mockDb, "user-123");
+      const result = await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
 
       // Retained: uploadedBy scrubbed, NOT soft-deleted (no deletedAt write).
       expect(mockDb.mediaFile.updateMany).toHaveBeenCalledWith(
@@ -283,7 +322,7 @@ describe("deleteUserData", () => {
         ])
         .mockResolvedValue([]);
 
-      await deleteUserData(mockDb, "user-123");
+      await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
 
       const postMediaOrder = vi.mocked(mockDb.postMedia.deleteMany).mock.invocationCallOrder[0];
       const mediaScanOrder = vi.mocked(mockDb.mediaFile.findMany).mock.invocationCallOrder[0];
@@ -298,7 +337,7 @@ describe("deleteUserData", () => {
     it("registry empty (today's default): the erasure loop is a clean no-op", async () => {
       // mockRegistry is cleared in the outer beforeEach — assert the default
       // shipped state (no extension owns a table yet) behaves cleanly.
-      const result = await deleteUserData(mockDb, "user-123");
+      const result = await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
 
       expect(result.extensionRowsErased).toBe(0);
     });
@@ -311,7 +350,7 @@ describe("deleteUserData", () => {
       });
       mockDb.dogReminder = { deleteMany: vi.fn().mockResolvedValue({ count: 3 }) };
 
-      const result = await deleteUserData(mockDb, "user-123");
+      const result = await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
 
       expect(mockDb.dogReminder.deleteMany).toHaveBeenCalledWith({
         where: { userId: "user-123" },
@@ -330,7 +369,7 @@ describe("deleteUserData", () => {
       });
       mockDb.dogPhoto = { deleteMany: vi.fn().mockResolvedValue({ count: 99 }) };
 
-      const result = await deleteUserData(mockDb, "user-123");
+      const result = await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
 
       expect(mockDb.dogPhoto.deleteMany).not.toHaveBeenCalled();
       expect(result.extensionRowsErased).toBe(0);
@@ -344,7 +383,7 @@ describe("deleteUserData", () => {
       mockDb.dogReminder = { deleteMany: vi.fn().mockResolvedValue({ count: 2 }) };
       mockDb.dogNote = { deleteMany: vi.fn().mockResolvedValue({ count: 5 }) };
 
-      const result = await deleteUserData(mockDb, "user-123");
+      const result = await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
 
       expect(mockDb.dogNote.deleteMany).toHaveBeenCalledWith({
         where: { authorId: "user-123" },
@@ -360,7 +399,7 @@ describe("deleteUserData", () => {
       });
       // mockDb intentionally has no `modelNotOnClient` delegate.
 
-      await expect(deleteUserData(mockDb, "user-123")).rejects.toThrow(
+      await expect(deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET })).rejects.toThrow(
         /modelNotOnClient/,
       );
       // Must fail BEFORE the user row is deleted — otherwise a drifted
@@ -442,7 +481,7 @@ describe("resolvePseudonymSecret", () => {
     await expect(resolvePseudonymSecret()).resolves.toBe("sm-secret");
   });
 
-  it("returns an empty string when nothing is configured", async () => {
-    await expect(resolvePseudonymSecret()).resolves.toBe("");
+  it("THROWS when nothing is configured (fail-closed, WS-2 finding 2 — never an empty key)", async () => {
+    await expect(resolvePseudonymSecret()).rejects.toThrow(/failing closed/);
   });
 });

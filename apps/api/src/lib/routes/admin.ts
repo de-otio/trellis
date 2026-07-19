@@ -342,8 +342,15 @@ export const adminRoutes: Route[] = [
           region,
           env,
           async (db) => {
-            const { deleteUserData } = await import("../services/user-data-deletion.js");
-            await deleteUserData(db, userId);
+            const { deleteUserData, resolvePseudonymSecret } = await import(
+              "../services/user-data-deletion.js"
+            );
+            // Fail-closed (WS-2 finding 2): an unresolvable tombstone key
+            // errors this test-cleanup route rather than writing an unkeyed
+            // (reversible) tombstone.
+            await deleteUserData(db, userId, {
+              pseudonymSecret: await resolvePseudonymSecret(),
+            });
           },
           {
             ...QueryTimeoutPresets.STANDARD,

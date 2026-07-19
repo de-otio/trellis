@@ -100,7 +100,13 @@ export const handler = async (): Promise<void> => {
 
   // 4. Process scheduled account deletions (GDPR Article 17 compliance)
   try {
-    const { deleteUserData } = await import("../lib/services/user-data-deletion.js");
+    const { deleteUserData, resolvePseudonymSecret } = await import(
+      "../lib/services/user-data-deletion.js"
+    );
+    // Fail-closed (WS-2 finding 2): resolve the erasure-tombstone HMAC key up
+    // front; an unresolvable/empty key throws into this step's catch and NO
+    // deletion runs (never a reversible `HMAC("", …)` tombstone).
+    const pseudonymSecret = await resolvePseudonymSecret();
 
     const usersToDelete = await db.user.findMany({
       where: {
@@ -122,7 +128,7 @@ export const handler = async (): Promise<void> => {
         //     reclaims their CAS bytes (`cas/{tenantId}/{contentHash}`) within
         //     its bounded window. The old 4b here enumerated the obsolete
         //     `originals/user-{id}/` prefix and therefore deleted zero bytes.
-        const result = await deleteUserData(db, user.id);
+        const result = await deleteUserData(db, user.id, { pseudonymSecret });
 
         // 4b. Delete the user-scoped STAGING objects (`pending/…`,
         //     `processing/…`) reported by the erasure — step 1's purge does

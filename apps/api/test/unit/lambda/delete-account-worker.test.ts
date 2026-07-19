@@ -49,6 +49,9 @@ vi.mock("@prisma/client", () => {
 
 vi.mock("../../../src/lib/services/user-data-deletion", () => ({
   deleteUserData: mockDeleteUserData,
+  // WS-2 T1: the entrypoint resolves the pseudonym secret and passes it into
+  // the worker core (findings 2+7).
+  resolvePseudonymSecret: vi.fn().mockResolvedValue("test-pseudonym-secret"),
 }));
 
 describe("DeleteAccountWorker Lambda", () => {
