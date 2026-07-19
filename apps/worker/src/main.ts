@@ -13,15 +13,26 @@
  * apps/worker that reads process.env.
  */
 
-import { S3Client } from "@aws-sdk/client-s3";
+import { S3Client, DeleteObjectsCommand } from "@aws-sdk/client-s3";
 import { getLogger } from "../../api/src/lib/logger.js";
 import { getLambdaPrisma } from "../../api/src/lib/lambda-prisma.js";
 import { resolvePseudonymSecret } from "../../api/src/lib/services/user-data-deletion.js";
 import { deleteStagingObjects } from "../../api/src/lib/media/staging-object-cleanup.js";
+import {
+  getKvStore,
+  makeKvSqlExecutor,
+  setKvSqlExecutor,
+  getKvSqlExecutor,
+  resolveKvProvider,
+} from "../../api/src/lib/kv/kv-provider.js";
+import { makeKvCronLock } from "../../api/src/lib/workers/cron-lock.js";
+import { noopMetrics } from "../../api/src/lib/workers/metrics-port.js";
 import { QueuePoller } from "./consumer.js";
 import { makeDefaultSqsClient, makeSqsQueueClient } from "./sqs-queue-client.js";
 import { buildDispatchTable, type WorkerQueueName } from "./workers.js";
 import { validateRequiredSecrets } from "./startup-validation.js";
+import { CronScheduler } from "./scheduler.js";
+import { buildCronJobs, type WorkerProfile } from "./cron-jobs.js";
 
 const stage = process.env.STAGE || "dev";
 
@@ -102,14 +113,89 @@ async function main(): Promise<void> {
     poller.start();
     pollers.push(poller);
   }
+  // ── Cron scheduler (T7b): the six cadences; single-fire lives INSIDE the
+  // cores via CronLock over WS-1's KvStore (`cron` namespace). Profile:
+  // KV_PROVIDER=postgres ⇒ scaleway (PostgresKvStore + kv-entries-cleanup);
+  // default ⇒ aws-shaped wiring (DynamoKvStore; no kv sweep). Note the
+  // container itself is only DEPLOYED on the Scaleway profile — the aws
+  // wiring exists so CI can run it against LocalStack (§3.1).
+  const profile: WorkerProfile = resolveKvProvider() === "postgres" ? "scaleway" : "aws";
+  if (profile === "scaleway" && getKvSqlExecutor() === undefined) {
+    const kvUrl = process.env.KV_DATABASE_URL || process.env.DATABASE_URL;
+    if (!kvUrl) {
+      throw new Error("KV_PROVIDER=postgres requires KV_DATABASE_URL or DATABASE_URL");
+    }
+    setKvSqlExecutor(await makeKvSqlExecutor(kvUrl));
+  }
+  const cronKv = getKvStore("cron");
+  const cronLock = makeKvCronLock(cronKv);
+  const clock = Date.now;
+  const getDb = (): ReturnType<typeof getLambdaPrisma> => getLambdaPrisma();
+  const lazyPseudonym = (): Promise<string> => resolvePseudonymSecret();
+  const stagingCleanup = (keys: string[]): ReturnType<typeof deleteStagingObjects> =>
+    deleteStagingObjects(s3, mediaBucket, keys);
+
+  const scheduler = new CronScheduler(
+    buildCronJobs({
+      profile,
+      logger,
+      cleanup: { logger, cronLock },
+      hourly: {
+        getDb,
+        logger,
+        metrics: noopMetrics, // OTel/Cockpit adapter arrives with WS-5
+        cronLock,
+        clock,
+        configSource: process.env,
+      },
+      nightly: {
+        getDb,
+        logger,
+        metrics: noopMetrics,
+        cronLock,
+        clock,
+        identity: undefined, // WS-3.3 IdentityProviderPort
+        email: undefined, // WS-5 email-provider factory
+        resolvePseudonymSecret: lazyPseudonym,
+        deleteStagingObjects: stagingCleanup,
+        objectStore: {
+          deleteObjects: async (keys) => {
+            await s3.send(
+              new DeleteObjectsCommand({
+                Bucket: mediaBucket,
+                Delete: { Objects: keys.map((Key) => ({ Key })) },
+              }),
+            );
+          },
+        },
+        getAppEnv: async () => {
+          const { buildEnv } = await import("../../api/src/env.js");
+          return buildEnv();
+        },
+      },
+      maintenance: { getDb, logger, cronLock, cronKv, clock },
+      // e2e-sweeper: only wired where an identity directory exists (AWS/e2e
+      // stages via Lambda today; container wiring arrives with WS-3.3).
+      e2eSweeper: undefined,
+      kvSweep:
+        profile === "scaleway"
+          ? { executor: getKvSqlExecutor()!, cronLock, clock }
+          : undefined,
+    }),
+    { logger },
+  );
+  scheduler.start();
+
   logger.info("worker runtime started", {
     stage,
+    profile,
     queues: Object.keys(table),
   });
 
   // Minimal drain (T7c hardens this to the server.ts-mirrored sequence).
   const shutdown = async (signal: string): Promise<void> => {
-    logger.info("shutdown requested — draining pollers", { signal });
+    logger.info("shutdown requested — stopping scheduler, draining pollers", { signal });
+    await scheduler.stop();
     await Promise.allSettled(pollers.map((p) => p.stop()));
     process.exit(0);
   };
