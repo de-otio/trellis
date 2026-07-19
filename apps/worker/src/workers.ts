@@ -35,16 +35,22 @@ import {
   processCompletion,
   type CompletionDeps,
 } from "../../api/src/lib/workers/media-completion.js";
+import type {
+  ExportJobMessage,
+  ExportWorkerPort,
+} from "../../api/src/lib/workers/export-worker-port.js";
 import type { MessageWorker } from "./dispatch.js";
 
-/** The queues this runtime consumes (§0 handler table; user-export is T11). */
+/** The queues this runtime consumes (§0 handler table + the T11 export
+ *  boundary — trellis produces to user-export; the consumer is injected). */
 export type WorkerQueueName =
   | "delete-account"
   | "media-processing"
   | "media-completion"
   | "link-check"
   | "followers-events"
-  | "federation-outbox";
+  | "federation-outbox"
+  | "user-export";
 
 /** Capabilities for the delete-account worker — the ONLY bag allowed to
  *  carry GDPR/identity capabilities, and only as lazy providers. */
@@ -79,6 +85,12 @@ export interface DispatchTableInput {
   readonly logger: Logger;
   readonly deleteAccount: DeleteAccountCapabilities;
   readonly media: MediaCapabilities;
+  /**
+   * T11 (finding 9): the PII-schema-bearing export worker, injected from the
+   * PRIVATE consuming package. Absent ⇒ the user-export queue fails closed
+   * (throw → no-ack) — export requests are never silently dropped.
+   */
+  readonly exportWorker?: ExportWorkerPort;
   /** Resolved by the composition root (ACTIVITYPUB_ENABLED === "true"). */
   readonly federationEnabled: boolean;
 }
@@ -163,6 +175,28 @@ export function buildDispatchTable(
         federationEnabled: input.federationEnabled,
       });
       // OFF-branch returns ⇒ ack (log-and-drop); ON-branch throws ⇒ fail.
+    },
+
+    "user-export": async (payload) => {
+      const port = input.exportWorker;
+      if (port === undefined) {
+        // Fail closed: an un-wired export consumer must never drop a DSAR
+        // request. Throw ⇒ no-ack ⇒ redeliver ⇒ DLQ pages.
+        throw new Error("user-export: ExportWorkerPort not injected");
+      }
+      const result = await port.run(payload as ExportJobMessage);
+      switch (result.kind) {
+        case "completed":
+          return "ack";
+        case "failed":
+          // Permanent — the job store carries the failure; no DLQ loop.
+          logger.warn("user-export: job failed permanently — ack-drop", {
+            reason: result.reason,
+          });
+          return "ack-drop";
+        case "retry":
+          return "fail";
+      }
     },
   };
 }

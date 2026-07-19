@@ -55,6 +55,7 @@ const CONCURRENCY: Record<WorkerQueueName, number> = {
   "link-check": 1,
   "followers-events": 1,
   "federation-outbox": 1,
+  "user-export": 1,
 };
 
 async function main(): Promise<void> {
@@ -99,6 +100,9 @@ async function main(): Promise<void> {
       // workers fail closed (throw → no-ack), never silently drop.
       completionDeps: undefined,
     },
+    // T11 (finding 9): the PII-schema-bearing export worker is injected from
+    // the PRIVATE consuming package; un-wired ⇒ the queue fails closed.
+    exportWorker: undefined,
     federationEnabled: process.env.ACTIVITYPUB_ENABLED === "true",
   });
 

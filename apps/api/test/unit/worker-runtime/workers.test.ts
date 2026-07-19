@@ -3,6 +3,9 @@
  * the §3.3 disposition mapping from the extracted cores' outcome enums.
  */
 
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildDispatchTable,
@@ -124,5 +127,60 @@ describe("buildDispatchTable", () => {
 
     const on = buildDispatchTable(baseInput({ federationEnabled: true }));
     await expect(on["federation-outbox"]({}, raw("{}"))).rejects.toThrow(/failing closed/);
+  });
+});
+
+describe("user-export boundary (T11, finding 9)", () => {
+  it("fails closed (throws → no-ack) when no ExportWorkerPort is injected — DSARs are never dropped", async () => {
+    const table = buildDispatchTable(baseInput());
+    await expect(
+      table["user-export"](
+        { jobId: "j1", userId: "u1", email: "u@example.com", format: "json", region: "EU" },
+        raw("{}"),
+      ),
+    ).rejects.toThrow(/not injected/);
+  });
+
+  it("maps the port's results onto dispositions: completed→ack, failed→ack-drop, retry→fail", async () => {
+    const results = [
+      { kind: "completed" as const },
+      { kind: "failed" as const, reason: "user gone" },
+      { kind: "retry" as const, reason: "storage blip" },
+    ];
+    let i = 0;
+    const table = buildDispatchTable(
+      baseInput({ exportWorker: { run: async () => results[i++] } }),
+    );
+    const msg = { jobId: "j1", userId: "u1", email: "u@example.com", format: "json", region: "EU" };
+    expect(await table["user-export"](msg, raw("{}"))).toBe("ack");
+    expect(await table["user-export"](msg, raw("{}"))).toBe("ack-drop");
+    expect(await table["user-export"](msg, raw("{}"))).toBe("fail");
+  });
+
+  it("GATE (finding 9): the public port file discloses NO table/column/field-level PII schema", () => {
+    const src = readFileSync(
+      join(
+        dirname(fileURLToPath(import.meta.url)),
+        "../../../src/lib/workers/export-worker-port.ts",
+      ),
+      "utf-8",
+    );
+    // The port carries only the job pointer + routing; a schema disclosure
+    // would name Prisma models/columns. Guard against the obvious markers.
+    for (const marker of [
+      "prisma",
+      "findMany",
+      "select:",
+      "posts",
+      "comments",
+      "directMessage",
+      "securityEvent",
+      "mediaFile",
+      "interactionEvent",
+      "consent",
+      "invitation",
+    ]) {
+      expect(src.toLowerCase()).not.toContain(marker.toLowerCase());
+    }
   });
 });
