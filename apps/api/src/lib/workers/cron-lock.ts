@@ -104,7 +104,8 @@ export function makeKvCronLock(kv: KvStore, options: KvCronLockOptions = {}): Cr
 }
 
 export interface WithCronLockResult {
-  /** False ⇒ another holder had the lock; the body did not run. */
+  /** False ⇒ another holder had the lock (or the lock store errored — see
+   *  below); the body did not run. */
   readonly acquired: boolean;
 }
 
@@ -117,6 +118,10 @@ export interface WithCronLockResult {
  *   `AbortSignal` (cores check the signal between steps).
  * - The lock is NOT released on completion — it expires by TTL, preserving
  *   today's duplicate-fire-inside-the-window skip semantics.
+ * - An acquire ERROR (lock-store outage) is treated as not-acquired → skip.
+ *   This preserves the old handlers' behavior (their bare `catch` around the
+ *   conditional PutItem treated any error as "already running, skip") and is
+ *   fail-safe: on store outage the cron is skipped, never run unlocked.
  */
 export async function withCronLock(
   lock: CronLock,
@@ -125,7 +130,16 @@ export async function withCronLock(
   logger: Logger,
   body: (signal: AbortSignal) => Promise<void>,
 ): Promise<WithCronLockResult> {
-  const acquired = await lock.acquire(name, ttlSeconds);
+  let acquired: boolean;
+  try {
+    acquired = await lock.acquire(name, ttlSeconds);
+  } catch (err) {
+    logger.warn("cron lock acquire errored — skipping this fire (fail-safe)", {
+      lock: name,
+      error: err,
+    });
+    acquired = false;
+  }
   if (!acquired) {
     return { acquired: false };
   }

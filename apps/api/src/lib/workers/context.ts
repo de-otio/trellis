@@ -18,6 +18,7 @@
  */
 
 import type { PrismaClient } from "@prisma/client";
+import type { KvStore } from "@de-otio/saas-foundation/kv";
 import type { Logger } from "../logger.js";
 import type { MetricsPort } from "./metrics-port.js";
 import type { CronLock } from "./cron-lock.js";
@@ -51,6 +52,13 @@ export interface WorkerContext {
 
   // -- optional capabilities (present only where the worker needs them) -----
 
+  /**
+   * Direct access to the `cron`-namespace KvStore — ONLY for the
+   * maintenance cron's defense-in-depth stale-lock sweep (§3.4; mostly
+   * redundant once `overwriteExpired` handles expiry, kept deliberately).
+   * Everything else goes through `cronLock`.
+   */
+  readonly cronKv?: KvStore;
   /** Provisional identity admin port (X6); Cognito-backed today. */
   readonly identity?: IdentityAdminPort;
   /**

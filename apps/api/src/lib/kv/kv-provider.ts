@@ -37,7 +37,8 @@ export type SingleKvNamespace =
   | "discexposure"
   | "invitations"
   | "claims"
-  | "idem";
+  | "idem"
+  | "cron";
 
 export function resolveKvProvider(): KvProvider {
   return process.env.KV_PROVIDER === "postgres" ? "postgres" : "dynamodb";
@@ -100,6 +101,19 @@ const LAYOUTS: Record<SingleKvNamespace, LayoutSpec> = {
     ttlAttr: "expiresAt",
     versionAttr: "_v",
     allowSeparatorInKey: true,
+  },
+  cron: {
+    // WS-2 single-fire cron locks. Byte-compat with the old inline handler
+    // lock items: pk `cron:<name>`, sk "lock", ttl attr `ttl`, plus the value
+    // fields ({ lockedAt, owner }) as top-level attrs; `_v` is the additive
+    // WS-1 version attribute. Keys are the server-fixed cron names
+    // ("cleanup", "hourly", …) — never user-influenced.
+    pkPrefix: "cron",
+    pkSeparator: ":",
+    skName: "sk",
+    skValue: "lock",
+    ttlAttr: "ttl",
+    versionAttr: "_v",
   },
 };
 
