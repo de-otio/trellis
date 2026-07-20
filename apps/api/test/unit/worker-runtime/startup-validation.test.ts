@@ -36,6 +36,32 @@ describe("validateRequiredSecrets (finding 2)", () => {
     ).rejects.toThrow(StartupValidationError);
   });
 
+  it.each([
+    ["null", null],
+    ["undefined", undefined],
+    ["the number 0", 0],
+    ["a truthy number", 42],
+    ["a Buffer (lying resolver)", Buffer.from("key-material")],
+    ["whitespace-only (spaces)", "   "],
+    ["whitespace-only (tab+newline)", "\t\n"],
+  ])(
+    "GATE (critic F8 boundary): a resolver yielding %s refuses startup",
+    async (_label, value) => {
+      await expect(
+        validateRequiredSecrets(
+          [
+            {
+              name: "pseudonym-tombstone-key",
+              // A misbehaving resolver escapes the declared Promise<string>.
+              resolve: async () => value as unknown as string,
+            },
+          ],
+          makeLogger(),
+        ),
+      ).rejects.toThrow(StartupValidationError);
+    },
+  );
+
   it("GATE: a resolution ERROR refuses startup (fail-closed, not fail-open)", async () => {
     await expect(
       validateRequiredSecrets(
