@@ -16,6 +16,7 @@ import type { RawPrismaLike } from "./lib/extension-scoped-db.js";
 import { buildEnv, validateEnv } from "./env.js";
 import { startExtensionJobRunners } from "./lib/extension-job-runner.js";
 import { validateBootEnv } from "./env-schema.js";
+import { verifyKeycloakProfileLockdownAtBoot } from "./lib/identity/identity-provider.js";
 import { buildHonoApp } from "./lib/app.js";
 import { getLogger, Logger } from "./lib/logger.js";
 import { TrellisRequestContextManager } from "./lib/request-context.js";
@@ -72,6 +73,19 @@ export async function startServer(): Promise<http.Server> {
     process.exit(1);
   }
   const logger = getLogger();
+
+  // [F3] Startup health-check (Keycloak only): verify the realm's User Profile
+  // config locks the privilege-bearing custom:* attributes admin-edit-only, so
+  // a user cannot self-assign roles / switch active tenant by editing their own
+  // profile. Fail boot otherwise. Bypassable ONLY via
+  // KC_SKIP_PROFILE_LOCKDOWN_CHECK=true (logs a loud warning). No-op on Cognito.
+  try {
+    await verifyKeycloakProfileLockdownAtBoot(logger);
+  } catch (err) {
+    console.error("Keycloak user-profile lockdown check failed at boot:");
+    console.error(`  - ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
 
   // Validate extensions
   const extensions = getExtensions();

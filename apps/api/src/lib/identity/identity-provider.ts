@@ -115,6 +115,49 @@ export function getIdentityProvider(): IdentityProviderPort {
 }
 
 /**
+ * [F3] Startup health-check: when the deployment runs on Keycloak, verify the
+ * realm's User Profile config locks every privilege-bearing `custom:*`
+ * attribute (globalRole / tenantRole / activeTenantId) admin-edit-only. The
+ * app trusts these claims from the verified token for authorization; if a user
+ * could edit them through the account API they could self-assign roles or
+ * switch active tenant. Throws (fails boot) when the lockdown is not in place.
+ *
+ * No-ops on the Cognito path (attribute mutability is enforced by the pool
+ * schema, not this check). Bypassable ONLY via the explicit
+ * `KC_SKIP_PROFILE_LOCKDOWN_CHECK=true` env flag, which logs a loud warning —
+ * for tests/dev, never prod.
+ *
+ * Duck-typed on `verifyProfileLockdown` so a test-injected fake port exercises
+ * the wiring without a real KeycloakIdentityProvider.
+ */
+export async function verifyKeycloakProfileLockdownAtBoot(logger: {
+  warn: (message: string, data?: unknown) => void;
+  info: (message: string, data?: unknown) => void;
+}): Promise<void> {
+  if (resolveIdentityProviderKind() !== "keycloak") return;
+
+  if (process.env.KC_SKIP_PROFILE_LOCKDOWN_CHECK === "true") {
+    logger.warn(
+      "KC_SKIP_PROFILE_LOCKDOWN_CHECK=true — SKIPPING the Keycloak user-profile " +
+        "lockdown check. Privilege-bearing custom:* attributes are NOT verified " +
+        "admin-edit-only; a misconfigured realm could let users self-assign roles. " +
+        "NEVER set this in production.",
+    );
+    return;
+  }
+
+  const provider = getIdentityProvider() as IdentityProviderPort & {
+    verifyProfileLockdown?: () => Promise<void>;
+  };
+  if (typeof provider.verifyProfileLockdown === "function") {
+    await provider.verifyProfileLockdown();
+    logger.info(
+      "Keycloak user-profile lockdown check passed — privilege-bearing custom:* attributes are admin-edit-only.",
+    );
+  }
+}
+
+/**
  * The narrow X6 admin slice for the WS-2 worker contexts, or `undefined` when
  * the selected provider is unconfigured — preserving the old per-Lambda
  * `if (COGNITO_USER_POOL_ID) …` skip exactly (the worker cores treat an
