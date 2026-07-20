@@ -190,7 +190,14 @@ export interface Env {
   RECAPTCHA_SECRET_KEY?: string;
 
   // Email
-  EMAIL_SERVICE?: "aws-ses" | "resend" | "alibaba-directmail" | "tencent-ses";
+  EMAIL_SERVICE?:
+    | "aws-ses"
+    | "resend"
+    | "alibaba-directmail"
+    | "tencent-ses"
+    // WS-5 Scaleway profile (manifest D8a draft): TEM HTTP API / generic SMTP.
+    | "scaleway-tem"
+    | "smtp";
   EMAIL_SERVICE_REGION?: string;
   FROM_EMAIL?: string;
   AWS_SES_REGION?: string;
