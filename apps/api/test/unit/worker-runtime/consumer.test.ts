@@ -85,11 +85,16 @@ describe("QueuePoller", () => {
 
   it("GATE: at-least-once under crash — work done but delete fails ⇒ redelivery ⇒ idempotent second run, then deleted", async () => {
     const q = new FakeQueue();
-    q.enqueue(JSON.stringify({ userId: "u1" }));
+    q.enqueue(JSON.stringify({ userId: "u1" }), "m-original");
     q.failNextDeletes = 1; // crash between "work done" and ack
-    const workRuns = vi.fn(async () => "ack" as const);
+    // Capture the raw message each run sees (critic F7: prove identity).
+    const raws: Array<{ messageId: string; receiptHandle: string }> = [];
+    const workRuns = vi.fn(async (_payload: unknown, raw: { messageId: string; receiptHandle: string }) => {
+      raws.push({ messageId: raw.messageId, receiptHandle: raw.receiptHandle });
+      return "ack" as const;
+    });
 
-    const poller = new QueuePoller(q, workRuns, {
+    const poller = new QueuePoller(q, workRuns as never, {
       queueName: "delete-account",
       concurrency: 1,
       logger: makeLogger(),
@@ -104,6 +109,19 @@ describe("QueuePoller", () => {
 
     expect(workRuns).toHaveBeenCalledTimes(2); // idempotency absorbs the rerun
     expect(q.remaining).toBe(0);
+
+    // Critic F7 — identity assertions:
+    // The redelivered run saw the SAME message (same messageId), not a
+    // different one that happened to make the counts line up.
+    expect(raws).toHaveLength(2);
+    expect(raws[0].messageId).toBe("m-original");
+    expect(raws[1].messageId).toBe("m-original");
+    // And the successful ack targeted THAT message via the receipt handle of
+    // the delivery it processed — the redelivery's handle, which supersedes
+    // the first (crashed) delivery's now-stale handle.
+    expect(q.deleted[0].messageId).toBe("m-original");
+    expect(raws[1].receiptHandle).not.toBe(raws[0].receiptHandle);
+    expect(q.deleted[0].receiptHandle).toBe(raws[1].receiptHandle);
   });
 
   it("drain: stop() waits for in-flight work; nothing is lost", async () => {
