@@ -31,6 +31,18 @@ export const PSEUDONYM_DOMAIN = "trellis.user.pseudonym:";
 export interface PseudonymEnv {
   PSEUDONYM_HMAC_KMS_KEY_ID?: string;
   AWS_REGION?: string;
+  /**
+   * MAC backend selection (WS-5, redesign §5): unset/"kms" keeps the KMS
+   * GenerateMac path (zero AWS change); "software" allows running without a
+   * KMS key id — the deployment MUST have wired a software MAC computer via
+   * `setMacComputer` (see `crypto/software-hmac-mac.ts`,
+   * `configurePseudonymMacFromEnv`). Scaleway Key Manager has no GenerateMac
+   * equivalent, so the Scaleway profile uses HMAC-SHA256 in-process with a
+   * key from the secret port. If the flag is set but no computer was wired,
+   * the default KMS computer receives an empty key id and fails loudly —
+   * never an unkeyed hash.
+   */
+  PSEUDONYM_MAC_PROVIDER?: "kms" | "software";
 }
 
 /**
@@ -103,15 +115,20 @@ export async function computeAnonymousId(
     throw new Error("computeAnonymousId: userId must be a non-empty string");
   }
   const kmsKeyId = env.PSEUDONYM_HMAC_KMS_KEY_ID;
-  if (!kmsKeyId) {
+  if (!kmsKeyId && env.PSEUDONYM_MAC_PROVIDER !== "software") {
     // Fail-safe: never derive an unkeyed pseudonym.
     throw new Error(
       "PSEUDONYM_HMAC_KMS_KEY_ID not configured: cannot derive a keyed " +
-        "anonymousId. Refusing to fall back to an unkeyed hash.",
+        "anonymousId. Refusing to fall back to an unkeyed hash. " +
+        "(Non-KMS deployments must set PSEUDONYM_MAC_PROVIDER=software AND " +
+        "wire a keyed software MAC via configurePseudonymMacFromEnv.)",
     );
   }
   const region = env.AWS_REGION || process.env.AWS_REGION || "us-east-1";
   const message = new TextEncoder().encode(PSEUDONYM_DOMAIN + userId);
-  const mac = await macComputer(kmsKeyId, region, message);
+  // Software mode passes an empty key id — the software computer ignores it
+  // (its key comes from the secret port); the default KMS computer would
+  // reject it loudly, which is the fail-closed misconfiguration path.
+  const mac = await macComputer(kmsKeyId ?? "", region, message);
   return Buffer.from(mac).toString("base64");
 }
