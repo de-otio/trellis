@@ -58,7 +58,13 @@ export const handler = async (event: any) => {
     if (err?.message?.startsWith("RATE_LIMIT_EXCEEDED")) {
       throw err;
     }
-    logger.error("Rate limit check failed, proceeding with token generation", { error: err });
+    // [F2] FAIL CLOSED. A limiter-backend error (DynamoDB outage/throttle) must
+    // NOT lift the per-email rate limit — proceeding here would open an
+    // unmetered magic-link email-flooding path exactly when the limiter is
+    // down. Abort challenge creation instead, matching the /auth/magic-link
+    // endpoint's 503 posture. (Was previously fail-open: logged + proceeded.)
+    logger.error("Rate limit check failed — failing closed (aborting challenge creation)", { error: err });
+    throw err;
   }
 
   const token = randomBytes(32).toString("base64url");

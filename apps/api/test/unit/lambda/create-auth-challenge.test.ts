@@ -158,20 +158,24 @@ describe("CreateAuthChallenge Lambda", () => {
     await expect(handler(event)).rejects.toThrow("RATE_LIMIT_EXCEEDED");
   });
 
-  it("should proceed even if rate limit check fails (non-rate-limit DynamoDB error)", async () => {
-    // First call (rate limit GET) fails with a transient error
+  it("[F2] FAILS CLOSED when the rate-limit check errors (limiter outage lifts no limit)", async () => {
+    // The rate-limit GET fails with a transient/backend error (e.g. a DynamoDB
+    // outage or throttle). Previously the handler logged and PROCEEDED with
+    // token generation — a DynamoDB outage silently lifted the per-email limit,
+    // opening an email-flooding path. It must now FAIL CLOSED: abort challenge
+    // creation rather than send an unmetered magic link.
+    mockDynamoSend.mockReset();
     mockDynamoSend.mockRejectedValueOnce(new Error("DynamoDB transient error"));
-    // Subsequent calls succeed
     mockDynamoSend.mockResolvedValue({});
     mockSesSend.mockResolvedValue({});
 
     const handler = await loadHandler();
     const event = makeEvent();
 
-    const result = await handler(event);
-    // Should still succeed — transient rate limit errors are swallowed
-    expect(result.response.privateChallengeParameters.token).toBeDefined();
-    expect(result.response.challengeMetadata).toBe("MAGIC_LINK");
+    await expect(handler(event)).rejects.toThrow("DynamoDB transient error");
+    // Fail closed: no token stored (only the failed rate GET was attempted),
+    // and no email sent.
+    expect(mockSesSend).not.toHaveBeenCalled();
   });
 
   it("should throw when DynamoDB PutItem for token storage fails", async () => {
