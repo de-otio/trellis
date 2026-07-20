@@ -22,6 +22,34 @@ function received(queue: FakeQueue): Promise<ReceivedMessage> {
   return queue.receive({ maxMessages: 1, waitTimeSeconds: 0 }).then((m) => m[0]);
 }
 
+/**
+ * Extract every `catch (...) { ... }` block with REAL brace matching (any
+ * nesting depth), instead of a fixed-depth regex. Lexical only: a `}` inside
+ * a string literal would end a block early — acceptable for this gate, which
+ * exists to catch structural regressions, and dispatch.ts contains no braces
+ * inside string literals within catch blocks.
+ */
+function extractCatchBlocks(src: string): string[] {
+  const blocks: string[] = [];
+  const re = /\bcatch\b\s*(\([^)]*\))?\s*\{/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(src)) !== null) {
+    const open = m.index + m[0].length - 1; // index of the opening brace
+    let depth = 0;
+    for (let i = open; i < src.length; i++) {
+      if (src[i] === "{") depth++;
+      else if (src[i] === "}") {
+        depth--;
+        if (depth === 0) {
+          blocks.push(src.slice(open, i + 1));
+          break;
+        }
+      }
+    }
+  }
+  return blocks;
+}
+
 describe("dispatchMessage (finding 3)", () => {
   it("returned 'ack' (or void) deletes the message", async () => {
     for (const ret of ["ack" as const, undefined]) {
@@ -117,19 +145,28 @@ describe("dispatchMessage (finding 3)", () => {
     expect(q.pending).toHaveLength(1); // will be processed again (idempotency)
   });
 
-  it("GATE (code shape): no deleteMessage call is lexically reachable from a catch block", () => {
+  it("GATE (code shape): no delete/ack primitive is lexically reachable from ANY catch block (full nesting)", () => {
     const src = readFileSync(
       join(dirname(fileURLToPath(import.meta.url)), "../../../../worker/src/dispatch.ts"),
       "utf-8",
     );
-    // Every catch block, with nested-brace tolerance one level deep.
-    const catchBlocks = src.match(/catch[^{]*\{(?:[^{}]|\{[^{}]*\})*\}/g) ?? [];
+    // Every catch block via real brace matching (critic F4: the old regex
+    // tolerated only ONE nesting level and only the literal
+    // `queue.deleteMessage(` — a helper alias, a `.delete(` call, or a
+    // receipt-handle handed to any function inside a deeply nested catch
+    // would have slipped through).
+    const catchBlocks = extractCatchBlocks(src);
     expect(catchBlocks.length).toBeGreaterThan(0);
     for (const block of catchBlocks) {
-      expect(block).not.toContain("deleteMessage");
+      // Any spelling of the ack/delete primitive:
+      expect(block).not.toMatch(/deleteMessage/);
+      expect(block).not.toMatch(/\.delete\s*\(/);
+      // And no receipt handle may even be PASSED anywhere inside a catch —
+      // that is the raw material for an out-of-band ack.
+      expect(block).not.toMatch(/receiptHandle/i);
     }
-    // And there are exactly two delete call sites: the switch's ack/ack-drop
-    // paths share safeDelete; safeDelete's try calls the transport once.
+    // And there is exactly one transport delete call site: safeDelete's try
+    // (the switch's ack/ack-drop paths share it).
     const calls = src.match(/queue\.deleteMessage\(/g) ?? [];
     expect(calls).toHaveLength(1);
   });
