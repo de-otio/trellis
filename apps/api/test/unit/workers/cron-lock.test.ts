@@ -79,6 +79,38 @@ describe("makeKvCronLock", () => {
     await expect(a.refresh("nightly", 30)).resolves.toBe(false);
   });
 
+  it("refresh returns FALSE when the owner still matches but the version CAS loses (critic F6)", async () => {
+    // The untested `result.applied === false` branch: between refresh's read
+    // and its compareAndSet, a concurrent write bumps the version WITHOUT
+    // changing the owner (e.g. another refresh heartbeat from a twin process
+    // holding the same owner token, or any interleaved store write). The
+    // owner fence passes but the version-guarded CAS must lose — refresh
+    // returns false and the caller aborts.
+    const a = makeKvCronLock(interceptedKv(), { owner: "A", clock });
+    await expect(a.acquire("nightly", 30)).resolves.toBe(true);
+    await expect(a.refresh("nightly", 30)).resolves.toBe(false);
+
+    function interceptedKv(): typeof kv {
+      // Delegate everything to the real MemoryKvStore, but bump the version
+      // out-of-band (same value, same owner) right before the caller's CAS —
+      // the classic read-modify-write race, made deterministic.
+      return {
+        get: (k: string, o?: unknown) => kv.get(k, o as never),
+        putIfAbsent: (k: string, v: unknown, o?: unknown) =>
+          kv.putIfAbsent(k, v, o as never),
+        delete: (k: string, ver?: number) => kv.delete(k, ver as never),
+        compareAndSet: async (k: string, expectedVersion: number, v: unknown, o?: unknown) => {
+          const current = await kv.get<CronLockValue>(k, { consistent: true });
+          if (current !== null) {
+            // Out-of-band writer: same owner, same value — only the version moves.
+            await kv.compareAndSet(k, current.version, current.value, { ttlSeconds: 999 });
+          }
+          return kv.compareAndSet(k, expectedVersion, v, o as never);
+        },
+      } as unknown as typeof kv;
+    }
+  });
+
   it("release deletes only the caller's own live lock", async () => {
     const a = makeKvCronLock(kv, { owner: "A", clock });
     const b = makeKvCronLock(kv, { owner: "B", clock });
