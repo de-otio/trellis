@@ -76,4 +76,41 @@ describe("forged native { objectKey } messages (finding 12)", () => {
     expect((outcome as { poison?: boolean }).poison).toBe(true);
     expect(markMediaForReview).not.toHaveBeenCalled();
   });
+
+  it("a row that LOST its upload session (uploadId === null) is POISON → REVIEW + ack (critic F9)", async () => {
+    // The `row.uploadId === null` half of the step-2 guard: the row exists
+    // but can no longer certify the triggering object. Unlike the no-row
+    // case, there IS a row to route to REVIEW.
+    const { deps, markMediaForReview, transcode } = makeDeps({
+      id: "media-orphaned",
+      tenantId: TENANT,
+      uploadId: null,
+    });
+    const outcome = await processRecord(nativeRecord(`pending/${TENANT}/${UPLOAD}`), deps);
+
+    expect(outcome.disposition).toBe("ack"); // acked — no retry storm
+    expect((outcome as { poison?: boolean }).poison).toBe(true);
+    expect(markMediaForReview).toHaveBeenCalledWith("media-orphaned");
+    expect(transcode.probeDurationSeconds).not.toHaveBeenCalled();
+  });
+
+  it("a row whose OWN tenant is malformed (isCasKeyError on rebuild) is POISON → REVIEW + ack (critic F9)", async () => {
+    // The `isCasKeyError(expectedKey)` half of the step-2 guard: the
+    // triggering key is well-formed, but the row's authoritative tenantId
+    // fails the cas-key allowlist, so pendingKey(rowTenant, uploadId)
+    // returns an error rather than a comparable key. Fail closed the same
+    // way — the worker must never derive storage keys from a malformed
+    // tenant.
+    const { deps, markMediaForReview, transcode } = makeDeps({
+      id: "media-bad-tenant",
+      tenantId: "NOT_A_VALID_TENANT/../x", // fails TENANT_ID_RE
+      uploadId: UPLOAD,
+    });
+    const outcome = await processRecord(nativeRecord(`pending/${TENANT}/${UPLOAD}`), deps);
+
+    expect(outcome.disposition).toBe("ack");
+    expect((outcome as { poison?: boolean }).poison).toBe(true);
+    expect(markMediaForReview).toHaveBeenCalledWith("media-bad-tenant");
+    expect(transcode.probeDurationSeconds).not.toHaveBeenCalled();
+  });
 });
