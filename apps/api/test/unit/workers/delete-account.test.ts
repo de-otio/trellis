@@ -130,6 +130,30 @@ describe("runDeleteAccount", () => {
       expect(ctx._identityDelete).not.toHaveBeenCalled();
     });
 
+    it.each([
+      ["whitespace-only (tab+newline)", "\t\n"],
+      ["whitespace-only (spaces)", "   "],
+      ["null", null],
+      ["undefined", undefined],
+    ])(
+      "THROWS before any deletion when the secret resolves %s (critic F3 boundary)",
+      async (_label, value) => {
+        const ctx = makeCtx({
+          resolvePseudonymSecret: vi.fn().mockResolvedValue(value as never),
+        });
+
+        await expect(runDeleteAccount({ userId: "u1" }, ctx)).rejects.toThrow(
+          /fail-closed/,
+        );
+
+        // No lookup, no deletion, no staging cleanup, no identity call.
+        expect(ctx._findUnique).not.toHaveBeenCalled();
+        expect(mockDeleteUserData).not.toHaveBeenCalled();
+        expect(ctx._deleteStaging).not.toHaveBeenCalled();
+        expect(ctx._identityDelete).not.toHaveBeenCalled();
+      },
+    );
+
     it("THROWS when the secret provider itself fails (resolution error propagates)", async () => {
       const ctx = makeCtx({
         resolvePseudonymSecret: vi.fn().mockRejectedValue(new Error("SSM down")),

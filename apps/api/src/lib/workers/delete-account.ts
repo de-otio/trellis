@@ -41,10 +41,14 @@ export async function runDeleteAccount(
 
   // 0. GDPR fail-closed gate (finding 2): resolve + assert the tombstone key
   //    BEFORE any deletion. A throw here leaves the message un-acked.
+  //    Hardened (test-critique F3): a non-string resolver return or a
+  //    whitespace-only value is as unkeyed as "" — `HMAC("\t\n", …)` is just
+  //    as guessable — so the gate trims and type-checks, matching
+  //    startup-validation and the nightly/deleteUserData gates.
   const pseudonymSecret = await ctx.resolvePseudonymSecret();
-  if (pseudonymSecret.length === 0) {
+  if (typeof pseudonymSecret !== "string" || pseudonymSecret.trim().length === 0) {
     throw new Error(
-      "delete-account: empty pseudonym tombstone secret — refusing erasure (fail-closed)",
+      "delete-account: empty/whitespace pseudonym tombstone secret — refusing erasure (fail-closed)",
     );
   }
 

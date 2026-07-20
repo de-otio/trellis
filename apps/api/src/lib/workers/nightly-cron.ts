@@ -141,10 +141,12 @@ export async function runNightlyCron(
         // Fail-closed (findings 2+7): resolve the erasure-tombstone HMAC key
         // up front; empty/unresolvable throws into this step's catch and NO
         // deletion runs (never a reversible `HMAC("", …)` tombstone).
+        // Hardened (test-critique F3): whitespace-only or non-string values
+        // are rejected too, matching the delete-account/startup gates.
         const pseudonymSecret = await ctx.resolvePseudonymSecret();
-        if (pseudonymSecret.length === 0) {
+        if (typeof pseudonymSecret !== "string" || pseudonymSecret.trim().length === 0) {
           throw new Error(
-            "nightly-cron: empty pseudonym tombstone secret — refusing scheduled deletions (fail-closed)",
+            "nightly-cron: empty/whitespace pseudonym tombstone secret — refusing scheduled deletions (fail-closed)",
           );
         }
 

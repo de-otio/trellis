@@ -186,9 +186,9 @@ export async function deleteUserData(
   // reversible `HMAC("", …)` tombstone in step 15c. Re-asserted here (not
   // only at caller startup) because a secret can rotate to empty mid-process.
   const pseudonymSecret = options.pseudonymSecret;
-  if (typeof pseudonymSecret !== "string" || pseudonymSecret.length === 0) {
+  if (typeof pseudonymSecret !== "string" || pseudonymSecret.trim().length === 0) {
     throw new Error(
-      "deleteUserData: empty/absent pseudonym tombstone secret — refusing erasure " +
+      "deleteUserData: empty/absent/whitespace pseudonym tombstone secret — refusing erasure " +
         "(fail-closed; an unkeyed tombstone would be reversible)",
     );
   }

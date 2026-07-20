@@ -46,7 +46,11 @@ export async function validateRequiredSecrets(
   for (const req of requirements) {
     try {
       const value = await req.resolve();
-      if (typeof value !== "string" || value.length === 0) {
+      // Hardened (test-critique F3/F8): non-string returns (null, undefined,
+      // numbers, Buffers — a lying resolver) and whitespace-only strings are
+      // all as unkeyed as "" — reject them the same way, consistent with the
+      // per-message gates in delete-account/nightly-cron/deleteUserData.
+      if (typeof value !== "string" || value.trim().length === 0) {
         failures.push(`${req.name}: resolved empty`);
       }
       // Value intentionally dropped here — presence proven, nothing retained.
