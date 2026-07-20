@@ -66,24 +66,17 @@ export interface Env {
   COGNITO_HOSTED_UI_DOMAIN?: string;
   COGNITO_REDIRECT_URI?: string;
 
-  // Generic OIDC verification (WS-3.1). All default-derived from COGNITO_* so
-  // existing deployments need ZERO config change (see lib/auth/auth-config.ts).
-  /** Exact `iss` to pin + JWKS discovery base. Default: the Cognito issuer. */
-  AUTH_ISSUER_URL?: string;
-  /** Expected `aud`. Default: COGNITO_APP_CLIENT_ID. */
-  AUTH_AUDIENCE?: string;
-  /** Explicit JWKS override (air-gapped / fixture tests). Default: unset. */
-  AUTH_JWKS_URL?: string;
-
-  // WS-3.3 identity live-wiring. Names per manifest D8 (draft) — D8 renames
-  // COGNITO_USER_POOL_ID → OIDC_ISSUER_URL and COGNITO_APP_CLIENT_ID →
-  // OIDC_APP_CLIENT_ID. NOTE for the D8 freeze: WS-3.1 landed AUTH_ISSUER_URL /
-  // AUTH_AUDIENCE first; both spellings are accepted (AUTH_* wins) until the
-  // manifest freeze picks one.
-  /** Full issuer URL (per manifest D8 (draft)). Alias for AUTH_ISSUER_URL. */
+  // Generic OIDC verification (WS-3.1/3.3). Names per manifest D8 (FROZEN:
+  // OIDC_* canonical). All default-derived from COGNITO_* so existing
+  // deployments need ZERO config change (see lib/auth/auth-config.ts). D8
+  // renames COGNITO_USER_POOL_ID → OIDC_ISSUER_URL and COGNITO_APP_CLIENT_ID →
+  // OIDC_APP_CLIENT_ID; the WS-3.1-interim AUTH_* spelling has been removed.
+  /** Full issuer URL to pin + JWKS discovery base. Default: the Cognito issuer. */
   OIDC_ISSUER_URL?: string;
-  /** App client id / expected `aud` (per manifest D8 (draft)). */
+  /** App client id / expected `aud`. Default: COGNITO_APP_CLIENT_ID. */
   OIDC_APP_CLIENT_ID?: string;
+  /** Explicit JWKS override (air-gapped / fixture tests). Default: unset. */
+  OIDC_JWKS_URL?: string;
   /** Identity adapter selection: "cognito" (default) | "keycloak" (WS-3.3). */
   IDENTITY_PROVIDER?: string;
   /** Keycloak service-account client id (proposed D8 addition). */
@@ -1357,14 +1350,11 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     COGNITO_HOSTED_UI_DOMAIN: process.env.COGNITO_HOSTED_UI_DOMAIN,
     COGNITO_REDIRECT_URI: process.env.COGNITO_REDIRECT_URI,
 
-    // Generic OIDC verification (WS-3.1) — additive, default-derived from COGNITO_*.
-    AUTH_ISSUER_URL: process.env.AUTH_ISSUER_URL,
-    AUTH_AUDIENCE: process.env.AUTH_AUDIENCE,
-    AUTH_JWKS_URL: process.env.AUTH_JWKS_URL,
-
-    // WS-3.3 identity live-wiring — per manifest D8 (draft).
+    // Generic OIDC verification (WS-3.1/3.3) — per manifest D8 (OIDC_* canonical);
+    // additive, default-derived from COGNITO_*.
     OIDC_ISSUER_URL: process.env.OIDC_ISSUER_URL,
     OIDC_APP_CLIENT_ID: process.env.OIDC_APP_CLIENT_ID,
+    OIDC_JWKS_URL: process.env.OIDC_JWKS_URL,
     IDENTITY_PROVIDER: process.env.IDENTITY_PROVIDER,
     IDENTITY_ADMIN_CLIENT_ID: process.env.IDENTITY_ADMIN_CLIENT_ID,
     IDENTITY_ADMIN_CLIENT_SECRET: process.env.IDENTITY_ADMIN_CLIENT_SECRET,

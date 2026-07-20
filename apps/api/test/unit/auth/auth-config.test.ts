@@ -3,10 +3,10 @@
  *
  * Proves:
  *   (a) only COGNITO_* set → resolved issuer + audience equal today's values
- *   (b) direct AUTH_ISSUER_URL set → validated + wins
+ *   (b) direct OIDC_ISSUER_URL set → validated + wins
  *   (c) neither issuer source → resolve fails closed
- *   (d) [SEC-6] non-Cognito issuer without AUTH_AUDIENCE → fails closed
- *   (e) [SEC-4] AUTH_JWKS_URL at a private/IMDS/non-https/credentialed address
+ *   (d) [SEC-6] non-Cognito issuer without OIDC_APP_CLIENT_ID → fails closed
+ *   (e) [SEC-4] OIDC_JWKS_URL at a private/IMDS/non-https/credentialed address
  *       → fails closed; loopback refused unless the test gate is set
  */
 
@@ -49,30 +49,30 @@ describe("resolveAuthConfig — (a) Cognito-derived defaults", () => {
   });
 });
 
-describe("resolveAuthConfig — (b) explicit AUTH_* wins and is equivalent", () => {
-  it("an explicit AUTH_ISSUER_URL/AUTH_AUDIENCE set to the derived values is equivalent", () => {
+describe("resolveAuthConfig — (b) explicit OIDC_* wins and is equivalent", () => {
+  it("an explicit OIDC_ISSUER_URL/OIDC_APP_CLIENT_ID set to the derived values is equivalent", () => {
     const derived = resolveAuthConfig(COGNITO_ENV);
     const explicit = resolveAuthConfig({
       ...COGNITO_ENV,
-      AUTH_ISSUER_URL: derived.issuer,
-      AUTH_AUDIENCE: derived.audience,
+      OIDC_ISSUER_URL: derived.issuer,
+      OIDC_APP_CLIENT_ID: derived.audience,
     });
     expect(explicit.issuer).toBe(derived.issuer);
     expect(explicit.audience).toBe(derived.audience);
     expect(explicit.issuerKind).toBe("cognito");
   });
 
-  it("carries an explicit AUTH_JWKS_URL through", () => {
+  it("carries an explicit OIDC_JWKS_URL through", () => {
     const cfg = resolveAuthConfig({
       ...COGNITO_ENV,
-      AUTH_JWKS_URL: "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_TestPool123/.well-known/jwks.json",
+      OIDC_JWKS_URL: "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_TestPool123/.well-known/jwks.json",
     });
     expect(cfg.jwksUri).toContain("/.well-known/jwks.json");
   });
 });
 
 describe("resolveAuthConfig — (c) fail-closed when unresolvable", () => {
-  it("throws when neither AUTH_ISSUER_URL nor COGNITO_USER_POOL_ID is set", () => {
+  it("throws when neither OIDC_ISSUER_URL nor COGNITO_USER_POOL_ID is set", () => {
     expect(() => resolveAuthConfig({ COGNITO_APP_CLIENT_ID: "c" })).toThrow(/issuer could not be resolved/);
   });
 
@@ -83,23 +83,21 @@ describe("resolveAuthConfig — (c) fail-closed when unresolvable", () => {
   });
 });
 
-describe("resolveAuthConfig — (d) [SEC-6] non-Cognito issuer requires AUTH_AUDIENCE", () => {
-  it("throws for a Keycloak issuer without AUTH_AUDIENCE", () => {
+describe("resolveAuthConfig — (d) [SEC-6] non-Cognito issuer requires OIDC_APP_CLIENT_ID", () => {
+  it("throws for a Keycloak issuer without OIDC_APP_CLIENT_ID", () => {
     expect(() =>
       resolveAuthConfig({
         ...COGNITO_ENV,
-        AUTH_ISSUER_URL: "https://keycloak.example.com/realms/trellis",
+        OIDC_ISSUER_URL: "https://keycloak.example.com/realms/trellis",
       }),
-    // Message widened by WS-3.3: OIDC_APP_CLIENT_ID (D8 draft) also counts as
-    // the explicit audience. Behavior (throw, fail closed) unchanged.
-    ).toThrow(/explicit audience \(AUTH_AUDIENCE or OIDC_APP_CLIENT_ID\) is required/);
+    ).toThrow(/explicit audience \(OIDC_APP_CLIENT_ID\) is required/);
   });
 
-  it("accepts a Keycloak issuer WITH an explicit AUTH_AUDIENCE", () => {
+  it("accepts a Keycloak issuer WITH an explicit OIDC_APP_CLIENT_ID", () => {
     const cfg = resolveAuthConfig({
       ...COGNITO_ENV,
-      AUTH_ISSUER_URL: "https://keycloak.example.com/realms/trellis",
-      AUTH_AUDIENCE: "trellis-api",
+      OIDC_ISSUER_URL: "https://keycloak.example.com/realms/trellis",
+      OIDC_APP_CLIENT_ID: "trellis-api",
     });
     expect(cfg.issuerKind).toBe("generic");
     expect(cfg.audience).toBe("trellis-api");

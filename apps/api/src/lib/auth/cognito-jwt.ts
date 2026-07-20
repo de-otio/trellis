@@ -35,12 +35,10 @@ const VERIFIER_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 function envForAuth(): AuthConfigEnv {
   return {
-    AUTH_ISSUER_URL: process.env.AUTH_ISSUER_URL,
-    AUTH_AUDIENCE: process.env.AUTH_AUDIENCE,
-    AUTH_JWKS_URL: process.env.AUTH_JWKS_URL,
-    // WS-3.3 — per manifest D8 (draft); AUTH_* wins (auth-config.ts).
+    // Provider-neutral names (manifest D8 — OIDC_* canonical).
     OIDC_ISSUER_URL: process.env.OIDC_ISSUER_URL,
     OIDC_APP_CLIENT_ID: process.env.OIDC_APP_CLIENT_ID,
+    OIDC_JWKS_URL: process.env.OIDC_JWKS_URL,
     COGNITO_USER_POOL_ID: process.env.COGNITO_USER_POOL_ID,
     COGNITO_APP_CLIENT_ID: process.env.COGNITO_APP_CLIENT_ID,
     COGNITO_REGION: process.env.COGNITO_REGION,

@@ -2,8 +2,8 @@
  * WS-3.3 verifier live-wiring tests.
  *
  * What WS-3.1 deliberately left for WS-3.3 (EXECUTION-COORDINATION X7):
- *  - the D8 (draft) OIDC_ISSUER_URL / OIDC_APP_CLIENT_ID config spelling
- *    feeding the issuer-aware verifier (AUTH_* wins, COGNITO_* derivation
+ *  - the D8 OIDC_ISSUER_URL / OIDC_APP_CLIENT_ID config spelling (FROZEN:
+ *    OIDC_* canonical) feeding the issuer-aware verifier (COGNITO_* derivation
  *    byte-identical when neither is set);
  *  - the generic-issuer (Keycloak) claim mapping in normalizeClaims — G2
  *    C-10/E-3 proved KC protocol mappers emit the LITERAL `custom:*` names;
@@ -25,7 +25,7 @@ const COGNITO_ENV = {
   COGNITO_REGION: "eu-central-1",
 };
 
-describe("resolveAuthConfig — D8 (draft) OIDC_* wiring", () => {
+describe("resolveAuthConfig — D8 OIDC_* wiring", () => {
   it("keeps the Cognito derivation byte-identical when no new var is set", () => {
     const cfg = resolveAuthConfig({ ...COGNITO_ENV });
     expect(cfg).toEqual({
@@ -45,17 +45,6 @@ describe("resolveAuthConfig — D8 (draft) OIDC_* wiring", () => {
       audience: "trellis-app",
       issuerKind: "generic",
     });
-  });
-
-  it("lets the WS-3.1 AUTH_* spelling win over OIDC_* when both are set", () => {
-    const cfg = resolveAuthConfig({
-      AUTH_ISSUER_URL: "https://other.example.test/realms/r2",
-      AUTH_AUDIENCE: "aud-a",
-      OIDC_ISSUER_URL: KC_ISSUER,
-      OIDC_APP_CLIENT_ID: "aud-b",
-    });
-    expect(cfg.issuer).toBe("https://other.example.test/realms/r2");
-    expect(cfg.audience).toBe("aud-a");
   });
 
   it("[SEC-6] still fails closed on a generic issuer without ANY explicit audience", () => {
@@ -162,7 +151,7 @@ describe("boot schema — Keycloak-profile deployment (WS-3.3 relaxation)", () =
       ...baseDev,
       OIDC_ISSUER_URL: KC_ISSUER,
     });
-    expect(issues.some((i) => i.startsWith("AUTH_AUDIENCE"))).toBe(true);
+    expect(issues.some((i) => i.startsWith("OIDC_APP_CLIENT_ID"))).toBe(true);
     expect(issues.some((i) => i.startsWith("COGNITO_USER_POOL_ID"))).toBe(true);
   });
 

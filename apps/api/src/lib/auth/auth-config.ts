@@ -2,28 +2,37 @@
  * Resolved authentication config — the issuer / audience / JWKS a request is
  * verified against (WS-3.1 §4).
  *
+ * ## Env-var names (manifest D8 — FROZEN: OIDC_* canonical)
+ *
+ * The provider-neutral names are `OIDC_*` (manifest D8, frozen 2026-07-20). The
+ * WS-3.1-interim `AUTH_*` spelling has been removed; nothing else references it.
+ *
  * ## Zero-config for existing Cognito deployments
  *
  * Every new var derives a default from the existing `COGNITO_*` vars, so a
  * deployment that sets none of the new vars verifies **byte-identically** to
  * today:
  *
- *   - `AUTH_ISSUER_URL`  ← `https://cognito-idp.<region>.amazonaws.com/<poolId>`
- *   - `AUTH_AUDIENCE`    ← `COGNITO_APP_CLIENT_ID`
- *   - `AUTH_JWKS_URL`    ← unset (the library derives `${issuer}/.well-known/jwks.json`)
+ *   - `OIDC_ISSUER_URL`     ← `https://cognito-idp.<region>.amazonaws.com/<poolId>`
+ *   - `OIDC_APP_CLIENT_ID`  ← `COGNITO_APP_CLIENT_ID`
+ *   - `OIDC_JWKS_URL`       ← unset (the library derives `${issuer}/.well-known/jwks.json`)
  *
  * where `region = COGNITO_REGION ?? AWS_REGION ?? "us-east-1"`.
  *
  * ## Fail-closed boot guards
  *
- *   - **[SEC-6]** When `AUTH_ISSUER_URL` names a **non-Cognito** issuer, the
- *     `AUTH_AUDIENCE = COGNITO_APP_CLIENT_ID` default is wrong (it would reject
- *     every token — a baffling outage). We require an explicit `AUTH_AUDIENCE`.
- *   - **[SEC-4]** `AUTH_JWKS_URL` is SSRF-guarded at boot: https-only, no
+ *   - **[SEC-6]** When `OIDC_ISSUER_URL` names a **non-Cognito** issuer, the
+ *     `OIDC_APP_CLIENT_ID = COGNITO_APP_CLIENT_ID` default is wrong (it would
+ *     reject every token — a baffling outage). We require an explicit
+ *     `OIDC_APP_CLIENT_ID`.
+ *   - **[SEC-4]** `OIDC_JWKS_URL` is SSRF-guarded at boot: https-only, no
  *     `user:pass@`, and the host must not resolve to any private / link-local /
  *     IMDS / loopback address (reusing vestibulum's `isPrivateAddress`). A
  *     test-only loopback exception is gated behind a non-prod flag so a real
  *     deployment can never point key retrieval at an internal address.
+ *
+ * `OIDC_JWKS_URL` is an optional override not in the manifest D8 table (a WS-3.1
+ * addition); follow-up: add it to the manifest env-var contract.
  */
 
 import { promises as dns } from "node:dns";
@@ -36,13 +45,12 @@ const COGNITO_ISSUER_RE = /^https:\/\/cognito-idp\.[a-z0-9-]+\.amazonaws\.com\/[
 
 /** The subset of env this module reads. */
 export interface AuthConfigEnv {
-  AUTH_ISSUER_URL?: string;
-  AUTH_AUDIENCE?: string;
-  AUTH_JWKS_URL?: string;
-  /** Issuer URL, per manifest D8 (draft) — alias; AUTH_ISSUER_URL wins. */
+  /** Full issuer URL to pin (manifest D8). Default: the Cognito issuer. */
   OIDC_ISSUER_URL?: string;
-  /** App client id / audience, per manifest D8 (draft); AUTH_AUDIENCE wins. */
+  /** App client id / expected `aud` (manifest D8). Default: COGNITO_APP_CLIENT_ID. */
   OIDC_APP_CLIENT_ID?: string;
+  /** Explicit JWKS override (air-gapped / fixture tests). Default: unset. */
+  OIDC_JWKS_URL?: string;
   COGNITO_USER_POOL_ID?: string;
   COGNITO_APP_CLIENT_ID?: string;
   COGNITO_REGION?: string;
@@ -71,21 +79,17 @@ export function derivedCognitoIssuer(env: AuthConfigEnv): string | undefined {
 }
 
 /**
- * Resolve the effective auth config. `AUTH_*` wins when set; otherwise derived
+ * Resolve the effective auth config. `OIDC_*` wins when set; otherwise derived
  * from `COGNITO_*`. Throws (fail closed) if issuer or audience cannot be
  * resolved, or if [SEC-6] is violated.
  */
 export function resolveAuthConfig(env: AuthConfigEnv): ResolvedAuthConfig {
-  // WS-3.3: the D8 (draft) OIDC_ISSUER_URL is accepted as an issuer source;
-  // the WS-3.1-landed AUTH_ISSUER_URL wins when both are set. A deployment
+  // The neutral OIDC_ISSUER_URL (manifest D8) names the issuer; a deployment
   // that sets only COGNITO_* still derives the byte-identical Cognito issuer.
-  const issuer =
-    env.AUTH_ISSUER_URL ??
-    env.OIDC_ISSUER_URL /* per manifest D8 (draft) */ ??
-    derivedCognitoIssuer(env);
+  const issuer = env.OIDC_ISSUER_URL ?? derivedCognitoIssuer(env);
   if (!issuer) {
     throw new Error(
-      "auth issuer could not be resolved — set AUTH_ISSUER_URL, OIDC_ISSUER_URL or COGNITO_USER_POOL_ID",
+      "auth issuer could not be resolved — set OIDC_ISSUER_URL or COGNITO_USER_POOL_ID",
     );
   }
   const issuerKind: "cognito" | "generic" = COGNITO_ISSUER_RE.test(issuer)
@@ -93,27 +97,26 @@ export function resolveAuthConfig(env: AuthConfigEnv): ResolvedAuthConfig {
     : "generic";
 
   // [SEC-6] the COGNITO_APP_CLIENT_ID audience default is only correct for a
-  // Cognito issuer. A non-Cognito issuer must name its audience explicitly —
-  // AUTH_AUDIENCE or the D8 (draft) OIDC_APP_CLIENT_ID both count.
-  const explicitAudience =
-    env.AUTH_AUDIENCE ?? env.OIDC_APP_CLIENT_ID; /* per manifest D8 (draft) */
+  // Cognito issuer. A non-Cognito issuer must name its audience explicitly via
+  // OIDC_APP_CLIENT_ID.
+  const explicitAudience = env.OIDC_APP_CLIENT_ID;
   if (issuerKind === "generic" && explicitAudience === undefined) {
     throw new Error(
-      "an explicit audience (AUTH_AUDIENCE or OIDC_APP_CLIENT_ID) is required when the issuer is non-Cognito",
+      "an explicit audience (OIDC_APP_CLIENT_ID) is required when the issuer is non-Cognito",
     );
   }
 
   const audience = explicitAudience ?? env.COGNITO_APP_CLIENT_ID;
   if (!audience) {
     throw new Error(
-      "auth audience could not be resolved — set AUTH_AUDIENCE, OIDC_APP_CLIENT_ID or COGNITO_APP_CLIENT_ID",
+      "auth audience could not be resolved — set OIDC_APP_CLIENT_ID or COGNITO_APP_CLIENT_ID",
     );
   }
 
   return {
     issuer,
     audience,
-    ...(env.AUTH_JWKS_URL !== undefined ? { jwksUri: env.AUTH_JWKS_URL } : {}),
+    ...(env.OIDC_JWKS_URL !== undefined ? { jwksUri: env.OIDC_JWKS_URL } : {}),
     issuerKind,
   };
 }
@@ -135,7 +138,7 @@ function isLoopbackLiteral(host: string): boolean {
 }
 
 /**
- * [SEC-4] Assert an `AUTH_JWKS_URL` is safe to fetch. Throws (fail closed) on
+ * [SEC-4] Assert an `OIDC_JWKS_URL` is safe to fetch. Throws (fail closed) on
  * any violation. Run at boot, not per-request.
  */
 export async function assertJwksUrlSafe(
@@ -146,7 +149,7 @@ export async function assertJwksUrlSafe(
   try {
     url = new URL(jwksUrl);
   } catch {
-    throw new Error("AUTH_JWKS_URL is not a valid absolute URL");
+    throw new Error("OIDC_JWKS_URL is not a valid absolute URL");
   }
 
   const host = url.hostname.replace(/^\[|\]$/g, "");
@@ -155,23 +158,23 @@ export async function assertJwksUrlSafe(
   if (url.protocol !== "https:") {
     // The only non-https allowance is a loopback fixture endpoint under the gate.
     if (!(loopbackAllowed && url.protocol === "http:" && isLoopbackLiteral(host))) {
-      throw new Error("AUTH_JWKS_URL must use https:// (http is allowed only for a loopback test fixture)");
+      throw new Error("OIDC_JWKS_URL must use https:// (http is allowed only for a loopback test fixture)");
     }
   }
   if (url.username || url.password) {
-    throw new Error("AUTH_JWKS_URL must not include user:pass@ credentials");
+    throw new Error("OIDC_JWKS_URL must not include user:pass@ credentials");
   }
 
   if (isLoopbackLiteral(host)) {
     if (loopbackAllowed) return; // fixture harness
-    throw new Error("AUTH_JWKS_URL must not point at a loopback address");
+    throw new Error("OIDC_JWKS_URL must not point at a loopback address");
   }
 
   // Resolve and reject any private / link-local / IMDS address.
   const addresses = isIP(host) ? [host] : await resolveOrThrow(host, opts);
   for (const addr of addresses) {
     if (isPrivateAddress(addr)) {
-      throw new Error(`AUTH_JWKS_URL resolves to a non-public address (${addr})`);
+      throw new Error(`OIDC_JWKS_URL resolves to a non-public address (${addr})`);
     }
   }
 }
@@ -182,10 +185,10 @@ async function resolveOrThrow(host: string, opts: JwksUrlGuardOptions): Promise<
   try {
     addrs = await resolve(host);
   } catch {
-    throw new Error(`AUTH_JWKS_URL hostname could not be resolved (${host})`);
+    throw new Error(`OIDC_JWKS_URL hostname could not be resolved (${host})`);
   }
   if (addrs.length === 0) {
-    throw new Error(`AUTH_JWKS_URL hostname could not be resolved (${host})`);
+    throw new Error(`OIDC_JWKS_URL hostname could not be resolved (${host})`);
   }
   return addrs;
 }

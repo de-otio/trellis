@@ -189,24 +189,18 @@ export function buildBootEnvSchema(stage: BootStage) {
       COGNITO_USER_POOL_ID: z.string().min(1).optional(),
       COGNITO_APP_CLIENT_ID: z.string().min(1).optional(),
 
-      // Generic OIDC verification (WS-3.1) — additive, default-derived from
-      // COGNITO_*. Requiredness/SSRF rules live in superRefine + the SEC-4 boot
-      // guard (lib/auth/auth-config.ts).
-      AUTH_ISSUER_URL: z
-        .string()
-        .url({ message: "must be a valid https:// URL" })
-        .optional(),
-      AUTH_AUDIENCE: z.string().min(1).optional(),
-      AUTH_JWKS_URL: z.string().url({ message: "must be a valid URL" }).optional(),
-
-      // WS-3.3 identity live-wiring — names per manifest D8 (draft). Aliases
-      // for the WS-3.1 AUTH_* pair (AUTH_* wins when both are set; flag the
-      // duplication at the D8 freeze).
+      // Generic OIDC verification (WS-3.1/3.3) — names per manifest D8 (FROZEN:
+      // OIDC_* canonical; the WS-3.1-interim AUTH_* spelling has been removed).
+      // Additive, default-derived from COGNITO_*. Requiredness/SSRF rules live
+      // in superRefine + the SEC-4 boot guard (lib/auth/auth-config.ts).
       OIDC_ISSUER_URL: z
         .string()
         .url({ message: "must be a valid https:// URL" })
         .optional(),
       OIDC_APP_CLIENT_ID: z.string().min(1).optional(),
+      // Optional JWKS override (air-gapped / fixture tests); SSRF-guarded at
+      // boot. Not in the manifest D8 table (WS-3.1 addition) — follow-up: add it.
+      OIDC_JWKS_URL: z.string().url({ message: "must be a valid URL" }).optional(),
       IDENTITY_PROVIDER: z.enum(["cognito", "keycloak"]).optional(),
       IDENTITY_ADMIN_CLIENT_ID: z.string().min(1).optional(),
       IDENTITY_ADMIN_CLIENT_SECRET: z.string().min(1).optional(),
@@ -275,13 +269,13 @@ export function buildBootEnvSchema(stage: BootStage) {
       }
 
       // ── Issuer resolution (WS-3.1 + WS-3.3) ──────────────────────────────
-      // AUTH_* (WS-3.1) wins over the D8 (draft) OIDC_* spelling; either names
-      // the issuer. A NON-Cognito issuer with an explicit audience is a fully
-      // configured generic-OIDC deployment (WS-3.3 live wiring) and lifts the
-      // Cognito-ids requirement below.
+      // OIDC_ISSUER_URL (manifest D8, canonical) names the issuer. A NON-Cognito
+      // issuer with an explicit audience is a fully configured generic-OIDC
+      // deployment (WS-3.3 live wiring) and lifts the Cognito-ids requirement
+      // below.
       const cognitoIssuerRe = /^https:\/\/cognito-idp\.[a-z0-9-]+\.amazonaws\.com\/[^/]+$/;
-      const resolvedIssuer = env.AUTH_ISSUER_URL ?? env.OIDC_ISSUER_URL;
-      const explicitAudience = env.AUTH_AUDIENCE ?? env.OIDC_APP_CLIENT_ID;
+      const resolvedIssuer = env.OIDC_ISSUER_URL;
+      const explicitAudience = env.OIDC_APP_CLIENT_ID;
       const genericIssuerConfigured =
         resolvedIssuer !== undefined &&
         !cognitoIssuerRe.test(resolvedIssuer) &&
@@ -310,10 +304,10 @@ export function buildBootEnvSchema(stage: BootStage) {
       }
 
       // ── [SEC-6] non-Cognito issuer requires an explicit audience ─────────
-      // The AUTH_AUDIENCE = COGNITO_APP_CLIENT_ID default is only correct for a
-      // Cognito issuer. A Keycloak/Zitadel issuer without an explicit audience
-      // (AUTH_AUDIENCE or the D8 (draft) OIDC_APP_CLIENT_ID) would silently
-      // reject every token — fail closed at boot with a clear message instead.
+      // The OIDC_APP_CLIENT_ID = COGNITO_APP_CLIENT_ID default is only correct
+      // for a Cognito issuer. A Keycloak/Zitadel issuer without an explicit
+      // OIDC_APP_CLIENT_ID would silently reject every token — fail closed at
+      // boot with a clear message instead.
       if (
         resolvedIssuer !== undefined &&
         !cognitoIssuerRe.test(resolvedIssuer) &&
@@ -321,9 +315,9 @@ export function buildBootEnvSchema(stage: BootStage) {
       ) {
         ctx.addIssue({
           code: "custom",
-          path: ["AUTH_AUDIENCE"],
+          path: ["OIDC_APP_CLIENT_ID"],
           message:
-            "required when the issuer is non-Cognito (set AUTH_AUDIENCE or OIDC_APP_CLIENT_ID — the COGNITO_APP_CLIENT_ID default would reject every token)",
+            "required when the issuer is non-Cognito (set OIDC_APP_CLIENT_ID — the COGNITO_APP_CLIENT_ID default would reject every token)",
         });
       }
 

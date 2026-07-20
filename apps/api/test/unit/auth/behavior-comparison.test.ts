@@ -9,7 +9,7 @@
  *      and AuthContext for the valid token.
  *   2. Every fixture is run through the new path in BOTH config modes —
  *      (A) Cognito-derived defaults (no new env vars) and (B) explicit
- *      AUTH_ISSUER_URL/AUTH_AUDIENCE set to the derived values — and must yield
+ *      OIDC_ISSUER_URL/OIDC_APP_CLIENT_ID set to the derived values — and must yield
  *      the golden outcome in both, and the two modes must agree.
  *   3. Outcomes (accept/reject) and the resolved AuthContext are compared, NOT
  *      internal attempt counts [SEC-10] (the [SEC-2] retry narrowing changes
@@ -147,7 +147,7 @@ function installJwksSpy() {
   });
 }
 
-const ENV_KEYS = ["COGNITO_USER_POOL_ID", "COGNITO_APP_CLIENT_ID", "COGNITO_REGION", "AUTH_ISSUER_URL", "AUTH_AUDIENCE", "AUTH_JWKS_URL"] as const;
+const ENV_KEYS = ["COGNITO_USER_POOL_ID", "COGNITO_APP_CLIENT_ID", "COGNITO_REGION", "OIDC_ISSUER_URL", "OIDC_APP_CLIENT_ID", "OIDC_JWKS_URL"] as const;
 const saved: Record<string, string | undefined> = {};
 
 beforeEach(() => {
@@ -173,10 +173,10 @@ function setMode(mode: "derived" | "explicit") {
   process.env.COGNITO_USER_POOL_ID = POOL_ID;
   process.env.COGNITO_APP_CLIENT_ID = CLIENT_ID;
   process.env.COGNITO_REGION = REGION;
-  process.env.AUTH_JWKS_URL = JWKS_URI;
+  process.env.OIDC_JWKS_URL = JWKS_URI;
   if (mode === "explicit") {
-    process.env.AUTH_ISSUER_URL = ISSUER;
-    process.env.AUTH_AUDIENCE = CLIENT_ID;
+    process.env.OIDC_ISSUER_URL = ISSUER;
+    process.env.OIDC_APP_CLIENT_ID = CLIENT_ID;
   }
   resetVerifier();
 }
