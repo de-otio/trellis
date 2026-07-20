@@ -1125,6 +1125,19 @@ export function validateEnv(env: Env): string[] {
     );
   }
 
+  // SECURITY (WS-2 §4 finding 1, test-critique F1): the media control-
+  // inversion flag ON with no queue binding would otherwise let
+  // `completeSession` flip sessions to "uploaded" WITHOUT enqueuing a
+  // moderation job — permanently unmoderated media once Deploy 2 removes the
+  // S3 notification. Flag on ⇒ queue REQUIRED; refuse to start otherwise.
+  // (`completeSession` also carries a runtime fail-closed guard for
+  // hand-built Envs that bypass this startup check.)
+  if (env.MEDIA_ENQUEUE_ON_COMPLETE && !env.MEDIA_PROCESSING_QUEUE) {
+    errors.push(
+      "MEDIA_ENQUEUE_ON_COMPLETE is true but MEDIA_PROCESSING_QUEUE is missing — completions could flip sessions without enqueuing moderation (unmoderated media). Wire the queue or turn the flag off.",
+    );
+  }
+
   // Email provider config — validate ONLY when a provider is explicitly
   // selected via the RAW env var. buildEnv() defaults EMAIL_SERVICE to
   // "aws-ses", so reading env.EMAIL_SERVICE here would fire for every

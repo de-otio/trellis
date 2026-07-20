@@ -914,6 +914,58 @@ describe("WS-2 §4 media control inversion (MEDIA_ENQUEUE_ON_COMPLETE)", () => {
     expect(queue.send).not.toHaveBeenCalled();
   });
 
+  it("FINDING 1 (critic F1): FLAG ON with NO queue fails CLOSED — error surfaced, session NOT flipped", async () => {
+    const env = invEnv(undefined, true); // flag on, queue binding missing
+    const handler = new PresignedUploadHandler(env, makePort().port);
+    const created = await createHappySession(handler, env);
+
+    mockHead.mockResolvedValue({ size: 100 });
+    const res = await handler.completeSession(created.session.sessionId, USER, "US", env);
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.status).toBe(503);
+    // The load-bearing assertion: the session did NOT silently flip — the
+    // idempotency key still admits a retry once the config is fixed.
+    expect(state.sessions[0].status).toBe("awaiting-upload");
+    expect(state.jobs).toHaveLength(0);
+
+    // Config fixed (queue wired): the SAME session completes the FULL path —
+    // enqueue + flip — proving the failure was retryable, not terminal.
+    const queue = makeQueue();
+    (env as any).MEDIA_PROCESSING_QUEUE = queue;
+    const retry = await handler.completeSession(created.session.sessionId, USER, "US", env);
+    expect(retry.ok).toBe(true);
+    expect(queue.send).toHaveBeenCalledTimes(1);
+    expect(state.sessions[0].status).toBe("uploaded");
+  });
+
+  it("FINDING 1 (critic F1): FLAG ON with NO queue on an already-uploaded session fails CLOSED (no silent success without a job)", async () => {
+    const env = invEnv(undefined, true); // flag on, queue binding missing
+    const handler = new PresignedUploadHandler(env, makePort().port);
+    const created = await createHappySession(handler, env);
+
+    // A legacy "uploaded" row with NO moderation job: the self-heal twin
+    // branch must not report success when it cannot enqueue.
+    state.sessions[0].status = "uploaded";
+    expect(state.jobs).toHaveLength(0);
+
+    const res = await handler.completeSession(created.session.sessionId, USER, "US", env);
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.status).toBe(503);
+  });
+
+  it("FINDING 1 (critic F1): FLAG OFF with no queue binding is unaffected (AWS default path)", async () => {
+    const env = invEnv(undefined, false);
+    const handler = new PresignedUploadHandler(env, makePort().port);
+    const created = await createHappySession(handler, env);
+
+    mockHead.mockResolvedValue({ size: 100 });
+    const res = await handler.completeSession(created.session.sessionId, USER, "US", env);
+    expect(res.ok).toBe(true);
+    expect(state.sessions[0].status).toBe("uploaded");
+  });
+
   it("self-heal enqueue failure returns retryable 503 (success is never reported without a job)", async () => {
     const queue = makeQueue();
     const env = invEnv(queue, true);

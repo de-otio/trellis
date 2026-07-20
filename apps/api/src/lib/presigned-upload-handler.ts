@@ -413,6 +413,27 @@ export class PresignedUploadHandler {
     region: string,
     env: Env,
   ): Promise<CompletePresignedResult> {
+    // FAIL-CLOSED config guard (finding 1, test-critique F1): the inversion
+    // flag ON with NO queue binding is a deployment misconfiguration that
+    // would otherwise flip sessions to "uploaded" WITHOUT enqueuing a
+    // moderation job — permanently unmoderated media (a CSAM-adjacent bypass
+    // once Deploy 2 removes the S3 notification). Refuse BEFORE any state
+    // change: no flip, retryable error. The same condition is also refused at
+    // startup (validateEnv), so this runtime guard only fires for a
+    // hand-built/miswired Env.
+    if (env.MEDIA_ENQUEUE_ON_COMPLETE && !env.MEDIA_PROCESSING_QUEUE) {
+      this.logger.error(
+        "presigned.complete: MEDIA_ENQUEUE_ON_COMPLETE is on but MEDIA_PROCESSING_QUEUE is missing — failing closed (no flip, no enqueue)",
+        { sessionId },
+      );
+      return {
+        ok: false,
+        status: 503,
+        error: "Enqueue unavailable",
+        message:
+          "Upload processing is misconfigured; the upload cannot be completed. Retry after the service is restored.",
+      };
+    }
     const { sharedDatabaseConnectionManager } = await import(
       "./database-connection-manager.js"
     );
@@ -446,8 +467,10 @@ export class PresignedUploadHandler {
       // that reached "uploaded" without an enqueued moderation job (a
       // pre-migration session, or a flip that raced a send failure under the
       // old ordering). Re-enqueue when no job exists; a session with a job
-      // must NOT double-enqueue.
-      if (env.MEDIA_ENQUEUE_ON_COMPLETE && env.MEDIA_PROCESSING_QUEUE) {
+      // must NOT double-enqueue. Queue presence is guaranteed by the
+      // fail-closed config guard at the top of this method (finding 1) —
+      // flag-on/queue-missing can never silently skip this block.
+      if (env.MEDIA_ENQUEUE_ON_COMPLETE) {
         const hasJob = await withQueryTimeoutAndRetry<{ id: string } | null>(
           sharedDatabaseConnectionManager,
           region,
@@ -614,7 +637,11 @@ export class PresignedUploadHandler {
     // completions (count the "media processing enqueued" events against
     // completed uploads); only then does Deploy 2 remove the notification
     // ALONE. The flag defaults OFF on AWS until Deploy 1.
-    if (env.MEDIA_ENQUEUE_ON_COMPLETE && env.MEDIA_PROCESSING_QUEUE) {
+    //
+    // Queue presence is guaranteed by the fail-closed config guard at the top
+    // of this method (finding 1): flag-on/queue-missing errors out BEFORE any
+    // state change instead of silently flipping without an enqueue.
+    if (env.MEDIA_ENQUEUE_ON_COMPLETE) {
       try {
         await env.MEDIA_PROCESSING_QUEUE.send({
           objectKey,
