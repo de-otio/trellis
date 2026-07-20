@@ -14,10 +14,6 @@
 
 import type { SQSHandler } from "aws-lambda";
 import { S3Client } from "@aws-sdk/client-s3";
-import {
-  CognitoIdentityProviderClient,
-  AdminDeleteUserCommand,
-} from "@aws-sdk/client-cognito-identity-provider";
 import { Logger } from "@aws-lambda-powertools/logger";
 import { getLambdaPrisma as getPrisma } from "../lib/lambda-prisma.js";
 import { getLogger } from "../lib/logger.js";
@@ -25,35 +21,20 @@ import {
   runDeleteAccount,
   type DeleteAccountContext,
 } from "../lib/workers/delete-account.js";
-import type { IdentityAdminPort } from "../lib/workers/identity-admin-port.js";
+import { makeIdentityAdminPort } from "../lib/identity/identity-provider.js";
 
 const logger = new Logger({ serviceName: "delete-account-worker" });
 
 const s3 = new S3Client({ region: process.env.AWS_REGION });
-
-/** Cognito-backed IdentityAdminPort, or undefined when no pool is configured
- *  (preserves the old `if (COGNITO_USER_POOL_ID)` skip). */
-function makeCognitoIdentityPort(): IdentityAdminPort | undefined {
-  const userPoolId = process.env.COGNITO_USER_POOL_ID;
-  if (!userPoolId) return undefined;
-  return {
-    async deleteUser({ email }) {
-      const cognito = new CognitoIdentityProviderClient({
-        region: process.env.AWS_REGION,
-      });
-      await cognito.send(
-        new AdminDeleteUserCommand({ UserPoolId: userPoolId, Username: email }),
-      );
-    },
-  };
-}
 
 async function buildContext(): Promise<DeleteAccountContext> {
   const db = await getPrisma();
   return {
     db,
     logger: getLogger(),
-    identity: makeCognitoIdentityPort(),
+    // WS-3.3: the shared IdentityProviderPort (X6 absorbed) — byte-identical
+    // AdminDeleteUser on the default cognito provider.
+    identity: makeIdentityAdminPort(),
     resolvePseudonymSecret: async () => {
       const { resolvePseudonymSecret } = await import(
         "../lib/services/user-data-deletion.js"

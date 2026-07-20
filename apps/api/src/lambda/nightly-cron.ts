@@ -14,10 +14,6 @@ import { Logger } from "@aws-lambda-powertools/logger";
 import { Metrics } from "@aws-lambda-powertools/metrics";
 import { DynamoDBClient, DeleteItemCommand } from "@aws-sdk/client-dynamodb";
 import { S3Client, DeleteObjectsCommand } from "@aws-sdk/client-s3";
-import {
-  CognitoIdentityProviderClient,
-  AdminDeleteUserCommand,
-} from "@aws-sdk/client-cognito-identity-provider";
 import { SESClient, SendEmailCommand } from "@aws-sdk/client-ses";
 import { marshall } from "@aws-sdk/util-dynamodb";
 import { getLambdaPrisma as getPrisma } from "../lib/lambda-prisma.js";
@@ -28,7 +24,7 @@ import {
   runNightlyCron,
   type DeletionEmailPort,
 } from "../lib/workers/nightly-cron.js";
-import type { IdentityAdminPort } from "../lib/workers/identity-admin-port.js";
+import { makeIdentityAdminPort } from "../lib/identity/identity-provider.js";
 import { makeEmfMetricsPort } from "./emf-metrics-adapter.js";
 
 const logger = new Logger({ serviceName: "nightly-cron" });
@@ -38,21 +34,6 @@ const dynamo = new DynamoDBClient({ region: process.env.AWS_REGION });
 const s3 = new S3Client({ region: process.env.AWS_REGION });
 const TABLE = process.env.DYNAMODB_TABLE!;
 const MEDIA_BUCKET = process.env.MEDIA_BUCKET_NAME!;
-
-function makeCognitoIdentityPort(): IdentityAdminPort | undefined {
-  const userPoolId = process.env.COGNITO_USER_POOL_ID;
-  if (!userPoolId) return undefined;
-  return {
-    async deleteUser({ email }) {
-      const cognito = new CognitoIdentityProviderClient({
-        region: process.env.AWS_REGION,
-      });
-      await cognito.send(
-        new AdminDeleteUserCommand({ UserPoolId: userPoolId, Username: email }),
-      );
-    },
-  };
-}
 
 function makeSesEmailPort(): DeletionEmailPort | undefined {
   const domain = process.env.DOMAIN;
@@ -84,7 +65,9 @@ export const handler = async (): Promise<void> => {
       metrics: makeEmfMetricsPort(metrics),
       cronLock: makeKvCronLock(getKvStore("cron")),
       clock: Date.now,
-      identity: makeCognitoIdentityPort(),
+      // WS-3.3: the shared IdentityProviderPort (X6 absorbed) — byte-identical
+      // AdminDeleteUser on the default cognito provider.
+      identity: makeIdentityAdminPort(),
       email: makeSesEmailPort(),
       resolvePseudonymSecret: async () => {
         const { resolvePseudonymSecret } = await import(

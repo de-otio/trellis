@@ -1,16 +1,19 @@
 /**
- * IdentityAdminPort — PROVISIONAL one-method admin port (WS-2 §1.0, X6).
+ * IdentityAdminPort — the narrow admin slice of the identity port (X6,
+ * resolved by WS-3.3).
  *
- * WS-3.3 will introduce the full `IdentityProviderPort`; it is unwritten, so
- * WS-2 defines the minimal slice the extracted workers need today
- * (delete-account, nightly-cron, and e2e-sweeper delete external identities).
+ * Originally WS-2's PROVISIONAL one-method port; WS-3.3 absorbed it into the
+ * full `IdentityProviderPort` (`@de-otio/saas-foundation/identity`), which is
+ * a structural superset — every implementation of the full port satisfies
+ * this slice unchanged.
  *
- * The AWS entrypoints inject a Cognito-backed implementation (wrapping
- * `AdminDeleteUserCommand`); the worker container injects the same today.
- * When WS-3.3 lands, this port is either absorbed into `IdentityProviderPort`
- * or kept as its narrow admin slice — a WS-3.3 decision, flagged in that plan.
- * Keeping it one method now means the WS-3.3 merge is a rename, not a
- * redesign. Do NOT grow this interface here.
+ * This narrow interface stays deliberately: the WS-2 worker contexts depend
+ * on it (not the full port) so the secret-blast-radius rule holds — a worker
+ * whose `Pick<WorkerContext, …>` includes `identity` gains ONLY external
+ * identity deletion, never magic-link initiation. Wiring goes through
+ * `lib/identity/identity-provider.ts` (`makeIdentityAdminPort`,
+ * `IDENTITY_PROVIDER` selection, default cognito). Do NOT grow this
+ * interface; add capabilities on the foundation port instead.
  */
 export interface IdentityAdminPort {
   /**
