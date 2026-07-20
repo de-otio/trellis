@@ -1,35 +1,37 @@
-import type { PreSignUpTriggerEvent, PreSignUpTriggerHandler } from "aws-lambda";
-import { DynamoDBClient, GetItemCommand } from "@aws-sdk/client-dynamodb";
-import { marshall, unmarshall } from "@aws-sdk/util-dynamodb";
+/**
+ * Thin AWS entrypoint for the Cognito PreSignUp trigger (WS-3.3 trigger-hook
+ * extraction, WS-2 pattern).
+ *
+ * Owns the Cognito concerns only: the trigger-event shape (the invitation
+ * code arrives via `custom:invitationCode` or clientMetadata) and the
+ * response flags. The invitation-gate LOGIC lives in
+ * `lib/identity/invitation-gate.ts`, reading the `invitations` record through
+ * the KvStore port (`KV_PROVIDER`, default DynamoDB — the byte-compatible
+ * item this trigger always read: pk `invitations:<CODE>`, sk `v`, ttl).
+ */
 
-const dynamo = new DynamoDBClient({ region: process.env.AWS_REGION });
-const TABLE = process.env.DYNAMODB_TABLE!;
+import type { PreSignUpTriggerHandler } from "aws-lambda";
+import type { KvStore } from "@de-otio/saas-foundation/kv";
+import { assertInvitationValid } from "../lib/identity/invitation-gate.js";
+import { getKvStore } from "../lib/kv/kv-provider.js";
+
+let _store: KvStore | null = null;
+
+function store(): KvStore {
+  if (_store === null) _store = getKvStore("invitations");
+  return _store;
+}
+
+/** Test seam: inject a `KvStore` (e.g. `MemoryKvStore`); pass null to reset. */
+export function __setInvitationStoreForTest(s: KvStore | null): void {
+  _store = s;
+}
 
 export const handler: PreSignUpTriggerHandler = async (event) => {
   const invitationCode = (event.request.userAttributes["custom:invitationCode"] ||
                           event.request.clientMetadata?.invitationCode) as string | undefined;
 
-  if (!invitationCode) {
-    throw new Error("An invitation code is required to register.");
-  }
-
-  // Check invitation code in DynamoDB
-  const result = await dynamo.send(new GetItemCommand({
-    TableName: TABLE,
-    Key: marshall({ pk: `invitations:${invitationCode}`, sk: "v" }),
-  }));
-
-  if (!result.Item) {
-    throw new Error("Invalid or expired invitation code.");
-  }
-
-  const invitation = unmarshall(result.Item);
-  if (invitation.used) {
-    throw new Error("This invitation code has already been used.");
-  }
-  if (invitation.ttl && invitation.ttl < Math.floor(Date.now() / 1000)) {
-    throw new Error("This invitation code has expired.");
-  }
+  await assertInvitationValid(invitationCode, { store: store() });
 
   // Auto-confirm and auto-verify invited users.
   //
