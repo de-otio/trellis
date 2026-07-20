@@ -45,6 +45,7 @@ function validProdEnv(): Record<string, string | undefined> {
     SESSION_SALT: "prod-salt-value-32-characters-minimum!!",
     COGNITO_USER_POOL_ID: "eu-central-1_ABCdef123",
     COGNITO_APP_CLIENT_ID: "abcdefghijklmnopqrstuvwxy",
+    APP_DOMAIN: "app.example.test", // [F4] required in prod
     MEDIA_THRESHOLDS_JSON: JSON.stringify({
       // Test-fixture values only — not operative thresholds.
       test_category: { review: 0.5, quarantine: 0.9 },
@@ -204,6 +205,37 @@ describe("validateBootEnv — dev-only-overridable keys (required in prod, optio
     expect(issues).toHaveLength(1);
     expect(issues[0].startsWith("MEDIA_THRESHOLDS_JSON:")).toBe(true);
     expect(issues[0]).toContain("at least one category");
+  });
+
+  it("[F4] APP_DOMAIN absent in dev is fine", () => {
+    const env = validDevEnv();
+    expect(env.APP_DOMAIN).toBeUndefined();
+    expect(validateBootEnv(env)).toEqual([]);
+  });
+
+  it("[F4] APP_DOMAIN absent in prod → names the key", () => {
+    const env = validProdEnv();
+    delete env.APP_DOMAIN;
+    const issues = validateBootEnv(env);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].startsWith("APP_DOMAIN:")).toBe(true);
+    expect(issues[0]).toContain("required in prod");
+  });
+
+  it("[F4] APP_DOMAIN required when IDENTITY_PROVIDER=keycloak (even in dev)", () => {
+    const env = {
+      ...validDevEnv(),
+      IDENTITY_PROVIDER: "keycloak",
+      OIDC_ISSUER_URL: "https://id.example.test/realms/skybber-dev",
+      OIDC_APP_CLIENT_ID: "trellis-app",
+      IDENTITY_ADMIN_CLIENT_ID: "trellis-api",
+      IDENTITY_ADMIN_CLIENT_SECRET: "svc-secret",
+    };
+    const issues = validateBootEnv(env);
+    expect(issues.some((i) => i.startsWith("APP_DOMAIN:"))).toBe(true);
+
+    // With APP_DOMAIN present the keycloak env boots clean.
+    expect(validateBootEnv({ ...env, APP_DOMAIN: "app.example.test" })).toEqual([]);
   });
 });
 

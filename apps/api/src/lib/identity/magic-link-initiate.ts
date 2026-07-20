@@ -151,8 +151,17 @@ export async function handleMagicLinkInitiate(
     }
     redirectUri = requestedRedirect;
   } else {
-    // Default app verify route; on the cognito provider the value is unused.
-    redirectUri = appDomain ? `https://${appDomain}/auth/verify` : "";
+    // [F4] Default app verify route. FAIL CLOSED when APP_DOMAIN is unset:
+    // sending an empty redirect_uri to the IdP is a misconfiguration, not a
+    // valid request (an empty redirect_uri would be rejected by — or, worse,
+    // mishandled at — the provider). Refuse with 503 (same posture as the
+    // limiter-outage path) rather than proceed. APP_DOMAIN is also enforced at
+    // boot when IDENTITY_PROVIDER=keycloak / in prod (env-schema.ts).
+    if (!appDomain) {
+      logger.error("magic-link.app_domain_unset");
+      return jsonResponse(503, { error: "Service temporarily unavailable" }, corsHeaders);
+    }
+    redirectUri = `https://${appDomain}/auth/verify`;
   }
 
   const identity: IdentityProviderPort = getIdentityProvider();

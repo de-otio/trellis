@@ -178,6 +178,7 @@ describe("boot schema — Keycloak-profile deployment (WS-3.3 relaxation)", () =
       "OIDC_APP_CLIENT_ID",
       "IDENTITY_ADMIN_CLIENT_ID",
       "IDENTITY_ADMIN_CLIENT_SECRET",
+      "APP_DOMAIN", // [F4]
     ]) {
       expect(issues.some((i) => i.startsWith(key))).toBe(true);
     }
@@ -191,6 +192,7 @@ describe("boot schema — Keycloak-profile deployment (WS-3.3 relaxation)", () =
       OIDC_APP_CLIENT_ID: "trellis-app",
       IDENTITY_ADMIN_CLIENT_ID: "trellis-api",
       IDENTITY_ADMIN_CLIENT_SECRET: "svc-secret",
+      APP_DOMAIN: "app.example.test", // [F4] required when keycloak
     });
     expect(issues).toEqual([]);
   });

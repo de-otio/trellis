@@ -211,6 +211,12 @@ export function buildBootEnvSchema(stage: BootStage) {
       IDENTITY_ADMIN_CLIENT_ID: z.string().min(1).optional(),
       IDENTITY_ADMIN_CLIENT_SECRET: z.string().min(1).optional(),
 
+      // [F4] App domain — the base for the default magic-link redirect_uri and
+      // the sign-in email From. REQUIRED when IDENTITY_PROVIDER=keycloak and in
+      // prod (requiredness enforced in superRefine): an empty APP_DOMAIN would
+      // otherwise let the initiate path fall back to an empty redirect_uri.
+      APP_DOMAIN: z.string().min(1).optional(),
+
       // Tier 2/3 — media pipeline gate + format-checked optionals
       MEDIA_THRESHOLDS_JSON: mediaThresholdsJson(prod).optional(),
       MEDIA_MAX_BYTES_IMAGE: positiveIntString.optional(),
@@ -328,6 +334,10 @@ export function buildBootEnvSchema(stage: BootStage) {
           "OIDC_APP_CLIENT_ID",
           "IDENTITY_ADMIN_CLIENT_ID",
           "IDENTITY_ADMIN_CLIENT_SECRET",
+          // [F4] the magic-link default redirect_uri base — a keycloak
+          // deployment without APP_DOMAIN would fall back to an empty
+          // redirect_uri (now a 503 at runtime; refuse at boot instead).
+          "APP_DOMAIN",
         ] as const) {
           if (env[key] === undefined) {
             ctx.addIssue({
@@ -354,6 +364,16 @@ export function buildBootEnvSchema(stage: BootStage) {
             path: ["MEDIA_THRESHOLDS_JSON"],
             message:
               "required in prod — the media-moderation gate thresholds (optional in dev, where absence fail-closes every category to review)",
+          });
+        }
+        // [F4] APP_DOMAIN must be present in prod regardless of identity
+        // provider — it is the base for the magic-link redirect_uri and the
+        // sign-in email From; an empty value fails the initiate path closed.
+        if (env.APP_DOMAIN === undefined) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["APP_DOMAIN"],
+            message: "required in prod — app domain (magic-link redirect_uri base and email From)",
           });
         }
       }

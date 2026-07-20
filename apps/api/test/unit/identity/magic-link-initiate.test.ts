@@ -230,6 +230,25 @@ describe("handleMagicLinkInitiate", () => {
     });
   });
 
+  it("[F4] fails CLOSED (503) when APP_DOMAIN is unset and no redirect_uri was supplied", async () => {
+    const { provider, calls } = keycloakLikeProvider();
+    __setIdentityProviderForTest(provider);
+
+    // Env WITHOUT APP_DOMAIN and a request with no redirect_uri → the default
+    // path would otherwise send an empty redirect_uri to the IdP. Refuse.
+    const envNoDomain = {} as unknown as Env;
+    const res = await handleMagicLinkInitiate(
+      makeRequest({ email: "user1@example.test" }),
+      envNoDomain,
+      new RateLimiter(),
+      {},
+    );
+    expect(res.status).toBe(503);
+    // The provider must never be reached with an empty redirect_uri.
+    expect(calls).toHaveLength(0);
+    expect(sentEmails).toHaveLength(0);
+  });
+
   it("rejects malformed input (missing/invalid email, bad JSON)", async () => {
     const { provider, calls } = keycloakLikeProvider();
     __setIdentityProviderForTest(provider);
