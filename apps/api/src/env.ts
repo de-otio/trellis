@@ -75,6 +75,22 @@ export interface Env {
   /** Explicit JWKS override (air-gapped / fixture tests). Default: unset. */
   AUTH_JWKS_URL?: string;
 
+  // WS-3.3 identity live-wiring. Names per manifest D8 (draft) — D8 renames
+  // COGNITO_USER_POOL_ID → OIDC_ISSUER_URL and COGNITO_APP_CLIENT_ID →
+  // OIDC_APP_CLIENT_ID. NOTE for the D8 freeze: WS-3.1 landed AUTH_ISSUER_URL /
+  // AUTH_AUDIENCE first; both spellings are accepted (AUTH_* wins) until the
+  // manifest freeze picks one.
+  /** Full issuer URL (per manifest D8 (draft)). Alias for AUTH_ISSUER_URL. */
+  OIDC_ISSUER_URL?: string;
+  /** App client id / expected `aud` (per manifest D8 (draft)). */
+  OIDC_APP_CLIENT_ID?: string;
+  /** Identity adapter selection: "cognito" (default) | "keycloak" (WS-3.3). */
+  IDENTITY_PROVIDER?: string;
+  /** Keycloak service-account client id (proposed D8 addition). */
+  IDENTITY_ADMIN_CLIENT_ID?: string;
+  /** Keycloak service-account client secret (proposed D8 addition). */
+  IDENTITY_ADMIN_CLIENT_SECRET?: string;
+
   // OAuth device-authorization adapter (T9b-d)
   /** Public Cognito app client used by `trellis-agent-cli` (no secret, PKCE). */
   COGNITO_AGENT_CLIENT_ID?: string;
@@ -1338,6 +1354,13 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     AUTH_ISSUER_URL: process.env.AUTH_ISSUER_URL,
     AUTH_AUDIENCE: process.env.AUTH_AUDIENCE,
     AUTH_JWKS_URL: process.env.AUTH_JWKS_URL,
+
+    // WS-3.3 identity live-wiring — per manifest D8 (draft).
+    OIDC_ISSUER_URL: process.env.OIDC_ISSUER_URL,
+    OIDC_APP_CLIENT_ID: process.env.OIDC_APP_CLIENT_ID,
+    IDENTITY_PROVIDER: process.env.IDENTITY_PROVIDER,
+    IDENTITY_ADMIN_CLIENT_ID: process.env.IDENTITY_ADMIN_CLIENT_ID,
+    IDENTITY_ADMIN_CLIENT_SECRET: process.env.IDENTITY_ADMIN_CLIENT_SECRET,
 
     // OAuth device-authorization adapter (T9b-d)
     COGNITO_AGENT_CLIENT_ID: process.env.COGNITO_AGENT_CLIENT_ID,

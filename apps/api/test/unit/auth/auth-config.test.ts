@@ -90,7 +90,9 @@ describe("resolveAuthConfig — (d) [SEC-6] non-Cognito issuer requires AUTH_AUD
         ...COGNITO_ENV,
         AUTH_ISSUER_URL: "https://keycloak.example.com/realms/trellis",
       }),
-    ).toThrow(/AUTH_AUDIENCE is required when AUTH_ISSUER_URL is a non-Cognito issuer/);
+    // Message widened by WS-3.3: OIDC_APP_CLIENT_ID (D8 draft) also counts as
+    // the explicit audience. Behavior (throw, fail closed) unchanged.
+    ).toThrow(/explicit audience \(AUTH_AUDIENCE or OIDC_APP_CLIENT_ID\) is required/);
   });
 
   it("accepts a Keycloak issuer WITH an explicit AUTH_AUDIENCE", () => {

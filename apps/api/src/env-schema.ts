@@ -199,6 +199,18 @@ export function buildBootEnvSchema(stage: BootStage) {
       AUTH_AUDIENCE: z.string().min(1).optional(),
       AUTH_JWKS_URL: z.string().url({ message: "must be a valid URL" }).optional(),
 
+      // WS-3.3 identity live-wiring — names per manifest D8 (draft). Aliases
+      // for the WS-3.1 AUTH_* pair (AUTH_* wins when both are set; flag the
+      // duplication at the D8 freeze).
+      OIDC_ISSUER_URL: z
+        .string()
+        .url({ message: "must be a valid https:// URL" })
+        .optional(),
+      OIDC_APP_CLIENT_ID: z.string().min(1).optional(),
+      IDENTITY_PROVIDER: z.enum(["cognito", "keycloak"]).optional(),
+      IDENTITY_ADMIN_CLIENT_ID: z.string().min(1).optional(),
+      IDENTITY_ADMIN_CLIENT_SECRET: z.string().min(1).optional(),
+
       // Tier 2/3 — media pipeline gate + format-checked optionals
       MEDIA_THRESHOLDS_JSON: mediaThresholdsJson(prod).optional(),
       MEDIA_MAX_BYTES_IMAGE: positiveIntString.optional(),
@@ -256,39 +268,75 @@ export function buildBootEnvSchema(stage: BootStage) {
         });
       }
 
+      // ── Issuer resolution (WS-3.1 + WS-3.3) ──────────────────────────────
+      // AUTH_* (WS-3.1) wins over the D8 (draft) OIDC_* spelling; either names
+      // the issuer. A NON-Cognito issuer with an explicit audience is a fully
+      // configured generic-OIDC deployment (WS-3.3 live wiring) and lifts the
+      // Cognito-ids requirement below.
+      const cognitoIssuerRe = /^https:\/\/cognito-idp\.[a-z0-9-]+\.amazonaws\.com\/[^/]+$/;
+      const resolvedIssuer = env.AUTH_ISSUER_URL ?? env.OIDC_ISSUER_URL;
+      const explicitAudience = env.AUTH_AUDIENCE ?? env.OIDC_APP_CLIENT_ID;
+      const genericIssuerConfigured =
+        resolvedIssuer !== undefined &&
+        !cognitoIssuerRe.test(resolvedIssuer) &&
+        explicitAudience !== undefined;
+
       // ── Cognito ids (matches the S1.4 post-build checks, but at boot) ─────
-      if (env.COGNITO_USER_POOL_ID === undefined) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["COGNITO_USER_POOL_ID"],
-          message: "required — Cognito user pool id (JWT verification cannot start without it)",
-        });
-      }
-      if (env.COGNITO_APP_CLIENT_ID === undefined) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["COGNITO_APP_CLIENT_ID"],
-          message: "required — Cognito app client id",
-        });
+      // WS-3.3 relaxation: not required when a non-Cognito issuer is FULLY
+      // configured (issuer + explicit audience) — that is the Keycloak-profile
+      // deployment WS-3.1 deferred to WS-3.3. A deployment that sets neither
+      // still fails closed here, exactly as before.
+      if (!genericIssuerConfigured) {
+        if (env.COGNITO_USER_POOL_ID === undefined) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["COGNITO_USER_POOL_ID"],
+            message: "required — Cognito user pool id (JWT verification cannot start without it)",
+          });
+        }
+        if (env.COGNITO_APP_CLIENT_ID === undefined) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["COGNITO_APP_CLIENT_ID"],
+            message: "required — Cognito app client id",
+          });
+        }
       }
 
       // ── [SEC-6] non-Cognito issuer requires an explicit audience ─────────
       // The AUTH_AUDIENCE = COGNITO_APP_CLIENT_ID default is only correct for a
-      // Cognito issuer. A Keycloak/Zitadel AUTH_ISSUER_URL without AUTH_AUDIENCE
-      // would silently reject every token — fail closed at boot with a clear
-      // message instead. (In WS-3.1 only the Cognito path is deployed, so this
-      // never fires in practice yet; it prevents a WS-3.3 footgun.)
+      // Cognito issuer. A Keycloak/Zitadel issuer without an explicit audience
+      // (AUTH_AUDIENCE or the D8 (draft) OIDC_APP_CLIENT_ID) would silently
+      // reject every token — fail closed at boot with a clear message instead.
       if (
-        env.AUTH_ISSUER_URL !== undefined &&
-        !/^https:\/\/cognito-idp\.[a-z0-9-]+\.amazonaws\.com\/[^/]+$/.test(env.AUTH_ISSUER_URL) &&
-        env.AUTH_AUDIENCE === undefined
+        resolvedIssuer !== undefined &&
+        !cognitoIssuerRe.test(resolvedIssuer) &&
+        explicitAudience === undefined
       ) {
         ctx.addIssue({
           code: "custom",
           path: ["AUTH_AUDIENCE"],
           message:
-            "required when AUTH_ISSUER_URL is a non-Cognito issuer (the COGNITO_APP_CLIENT_ID default would reject every token)",
+            "required when the issuer is non-Cognito (set AUTH_AUDIENCE or OIDC_APP_CLIENT_ID — the COGNITO_APP_CLIENT_ID default would reject every token)",
         });
+      }
+
+      // ── IDENTITY_PROVIDER=keycloak requires its full config ──────────────
+      if (env.IDENTITY_PROVIDER === "keycloak") {
+        for (const key of [
+          "OIDC_ISSUER_URL",
+          "OIDC_APP_CLIENT_ID",
+          "IDENTITY_ADMIN_CLIENT_ID",
+          "IDENTITY_ADMIN_CLIENT_SECRET",
+        ] as const) {
+          if (env[key] === undefined) {
+            ctx.addIssue({
+              code: "custom",
+              path: [key],
+              message: "required when IDENTITY_PROVIDER=keycloak (fail-closed identity wiring)",
+            });
+          }
+        }
       }
 
       // ── Prod-only tier (dev-only-overridable vars) ────────────────────────

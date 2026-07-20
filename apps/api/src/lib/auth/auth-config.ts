@@ -39,6 +39,10 @@ export interface AuthConfigEnv {
   AUTH_ISSUER_URL?: string;
   AUTH_AUDIENCE?: string;
   AUTH_JWKS_URL?: string;
+  /** Issuer URL, per manifest D8 (draft) — alias; AUTH_ISSUER_URL wins. */
+  OIDC_ISSUER_URL?: string;
+  /** App client id / audience, per manifest D8 (draft); AUTH_AUDIENCE wins. */
+  OIDC_APP_CLIENT_ID?: string;
   COGNITO_USER_POOL_ID?: string;
   COGNITO_APP_CLIENT_ID?: string;
   COGNITO_REGION?: string;
@@ -72,10 +76,16 @@ export function derivedCognitoIssuer(env: AuthConfigEnv): string | undefined {
  * resolved, or if [SEC-6] is violated.
  */
 export function resolveAuthConfig(env: AuthConfigEnv): ResolvedAuthConfig {
-  const issuer = env.AUTH_ISSUER_URL ?? derivedCognitoIssuer(env);
+  // WS-3.3: the D8 (draft) OIDC_ISSUER_URL is accepted as an issuer source;
+  // the WS-3.1-landed AUTH_ISSUER_URL wins when both are set. A deployment
+  // that sets only COGNITO_* still derives the byte-identical Cognito issuer.
+  const issuer =
+    env.AUTH_ISSUER_URL ??
+    env.OIDC_ISSUER_URL /* per manifest D8 (draft) */ ??
+    derivedCognitoIssuer(env);
   if (!issuer) {
     throw new Error(
-      "auth issuer could not be resolved — set AUTH_ISSUER_URL or COGNITO_USER_POOL_ID",
+      "auth issuer could not be resolved — set AUTH_ISSUER_URL, OIDC_ISSUER_URL or COGNITO_USER_POOL_ID",
     );
   }
   const issuerKind: "cognito" | "generic" = COGNITO_ISSUER_RE.test(issuer)
@@ -83,16 +93,21 @@ export function resolveAuthConfig(env: AuthConfigEnv): ResolvedAuthConfig {
     : "generic";
 
   // [SEC-6] the COGNITO_APP_CLIENT_ID audience default is only correct for a
-  // Cognito issuer. A non-Cognito issuer must set AUTH_AUDIENCE explicitly.
-  if (issuerKind === "generic" && env.AUTH_AUDIENCE === undefined) {
+  // Cognito issuer. A non-Cognito issuer must name its audience explicitly —
+  // AUTH_AUDIENCE or the D8 (draft) OIDC_APP_CLIENT_ID both count.
+  const explicitAudience =
+    env.AUTH_AUDIENCE ?? env.OIDC_APP_CLIENT_ID; /* per manifest D8 (draft) */
+  if (issuerKind === "generic" && explicitAudience === undefined) {
     throw new Error(
-      "AUTH_AUDIENCE is required when AUTH_ISSUER_URL is a non-Cognito issuer",
+      "an explicit audience (AUTH_AUDIENCE or OIDC_APP_CLIENT_ID) is required when the issuer is non-Cognito",
     );
   }
 
-  const audience = env.AUTH_AUDIENCE ?? env.COGNITO_APP_CLIENT_ID;
+  const audience = explicitAudience ?? env.COGNITO_APP_CLIENT_ID;
   if (!audience) {
-    throw new Error("auth audience could not be resolved — set AUTH_AUDIENCE or COGNITO_APP_CLIENT_ID");
+    throw new Error(
+      "auth audience could not be resolved — set AUTH_AUDIENCE, OIDC_APP_CLIENT_ID or COGNITO_APP_CLIENT_ID",
+    );
   }
 
   return {

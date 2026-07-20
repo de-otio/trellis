@@ -38,6 +38,9 @@ function envForAuth(): AuthConfigEnv {
     AUTH_ISSUER_URL: process.env.AUTH_ISSUER_URL,
     AUTH_AUDIENCE: process.env.AUTH_AUDIENCE,
     AUTH_JWKS_URL: process.env.AUTH_JWKS_URL,
+    // WS-3.3 — per manifest D8 (draft); AUTH_* wins (auth-config.ts).
+    OIDC_ISSUER_URL: process.env.OIDC_ISSUER_URL,
+    OIDC_APP_CLIENT_ID: process.env.OIDC_APP_CLIENT_ID,
     COGNITO_USER_POOL_ID: process.env.COGNITO_USER_POOL_ID,
     COGNITO_APP_CLIENT_ID: process.env.COGNITO_APP_CLIENT_ID,
     COGNITO_REGION: process.env.COGNITO_REGION,
@@ -144,9 +147,15 @@ export function normalizeClaims(
     };
   }
 
-  // Generic OIDC (Keycloak/Zitadel). WS-3.1 leaves the Trellis-specific claim
-  // mapping to WS-3.3; carry the standard OIDC fields through so the shape is
-  // valid and the least-privilege defaults in auth-middleware still apply.
+  // Generic OIDC (Keycloak/Zitadel) — WS-3.3 live wiring. G2 proved (C-10 /
+  // E-3, live 2026-07-19) that Keycloak protocol mappers emit the LITERAL
+  // `custom:*` claim names (the `:` passes through KC's token JSON unchanged),
+  // so the generic mapping mirrors the Cognito table 1:1 for those claims;
+  // only the username source differs (`preferred_username` vs
+  // `cognito:username`). [SEC-7] this stays a mapping layer: no defaults are
+  // injected here — an unmapped/missing role claim falls through to
+  // auth-middleware's least-privilege defaults (END_USER / GUEST), never
+  // higher.
   return {
     sub,
     username:
@@ -155,6 +164,13 @@ export function normalizeClaims(
       asString(raw.email) ??
       "",
     ...pick("email", asString(raw.email)),
+    ...pick("userId", asString(raw["custom:userId"])),
+    ...pick("globalRole", asString(raw["custom:globalRole"]) ?? asString(raw["custom:role"])),
+    ...pick("activeTenantId", asString(raw["custom:activeTenantId"])),
+    ...pick("tenantSlug", asString(raw["custom:tenantSlug"])),
+    ...pick("tenantRole", asString(raw["custom:tenantRole"])),
+    ...pick("handle", asString(raw["custom:handle"])),
+    ...pick("dataRegion", asString(raw["custom:dataRegion"])),
   };
 }
 
