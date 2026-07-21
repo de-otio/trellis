@@ -12,6 +12,9 @@
     "start": "node dist/apps/worker/src/main.js"
   },
   "dependencies": {
-    "@aws-sdk/client-sqs": "^3.996.5"
+    "@aws-sdk/client-sqs": "^3.996.5",
+    "@de-otio/saas-foundation": "^0.4.0",
+    "@de-otio/trellis-extension-api": "^0.7.0",
+    "@de-otio/vestibulum": "^0.4.0"
   }
 }
