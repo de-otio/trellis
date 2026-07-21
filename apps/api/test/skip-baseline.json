@@ -85,6 +85,12 @@
       "kind": "skip",
       "name": "[T7] should include partnerId in security event (rename to tenantId)",
       "reason": "fix — same partnerId→tenantId rename debt as above"
+    },
+    {
+      "file": "test/integration/extension-schema-baseline.integration.test.ts",
+      "kind": "skip",
+      "name": "SKIPPED: set O1_L2_SHADOW_DB_URL + O1_L2_SHADOW_DIRECT_URL (ephemeral local DBs) to run",
+      "reason": "needs-infra-run-nightly — env-guarded (if (!ENABLED)) shadow-DB replay baseline; the placeholder it.skip registers only when O1_L2_SHADOW_DB_URL + O1_L2_SHADOW_DIRECT_URL are unset"
     }
   ]
 }
