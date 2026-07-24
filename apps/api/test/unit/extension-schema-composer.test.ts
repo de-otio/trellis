@@ -297,19 +297,27 @@ describe("deriveBackRelations + injectBackRelations", () => {
 });
 
 describe("generateRegistry + delegateKey", () => {
-  it("registers every model; only subject-erasure carries erasureSubjectField", () => {
+  it("registers every model; only subject-erasure carries erasureSubjectField; entity FK → fkFields", () => {
     const models = parseFragment("widget", VALID_FRAGMENT);
     const reg = generateRegistry(models);
+    // Both widget models declare `entity Entity @relation(fields:[entityId])`,
+    // so each carries an fkFields entry for the FK-tenant check (security F3/B4).
+    // The tenant relation is the tenantField (not an fkField).
+    const entityFk = [
+      { field: "entityId", targetModel: "entity", targetTenantField: "tenantId" },
+    ];
     expect(reg).toEqual([
       {
         model: "ext_widget__records",
         tenantField: "tenantId",
         erasureSubjectField: "createdBy",
+        fkFields: entityFk,
       },
       {
         model: "ext_widget__reminders",
         tenantField: "tenantId",
         erasureSubjectField: null,
+        fkFields: entityFk,
       },
     ]);
   });

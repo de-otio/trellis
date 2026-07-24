@@ -2,7 +2,7 @@ import { createHmac } from "node:crypto";
 import { getParameter } from "@aws-lambda-powertools/parameters/ssm";
 import { resolveSecret, secretRef } from "@de-otio/saas-foundation/secrets";
 import type { PrismaClient } from "@prisma/client";
-import { EXTENSION_MODEL_REGISTRY } from "../extension-model-registry.js";
+import { getExtensionModelRegistry } from "../extension-model-registry.js";
 import { getLogger } from "../logger.js";
 
 /**
@@ -290,7 +290,7 @@ export async function deleteUserData(
   //      empty today — no extension owns a table yet (O-1 is infra ahead of
   //      its first table-owner) — so this loop is a clean no-op until then.
   let extensionRowsErased = 0;
-  for (const entry of EXTENSION_MODEL_REGISTRY) {
+  for (const entry of getExtensionModelRegistry()) {
     if (!entry.erasureSubjectField) continue;
     const delegate = getExtensionDeleteManyDelegate(db, entry.model);
     const result = await delegate.deleteMany({
