@@ -21,6 +21,10 @@ vi.mock("@de-otio/saas-foundation/secrets", () => ({
 
 vi.mock("../../../src/lib/extension-model-registry.js", () => ({
   EXTENSION_MODEL_REGISTRY: mockRegistry,
+  // The erasure flow now reads the boot-injected registry via the getter (plan
+  // 011 Phase B); return the same mutable stand-in so the existing push/clear
+  // tests still drive it.
+  getExtensionModelRegistry: () => mockRegistry,
 }));
 
 import {

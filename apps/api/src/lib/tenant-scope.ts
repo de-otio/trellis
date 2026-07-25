@@ -36,7 +36,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { Prisma } from "@prisma/client";
 import { getCurrentTenantId } from "@de-otio/saas-foundation/tenant";
 import {
-  EXTENSION_MODEL_REGISTRY,
+  getExtensionModelRegistry,
   type ExtensionModelRegistryEntry,
 } from "./extension-model-registry.js";
 import { getLogger } from "./logger.js";
@@ -69,7 +69,7 @@ export function delegateKeyToModelName(key: string): string {
  * second AND-merge).
  */
 export function extensionScopedModelNames(
-  registry: readonly ExtensionModelRegistryEntry[] = EXTENSION_MODEL_REGISTRY,
+  registry: readonly ExtensionModelRegistryEntry[] = getExtensionModelRegistry(),
 ): string[] {
   return registry.map((entry) => delegateKeyToModelName(entry.model));
 }

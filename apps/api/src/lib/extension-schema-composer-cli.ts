@@ -119,6 +119,8 @@ export const EXTENSION_MODEL_REGISTRY: readonly ExtensionModelRegistryEntry[] = 
       model: e.model,
       tenantField: e.tenantField,
       erasureSubjectField: e.erasureSubjectField,
+      // FK-tenant-validation fields (security F3/B4) when the model declares any.
+      ...(e.fkFields && e.fkFields.length > 0 ? { fkFields: e.fkFields } : {}),
     })),
     null,
     2,
@@ -151,8 +153,20 @@ export async function runCli(argv: readonly string[]): Promise<void> {
   await mkdir(args.out, { recursive: true });
   const schemaOut = path.join(args.out, "schema.prisma");
   const registryOut = path.join(args.out, "extension-model-registry.generated.ts");
+  // Runtime-loadable JSON (B3): a consuming app loads this at boot and passes it
+  // to `startServer({ extensionModelRegistry })` — decouples the app's bundle from
+  // a compile-time import of a generated .ts artifact.
+  const registryJsonOut = path.join(
+    args.out,
+    "extension-model-registry.generated.json",
+  );
   await writeFile(schemaOut, result.schema, "utf8");
   await writeFile(registryOut, renderRegistryModule(result.registry), "utf8");
+  await writeFile(
+    registryJsonOut,
+    JSON.stringify(result.registry, null, 2) + "\n",
+    "utf8",
+  );
   process.stdout.write(
     `composed ${result.models.length} extension model(s) → ${schemaOut}\n`,
   );

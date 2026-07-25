@@ -4,7 +4,7 @@
  * Tests for GDPR-compliant user data export, job creation, and processing.
  */
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TrellisRequestContext } from "../../src/lib/request-context.js";
 import type { Session } from "../../src/lib/session-cookie.js";
 import {
@@ -12,6 +12,10 @@ import {
   type Env,
   type ExportJob,
 } from "../../src/lib/user-export-handler.js";
+import {
+  setExtensionModelRegistry,
+  __resetExtensionModelRegistryForTest,
+} from "../../src/lib/extension-model-registry.js";
 
 // Mock DataRouter
 vi.mock("../../src/lib/data-router", () => ({
@@ -636,6 +640,63 @@ describe("UserExportHandler", () => {
       );
 
       expect(response).toBeNull();
+    });
+  });
+
+  describe("processExportJob — extension-owned data (O-1 / GDPR Art.15/20)", () => {
+    const jobData = {
+      jobId: "job123",
+      userId: "user123",
+      email: "test@example.com",
+      format: "json" as const,
+      region: "US",
+    };
+
+    afterEach(() => {
+      __resetExtensionModelRegistryForTest();
+      delete (mockDb as any).ext_dog__private;
+      delete (mockDb as any).ext_cascade_only;
+    });
+
+    it("includes ext_* rows where the user is the erasure subject", async () => {
+      setExtensionModelRegistry([
+        {
+          model: "ext_dog__private",
+          tenantField: "tenantId",
+          erasureSubjectField: "createdByUserId",
+          fkFields: [],
+        },
+      ]);
+      const row = { entityId: "e1", createdByUserId: "user123", microchip: "982000123456789" };
+      (mockDb as any).ext_dog__private = {
+        findMany: vi.fn().mockResolvedValue([row]),
+      };
+
+      await handler.processExportJob(jobData, mockEnv);
+
+      expect((mockDb as any).ext_dog__private.findMany).toHaveBeenCalledWith({
+        where: { createdByUserId: "user123" },
+      });
+      const body = JSON.parse(mockExportFilesR2.put.mock.calls[0][1]);
+      expect(body.extensionData.ext_dog__private).toEqual([row]);
+    });
+
+    it("skips a cascade-only model (null erasureSubjectField) and omits extensionData when empty", async () => {
+      setExtensionModelRegistry([
+        {
+          model: "ext_cascade_only",
+          tenantField: "tenantId",
+          erasureSubjectField: null,
+          fkFields: [],
+        },
+      ]);
+      (mockDb as any).ext_cascade_only = { findMany: vi.fn() };
+
+      await handler.processExportJob(jobData, mockEnv);
+
+      expect((mockDb as any).ext_cascade_only.findMany).not.toHaveBeenCalled();
+      const body = JSON.parse(mockExportFilesR2.put.mock.calls[0][1]);
+      expect(body.extensionData).toBeUndefined();
     });
   });
 });

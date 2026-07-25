@@ -12,6 +12,7 @@ import type { KVNamespace, R2Bucket, CloudflareQueue, Queue } from "../types/clo
  */
 
 import { DataRouter } from "./data-router.js";
+import { getExtensionModelRegistry } from "./extension-model-registry.js";
 import { Session } from "./session-cookie.js";
 import type { TrellisRequestContext } from "./request-context.js";
 
@@ -163,6 +164,13 @@ export interface UserExportData {
     createdAt: string;
     acceptedAt?: string | null;
   }>;
+
+  // Extension-owned rows where this user is the erasure subject (O-1), keyed by
+  // model name. GDPR Art. 15/20 completeness for extension tables — symmetric to
+  // deleteUserData's registry-driven erasure (Art. 17). Present only when an
+  // extension owns such a table AND the user has rows in it (e.g. a dog's
+  // ext_dog__private microchip/passport belong to the keeper who entered them).
+  extensionData?: Record<string, unknown[]>;
 }
 
 export class UserExportHandler {
@@ -250,6 +258,40 @@ export class UserExportHandler {
     }
 
     return job;
+  }
+
+  /**
+   * Collect extension-owned rows where the user is the erasure subject (O-1),
+   * for GDPR Art. 15/20 export completeness. Symmetric to deleteUserData's
+   * registry-driven erasure (Art. 17): any `ext_*` model that declares an
+   * `erasureSubjectField` holds that user's personal data and must be exported.
+   * Resilient per-model — a single model's failure is logged, never fatal to
+   * the whole export. Returns a map of model name → rows (only non-empty ones).
+   */
+  private async collectExtensionData(
+    db: any,
+    userId: string,
+  ): Promise<Record<string, unknown[]>> {
+    const out: Record<string, unknown[]> = {};
+    for (const entry of getExtensionModelRegistry()) {
+      if (!entry.erasureSubjectField) continue;
+      const delegate = db?.[entry.model];
+      if (!delegate || typeof delegate.findMany !== "function") continue;
+      try {
+        const rows = await delegate.findMany({
+          where: { [entry.erasureSubjectField]: userId },
+        });
+        if (Array.isArray(rows) && rows.length > 0) {
+          out[entry.model] = rows;
+        }
+      } catch (error) {
+        getLogger().warn(
+          `[UserExportHandler] extension export failed for model ${entry.model}`,
+          { error: error instanceof Error ? error.message : String(error) },
+        );
+      }
+    }
+    return out;
   }
 
   /**
@@ -401,6 +443,11 @@ export class UserExportHandler {
         orderBy: { createdAt: "desc" },
       }) as unknown as Promise<any[]>);
 
+      // Extension-owned data where the user is the erasure subject (O-1 / GDPR
+      // Art. 15/20). Empty unless an extension owns such a table (e.g. dogs'
+      // ext_dog__private) and the user has rows.
+      const extensionData = await this.collectExtensionData(db, userId);
+
       // Format the export data
       const exportData: UserExportData = {
         exportedAt: new Date().toISOString(),
@@ -506,6 +553,7 @@ export class UserExportHandler {
           labels: geo.labels,
           createdAt: geo.createdAt.toISOString(),
         })),
+        ...(Object.keys(extensionData).length > 0 ? { extensionData } : {}),
       };
 
       // Transform to AT Protocol format if needed

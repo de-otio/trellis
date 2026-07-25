@@ -45,7 +45,7 @@ import type {
   TenantId,
 } from "@de-otio/trellis-extension-api";
 import {
-  EXTENSION_MODEL_REGISTRY,
+  getExtensionModelRegistry,
   type ExtensionModelRegistryEntry,
 } from "./extension-model-registry.js";
 
@@ -621,10 +621,10 @@ export function createScopedDb(
 // ---------------------------------------------------------------------------
 
 /**
- * Map the composed-model registry (Phase 0 T0.5 contract, empty today) into
- * proxy metadata. The registry carries `tenantField`; FK declarations arrive
- * once L2's composer enriches it, so `fkFields`/`jsonFields` are empty for now
- * and the FK-validation path is exercised via explicit metas in tests.
+ * Map the composed-model registry into proxy metadata. `fkFields` now flows from
+ * the registry entry (security F3/B4 — populated by the composer so the FK-tenant
+ * read-before-write check fires for `ext_*` models); `jsonFields` stays empty
+ * (no owned model declares a JSON FK-bearing column in v1).
  */
 export function registryToMetas(
   registry: readonly ExtensionModelRegistryEntry[],
@@ -632,21 +632,13 @@ export function registryToMetas(
   return registry.map((entry) => ({
     model: entry.model,
     tenantField: entry.tenantField,
-    fkFields: [],
+    fkFields: entry.fkFields ?? [],
     jsonFields: [],
   }));
 }
 
-/**
- * Assemble the full `delegate key → ScopedModelMeta` map for a scoped surface:
- * the tenant-carrying core delegates plus the extension's own composed models.
- * Validates that every declared FK target is either a core allowlist model or
- * another model on the surface — a config error fails fast (defense in depth).
- */
-export function buildScopedModelMetas(
-  extMetas: readonly ScopedModelMeta[] = registryToMetas(
-    EXTENSION_MODEL_REGISTRY,
-  ),
+function assembleScopedModelMetas(
+  extMetas: readonly ScopedModelMeta[],
 ): Map<string, ScopedModelMeta> {
   const map = new Map<string, ScopedModelMeta>();
   for (const meta of CORE_SCOPED_DELEGATE_META) map.set(meta.model, meta);
@@ -662,5 +654,36 @@ export function buildScopedModelMetas(
       }
     }
   }
+  return map;
+}
+
+// The default (no-arg) path reads the boot-injected registry and CACHES the
+// assembled map (security F5): the registry is immutable after freeze, and
+// `createExtensionContext` calls this per request — recomputing each time is
+// waste. The cache is keyed on the active-registry array identity, so a
+// `setExtensionModelRegistry` (before freeze) or a test reset — which replaces
+// the array reference — invalidates it automatically.
+let cachedRegistryRef: readonly ExtensionModelRegistryEntry[] | null = null;
+let cachedRegistryMetas: Map<string, ScopedModelMeta> | null = null;
+
+/**
+ * Assemble the full `delegate key → ScopedModelMeta` map for a scoped surface:
+ * the tenant-carrying core delegates plus the extension's own composed models.
+ * With no argument it reads the boot-injected registry (cached); an explicit
+ * `extMetas` (used by tests) bypasses the cache.
+ */
+export function buildScopedModelMetas(
+  extMetas?: readonly ScopedModelMeta[],
+): Map<string, ScopedModelMeta> {
+  if (extMetas !== undefined) {
+    return assembleScopedModelMetas(extMetas);
+  }
+  const registry = getExtensionModelRegistry();
+  if (cachedRegistryMetas && cachedRegistryRef === registry) {
+    return cachedRegistryMetas;
+  }
+  const map = assembleScopedModelMetas(registryToMetas(registry));
+  cachedRegistryRef = registry;
+  cachedRegistryMetas = map;
   return map;
 }

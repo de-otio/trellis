@@ -527,10 +527,26 @@ export function generateRegistry(
     const tenantField = tenant?.fields[0] ?? "tenantId";
     const erasureSubjectField =
       model.erasure?.kind === "subject" ? model.erasure.field : null;
+    // FK-tenant-validation fields (security F3/B4): relations to tenant-owned
+    // core models the scoped proxy read-before-write-validates. Excludes the
+    // tenant relation (that IS the tenantField) and User FKs (a per-SUBJECT
+    // erasure linkage, not a tenant check — see CORE_FK_ALLOWLIST in
+    // extension-scoped-db.ts). A single-scalar FK only (v1 models are shallow).
+    const fkFields = model.relations
+      .filter(
+        (r) =>
+          r.target !== "Tenant" && r.target !== "User" && r.fields.length === 1,
+      )
+      .map((r) => ({
+        field: r.fields[0],
+        targetModel: delegateKey(r.target),
+        targetTenantField: "tenantId",
+      }));
     return {
       model: delegateKey(model.name),
       tenantField,
       erasureSubjectField,
+      ...(fkFields.length > 0 ? { fkFields } : {}),
     };
   });
 }

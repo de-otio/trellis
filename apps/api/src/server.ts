@@ -22,6 +22,21 @@ import { TrellisRequestContextManager } from "./lib/request-context.js";
 import { SessionManager } from "./lib/session-cookie.js";
 import { getExtensions } from "./extensions.js";
 import { validateExtensions } from "./lib/extension-validator.js";
+import {
+  setExtensionModelRegistry,
+  freezeExtensionModelRegistry,
+  type ExtensionModelRegistryEntry,
+} from "./lib/extension-model-registry.js";
+
+/** Options for {@link startServer}. */
+export interface StartServerOptions {
+  /**
+   * Composed extension-owned-model registry, produced by the schema composer
+   * for an app that owns `ext_*` tables. Injected at boot and frozen before the
+   * listener binds. Omit when no extension owns tables (the default).
+   */
+  readonly extensionModelRegistry?: readonly ExtensionModelRegistryEntry[];
+}
 
 const MAX_BODY_SIZE = 10 * 1024 * 1024; // 10 MB
 const REQUEST_TIMEOUT_MS = 25_000; // 25 seconds
@@ -44,8 +59,20 @@ async function readBody(req: http.IncomingMessage): Promise<Buffer> {
   });
 }
 
-export async function startServer(): Promise<http.Server> {
+export async function startServer(
+  options?: StartServerOptions,
+): Promise<http.Server> {
   const PORT = parseInt(process.env.PORT || "3000", 10);
+
+  // O-1 boot seam (security F5): inject the composed extension-model registry
+  // (if the app owns ext_* tables), then FREEZE so it can never change while
+  // requests are served. Freeze unconditionally — even with no owned tables —
+  // so a late setExtensionModelRegistry() is a loud error, not a silent surface
+  // change. Must precede any request handling / job runner / listener bind.
+  if (options?.extensionModelRegistry) {
+    setExtensionModelRegistry(options.extensionModelRegistry);
+  }
+  freezeExtensionModelRegistry();
 
   // AR12 — boot-time env validation (Zod, src/env-schema.ts): fail fast,
   // naming the missing/invalid key, BEFORE any AWS client is constructed or
