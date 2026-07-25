@@ -8,10 +8,10 @@
 
 import type { TenantRole, UserRole, TenantMember, Tenant } from "@prisma/client";
 
-/** The data carried from a Cognito JWT into each request. */
+/** The data carried from a verified JWT into each request. */
 export interface AuthContext {
-  /** Cognito user pool sub (UUID). Stable identifier used for cache keys. */
-  cognitoSub: string;
+  /** Opaque IdP subject (`sub`). Stable identifier used for cache keys. */
+  sub: string;
   /** Trellis `User.id` (cuid). */
   userId: string;
   /** Platform-wide role from `users.role`. */

@@ -214,15 +214,15 @@ async function buildAuthContext(
   if (!memberWithTenant) return null;
 
   // HIGH-5: resolve the real Cognito sub from the User row. We previously
-  // used session.userId (the trellis user id) as the cognitoSub fallback,
+  // used session.userId (the trellis user id) as the sub fallback,
   // which would have caused AdminUserGlobalSignOut to be called against
   // the wrong identifier. Block agent approval if the sub cannot be
   // resolved rather than silently writing a value that won't revoke.
   const userRow = await prisma.user.findUnique({
     where: { id: session.userId },
-    select: { cognitoSub: true },
+    select: { subject: true },
   });
-  if (!userRow?.cognitoSub) {
+  if (!userRow?.subject) {
     return null;
   }
 
@@ -230,7 +230,7 @@ async function buildAuthContext(
   const globalRole = (session.role as AuthContext["globalRole"]) ?? "END_USER";
 
   return {
-    cognitoSub: userRow.cognitoSub,
+    sub: userRow.subject,
     userId: session.userId,
     globalRole,
     activeTenantId: memberWithTenant.tenantId,
@@ -525,7 +525,7 @@ export const agentAuthorizeRoutes: Route[] = [
       const tokens = await issuer.issueForAgent({
         userPoolId,
         clientId: agentClientId,
-        username: auth.cognitoSub,
+        username: auth.sub,
         refreshToken,
       });
 
@@ -538,7 +538,7 @@ export const agentAuthorizeRoutes: Route[] = [
       await approveDeviceAuth({
         deviceCode,
         approvedByUserId: auth.userId,
-        cognitoSub: auth.cognitoSub,
+        sub: auth.sub,
         tenantId: auth.activeTenantId,
         tokens,
         sessionId,
@@ -548,7 +548,7 @@ export const agentAuthorizeRoutes: Route[] = [
       const sessionRow: AgentSessionRecord = {
         sessionId,
         userId: auth.userId,
-        cognitoSub: auth.cognitoSub,
+        sub: auth.sub,
         tenantId: auth.activeTenantId,
         currentJti: initialJti,
         status: "active",

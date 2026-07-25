@@ -131,9 +131,9 @@ export class IdpHandler {
     const db = createPrisma(env);
     const members = await db.tenantMember.findMany({
       where: { tenantId },
-      select: { user: { select: { cognitoSub: true } } },
+      select: { user: { select: { subject: true } } },
     });
-    const subs = members.map((m) => m.user.cognitoSub).filter((s): s is string => !!s);
+    const subs = members.map((m) => m.user.subject).filter((s): s is string => !!s);
     if (this.deps.invalidateClaimsForSubs) {
       await this.deps.invalidateClaimsForSubs(subs);
       return;

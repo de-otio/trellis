@@ -362,8 +362,8 @@ export class TenantHandler {
     try {
       const cache = createClaimsCacheFromEnv();
       if (tenantWithRole) {
-        await cache.invalidate(auth.cognitoSub);
-        await cache.put(auth.cognitoSub, {
+        await cache.invalidate(auth.sub);
+        await cache.put(auth.sub, {
           userId: auth.userId,
           globalRole: auth.globalRole,
           activeTenantId: tenantId,
@@ -372,7 +372,7 @@ export class TenantHandler {
           handle: auth.handle,
         });
       } else {
-        await cache.invalidate(auth.cognitoSub);
+        await cache.invalidate(auth.sub);
       }
     } catch {
       // Cache write is best-effort: don't block the switch if DDB is

@@ -28,13 +28,7 @@
  * a mocked DynamoDB).
  */
 
-import {
-  type DeleteItemCommandOutput,
-  DeleteItemCommand,
-  type PutItemCommandOutput,
-  PutItemCommand,
-} from "@aws-sdk/client-dynamodb";
-import { marshall } from "@aws-sdk/util-dynamodb";
+import type { KvStore } from "@de-otio/saas-foundation/kv";
 import type {
   CrossTenantReadDelegate,
   ExtensionJobContext,
@@ -53,16 +47,6 @@ import type { Logger } from "./logger.js";
 // ---------------------------------------------------------------------------
 
 /**
- * The narrow DynamoDB surface the lock needs. The real `DynamoDBClient`
- * satisfies it structurally; tests provide a fake honoring the two
- * ConditionExpressions the runner uses.
- */
-export interface JobLockDynamo {
-  send(command: PutItemCommand): Promise<PutItemCommandOutput>;
-  send(command: DeleteItemCommand): Promise<DeleteItemCommandOutput>;
-}
-
-/**
  * Everything the runner needs, all injected so nothing is wall-clock or
  * ambient. `scopedDbFactory` is optional: O-1 v1 ships zero jobs, so
  * `ctx.tenant(...)` is never invoked in production yet — the L1 scoped-DB
@@ -70,13 +54,19 @@ export interface JobLockDynamo {
  * exercise the `tenant()` path.
  */
 export interface JobRunnerDeps {
-  /** DynamoDB client for the single-flight lock. */
-  readonly dynamo: JobLockDynamo;
-  /** The KV/lock table name (same table `hourly-cron` uses). */
-  readonly tableName: string;
+  /**
+   * The `KvStore` for the single-flight lock (WS-1 §3.9). The lock is a
+   * `putIfAbsent(key, {lockedAt}, {ttlSeconds, overwriteExpired:true})` create;
+   * the returned record's `version` is the anti-steal lock token, and release
+   * is a version-guarded `delete`. The default is a DynamoKvStore over the
+   * byte-compat `job` layout (pk `job:{extId}:{jobId}`, sk `lock`); tests inject
+   * a `MemoryKvStore`. MUST share the same injected clock as `now` below so
+   * frozen-clock TTL/takeover assertions are deterministic.
+   */
+  readonly kvStore: KvStore;
   /** Injected clock — MILLISECONDS since epoch (e.g. `Date.now`). */
   readonly now: () => number;
-  /** Injected uuid — the lock token generator (e.g. `crypto.randomUUID`). */
+  /** Injected uuid — retained for compatibility (the lock token is now the KvStore version). */
   readonly uuid: () => string;
   /** Resolve a declared cross-tenant-read model name to its raw read delegate. */
   readonly readDelegateSource: (model: string) => CrossTenantReadDelegate | undefined;
@@ -128,9 +118,18 @@ export class UndeclaredJobModelError extends Error {
 // Pure core
 // ---------------------------------------------------------------------------
 
-/** The DynamoDB partition key for a job's lock. Pure. */
+/** The full byte-compat partition key for a job's lock. Pure. */
 export function jobLockPk(extId: string, jobId: string): string {
   return `job:${extId}:${jobId}`;
+}
+
+/**
+ * The `KvStore` key for a job lock — the composite segment AFTER the `job`
+ * namespace prefix, so the DynamoKvStore `job` layout (pkPrefix `job`, sep `:`,
+ * allowSeparatorInKey) recomposes the exact byte-compat `jobLockPk`. Pure.
+ */
+function jobLockKey(extId: string, jobId: string): string {
+  return `${extId}:${jobId}`;
 }
 
 /** Poll cadence in milliseconds for a schedule. Pure, exhaustive. */
@@ -146,16 +145,6 @@ export function scheduleIntervalMs(schedule: ExtensionJobSchedule): number {
       throw new Error(`Unhandled job schedule: ${String(never)}`);
     }
   }
-}
-
-/** True iff `err` is DynamoDB's ConditionalCheckFailedException. Pure. */
-function isConditionalCheckFailed(err: unknown): boolean {
-  return (
-    typeof err === "object" &&
-    err !== null &&
-    "name" in err &&
-    (err as { name?: unknown }).name === "ConditionalCheckFailedException"
-  );
 }
 
 function errMessage(err: unknown): string {
@@ -259,39 +248,25 @@ export async function acquireJobLock(
 ): Promise<string | null> {
   const { timeoutSeconds, marginSeconds } = resolveTimeouts(deps);
   const nowSec = Math.floor(deps.now() / 1000);
-  const ttl = nowSec + timeoutSeconds + marginSeconds;
-  const lockToken = deps.uuid();
 
-  try {
-    await deps.dynamo.send(
-      new PutItemCommand({
-        TableName: deps.tableName,
-        Item: marshall({
-          pk: jobLockPk(extId, jobId),
-          sk: "lock",
-          ttl,
-          lockedAt: nowSec,
-          lockToken,
-        }),
-        // Acquire iff no lock exists OR the existing one has expired (crashed
-        // holder — TTL-based recovery, matching hourly-cron's idiom).
-        ConditionExpression: "attribute_not_exists(pk) OR #ttl < :now",
-        ExpressionAttributeNames: { "#ttl": "ttl" },
-        ExpressionAttributeValues: marshall({ ":now": nowSec }),
-      }),
-    );
-    return lockToken;
-  } catch (err) {
-    if (isConditionalCheckFailed(err)) return null;
-    throw err;
-  }
+  // Acquire iff no lock exists OR the existing one has expired (crashed holder —
+  // TTL-based recovery). `putIfAbsent` treats an expired row as absent (F1) and
+  // `overwriteExpired` is the explicit takeover intent. The returned record's
+  // `version` is the anti-steal lock token: an expired-takeover bumps it, so the
+  // prior (overran) holder's version-guarded release becomes a silent no-op.
+  const res = await deps.kvStore.putIfAbsent(
+    jobLockKey(extId, jobId),
+    { lockedAt: nowSec },
+    { ttlSeconds: timeoutSeconds + marginSeconds, overwriteExpired: true },
+  );
+  return res.applied && res.record !== null ? String(res.record.version) : null;
 }
 
 /**
- * Release the lock via conditional DeleteItem — a NO-OP if a different holder
- * now owns it (our token no longer matches). Returns whether we deleted our own
- * lock. Never throws on a lost-lock race (returns `false`); other errors
- * propagate.
+ * Release the lock via a version-guarded delete — a NO-OP (`false`) if a
+ * different holder now owns it (our version no longer matches, i.e. the lock was
+ * re-acquired after our TTL lapsed) or the row is already gone. Never throws on
+ * a lost-lock race; other errors propagate.
  */
 export async function releaseJobLock(
   deps: JobRunnerDeps,
@@ -299,20 +274,7 @@ export async function releaseJobLock(
   jobId: string,
   lockToken: string,
 ): Promise<boolean> {
-  try {
-    await deps.dynamo.send(
-      new DeleteItemCommand({
-        TableName: deps.tableName,
-        Key: marshall({ pk: jobLockPk(extId, jobId), sk: "lock" }),
-        ConditionExpression: "lockToken = :myToken",
-        ExpressionAttributeValues: marshall({ ":myToken": lockToken }),
-      }),
-    );
-    return true;
-  } catch (err) {
-    if (isConditionalCheckFailed(err)) return false;
-    throw err;
-  }
+  return deps.kvStore.delete(jobLockKey(extId, jobId), Number(lockToken));
 }
 
 /**

@@ -31,6 +31,7 @@ vi.mock("../../src/lib/session-config", () => ({
 const mockVerifyCognitoJwt = vi.fn();
 vi.mock("../../src/lib/auth/cognito-jwt", () => ({
   verifyCognitoJwt: (...args: any[]) => mockVerifyCognitoJwt(...args),
+  verifyLegacyCognitoClaims: (...args: any[]) => mockVerifyCognitoJwt(...args),
 }));
 
 describe("SessionManager - Extended", () => {

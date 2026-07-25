@@ -29,7 +29,7 @@ vi.mock("../../src/db", () => ({
 
 function makeAuth(overrides: Partial<AuthContext> = {}): AuthContext {
   return {
-    cognitoSub: "owner-sub",
+    sub: "owner-sub",
     userId: "owner-id",
     globalRole: "B2B_PARTNER" as UserRole,
     activeTenantId: "tenant-id",

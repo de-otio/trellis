@@ -1,0 +1,20 @@
+{
+  "name": "@de-otio/trellis-worker",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "description": "Provider-neutral long-running worker runtime (WS-2 T7): polls the SQS-compatible queues (AWS SQS / Scaleway MNQ-SQS by endpoint config) and dispatches to the extracted lib/workers cores. Deployed on the Scaleway profile only; AWS keeps Lambda.",
+  "main": "./dist/apps/worker/src/main.js",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "echo 'worker runtime tests live in apps/api/test/unit/worker-runtime (api vitest lane)'",
+    "start": "node dist/apps/worker/src/main.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-sqs": "^3.996.5",
+    "@de-otio/saas-foundation": "^0.4.0",
+    "@de-otio/trellis-extension-api": "^0.7.0",
+    "@de-otio/vestibulum": "^0.4.0"
+  }
+}

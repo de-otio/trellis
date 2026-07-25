@@ -6,6 +6,7 @@
  */
 
 import { DynamoKv, createDefaultDynamoClient } from "@de-otio/saas-foundation/kv";
+import { resolveKvProvider, setKvSqlExecutor, makeKvSqlExecutor } from "./lib/kv/kv-provider.js";
 import { S3Storage, createDefaultS3Client } from "@de-otio/saas-foundation/storage";
 import { SqsQueue, createDefaultSqsClient } from "@de-otio/saas-foundation/queue";
 import {
@@ -64,6 +65,24 @@ export interface Env {
   COGNITO_REGION?: string;
   COGNITO_HOSTED_UI_DOMAIN?: string;
   COGNITO_REDIRECT_URI?: string;
+
+  // Generic OIDC verification (WS-3.1/3.3). Names per manifest D8 (FROZEN:
+  // OIDC_* canonical). All default-derived from COGNITO_* so existing
+  // deployments need ZERO config change (see lib/auth/auth-config.ts). D8
+  // renames COGNITO_USER_POOL_ID → OIDC_ISSUER_URL and COGNITO_APP_CLIENT_ID →
+  // OIDC_APP_CLIENT_ID; the WS-3.1-interim AUTH_* spelling has been removed.
+  /** Full issuer URL to pin + JWKS discovery base. Default: the Cognito issuer. */
+  OIDC_ISSUER_URL?: string;
+  /** App client id / expected `aud`. Default: COGNITO_APP_CLIENT_ID. */
+  OIDC_APP_CLIENT_ID?: string;
+  /** Explicit JWKS override (air-gapped / fixture tests). Default: unset. */
+  OIDC_JWKS_URL?: string;
+  /** Identity adapter selection: "cognito" (default) | "keycloak" (WS-3.3). */
+  IDENTITY_PROVIDER?: string;
+  /** Keycloak service-account client id (proposed D8 addition). */
+  IDENTITY_ADMIN_CLIENT_ID?: string;
+  /** Keycloak service-account client secret (proposed D8 addition). */
+  IDENTITY_ADMIN_CLIENT_SECRET?: string;
 
   // OAuth device-authorization adapter (T9b-d)
   /** Public Cognito app client used by `trellis-agent-cli` (no secret, PKCE). */
@@ -164,7 +183,14 @@ export interface Env {
   RECAPTCHA_SECRET_KEY?: string;
 
   // Email
-  EMAIL_SERVICE?: "aws-ses" | "resend" | "alibaba-directmail" | "tencent-ses";
+  EMAIL_SERVICE?:
+    | "aws-ses"
+    | "resend"
+    | "alibaba-directmail"
+    | "tencent-ses"
+    // WS-5 Scaleway profile (manifest D8a draft): TEM HTTP API / generic SMTP.
+    | "scaleway-tem"
+    | "smtp";
   EMAIL_SERVICE_REGION?: string;
   FROM_EMAIL?: string;
   AWS_SES_REGION?: string;
@@ -247,6 +273,17 @@ export interface Env {
   FOLLOWERS_EVENTS_QUEUE: CloudflareQueue;
   LINK_CHECK_QUEUE: CloudflareQueue;
   MEDIA_PROCESSING_QUEUE: CloudflareQueue;
+  /**
+   * WS-2 §4 media control inversion: when true, `completeSession` enqueues
+   * the media-processing job explicitly (native `{ objectKey }` message)
+   * BEFORE flipping the session to "uploaded". Source:
+   * `MEDIA_ENQUEUE_ON_COMPLETE === "true"`. DEFAULT OFF on AWS — zero
+   * behavior change until the explicit TWO-DEPLOY cutover (enqueue ON with
+   * the S3 notification still live → monitoring gate → notification
+   * removal; finding 1 — a single-deploy swap is forbidden). Scaleway (no
+   * bucket notifications) runs with this ON from the start.
+   */
+  MEDIA_ENQUEUE_ON_COMPLETE: boolean;
 
   // Storage (S3-backed, same interface as Cloudflare R2)
   MEDIA_BUCKET_R2: R2Bucket;
@@ -1104,6 +1141,19 @@ export function validateEnv(env: Env): string[] {
     );
   }
 
+  // SECURITY (WS-2 §4 finding 1, test-critique F1): the media control-
+  // inversion flag ON with no queue binding would otherwise let
+  // `completeSession` flip sessions to "uploaded" WITHOUT enqueuing a
+  // moderation job — permanently unmoderated media once Deploy 2 removes the
+  // S3 notification. Flag on ⇒ queue REQUIRED; refuse to start otherwise.
+  // (`completeSession` also carries a runtime fail-closed guard for
+  // hand-built Envs that bypass this startup check.)
+  if (env.MEDIA_ENQUEUE_ON_COMPLETE && !env.MEDIA_PROCESSING_QUEUE) {
+    errors.push(
+      "MEDIA_ENQUEUE_ON_COMPLETE is true but MEDIA_PROCESSING_QUEUE is missing — completions could flip sessions without enqueuing moderation (unmoderated media). Wire the queue or turn the flag off.",
+    );
+  }
+
   // Email provider config — validate ONLY when a provider is explicitly
   // selected via the RAW env var. buildEnv() defaults EMAIL_SERVICE to
   // "aws-ses", so reading env.EMAIL_SERVICE here would fire for every
@@ -1247,6 +1297,16 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
   // NOT write it to process.env so it can't leak through env-var exposure.
   const databaseUrl = await resolveDatabaseUrl();
 
+  // WS-1 KV port provider wiring (§5). Default (unset) = "dynamodb": the typed
+  // KvStore hot-spot namespaces resolve to DynamoKvStore over their byte-compat
+  // layouts — existing AWS deployments see ZERO change. "postgres" builds a
+  // small dedicated KV pool (bypassing the tenant-scoped Prisma pool) and
+  // registers it so the same namespaces resolve to PostgresKvStore. The 13
+  // Cloudflare-compat string-KV bindings above are untouched (they stay DynamoKv).
+  if (resolveKvProvider() === "postgres") {
+    setKvSqlExecutor(await makeKvSqlExecutor(databaseUrl));
+  }
+
   return {
     // Realtime transport seam: resolveRealtimeEnv() reads the REALTIME_* vars
     // and selects the default (poll/noop) transport; Skybber overrides via
@@ -1289,6 +1349,15 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     COGNITO_REGION: process.env.COGNITO_REGION || process.env.AWS_REGION || "us-east-1",
     COGNITO_HOSTED_UI_DOMAIN: process.env.COGNITO_HOSTED_UI_DOMAIN,
     COGNITO_REDIRECT_URI: process.env.COGNITO_REDIRECT_URI,
+
+    // Generic OIDC verification (WS-3.1/3.3) — per manifest D8 (OIDC_* canonical);
+    // additive, default-derived from COGNITO_*.
+    OIDC_ISSUER_URL: process.env.OIDC_ISSUER_URL,
+    OIDC_APP_CLIENT_ID: process.env.OIDC_APP_CLIENT_ID,
+    OIDC_JWKS_URL: process.env.OIDC_JWKS_URL,
+    IDENTITY_PROVIDER: process.env.IDENTITY_PROVIDER,
+    IDENTITY_ADMIN_CLIENT_ID: process.env.IDENTITY_ADMIN_CLIENT_ID,
+    IDENTITY_ADMIN_CLIENT_SECRET: process.env.IDENTITY_ADMIN_CLIENT_SECRET,
 
     // OAuth device-authorization adapter (T9b-d)
     COGNITO_AGENT_CLIENT_ID: process.env.COGNITO_AGENT_CLIENT_ID,
@@ -1423,6 +1492,8 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     FOLLOWERS_EVENTS_QUEUE: new SqsQueue(sqsClient, sqsUrl("followers-events")),
     LINK_CHECK_QUEUE: new SqsQueue(sqsClient, sqsUrl("link-check")),
     MEDIA_PROCESSING_QUEUE: new SqsQueue(sqsClient, sqsUrl("media-processing")),
+    // WS-2 §4 inversion flag — default OFF (zero AWS change; finding 1).
+    MEDIA_ENQUEUE_ON_COMPLETE: process.env.MEDIA_ENQUEUE_ON_COMPLETE === "true",
 
     // S3 buckets (R2 interface)
     MEDIA_BUCKET_R2: new S3Storage(s3Client, mediaBucket),

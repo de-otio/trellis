@@ -23,9 +23,11 @@ import {
 // Mocks — hoisted seams for the cron's module-level clients
 // ---------------------------------------------------------------------------
 
-const { mockDynamoSend, mockGetPrisma, mockBatchedPrune, mockOpsPrune, mockSingleMetric } =
+const { kvState, mockGetPrisma, mockBatchedPrune, mockOpsPrune, mockSingleMetric } =
   vi.hoisted(() => ({
-    mockDynamoSend: vi.fn(),
+    // WS-2 T3a: the lock now goes through the kv-provider seam (CronLock over
+    // KvStore). A MemoryKvStore instance is swapped in per test.
+    kvState: { kv: undefined as unknown },
     mockGetPrisma: vi.fn(),
     mockBatchedPrune: vi.fn(),
     mockOpsPrune: vi.fn(),
@@ -39,13 +41,8 @@ vi.mock("@aws-lambda-powertools/metrics", () => ({
   MetricUnit: { Count: "Count" },
 }));
 
-vi.mock("@aws-sdk/client-dynamodb", () => ({
-  DynamoDBClient: class {
-    send = mockDynamoSend;
-  },
-  PutItemCommand: class {
-    constructor(public readonly input: unknown) {}
-  },
+vi.mock("../../../src/lib/kv/kv-provider.js", () => ({
+  getKvStore: vi.fn(() => kvState.kv),
 }));
 
 vi.mock("../../../src/lib/lambda-prisma.js", () => ({
@@ -67,6 +64,7 @@ vi.mock("../../../src/lib/graph/postgres/interaction-events.js", () => ({
 // instance returned by getLambdaPrisma — but the module imports the package,
 // so keep the real import resolvable and cheap.
 
+import { MemoryKvStore } from "@de-otio/saas-foundation/kv";
 import { handler } from "../../../src/lambda/hourly-cron.js";
 
 const HOUR = 3600000;
@@ -93,7 +91,7 @@ function makeDb(rows: FakeMediaRow[]) {
 describe("hourly-cron handler", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockDynamoSend.mockResolvedValue({}); // lock acquired
+    kvState.kv = new MemoryKvStore(); // fresh lock namespace → lock acquired
     mockSingleMetric.mockReturnValue({
       addDimension: vi.fn(),
       addMetric: vi.fn(),
@@ -116,10 +114,15 @@ describe("hourly-cron handler", () => {
   });
 
   it("skips the run entirely when the cron lock is held", async () => {
-    mockDynamoSend.mockRejectedValue(new Error("ConditionalCheckFailed"));
+    await (kvState.kv as MemoryKvStore).putIfAbsent(
+      "hourly",
+      { lockedAt: Math.floor(Date.now() / 1000), owner: "other" },
+      { ttlSeconds: 3600 },
+    );
 
     await handler();
 
+    // Lock-first, DB-second: a skipped fire opens NO DB connection.
     expect(mockGetPrisma).not.toHaveBeenCalled();
   });
 

@@ -1,0 +1,39 @@
+{
+  "_comment": "WS-3.1 §5.6 behavior-comparison golden. Each fixture's outcome is the CURRENT (pre-WS-3.1) verifyCognitoJwt decision for a Cognito-shaped token, which the new verifyJwt path must reproduce. Outcomes are compared, not attempt counts [SEC-10]. The two MUST-fix fixtures (no_exp, missing_sub) are the sanctioned new rejects [SEC-1]/[SEC-8]: the old path would have accepted no_exp and coerced missing_sub to ''.",
+  "fixtures": [
+    { "name": "valid_id_token", "outcome": "accept" },
+    { "name": "expired", "outcome": "reject" },
+    { "name": "not_yet_valid_nbf", "outcome": "reject" },
+    { "name": "wrong_audience", "outcome": "reject" },
+    { "name": "aud_array_includes", "outcome": "accept" },
+    { "name": "aud_array_excludes", "outcome": "reject" },
+    { "name": "wrong_issuer", "outcome": "reject" },
+    { "name": "wrong_token_use_access", "outcome": "reject" },
+    { "name": "alg_none", "outcome": "reject" },
+    { "name": "alg_confusion_hs256", "outcome": "reject" },
+    { "name": "alg_eddsa", "outcome": "reject" },
+    { "name": "malformed_two_part", "outcome": "reject" },
+    { "name": "no_exp_SEC1_new_reject", "outcome": "reject" },
+    { "name": "missing_sub_SEC8_new_reject", "outcome": "reject" }
+  ],
+  "validClaims": {
+    "sub": "opaque-subject-abc",
+    "username": "alice",
+    "email": "alice@example.com",
+    "userId": "cabc1234567890abcdefghijk",
+    "globalRole": "B2B_PARTNER",
+    "activeTenantId": "ctnt1234567890abcdefghijk",
+    "tenantSlug": "acme",
+    "tenantRole": "ADMIN",
+    "handle": "@alice"
+  },
+  "validAuthContext": {
+    "sub": "opaque-subject-abc",
+    "userId": "cabc1234567890abcdefghijk",
+    "globalRole": "B2B_PARTNER",
+    "activeTenantId": "ctnt1234567890abcdefghijk",
+    "tenantSlug": "acme",
+    "tenantRole": "ADMIN",
+    "handle": "@alice"
+  }
+}

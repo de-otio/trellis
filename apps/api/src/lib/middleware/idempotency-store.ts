@@ -18,6 +18,8 @@ import {
   ConditionalCheckFailedException,
 } from "@aws-sdk/client-dynamodb";
 import { marshall, unmarshall } from "@aws-sdk/util-dynamodb";
+import type { KvStore } from "@de-otio/saas-foundation/kv";
+import { getKvStore } from "../kv/kv-provider.js";
 
 /** Status of an in-flight request being processed by another worker. */
 export const IN_FLIGHT_SENTINEL = "__IN_FLIGHT__" as const;
@@ -138,6 +140,75 @@ export class DynamoIdempotencyStore implements IdempotencyStoreInterface {
       }),
     );
   }
+}
+
+/**
+ * `KvStore`-backed implementation of `IdempotencyStoreInterface` (WS-1 KV port).
+ *
+ * Wraps the `@de-otio/saas-foundation` `KvStore` port so the middleware is
+ * portable across backends (DynamoKvStore on AWS, PostgresKvStore on Scaleway)
+ * without a behavior change. On AWS the store is a `DynamoKvStore` over a
+ * byte-compat layout (`pkPrefix:"idem"`, `pkSeparator:"#"`, ttl attr
+ * `expiresAt`, pk-only) so the at-rest pk stays `idem#<scope>#<key>`.
+ *
+ * Key derivation: the interface hands us a full composite pk
+ * (`idem#<scope>#<key>`, see `buildPk`). The port re-composes the pk from
+ * `pkPrefix + pkSeparator + key`, so we strip the leading `idem#` and hand the
+ * remaining `<scope>#<key>` as the store key (the layout's
+ * `allowSeparatorInKey:true` permits the `#` this composite key legitimately
+ * contains).
+ *
+ * Value discipline: `pk` (partition attr) and `expiresAt` (ttl attr) are
+ * reserved by the layout, so they are stripped before the write and
+ * reconstructed on read.
+ *
+ * F1 (plan-sanctioned improvement): the port treats an expired-but-unswept row
+ * as absent, so a stale idempotency row no longer wrongly rejects a fresh retry.
+ */
+export class KvStoreIdempotencyStore implements IdempotencyStoreInterface {
+  constructor(private readonly store: KvStore) {}
+
+  /** Strip the structural `idem#` prefix; the port re-composes it via pkPrefix. */
+  private keyOf(pk: string): string {
+    return pk.startsWith("idem#") ? pk.slice(5) : pk;
+  }
+
+  async get(pk: string): Promise<StoredRecord | null> {
+    // Strong read is LOAD-BEARING for dedup correctness (matches ConsistentRead).
+    const rec = await this.store.get<Omit<StoredRecord, "pk" | "expiresAt">>(this.keyOf(pk), {
+      consistent: true,
+    });
+    if (rec === null) return null;
+    return { pk, ...rec.value, expiresAt: rec.expiresAt ?? 0 } as StoredRecord;
+  }
+
+  async putIfAbsent(record: StoredRecord): Promise<boolean> {
+    const { pk, expiresAt, ...value } = record;
+    const res = await this.store.putIfAbsent(this.keyOf(pk), value, { expiresAt });
+    return res.applied;
+  }
+
+  async resolve(record: IdempotencyRecord): Promise<void> {
+    const { pk, expiresAt, ...value } = record;
+    // Unconditional overwrite of the in-flight sentinel with the final response.
+    await this.store.put(this.keyOf(pk), value, { expiresAt });
+  }
+
+  async delete(pk: string): Promise<void> {
+    await this.store.delete(this.keyOf(pk));
+  }
+}
+
+/**
+ * Lazy-default factory: build a `KvStoreIdempotencyStore` over the `idem`
+ * KvStore resolved by the central provider factory (KV_PROVIDER, default the
+ * byte-compat DynamoKvStore — single-attr pk, ttl attr `expiresAt`). The
+ * middleware constructs this by default so wiring stays zero-behavior-change.
+ * `tableName` is retained for signature compatibility; the concrete table (or
+ * Postgres pool) is resolved by the factory from `IDEMPOTENCY_TABLE`.
+ */
+export function createIdempotencyStoreFromEnv(_tableName?: string): IdempotencyStoreInterface {
+  return new KvStoreIdempotencyStore(getKvStore("idem"));
 }
 
 /**

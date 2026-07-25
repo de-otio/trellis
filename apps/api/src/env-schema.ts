@@ -171,6 +171,14 @@ export function buildBootEnvSchema(stage: BootStage) {
       DB_SECRET_PASSWORD: z.string().min(1).optional(),
       DB_SECRET_HOST: z.string().min(1).optional(),
 
+      // WS-1 KV port: selects the backend for the typed KvStore hot-spot
+      // namespaces. Default (unset) = "dynamodb" — existing AWS deployments see
+      // ZERO change. "postgres" routes them to PostgresKvStore over the shared
+      // KV pool (DATABASE_URL is already required when postgres, so no new
+      // required var). The 13 Cloudflare-compat string-KV bindings are NOT
+      // affected — they stay on DynamoKv.
+      KV_PROVIDER: z.enum(["dynamodb", "postgres"]).optional(),
+
       SESSION_SECRET: z
         .string()
         .min(32, { message: "must be at least 32 characters" })
@@ -180,6 +188,28 @@ export function buildBootEnvSchema(stage: BootStage) {
 
       COGNITO_USER_POOL_ID: z.string().min(1).optional(),
       COGNITO_APP_CLIENT_ID: z.string().min(1).optional(),
+
+      // Generic OIDC verification (WS-3.1/3.3) — names per manifest D8 (FROZEN:
+      // OIDC_* canonical; the WS-3.1-interim AUTH_* spelling has been removed).
+      // Additive, default-derived from COGNITO_*. Requiredness/SSRF rules live
+      // in superRefine + the SEC-4 boot guard (lib/auth/auth-config.ts).
+      OIDC_ISSUER_URL: z
+        .string()
+        .url({ message: "must be a valid https:// URL" })
+        .optional(),
+      OIDC_APP_CLIENT_ID: z.string().min(1).optional(),
+      // Optional JWKS override (air-gapped / fixture tests); SSRF-guarded at
+      // boot. Not in the manifest D8 table (WS-3.1 addition) — follow-up: add it.
+      OIDC_JWKS_URL: z.string().url({ message: "must be a valid URL" }).optional(),
+      IDENTITY_PROVIDER: z.enum(["cognito", "keycloak"]).optional(),
+      IDENTITY_ADMIN_CLIENT_ID: z.string().min(1).optional(),
+      IDENTITY_ADMIN_CLIENT_SECRET: z.string().min(1).optional(),
+
+      // [F4] App domain — the base for the default magic-link redirect_uri and
+      // the sign-in email From. REQUIRED when IDENTITY_PROVIDER=keycloak and in
+      // prod (requiredness enforced in superRefine): an empty APP_DOMAIN would
+      // otherwise let the initiate path fall back to an empty redirect_uri.
+      APP_DOMAIN: z.string().min(1).optional(),
 
       // Tier 2/3 — media pipeline gate + format-checked optionals
       MEDIA_THRESHOLDS_JSON: mediaThresholdsJson(prod).optional(),
@@ -238,20 +268,79 @@ export function buildBootEnvSchema(stage: BootStage) {
         });
       }
 
+      // ── Issuer resolution (WS-3.1 + WS-3.3) ──────────────────────────────
+      // OIDC_ISSUER_URL (manifest D8, canonical) names the issuer. A NON-Cognito
+      // issuer with an explicit audience is a fully configured generic-OIDC
+      // deployment (WS-3.3 live wiring) and lifts the Cognito-ids requirement
+      // below.
+      const cognitoIssuerRe = /^https:\/\/cognito-idp\.[a-z0-9-]+\.amazonaws\.com\/[^/]+$/;
+      const resolvedIssuer = env.OIDC_ISSUER_URL;
+      const explicitAudience = env.OIDC_APP_CLIENT_ID;
+      const genericIssuerConfigured =
+        resolvedIssuer !== undefined &&
+        !cognitoIssuerRe.test(resolvedIssuer) &&
+        explicitAudience !== undefined;
+
       // ── Cognito ids (matches the S1.4 post-build checks, but at boot) ─────
-      if (env.COGNITO_USER_POOL_ID === undefined) {
+      // WS-3.3 relaxation: not required when a non-Cognito issuer is FULLY
+      // configured (issuer + explicit audience) — that is the Keycloak-profile
+      // deployment WS-3.1 deferred to WS-3.3. A deployment that sets neither
+      // still fails closed here, exactly as before.
+      if (!genericIssuerConfigured) {
+        if (env.COGNITO_USER_POOL_ID === undefined) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["COGNITO_USER_POOL_ID"],
+            message: "required — Cognito user pool id (JWT verification cannot start without it)",
+          });
+        }
+        if (env.COGNITO_APP_CLIENT_ID === undefined) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["COGNITO_APP_CLIENT_ID"],
+            message: "required — Cognito app client id",
+          });
+        }
+      }
+
+      // ── [SEC-6] non-Cognito issuer requires an explicit audience ─────────
+      // The OIDC_APP_CLIENT_ID = COGNITO_APP_CLIENT_ID default is only correct
+      // for a Cognito issuer. A Keycloak/Zitadel issuer without an explicit
+      // OIDC_APP_CLIENT_ID would silently reject every token — fail closed at
+      // boot with a clear message instead.
+      if (
+        resolvedIssuer !== undefined &&
+        !cognitoIssuerRe.test(resolvedIssuer) &&
+        explicitAudience === undefined
+      ) {
         ctx.addIssue({
           code: "custom",
-          path: ["COGNITO_USER_POOL_ID"],
-          message: "required — Cognito user pool id (JWT verification cannot start without it)",
+          path: ["OIDC_APP_CLIENT_ID"],
+          message:
+            "required when the issuer is non-Cognito (set OIDC_APP_CLIENT_ID — the COGNITO_APP_CLIENT_ID default would reject every token)",
         });
       }
-      if (env.COGNITO_APP_CLIENT_ID === undefined) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["COGNITO_APP_CLIENT_ID"],
-          message: "required — Cognito app client id",
-        });
+
+      // ── IDENTITY_PROVIDER=keycloak requires its full config ──────────────
+      if (env.IDENTITY_PROVIDER === "keycloak") {
+        for (const key of [
+          "OIDC_ISSUER_URL",
+          "OIDC_APP_CLIENT_ID",
+          "IDENTITY_ADMIN_CLIENT_ID",
+          "IDENTITY_ADMIN_CLIENT_SECRET",
+          // [F4] the magic-link default redirect_uri base — a keycloak
+          // deployment without APP_DOMAIN would fall back to an empty
+          // redirect_uri (now a 503 at runtime; refuse at boot instead).
+          "APP_DOMAIN",
+        ] as const) {
+          if (env[key] === undefined) {
+            ctx.addIssue({
+              code: "custom",
+              path: [key],
+              message: "required when IDENTITY_PROVIDER=keycloak (fail-closed identity wiring)",
+            });
+          }
+        }
       }
 
       // ── Prod-only tier (dev-only-overridable vars) ────────────────────────
@@ -269,6 +358,16 @@ export function buildBootEnvSchema(stage: BootStage) {
             path: ["MEDIA_THRESHOLDS_JSON"],
             message:
               "required in prod — the media-moderation gate thresholds (optional in dev, where absence fail-closes every category to review)",
+          });
+        }
+        // [F4] APP_DOMAIN must be present in prod regardless of identity
+        // provider — it is the base for the magic-link redirect_uri and the
+        // sign-in email From; an empty value fails the initiate path closed.
+        if (env.APP_DOMAIN === undefined) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["APP_DOMAIN"],
+            message: "required in prod — app domain (magic-link redirect_uri base and email From)",
           });
         }
       }

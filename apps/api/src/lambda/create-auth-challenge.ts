@@ -2,6 +2,7 @@ import { randomBytes, createHash } from "node:crypto";
 import { DynamoDBClient, PutItemCommand, GetItemCommand, UpdateItemCommand } from "@aws-sdk/client-dynamodb";
 import { Logger } from "@aws-lambda-powertools/logger";
 import { createEmailProvider, emailProviderConfigFromEnv } from "../lib/email-provider.js";
+import { buildMagicLinkEmail } from "../lib/identity/magic-link-email.js";
 
 const logger = new Logger({ serviceName: "create-auth-challenge" });
 
@@ -57,7 +58,13 @@ export const handler = async (event: any) => {
     if (err?.message?.startsWith("RATE_LIMIT_EXCEEDED")) {
       throw err;
     }
-    logger.error("Rate limit check failed, proceeding with token generation", { error: err });
+    // [F2] FAIL CLOSED. A limiter-backend error (DynamoDB outage/throttle) must
+    // NOT lift the per-email rate limit — proceeding here would open an
+    // unmetered magic-link email-flooding path exactly when the limiter is
+    // down. Abort challenge creation instead, matching the /auth/magic-link
+    // endpoint's 503 posture. (Was previously fail-open: logged + proceeded.)
+    logger.error("Rate limit check failed — failing closed (aborting challenge creation)", { error: err });
+    throw err;
   }
 
   const token = randomBytes(32).toString("base64url");
@@ -83,21 +90,18 @@ export const handler = async (event: any) => {
   }
 
   // Send magic link email via the email-provider abstraction (AWS SES by
-  // default, role-based auth). Subject/HTML/text content is unchanged.
+  // default, role-based auth). Subject/HTML/text content is unchanged —
+  // extracted VERBATIM to the shared S-8 template (WS-3.3) so the app-owned
+  // email is identical on every identity provider.
   const magicLink = `https://${DOMAIN}/auth/verify?token=${token}&email=${encodeURIComponent(email)}`;
+  const content = buildMagicLinkEmail(magicLink);
   try {
     await emailProvider.sendEmail({
       from: `Trellis <noreply@${DOMAIN}>`,
       to: email,
-      subject: "Sign in to Trellis",
-      html: `
-              <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 32px;">
-                <h2 style="color: #1a1a1a; margin-bottom: 24px;">Sign in to Trellis</h2>
-                <p style="color: #4a4a4a; font-size: 16px; line-height: 1.5;">Click the button below to sign in. This link expires in 5 minutes.</p>
-                <a href="${magicLink}" style="display: inline-block; background: #2563eb; color: #fff; padding: 14px 28px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 16px; margin: 24px 0;">Sign in to Trellis</a>
-                <p style="color: #9a9a9a; font-size: 13px; margin-top: 32px;">If you didn't request this, you can safely ignore this email.</p>
-              </div>`,
-      text: `Sign in to Trellis\n\nClick this link to sign in (expires in 5 minutes):\n${magicLink}\n\nIf you didn't request this, ignore this email.`,
+      subject: content.subject,
+      html: content.html,
+      text: content.text,
     });
   } catch (err) {
     logger.error("Failed to send magic link email", { error: err });

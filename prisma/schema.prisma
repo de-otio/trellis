@@ -172,7 +172,7 @@ model RoleMetadata {
 }
 
 // User model for feed posts
-// Using Cognito sub (UUID) as primary key via cognitoSub field
+// The opaque IdP subject (`sub`) is stored on the `subject` field.
 // actorUri is the ActivityPub actor identifier
 model User {
   id        String   @id @default(cuid())
@@ -189,8 +189,11 @@ model User {
   handle    String   @unique
   createdAt DateTime @default(now()) @map("created_at")
 
-  // Cognito Auth integration
-  cognitoSub String? @unique @map("cognito_sub") // Cognito user pool sub (UUID), nullable for migration safety
+  // IdP identity: opaque subject (`sub`). Code-only rename cognitoSub→subject
+  // (WS-3.1); the physical column stays `cognito_sub` via @map so there is NO
+  // SQL migration and no data movement. `sub` is treated as opaque — no format
+  // assumption — so a non-Cognito issuer's sub round-trips unchanged.
+  subject String? @unique @map("cognito_sub") // opaque IdP subject, nullable for migration safety
 
   // User Deprovisioning
   suspended       Boolean   @default(false)
@@ -371,7 +374,7 @@ model User {
   acceptedInvitations  TenantInvitation[] @relation("TenantInvitationAcceptedBy")
 
   // AR10 prune: dropped the single-column indexes duplicating @unique fields
-  // (username, actorUri, anonymousId, cognitoSub, personalTenantId — a unique
+  // (username, actorUri, anonymousId, subject, personalTenantId — a unique
   // constraint already creates the index), the low-cardinality boolean/flag
   // indexes never used as scan predicates (suspended, emailVerified,
   // identityVerified), the region/dataRegion indexes (no user-table scan
@@ -2533,4 +2536,40 @@ model ShiftSignup {
   @@unique([shiftId, userId])
   @@index([tenantId, shiftId])
   @@map("event_shift_signups")
+}
+
+// WS-1 KV port (ws1-kv-port-plan §4.2). Backs the PostgresKvStore adapter
+// (@de-otio/saas-foundation/kv/postgres) for the 10 hot-spot namespaces when
+// KV_PROVIDER=postgres. GLOBAL, not tenant-scoped: the KV pool bypasses the
+// tenant-scoping Prisma extension (KV keys are namespace-scoped, never
+// tenant-scoped). `value` holds the record object; `version` is the CAS token;
+// `expires_at` (timestamptz) is the port's epoch-seconds expiry; `indexed_key`
+// powers queryByIndex. Expired rows are filtered on read and reclaimed by the
+// sweep (sweepExpiredKvEntries) — the expires_at index powers that sweep.
+model KvEntry {
+  namespace  String
+  key        String
+  value      Json
+  version    BigInt    @default(1)
+  expiresAt  DateTime? @map("expires_at") @db.Timestamptz(6)
+  indexedKey String?   @map("indexed_key")
+
+  @@id([namespace, key])
+  @@index([namespace, indexedKey]) // powers queryByIndex
+  @@index([expiresAt]) // powers the TTL sweep
+  @@map("kv_entries")
+}
+
+/// WS-1 rate-limit port (ws1-kv-port-plan §3.10/§4.2, security fix F5). Backs the
+/// PostgresTokenBucketLimiter (@de-otio/saas-foundation/rate-limit). GLOBAL, NOT
+/// tenant-scoped — every bucket_key is `<namespace>#<key>`-scoped, and the
+/// dedicated KV/rate-limit pool bypasses the tenant Prisma extension. No RLS.
+model RateLimitBucket {
+  bucketKey    String    @id @map("bucket_key")
+  tokens       Float
+  lastRefillMs BigInt    @map("last_refill_ms")
+  expiresAt    DateTime? @map("expires_at") @db.Timestamptz(6)
+
+  @@index([expiresAt]) // powers the TTL sweep
+  @@map("rate_limit_buckets")
 }

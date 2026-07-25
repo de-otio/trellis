@@ -10,10 +10,14 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { mockGetSecret, PoolMock, PrismaPgMock, PrismaClientMock } = vi.hoisted(
+const { mockResolveSecret, PoolMock, PrismaPgMock, PrismaClientMock } = vi.hoisted(
   () => ({
-    mockGetSecret: vi.fn(),
-    PoolMock: vi.fn(),
+    mockResolveSecret: vi.fn(),
+    // Pool instances need .on (finding-8 error handler) and .end (teardown).
+    PoolMock: vi.fn(function (this: { on: unknown; end: unknown }) {
+      this.on = vi.fn();
+      this.end = vi.fn().mockResolvedValue(undefined);
+    }),
     PrismaPgMock: vi.fn(),
     PrismaClientMock: vi.fn(),
   }),
@@ -22,14 +26,24 @@ const { mockGetSecret, PoolMock, PrismaPgMock, PrismaClientMock } = vi.hoisted(
 vi.mock("pg", () => ({ Pool: PoolMock }));
 vi.mock("@prisma/adapter-pg", () => ({ PrismaPg: PrismaPgMock }));
 vi.mock("@prisma/client", () => ({ PrismaClient: PrismaClientMock }));
-vi.mock("@aws-lambda-powertools/parameters/secrets", () => ({
-  getSecret: mockGetSecret,
-}));
-vi.mock("@aws-lambda-powertools/logger", () => ({
-  Logger: class {
-    info = vi.fn();
-    warn = vi.fn();
-    error = vi.fn();
+// WS-2 §5.3: the DB secret now resolves via the ONE foundation secrets port.
+vi.mock("@de-otio/saas-foundation/secrets", () => ({
+  resolveSecret: mockResolveSecret,
+  secretRef: vi.fn((arn: string) => ({ arn })),
+  SecretCache: class {
+    private store = new Map<string, Buffer>();
+    get(key: string) {
+      return this.store.get(key) ?? null;
+    }
+    set(key: string, value: Buffer) {
+      this.store.set(key, value);
+    }
+    invalidate(key: string) {
+      this.store.delete(key);
+    }
+    clear() {
+      this.store.clear();
+    }
   },
 }));
 
@@ -47,7 +61,7 @@ describe("lambda-prisma", () => {
   beforeEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
-    mockGetSecret.mockResolvedValue(SECRET);
+    mockResolveSecret.mockResolvedValue(Buffer.from(JSON.stringify(SECRET), "utf-8"));
     process.env.DB_SECRET_ARN = "arn:secret";
     delete process.env.LAMBDA_DATABASE_POOL_MAX;
     delete process.env.LAMBDA_DATABASE_CONNECT_TIMEOUT_MS;
@@ -106,7 +120,67 @@ describe("lambda-prisma", () => {
     await getLambdaPrisma();
     await getLambdaPrisma();
     expect(PoolMock).toHaveBeenCalledTimes(1);
-    expect(mockGetSecret).toHaveBeenCalledTimes(1);
+    expect(mockResolveSecret).toHaveBeenCalledTimes(1);
+  });
+
+  // ── WS-2 finding 8: DB-password rotation self-heal ────────────────────────
+  describe("finding 8 — rotation self-heals in one failed connection, not one TTL", () => {
+    const ROTATED = { ...SECRET, password: "rotated-password" };
+
+    it("a 28P01 pool error invalidates the cached secret; the NEXT call rebuilds with the fresh credential", async () => {
+      const { getLambdaPrisma } = await import(IMPORT);
+      await getLambdaPrisma();
+      expect(PoolMock).toHaveBeenCalledTimes(1);
+
+      // Rotation lands behind the resolver…
+      mockResolveSecret.mockResolvedValue(
+        Buffer.from(JSON.stringify(ROTATED), "utf-8"),
+      );
+      // …and the pool reports an auth failure on an idle client.
+      const poolInstance = PoolMock.mock.instances[0] as unknown as {
+        on: ReturnType<typeof vi.fn>;
+        end: ReturnType<typeof vi.fn>;
+      };
+      const errorHandler = poolInstance.on.mock.calls.find(
+        (c: unknown[]) => c[0] === "error",
+      )?.[1] as (err: unknown) => void;
+      expect(errorHandler).toBeDefined();
+      errorHandler({ code: "28P01", message: "password authentication failed" });
+
+      // Next attempt: fresh resolve + rebuilt pool with the NEW password.
+      const client = await getLambdaPrisma();
+      expect(client).toBeDefined();
+      expect(PoolMock).toHaveBeenCalledTimes(2);
+      expect(PoolMock.mock.calls[1][0].connectionString).toContain(
+        encodeURIComponent("rotated-password"),
+      );
+      // The stale pool was torn down best-effort.
+      expect(poolInstance.end).toHaveBeenCalled();
+    });
+
+    it("a NON-auth pool error does NOT invalidate (no rebuild churn)", async () => {
+      const { getLambdaPrisma, invalidateDbCredentialsOnAuthError } = await import(IMPORT);
+      await getLambdaPrisma();
+      expect(
+        invalidateDbCredentialsOnAuthError(new Error("connection reset")),
+      ).toBe(false);
+      await getLambdaPrisma();
+      expect(PoolMock).toHaveBeenCalledTimes(1); // still cached
+    });
+
+    it("withLambdaDbBreaker routes a 28P01 into the invalidation", async () => {
+      const { getLambdaPrisma, withLambdaDbBreaker } = await import(IMPORT);
+      await getLambdaPrisma();
+      const authErr = Object.assign(new Error("auth failed"), { code: "28P01" });
+      await expect(
+        withLambdaDbBreaker(async () => {
+          throw authErr;
+        }),
+      ).rejects.toThrow("auth failed");
+      // Invalidated: the next call rebuilds.
+      await getLambdaPrisma();
+      expect(PoolMock).toHaveBeenCalledTimes(2);
+    });
   });
 
   describe("withLambdaDbBreaker", () => {

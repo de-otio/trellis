@@ -49,6 +49,7 @@ interface MediaRow {
 const state = {
   sessions: [] as SessionRow[],
   media: [] as MediaRow[],
+  jobs: [] as Array<{ id: string; mediaId: string }>,
   nextId: 1,
   // T16: the tenant quota-override row returned by fakeDb.tenant.findUnique
   // (null = no override → env defaults apply).
@@ -160,6 +161,12 @@ const fakeDb = {
     findUnique: async () =>
       state.tenantOverride === null ? null : { ...state.tenantOverride },
   },
+  // WS-2 §4: the hardened idempotent early-return checks for an existing
+  // moderation job before self-heal re-enqueueing.
+  mediaModerationJob: {
+    findFirst: async ({ where }: any) =>
+      state.jobs.find((j) => j.mediaId === where.mediaId) ?? null,
+  },
 };
 
 vi.mock("../../src/lib/db-query-helper", () => ({
@@ -263,6 +270,7 @@ async function createHappySession(handler: PresignedUploadHandler, env: Env) {
 beforeEach(() => {
   state.sessions = [];
   state.media = [];
+  state.jobs = [];
   state.nextId = 1;
   state.tenantOverride = null;
   mockHead.mockReset();
@@ -799,5 +807,177 @@ describe("AR-SEC F2 — combined video+audio track budgets on the byte rail", ()
     expect(res.status).toBe(413);
     expect(mockDelete).toHaveBeenCalled();
     expect(state.media[0].lifecycle).toBe("UPLOAD_FAILED");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WS-2 §4 — media control inversion (findings 11 + 12 + 1)
+// ---------------------------------------------------------------------------
+
+describe("WS-2 §4 media control inversion (MEDIA_ENQUEUE_ON_COMPLETE)", () => {
+  function makeQueue(): { send: ReturnType<typeof vi.fn> } {
+    return { send: vi.fn().mockResolvedValue(undefined) };
+  }
+
+  function invEnv(queue: { send: unknown } | undefined, flag: boolean): Env {
+    const env = makeEnv() as any;
+    env.MEDIA_ENQUEUE_ON_COMPLETE = flag;
+    env.MEDIA_PROCESSING_QUEUE = queue;
+    return env as Env;
+  }
+
+  it("FLAG OFF (AWS default): completeSession never sends — zero behavior change", async () => {
+    const queue = makeQueue();
+    const env = invEnv(queue, false);
+    const handler = new PresignedUploadHandler(env, makePort().port);
+    const created = await createHappySession(handler, env);
+
+    mockHead.mockResolvedValue({ size: 100 });
+    const res = await handler.completeSession(created.session.sessionId, USER, "US", env);
+    expect(res.ok).toBe(true);
+    expect(queue.send).not.toHaveBeenCalled();
+    expect(state.sessions[0].status).toBe("uploaded");
+  });
+
+  it("FLAG ON: enqueues the native { objectKey } message BEFORE the session flip, exactly once", async () => {
+    const queue = makeQueue();
+    const env = invEnv(queue, true);
+    const handler = new PresignedUploadHandler(env, makePort().port);
+    const created = await createHappySession(handler, env);
+
+    // Capture the session status AT SEND TIME (the ordering assertion).
+    let statusAtSend: string | undefined;
+    queue.send.mockImplementation(async () => {
+      statusAtSend = state.sessions[0].status;
+    });
+
+    mockHead.mockResolvedValue({ size: 100 });
+    const res = await handler.completeSession(created.session.sessionId, USER, "US", env);
+    expect(res.ok).toBe(true);
+    expect(queue.send).toHaveBeenCalledTimes(1);
+    expect(statusAtSend).toBe("awaiting-upload"); // enqueue BEFORE the flip
+    const message = queue.send.mock.calls[0][0];
+    expect(message.objectKey).toBe(state.sessions[0].objectKey);
+    expect(message.uploadId).toBe(created.session.sessionId);
+    expect(state.sessions[0].status).toBe("uploaded");
+  });
+
+  it("FINDING 11: a send failure does NOT flip the session — the client retry re-enters the full path", async () => {
+    const queue = makeQueue();
+    const env = invEnv(queue, true);
+    const handler = new PresignedUploadHandler(env, makePort().port);
+    const created = await createHappySession(handler, env);
+
+    mockHead.mockResolvedValue({ size: 100 });
+    queue.send.mockRejectedValueOnce(new Error("MNQ down"));
+    const first = await handler.completeSession(created.session.sessionId, USER, "US", env);
+    expect(first.ok).toBe(false);
+    if (first.ok) return;
+    expect(first.status).toBe(503);
+    // Session did NOT flip: the idempotency key still admits the retry.
+    expect(state.sessions[0].status).toBe("awaiting-upload");
+
+    // Retry: send succeeds → full path re-runs → flip + exactly one NEW job.
+    const second = await handler.completeSession(created.session.sessionId, USER, "US", env);
+    expect(second.ok).toBe(true);
+    expect(state.sessions[0].status).toBe("uploaded");
+    expect(queue.send).toHaveBeenCalledTimes(2); // 1 failed + 1 succeeded
+  });
+
+  it("FINDING 11 (self-heal): an already-uploaded session with NO moderation job re-enqueues before reporting success", async () => {
+    const queue = makeQueue();
+    const env = invEnv(queue, true);
+    const handler = new PresignedUploadHandler(env, makePort().port);
+    const created = await createHappySession(handler, env);
+
+    // Simulate a legacy row that reached "uploaded" without a job (e.g. a
+    // pre-migration session): flip it directly.
+    state.sessions[0].status = "uploaded";
+    expect(state.jobs).toHaveLength(0);
+
+    const res = await handler.completeSession(created.session.sessionId, USER, "US", env);
+    expect(res.ok).toBe(true);
+    expect(queue.send).toHaveBeenCalledTimes(1); // self-healed
+  });
+
+  it("FINDING 11 (no double-enqueue): an uploaded session WITH a job does not re-enqueue", async () => {
+    const queue = makeQueue();
+    const env = invEnv(queue, true);
+    const handler = new PresignedUploadHandler(env, makePort().port);
+    const created = await createHappySession(handler, env);
+
+    state.sessions[0].status = "uploaded";
+    state.jobs.push({ id: "job-1", mediaId: state.sessions[0].mediaId! });
+
+    const res = await handler.completeSession(created.session.sessionId, USER, "US", env);
+    expect(res.ok).toBe(true);
+    expect(queue.send).not.toHaveBeenCalled();
+  });
+
+  it("FINDING 1 (critic F1): FLAG ON with NO queue fails CLOSED — error surfaced, session NOT flipped", async () => {
+    const env = invEnv(undefined, true); // flag on, queue binding missing
+    const handler = new PresignedUploadHandler(env, makePort().port);
+    const created = await createHappySession(handler, env);
+
+    mockHead.mockResolvedValue({ size: 100 });
+    const res = await handler.completeSession(created.session.sessionId, USER, "US", env);
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.status).toBe(503);
+    // The load-bearing assertion: the session did NOT silently flip — the
+    // idempotency key still admits a retry once the config is fixed.
+    expect(state.sessions[0].status).toBe("awaiting-upload");
+    expect(state.jobs).toHaveLength(0);
+
+    // Config fixed (queue wired): the SAME session completes the FULL path —
+    // enqueue + flip — proving the failure was retryable, not terminal.
+    const queue = makeQueue();
+    (env as any).MEDIA_PROCESSING_QUEUE = queue;
+    const retry = await handler.completeSession(created.session.sessionId, USER, "US", env);
+    expect(retry.ok).toBe(true);
+    expect(queue.send).toHaveBeenCalledTimes(1);
+    expect(state.sessions[0].status).toBe("uploaded");
+  });
+
+  it("FINDING 1 (critic F1): FLAG ON with NO queue on an already-uploaded session fails CLOSED (no silent success without a job)", async () => {
+    const env = invEnv(undefined, true); // flag on, queue binding missing
+    const handler = new PresignedUploadHandler(env, makePort().port);
+    const created = await createHappySession(handler, env);
+
+    // A legacy "uploaded" row with NO moderation job: the self-heal twin
+    // branch must not report success when it cannot enqueue.
+    state.sessions[0].status = "uploaded";
+    expect(state.jobs).toHaveLength(0);
+
+    const res = await handler.completeSession(created.session.sessionId, USER, "US", env);
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.status).toBe(503);
+  });
+
+  it("FINDING 1 (critic F1): FLAG OFF with no queue binding is unaffected (AWS default path)", async () => {
+    const env = invEnv(undefined, false);
+    const handler = new PresignedUploadHandler(env, makePort().port);
+    const created = await createHappySession(handler, env);
+
+    mockHead.mockResolvedValue({ size: 100 });
+    const res = await handler.completeSession(created.session.sessionId, USER, "US", env);
+    expect(res.ok).toBe(true);
+    expect(state.sessions[0].status).toBe("uploaded");
+  });
+
+  it("self-heal enqueue failure returns retryable 503 (success is never reported without a job)", async () => {
+    const queue = makeQueue();
+    const env = invEnv(queue, true);
+    const handler = new PresignedUploadHandler(env, makePort().port);
+    const created = await createHappySession(handler, env);
+
+    state.sessions[0].status = "uploaded";
+    queue.send.mockRejectedValueOnce(new Error("MNQ down"));
+
+    const res = await handler.completeSession(created.session.sessionId, USER, "US", env);
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.status).toBe(503);
   });
 });

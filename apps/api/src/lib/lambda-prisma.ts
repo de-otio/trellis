@@ -1,9 +1,9 @@
-import { Logger } from "@aws-lambda-powertools/logger";
-import { getSecret } from "@aws-lambda-powertools/parameters/secrets";
+import { resolveSecret, secretRef, SecretCache } from "@de-otio/saas-foundation/secrets";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
 import { Pool } from "pg";
 import { DatabaseCircuitBreaker } from "./database-circuit-breaker.js";
+import { getLogger } from "./logger.js";
 
 interface DbSecret {
   username: string;
@@ -12,8 +12,6 @@ interface DbSecret {
   port: string | number;
   dbname: string;
 }
-
-const logger = new Logger({ serviceName: "lambda-prisma" });
 
 /**
  * Operational knobs — env-configurable with safe defaults (threshold-secrecy
@@ -35,9 +33,75 @@ const DEFAULT_CONNECT_TIMEOUT_MS = 2000;
 const DEFAULT_IDLE_TIMEOUT_MS = 10_000;
 const DEFAULT_BREAKER_THRESHOLD = 5;
 const DEFAULT_BREAKER_COOLDOWN_MS = 30_000;
+/**
+ * DB-credential cache TTL (WS-2 §5.3, finding 8a): SECONDS, not the
+ * foundation SecretCache default of 300s. On Lambda this is invisible (the
+ * client is module-scoped and the environment recycles), but the
+ * long-running worker container would otherwise hold a rotated-away
+ * password for up to the TTL. The 28P01 handler below (finding 8b) is the
+ * primary self-heal; the short TTL is the backstop.
+ */
+const DEFAULT_DB_SECRET_CACHE_TTL_SECONDS = 30;
 
 let prisma: PrismaClient | null = null;
 let pool: Pool | null = null;
+let dbSecretCache: SecretCache | null = null;
+
+function getDbSecretCache(): SecretCache {
+  if (dbSecretCache === null) {
+    dbSecretCache = new SecretCache({
+      ttlSeconds: Number(
+        process.env.LAMBDA_DB_SECRET_CACHE_TTL_SECONDS ??
+          DEFAULT_DB_SECRET_CACHE_TTL_SECONDS,
+      ),
+    });
+  }
+  return dbSecretCache;
+}
+
+/** Resolve the DB secret via the ONE foundation secrets port (§5.3 — the
+ *  powertools secrets path is gone; three secrets paths collapsed to one). */
+async function resolveDbSecret(fresh: boolean): Promise<DbSecret> {
+  const bytes = await resolveSecret(
+    secretRef(process.env.DB_SECRET_ARN!),
+    { cache: getDbSecretCache() },
+    { fresh },
+  );
+  return JSON.parse(bytes.toString("utf-8")) as DbSecret;
+}
+
+/** True for a Postgres invalid_password auth failure (SQLSTATE 28P01). */
+export function isPgAuthError(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { code?: unknown }).code === "28P01"
+  );
+}
+
+/**
+ * WS-2 finding 8b: on a Postgres auth failure, invalidate the cached secret
+ * and drop the cached client, so the NEXT connection attempt re-resolves a
+ * fresh credential and rebuilds the pool — a rotation self-heals in one
+ * failed connection rather than one cache TTL. Safe to call with any error;
+ * only 28P01 triggers the invalidation. Returns true when it invalidated.
+ */
+export function invalidateDbCredentialsOnAuthError(err: unknown): boolean {
+  if (!isPgAuthError(err)) return false;
+  getLogger().warn(
+    "lambda_db.auth_failure — invalidating cached DB secret and rebuilding on next use",
+  );
+  getDbSecretCache().clear();
+  const oldPool = pool;
+  prisma = null;
+  pool = null;
+  if (oldPool) {
+    void oldPool.end().catch(() => {
+      /* best-effort teardown of the stale pool */
+    });
+  }
+  return true;
+}
 
 /**
  * Per-execution-environment circuit breaker for the Lambda DB path.
@@ -63,6 +127,7 @@ export const lambdaDbBreaker = new DatabaseCircuitBreaker({
  * access in a Lambda handler so connection-exhaustion failures trip the breaker
  * instead of being retried into a saturated instance. When the breaker is OPEN
  * the call throws immediately (message begins "Circuit breaker is OPEN").
+ * Also routes 28P01 auth failures into the credential invalidation (finding 8b).
  */
 export async function withLambdaDbBreaker<T>(
   fn: () => Promise<T>,
@@ -75,14 +140,16 @@ export async function withLambdaDbBreaker<T>(
       err instanceof Error &&
       err.message.startsWith("Circuit breaker is OPEN")
     ) {
-      logger.warn("lambda_db.breaker_open", { operation });
+      getLogger().warn("lambda_db.breaker_open", { operation });
     }
+    invalidateDbCredentialsOnAuthError(err);
     throw err;
   }
 }
 
 /**
- * Build (and cache) a PrismaClient for standalone Lambda handlers.
+ * Build (and cache) a PrismaClient for standalone Lambda handlers (and the
+ * WS-2 worker container).
  *
  * RDS enforces `force_ssl`, so the connection MUST negotiate TLS — otherwise
  * Postgres rejects it with `28000 / no pg_hba.conf entry … no encryption`
@@ -97,14 +164,11 @@ export async function withLambdaDbBreaker<T>(
  * effect — see the knobs comment above.
  *
  * Cached at module scope so warm invocations reuse the client (and its single
- * connection).
+ * connection). The container sizes its pool via `LAMBDA_DATABASE_POOL_MAX`.
  */
 export async function getLambdaPrisma(): Promise<PrismaClient> {
   if (prisma) return prisma;
-  const { username, password, host, port, dbname } = (await getSecret(
-    process.env.DB_SECRET_ARN!,
-    { transform: "json" },
-  )) as unknown as DbSecret;
+  const { username, password, host, port, dbname } = await resolveDbSecret(false);
 
   // When an RDS Proxy is provisioned, the infra injects its endpoint here so the
   // Lambda connects through the proxy (which multiplexes and caps the
@@ -121,6 +185,11 @@ export async function getLambdaPrisma(): Promise<PrismaClient> {
     ),
     idleTimeoutMillis: DEFAULT_IDLE_TIMEOUT_MS,
     allowExitOnIdle: false,
+  });
+  // Finding 8b: an idle-client auth failure (rotation landed mid-run)
+  // invalidates the cached secret so the next attempt rebuilds fresh.
+  pool.on("error", (err) => {
+    invalidateDbCredentialsOnAuthError(err);
   });
   const adapter = new PrismaPg(pool);
   prisma = new PrismaClient({ adapter });

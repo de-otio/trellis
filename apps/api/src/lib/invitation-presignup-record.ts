@@ -26,24 +26,34 @@
  * the user PRESENTS at signup. A casing mismatch silently reintroduces the bug.
  */
 
-import {
-  DeleteItemCommand,
-  DynamoDBClient,
-  PutItemCommand,
-} from "@aws-sdk/client-dynamodb";
-import { marshall } from "@aws-sdk/util-dynamodb";
+import type { KvStore } from "@de-otio/saas-foundation/kv";
+import { getKvStore } from "./kv/kv-provider.js";
 
-function defaultClient(): DynamoDBClient {
-  return new DynamoDBClient({
-    region: process.env.AWS_REGION || "us-east-1",
-    ...(process.env.DYNAMODB_ENDPOINT
-      ? { endpoint: process.env.DYNAMODB_ENDPOINT }
-      : {}),
-  });
+/** The record value stored under the invitation key (pk/sk/ttl are reserved). */
+interface PreSignUpInvitationValue {
+  used: boolean;
+  usedBy?: string;
+  email?: string;
 }
 
-function defaultTable(): string {
-  return process.env.DYNAMODB_TABLE || `${process.env.STAGE || "dev"}-trellis`;
+let _store: KvStore | null = null;
+
+/**
+ * The `invitations` KvStore, provider-selected (KV_PROVIDER, default DynamoDB).
+ * On AWS the raw item PreSignUp reads is UNCHANGED: pk `invitations:<CODE>`, sk
+ * `v`, ttl epoch seconds (the KvStore key is the upper-cased code, so the port
+ * recomposes the exact pk; only the additive `_v` differs). The record VALUE is
+ * `{ used, usedBy?, email? }` — never pk/sk/ttl, which the port owns.
+ */
+function store(): KvStore {
+  if (_store !== null) return _store;
+  _store = getKvStore("invitations");
+  return _store;
+}
+
+/** Test seam: inject a `KvStore` (e.g. `MemoryKvStore`) for outcome-equivalence tests. */
+export function __setInvitationStoreForTest(s: KvStore | null): void {
+  _store = s;
 }
 
 /** The `pk` the PreSignUp reader looks up for a given invitation code. */
@@ -60,39 +70,33 @@ export interface WritePreSignUpInvitationRecordInput {
    *  PreSignUp email-match check; PreSignUp does NOT enforce it today. */
   email?: string | null;
   /** Injectable for tests. */
-  client?: DynamoDBClient;
-  /** Injectable for tests. */
-  tableName?: string;
+  store?: KvStore;
 }
 
 /**
  * Write the fail-closed PreSignUp record for a freshly created invitation.
- * Shape mirrors exactly what `pre-signup.ts` reads.
+ * The DynamoKvStore layout renders the same raw item `pre-signup.ts` reads
+ * (`pk: "invitations:<CODE>", sk: "v", ttl`), with `{ used, email? }` in the
+ * value and `used: false` on create.
  */
 export async function writePreSignUpInvitationRecord(
   input: WritePreSignUpInvitationRecordInput,
 ): Promise<void> {
-  const client = input.client ?? defaultClient();
-  const table = input.tableName ?? defaultTable();
-  const item = {
-    pk: preSignUpInvitationPk(input.code),
-    sk: "v",
+  const kv = input.store ?? store();
+  const value: PreSignUpInvitationValue = {
     used: false,
-    ttl: Math.floor(input.expiresAt.getTime() / 1000),
     ...(input.email ? { email: input.email } : {}),
   };
-  await client.send(
-    new PutItemCommand({ TableName: table, Item: marshall(item) }),
-  );
+  await kv.put(input.code.toUpperCase(), value, {
+    expiresAt: Math.floor(input.expiresAt.getTime() / 1000),
+  });
 }
 
 export interface DeletePreSignUpInvitationRecordInput {
   /** The invitation code whose PreSignUp record should be removed. */
   code: string;
   /** Injectable for tests. */
-  client?: DynamoDBClient;
-  /** Injectable for tests. */
-  tableName?: string;
+  store?: KvStore;
 }
 
 /**
@@ -111,14 +115,8 @@ export interface DeletePreSignUpInvitationRecordInput {
 export async function deletePreSignUpInvitationRecord(
   input: DeletePreSignUpInvitationRecordInput,
 ): Promise<void> {
-  const client = input.client ?? defaultClient();
-  const table = input.tableName ?? defaultTable();
-  await client.send(
-    new DeleteItemCommand({
-      TableName: table,
-      Key: marshall({ pk: preSignUpInvitationPk(input.code), sk: "v" }),
-    }),
-  );
+  const kv = input.store ?? store();
+  await kv.delete(input.code.toUpperCase());
 }
 
 export interface MarkPreSignUpInvitationRecordUsedInput {
@@ -131,9 +129,7 @@ export interface MarkPreSignUpInvitationRecordUsedInput {
   /** Preserved expiry, if known; otherwise a bounded future ttl is used. */
   expiresAt?: Date;
   /** Injectable for tests. */
-  client?: DynamoDBClient;
-  /** Injectable for tests. */
-  tableName?: string;
+  store?: KvStore;
 }
 
 /**
@@ -149,19 +145,15 @@ export interface MarkPreSignUpInvitationRecordUsedInput {
 export async function markPreSignUpInvitationRecordUsed(
   input: MarkPreSignUpInvitationRecordUsedInput,
 ): Promise<void> {
-  const client = input.client ?? defaultClient();
-  const table = input.tableName ?? defaultTable();
+  const kv = input.store ?? store();
   const ttlMs =
     input.expiresAt?.getTime() ?? Date.now() + 24 * 60 * 60 * 1000;
-  const item = {
-    pk: preSignUpInvitationPk(input.code),
-    sk: "v",
+  const value: PreSignUpInvitationValue = {
     used: true,
     usedBy: input.usedBy,
-    ttl: Math.floor(ttlMs / 1000),
     ...(input.email ? { email: input.email } : {}),
   };
-  await client.send(
-    new PutItemCommand({ TableName: table, Item: marshall(item) }),
-  );
+  await kv.put(input.code.toUpperCase(), value, {
+    expiresAt: Math.floor(ttlMs / 1000),
+  });
 }

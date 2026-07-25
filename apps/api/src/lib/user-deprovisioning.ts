@@ -50,10 +50,10 @@ export class UserDeprovisioning {
     const db = createPrisma(env);
 
     try {
-      // Fetch cognitoSub before update so we can invalidate the claim cache.
+      // Fetch subject before update so we can invalidate the claim cache.
       const userRow = await db.user.findUnique({
         where: { id: userId },
-        select: { cognitoSub: true },
+        select: { subject: true },
       });
 
       // Update user to suspended
@@ -69,10 +69,10 @@ export class UserDeprovisioning {
       // Invalidate DDB claim cache so the next token refresh reflects the suspension.
       // Mitigation for G2 H3: suspended users that still have a cached token would
       // bypass the suspension check for up to CACHE_TTL seconds without this call.
-      if (userRow?.cognitoSub) {
+      if (userRow?.subject) {
         try {
           const cache = createClaimsCacheFromEnv();
-          await cache.invalidate(userRow.cognitoSub);
+          await cache.invalidate(userRow.subject);
         } catch {
           // Best-effort — don't block suspension if DDB is unavailable.
         }
@@ -171,10 +171,10 @@ export class UserDeprovisioning {
     const db = createPrisma(env);
 
     try {
-      // Fetch cognitoSub before update so we can invalidate the claim cache.
+      // Fetch subject before update so we can invalidate the claim cache.
       const userRow = await db.user.findUnique({
         where: { id: userId },
-        select: { cognitoSub: true },
+        select: { subject: true },
       });
 
       await db.user.update({
@@ -187,10 +187,10 @@ export class UserDeprovisioning {
       });
 
       // Invalidate DDB claim cache so the next token refresh can succeed with restored status.
-      if (userRow?.cognitoSub) {
+      if (userRow?.subject) {
         try {
           const cache = createClaimsCacheFromEnv();
-          await cache.invalidate(userRow.cognitoSub);
+          await cache.invalidate(userRow.subject);
         } catch {
           // Best-effort.
         }

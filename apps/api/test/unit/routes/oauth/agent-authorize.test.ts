@@ -134,7 +134,7 @@ beforeEach(() => {
     status: "ACTIVE",
     tenant: { id: "t_one", slug: "demo" },
   });
-  mockFindUser.mockReset().mockResolvedValue({ cognitoSub: "cognito-sub-admin" });
+  mockFindUser.mockReset().mockResolvedValue({ subject: "cognito-sub-admin" });
 
   _resetAgentAuthorizeDepsForTest();
   _setAgentAuthorizeDepsForTest({
@@ -338,7 +338,7 @@ describe("POST /agents/authorize/approve", () => {
       pathname: "/agents/authorize/approve",
       params: {},
     });
-    // buildAuthContext returns null when cognitoSub is missing → 401.
+    // buildAuthContext returns null when subject is missing → 401.
     expect(response.status).toBe(401);
   });
 
@@ -441,9 +441,9 @@ describe("POST /agents/authorize/approve", () => {
     const issuerCall = mockIssueForAgent.mock.calls[0]![0] as { username: string };
     expect(issuerCall.username).toBe("cognito-sub-admin");
     const recordCall = mockRecordAgentSession.mock.calls[0]![0] as {
-      session: { cognitoSub: string };
+      session: { sub: string };
     };
-    expect(recordCall.session.cognitoSub).toBe("cognito-sub-admin");
+    expect(recordCall.session.sub).toBe("cognito-sub-admin");
   });
 
   it("returns 404 when user_code does not resolve", async () => {

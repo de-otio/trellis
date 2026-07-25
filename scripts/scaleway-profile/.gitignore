@@ -1,0 +1,3 @@
+# Fetched provider artifacts (verified at fetch time; never committed).
+providers/*.jar
+providers/*.asc

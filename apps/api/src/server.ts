@@ -16,6 +16,7 @@ import type { RawPrismaLike } from "./lib/extension-scoped-db.js";
 import { buildEnv, validateEnv } from "./env.js";
 import { startExtensionJobRunners } from "./lib/extension-job-runner.js";
 import { validateBootEnv } from "./env-schema.js";
+import { verifyKeycloakProfileLockdownAtBoot } from "./lib/identity/identity-provider.js";
 import { buildHonoApp } from "./lib/app.js";
 import { getLogger, Logger } from "./lib/logger.js";
 import { TrellisRequestContextManager } from "./lib/request-context.js";
@@ -100,6 +101,19 @@ export async function startServer(
   }
   const logger = getLogger();
 
+  // [F3] Startup health-check (Keycloak only): verify the realm's User Profile
+  // config locks the privilege-bearing custom:* attributes admin-edit-only, so
+  // a user cannot self-assign roles / switch active tenant by editing their own
+  // profile. Fail boot otherwise. Bypassable ONLY via
+  // KC_SKIP_PROFILE_LOCKDOWN_CHECK=true (logs a loud warning). No-op on Cognito.
+  try {
+    await verifyKeycloakProfileLockdownAtBoot(logger);
+  } catch (err) {
+    console.error("Keycloak user-profile lockdown check failed at boot:");
+    console.error(`  - ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+
   // Validate extensions
   const extensions = getExtensions();
   validateExtensions([...extensions]);
@@ -134,6 +148,7 @@ export async function startServer(
   // model metas are built once from the (currently empty) composed-model
   // registry; they carry only the tenant-scoped core delegates today.
   const { DynamoDBClient } = await import("@aws-sdk/client-dynamodb");
+  const { DynamoKvStore } = await import("@de-otio/saas-foundation/kv");
   const { sharedDatabaseConnectionManager: dbManager } = await import(
     "./lib/database-connection-manager.js"
   );
@@ -143,8 +158,19 @@ export async function startServer(
   const scopedModelMetas = buildScopedModelMetas();
   const jobRunnerHandle = startExtensionJobRunners(
     {
-      dynamo: new DynamoDBClient({ region: env.AWS_REGION }),
-      tableName: process.env.DYNAMODB_TABLE ?? `${env.STAGE ?? "dev"}-trellis`,
+      // Single-flight lock via the KvStore port (WS-1 §3.9). Default DynamoKvStore
+      // over the byte-compat `job` layout (pk `job:{extId}:{jobId}`, sk `lock`)
+      // — zero AWS behavior change; only the additive `_v` version attribute.
+      kvStore: new DynamoKvStore(new DynamoDBClient({ region: env.AWS_REGION }), {
+        tableName: process.env.DYNAMODB_TABLE ?? `${env.STAGE ?? "dev"}-trellis`,
+        pkPrefix: "job",
+        pkSeparator: ":",
+        skName: "sk",
+        skValue: "lock",
+        ttlAttr: "ttl",
+        versionAttr: "_v",
+        allowSeparatorInKey: true,
+      }),
       now: () => Date.now(),
       uuid: () => randomUUID(),
       readDelegateSource: (model) => {
