@@ -53,3 +53,28 @@ describe("buildMagicLinkEmail — HTML-attribute injection (F1)", () => {
     );
   });
 });
+
+describe("buildMagicLinkEmail — brandName parameterization", () => {
+  const link = "https://app.example.test/auth/verify?token=abc&email=a@b.test";
+
+  it("defaults to 'Trellis' — reproduces the pre-parameterization output byte for byte when omitted", () => {
+    const content = buildMagicLinkEmail(link);
+    expect(content.subject).toBe("Sign in to Trellis");
+    expect(content.html).toContain("Sign in to Trellis");
+    expect(content.text).toContain("Sign in to Trellis");
+  });
+
+  it("substitutes a caller-supplied brand name into subject/html/text", () => {
+    const content = buildMagicLinkEmail(link, "Skybber");
+    expect(content.subject).toBe("Sign in to Skybber");
+    expect(content.html).toContain("Sign in to Skybber");
+    expect(content.html).not.toContain("Sign in to Trellis");
+    expect(content.text).toContain("Sign in to Skybber");
+  });
+
+  it("HTML-escapes a misconfigured brand name so it can't break the markup", () => {
+    const content = buildMagicLinkEmail(link, `Evil"><script>alert(1)</script>`);
+    expect(content.html).not.toContain("<script>alert(1)</script>");
+    expect(content.html).toContain("&lt;script&gt;");
+  });
+});

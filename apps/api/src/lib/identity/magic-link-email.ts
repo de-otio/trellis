@@ -33,19 +33,34 @@ function escapeHtmlAttribute(value: string): string {
     .replace(/'/g, "&#39;");
 }
 
-export function buildMagicLinkEmail(magicLink: string): MagicLinkEmailContent {
+/**
+ * @param magicLink the (possibly untrusted) provider-returned magic-link URL
+ * @param brandName product name shown in the subject/heading/button/From
+ *   display name. Defaults to `"Trellis"` — the exact literal this template
+ *   shipped with — so an omitted argument reproduces today's output byte for
+ *   byte. Callers pass `env.EMAIL_BRAND_NAME` (or its own equivalent) to
+ *   brand the email without forking this shared S-8 template.
+ */
+export function buildMagicLinkEmail(
+  magicLink: string,
+  brandName = "Trellis",
+): MagicLinkEmailContent {
   // [F1] The URL is interpolated into an HTML `href` attribute — escape it.
   // The text/plain part below stays raw (no markup, nothing to inject).
   const hrefLink = escapeHtmlAttribute(magicLink);
+  // brandName is operator-configured (env var), not user input, but it still
+  // lands inside an HTML attribute-free text node here — escape defensively
+  // so a misconfigured value can't break the markup.
+  const brand = escapeHtmlAttribute(brandName);
   return {
-    subject: "Sign in to Trellis",
+    subject: `Sign in to ${brandName}`,
     html: `
               <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 32px;">
-                <h2 style="color: #1a1a1a; margin-bottom: 24px;">Sign in to Trellis</h2>
+                <h2 style="color: #1a1a1a; margin-bottom: 24px;">Sign in to ${brand}</h2>
                 <p style="color: #4a4a4a; font-size: 16px; line-height: 1.5;">Click the button below to sign in. This link expires in 5 minutes.</p>
-                <a href="${hrefLink}" style="display: inline-block; background: #2563eb; color: #fff; padding: 14px 28px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 16px; margin: 24px 0;">Sign in to Trellis</a>
+                <a href="${hrefLink}" style="display: inline-block; background: #2563eb; color: #fff; padding: 14px 28px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 16px; margin: 24px 0;">Sign in to ${brand}</a>
                 <p style="color: #9a9a9a; font-size: 13px; margin-top: 32px;">If you didn't request this, you can safely ignore this email.</p>
               </div>`,
-    text: `Sign in to Trellis\n\nClick this link to sign in (expires in 5 minutes):\n${magicLink}\n\nIf you didn't request this, ignore this email.`,
+    text: `Sign in to ${brandName}\n\nClick this link to sign in (expires in 5 minutes):\n${magicLink}\n\nIf you didn't request this, ignore this email.`,
   };
 }

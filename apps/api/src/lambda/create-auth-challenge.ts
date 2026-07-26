@@ -14,6 +14,14 @@ const dynamo = new DynamoDBClient({ region: process.env.AWS_REGION });
 const emailProvider = createEmailProvider(emailProviderConfigFromEnv(process.env));
 const TABLE = process.env.DYNAMODB_TABLE!;
 const DOMAIN = process.env.DOMAIN!;
+// Same From/branding fix as lib/identity/magic-link-initiate.ts — this Lambda
+// sends the IDENTICAL S-8 magic-link email (buildMagicLinkEmail) for the
+// Cognito flow, so it carries the identical bug: a hardcoded "Trellis
+// <noreply@DOMAIN>" ignores FROM_EMAIL, which breaks/DMARC-misaligns at the
+// Scaleway TEM cutover (TEM rejects sends from an unvalidated domain). Read
+// once at module scope, same as the other env-derived constants above.
+const FROM_EMAIL = process.env.FROM_EMAIL;
+const BRAND_NAME = process.env.EMAIL_BRAND_NAME || "Trellis";
 
 const RATE_LIMIT_MAX = 5;
 const RATE_LIMIT_WINDOW_SECONDS = 900; // 15 minutes
@@ -94,10 +102,14 @@ export const handler = async (event: any) => {
   // extracted VERBATIM to the shared S-8 template (WS-3.3) so the app-owned
   // email is identical on every identity provider.
   const magicLink = `https://${DOMAIN}/auth/verify?token=${token}&email=${encodeURIComponent(email)}`;
-  const content = buildMagicLinkEmail(magicLink);
+  const content = buildMagicLinkEmail(magicLink, BRAND_NAME);
+  // FROM_EMAIL (validated sending domain) wins when set; only fall back to
+  // the `noreply@${DOMAIN}` construction when it's unset, so a deployment
+  // that never sets FROM_EMAIL keeps booting with identical output.
+  const from = FROM_EMAIL ? `${BRAND_NAME} <${FROM_EMAIL}>` : `${BRAND_NAME} <noreply@${DOMAIN}>`;
   try {
     await emailProvider.sendEmail({
-      from: `Trellis <noreply@${DOMAIN}>`,
+      from,
       to: email,
       subject: content.subject,
       html: content.html,

@@ -106,6 +106,46 @@ describe("handleMagicLinkInitiate", () => {
     expect(sentEmails[0]!.from).toBe("Trellis <noreply@app.example.test>");
   });
 
+  it("[cutover fix] uses env.FROM_EMAIL as the sender when set, over the noreply@APP_DOMAIN guess", async () => {
+    const { provider } = keycloakLikeProvider();
+    __setIdentityProviderForTest(provider);
+
+    const env = { ...makeEnv(), FROM_EMAIL: "noreply@mail.dev.skybber.com" } as Env;
+    const res = await handleMagicLinkInitiate(
+      makeRequest({ email: "user1@example.test" }),
+      env,
+      new RateLimiter(),
+      {},
+    );
+
+    expect(res.status).toBe(200);
+    expect(sentEmails).toHaveLength(1);
+    // A validated-domain provider (Scaleway TEM) rejects sends from an
+    // unvalidated domain — env.FROM_EMAIL must win over the APP_DOMAIN guess.
+    expect(sentEmails[0]!.from).toBe("Trellis <noreply@mail.dev.skybber.com>");
+  });
+
+  it("[branding] honors env.EMAIL_BRAND_NAME in the From display name and subject", async () => {
+    const { provider } = keycloakLikeProvider();
+    __setIdentityProviderForTest(provider);
+
+    const env = {
+      ...makeEnv(),
+      FROM_EMAIL: "noreply@mail.dev.skybber.com",
+      EMAIL_BRAND_NAME: "Skybber",
+    } as Env;
+    const res = await handleMagicLinkInitiate(
+      makeRequest({ email: "user1@example.test" }),
+      env,
+      new RateLimiter(),
+      {},
+    );
+
+    expect(res.status).toBe(200);
+    expect(sentEmails[0]!.from).toBe("Skybber <noreply@mail.dev.skybber.com>");
+    expect(sentEmails[0]!.subject).toBe("Sign in to Skybber");
+  });
+
   it("does NOT send an email when the provider already delivered (Cognito path) and returns the session handle", async () => {
     const { provider } = keycloakLikeProvider({ handle: "sess-1", emailSent: true });
     __setIdentityProviderForTest(provider);

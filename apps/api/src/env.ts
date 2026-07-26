@@ -193,6 +193,15 @@ export interface Env {
     | "smtp";
   EMAIL_SERVICE_REGION?: string;
   FROM_EMAIL?: string;
+  /**
+   * Display/product name used in the app-owned email templates (magic-link
+   * S-8 subject/body/From display name — see `lib/identity/magic-link-email.ts`).
+   * Optional; defaults to "Trellis" everywhere it's read, so an unset var
+   * preserves today's behavior exactly. A consumer (e.g. skybber) sets this
+   * to its own product name to brand outbound email without forking the
+   * shared template.
+   */
+  EMAIL_BRAND_NAME?: string;
   AWS_SES_REGION?: string;
   /** SES configuration set applied to every send (event publishing/tracking). */
   SES_CONFIGURATION_SET?: string;
@@ -1434,6 +1443,7 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     EMAIL_SERVICE: (process.env.EMAIL_SERVICE as any) || "aws-ses",
     EMAIL_SERVICE_REGION: process.env.EMAIL_SERVICE_REGION,
     FROM_EMAIL: process.env.FROM_EMAIL,
+    EMAIL_BRAND_NAME: process.env.EMAIL_BRAND_NAME,
     AWS_SES_REGION: process.env.AWS_SES_REGION || process.env.AWS_REGION || "us-east-1",
     SES_CONFIGURATION_SET: process.env.SES_CONFIGURATION_SET,
     RESEND_API_KEY: process.env.RESEND_API_KEY,

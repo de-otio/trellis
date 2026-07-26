@@ -423,6 +423,23 @@ describe("buildMimeMessage", () => {
       expect(line.length).toBeLessThanOrEqual(76);
     }
   });
+
+  it("rejects a display name containing CRLF instead of letting it inject an extra header", () => {
+    // A naive implementation would splice this directly into `To: "<name>" <email>`,
+    // letting the attacker terminate the To header and start a new one
+    // (here, a spoofed Bcc) on its own line. The guard must throw instead of
+    // silently emitting a message with the injected header present.
+    expect(() =>
+      buildMimeMessage({
+        from: "s@example.test",
+        to: [{ email: "r@example.test", name: "Evil\r\nBcc: attacker@evil.test" }],
+        cc: [],
+        subject: "hello",
+        text: "hi",
+        messageId: "<id@example.test>",
+      }),
+    ).toThrow(/header injection/i);
+  });
 });
 
 describe("factory + env wiring (EMAIL_SERVICE=scaleway-tem / smtp)", () => {

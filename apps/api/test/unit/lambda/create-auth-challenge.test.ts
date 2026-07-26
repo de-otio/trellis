@@ -43,6 +43,11 @@ describe("CreateAuthChallenge Lambda", () => {
     process.env.DYNAMODB_TABLE = "test-table";
     process.env.DOMAIN = "trellis.test";
     delete process.env.RECAPTCHA_SECRET_KEY;
+    // These are read once at module scope (like DOMAIN above) — clear them so
+    // an earlier test/suite's env doesn't leak into a case that expects the
+    // unset-var defaults.
+    delete process.env.FROM_EMAIL;
+    delete process.env.EMAIL_BRAND_NAME;
     // Default: rate limit check returns no existing item, DynamoDB writes succeed, SES succeeds
     mockDynamoSend.mockResolvedValue({});
     mockSesSend.mockResolvedValue({});
@@ -199,6 +204,41 @@ describe("CreateAuthChallenge Lambda", () => {
     const event = makeEvent();
 
     await expect(handler(event)).rejects.toThrow("SES failure");
+  });
+
+  it("[cutover fix] uses FROM_EMAIL as the sender when set (validated TEM domain, not noreply@DOMAIN)", async () => {
+    process.env.FROM_EMAIL = "noreply@mail.dev.skybber.com";
+
+    const handler = await loadHandler();
+    await handler(makeEvent());
+
+    const sesInput = mockSesSend.mock.calls[0][0].input;
+    // The Cognito flow sends through the SAME email-provider abstraction, so
+    // at the Scaleway TEM cutover this From must be the validated sending
+    // domain (FROM_EMAIL) — never the unvalidated `noreply@${DOMAIN}` guess,
+    // which TEM rejects outright.
+    expect(sesInput.Source).toBe("Trellis <noreply@mail.dev.skybber.com>");
+  });
+
+  it("[cutover fix] falls back to noreply@DOMAIN unchanged when FROM_EMAIL is unset", async () => {
+    const handler = await loadHandler();
+    await handler(makeEvent());
+
+    const sesInput = mockSesSend.mock.calls[0][0].input;
+    expect(sesInput.Source).toBe("Trellis <noreply@trellis.test>");
+  });
+
+  it("[branding] honors EMAIL_BRAND_NAME in the From display name and subject", async () => {
+    process.env.FROM_EMAIL = "noreply@mail.dev.skybber.com";
+    process.env.EMAIL_BRAND_NAME = "Skybber";
+
+    const handler = await loadHandler();
+    await handler(makeEvent());
+
+    const sesInput = mockSesSend.mock.calls[0][0].input;
+    expect(sesInput.Source).toBe("Skybber <noreply@mail.dev.skybber.com>");
+    expect(sesInput.Message.Subject.Data).toBe("Sign in to Skybber");
+    expect(sesInput.Message.Body.Html.Data).toContain("Sign in to Skybber");
   });
 
   it("should be idempotent — duplicate invocation generates a new token", async () => {

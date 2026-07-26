@@ -178,8 +178,18 @@ export async function handleMagicLinkInitiate(
 
     // The app owns the S-8 email: deliver when the provider handed us a link.
     if (result.link !== undefined && !result.emailSent) {
-      const content = buildMagicLinkEmail(result.link);
-      const from = appDomain ? `Trellis <noreply@${appDomain}>` : "Trellis <noreply@localhost>";
+      const brandName = env.EMAIL_BRAND_NAME || "Trellis";
+      const content = buildMagicLinkEmail(result.link, brandName);
+      // Sender address: env.FROM_EMAIL (mirrors email-subscription-handler.ts)
+      // is REQUIRED for a validated-domain provider (Scaleway TEM rejects an
+      // unvalidated From domain outright). Only fall back to the
+      // `noreply@${APP_DOMAIN}` construction when FROM_EMAIL is unset, so
+      // existing deployments that never set it keep booting unchanged.
+      const from = env.FROM_EMAIL
+        ? `${brandName} <${env.FROM_EMAIL}>`
+        : appDomain
+          ? `${brandName} <noreply@${appDomain}>`
+          : `${brandName} <noreply@localhost>`;
       const send = emailSenderOverride ?? defaultSendEmail;
       await send({
         from,

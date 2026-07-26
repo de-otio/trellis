@@ -401,11 +401,30 @@ export class AWSSESProvider implements EmailProvider {
 }
 
 /**
+ * Reject CR/LF/NUL in a value that will end up inside (or become) an RFC 5322
+ * header. Untrusted input (a display name, a Reply-To address, …) that
+ * carries a raw `\r\n` can terminate the current header and start injecting
+ * arbitrary ones (extra recipients, a spoofed header, etc.) into providers
+ * that build/forward raw MIME (the SMTP provider's hand-rolled headers, TEM's
+ * `additional_headers`). Throws a clear, non-silent error rather than
+ * stripping — a caller that hits this should fix the input, not have it
+ * silently mangled.
+ */
+function assertNoHeaderInjection(value: string, field: string): void {
+  if (/[\r\n\0]/.test(value)) {
+    throw new Error(
+      `Email header injection blocked: ${field} contains a CR, LF, or NUL character`,
+    );
+  }
+}
+
+/**
  * Split a possibly display-named address ("Jane <jane@example.com>") into the
  * `{ email, name? }` object shape the Scaleway TEM API expects. A bare
  * address passes through as `{ email }`.
  */
 function toAddressObject(addr: string): { email: string; name?: string } {
+  assertNoHeaderInjection(addr, "address");
   const match = /^\s*(.*?)\s*<\s*([^<>\s]+@[^<>\s]+)\s*>\s*$/.exec(addr);
   if (match && match[2]) {
     const name = match[1]?.replace(/^"|"$/g, "").trim();
@@ -495,6 +514,9 @@ export class ScalewayTemProvider implements EmailProvider {
     };
     if (options.replyTo) {
       // Reply-To goes through additional_headers per the TEM API reference.
+      // Guard before it reaches the wire: a CR/LF/NUL here would inject an
+      // arbitrary header into the outbound message.
+      assertNoHeaderInjection(options.replyTo, "replyTo");
       body.additional_headers = [{ key: "Reply-To", value: options.replyTo }];
     }
 
@@ -760,6 +782,22 @@ export function buildMimeMessage(parts: {
   replyTo?: string;
   messageId: string;
 }): string {
+  // Header-injection guard: every value that lands verbatim in a header line
+  // below must be free of CR/LF/NUL, checked BEFORE any header string is
+  // assembled (a raw \r\n in a display name or Reply-To could otherwise
+  // terminate the header and inject an arbitrary one).
+  assertNoHeaderInjection(parts.from, "from");
+  for (const addr of parts.to) {
+    assertNoHeaderInjection(addr.email, "to.email");
+    if (addr.name) assertNoHeaderInjection(addr.name, "to.name");
+  }
+  for (const addr of parts.cc) {
+    assertNoHeaderInjection(addr.email, "cc.email");
+    if (addr.name) assertNoHeaderInjection(addr.name, "cc.name");
+  }
+  if (parts.replyTo) assertNoHeaderInjection(parts.replyTo, "replyTo");
+  assertNoHeaderInjection(parts.subject, "subject");
+
   const fmt = (a: { email: string; name?: string }) =>
     a.name ? `"${a.name.replace(/"/g, "")}" <${a.email}>` : a.email;
   // Encode non-ASCII subjects as RFC 2047 encoded-words.
