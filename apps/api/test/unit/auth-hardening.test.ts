@@ -421,24 +421,38 @@ describe("S1.4 — validateEnv", () => {
     expect(errors).toContain("SESSION_SECRET must be at least 32 characters");
   });
 
-  it("should return errors when COGNITO_USER_POOL_ID is missing", async () => {
+  it("should return an auth-issuer error when neither OIDC_ISSUER_URL nor COGNITO_USER_POOL_ID is set", async () => {
     const { validateEnv } = await import("../../src/env.js");
     const errors = validateEnv({
       SESSION_SECRET: "a".repeat(32),
       COGNITO_USER_POOL_ID: "",
       COGNITO_APP_CLIENT_ID: "client-id",
     } as any);
-    expect(errors).toContain("COGNITO_USER_POOL_ID is required");
+    expect(errors.some((e) => e.startsWith("auth issuer is required"))).toBe(true);
   });
 
-  it("should return errors when COGNITO_APP_CLIENT_ID is missing", async () => {
+  it("should return an auth-audience error when neither OIDC_APP_CLIENT_ID nor COGNITO_APP_CLIENT_ID is set", async () => {
     const { validateEnv } = await import("../../src/env.js");
     const errors = validateEnv({
       SESSION_SECRET: "a".repeat(32),
       COGNITO_USER_POOL_ID: "us-east-1_abc",
       COGNITO_APP_CLIENT_ID: "",
     } as any);
-    expect(errors).toContain("COGNITO_APP_CLIENT_ID is required");
+    expect(errors.some((e) => e.startsWith("auth audience is required"))).toBe(true);
+  });
+
+  // WS-3.3: a generic OIDC / Keycloak deployment (OIDC_* set, no COGNITO_*)
+  // must pass validateEnv — the auth check is provider-neutral and mirrors
+  // resolveAuthConfig().
+  it("should accept OIDC_* (Keycloak) auth with no COGNITO_* vars", async () => {
+    const { validateEnv } = await import("../../src/env.js");
+    const errors = validateEnv({
+      SESSION_SECRET: "a".repeat(32),
+      OIDC_ISSUER_URL: "https://id.example.com/realms/skybber",
+      OIDC_APP_CLIENT_ID: "skybber-api",
+      INVITATIONS_KV: {},
+    } as any);
+    expect(errors).toEqual([]);
   });
 
   it("should return empty array when all required vars are valid", async () => {

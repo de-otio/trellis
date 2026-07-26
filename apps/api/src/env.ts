@@ -1123,12 +1123,21 @@ export function validateEnv(env: Env): string[] {
     errors.push("SESSION_SECRET must be at least 32 characters");
   }
 
-  if (!env.COGNITO_USER_POOL_ID) {
-    errors.push("COGNITO_USER_POOL_ID is required");
+  // Auth issuer + audience must be resolvable. This mirrors resolveAuthConfig()
+  // (lib/auth/auth-config.ts) rather than hard-requiring Cognito: the neutral
+  // OIDC_* vars (WS-3.3 Keycloak / any generic OIDC issuer) satisfy it, and the
+  // legacy COGNITO_* derivation still satisfies it byte-identically. Requiring
+  // COGNITO_* unconditionally here would fail-closed every non-Cognito (e.g.
+  // Scaleway/Keycloak) deployment even though the verifier itself is happy.
+  if (!env.OIDC_ISSUER_URL && !env.COGNITO_USER_POOL_ID) {
+    errors.push(
+      "auth issuer is required — set OIDC_ISSUER_URL (generic OIDC / Keycloak) or COGNITO_USER_POOL_ID (Cognito)",
+    );
   }
-
-  if (!env.COGNITO_APP_CLIENT_ID) {
-    errors.push("COGNITO_APP_CLIENT_ID is required");
+  if (!env.OIDC_APP_CLIENT_ID && !env.COGNITO_APP_CLIENT_ID) {
+    errors.push(
+      "auth audience is required — set OIDC_APP_CLIENT_ID (generic OIDC / Keycloak) or COGNITO_APP_CLIENT_ID (Cognito)",
+    );
   }
 
   // SECURITY (T17): the invitation gate fails closed without this binding —
