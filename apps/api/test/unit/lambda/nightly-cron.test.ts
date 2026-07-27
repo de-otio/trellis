@@ -264,6 +264,29 @@ describe("NightlyCron Lambda", () => {
       expect(mockSesSend).toHaveBeenCalled();
     });
 
+    it("From uses FROM_EMAIL + EMAIL_BRAND_NAME so the sender aligns with DMARC", async () => {
+      process.env.FROM_EMAIL = "noreply@mail.dev.skybber.com";
+      process.env.EMAIL_BRAND_NAME = "Skybber";
+      try {
+        const handler = await loadHandler();
+        await handler();
+        const source = mockSesSend.mock.calls[0][0].input.Source;
+        expect(source).toBe("Skybber <noreply@mail.dev.skybber.com>");
+      } finally {
+        delete process.env.FROM_EMAIL;
+        delete process.env.EMAIL_BRAND_NAME;
+      }
+    });
+
+    it("From falls back to Trellis <noreply@${DOMAIN}> when FROM_EMAIL is unset (byte-identical to pre-fix)", async () => {
+      delete process.env.FROM_EMAIL;
+      delete process.env.EMAIL_BRAND_NAME;
+      const handler = await loadHandler();
+      await handler();
+      const source = mockSesSend.mock.calls[0][0].input.Source;
+      expect(source).toBe("Trellis <noreply@example.com>");
+    });
+
     it("counts a failed deletion without aborting the run", async () => {
       mockDeleteUserData.mockRejectedValueOnce(new Error("DB connection lost"));
 

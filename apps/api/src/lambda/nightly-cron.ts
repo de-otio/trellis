@@ -38,6 +38,15 @@ const MEDIA_BUCKET = process.env.MEDIA_BUCKET_NAME!;
 function makeSesEmailPort(): DeletionEmailPort | undefined {
   const domain = process.env.DOMAIN;
   if (!domain) return undefined;
+  // Sender identity mirrors create-auth-challenge.ts / magic-link-initiate.ts:
+  // FROM_EMAIL (the DKIM/SPF-validated sending domain) wins when set so the
+  // From aligns with DMARC; only fall back to `noreply@${DOMAIN}` when it is
+  // unset, keeping output byte-identical for any deploy that never sets it.
+  const brandName = process.env.EMAIL_BRAND_NAME || "Trellis";
+  const fromEmail = process.env.FROM_EMAIL;
+  const source = fromEmail
+    ? `${brandName} <${fromEmail}>`
+    : `${brandName} <noreply@${domain}>`;
   return {
     async sendAccountDeleted({ to, subject, textBody, htmlBody }) {
       const ses = new SESClient({
@@ -45,7 +54,7 @@ function makeSesEmailPort(): DeletionEmailPort | undefined {
       });
       await ses.send(
         new SendEmailCommand({
-          Source: `Trellis <noreply@${domain}>`,
+          Source: source,
           Destination: { ToAddresses: [to] },
           Message: {
             Subject: { Data: subject },
