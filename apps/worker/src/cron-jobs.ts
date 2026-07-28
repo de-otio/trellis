@@ -59,6 +59,14 @@ export interface CronJobsInput {
     readonly cronLock: CronLock;
     readonly clock: () => number;
   };
+  /**
+   * Cron cadences to OMIT from scheduling, by name (e.g. "nightly"). Populated
+   * from `WORKER_DISABLED_CRONS` in main.ts. Lets a deploy park a specific cron
+   * (the scheduled GDPR-deletion nightly job, until its identity + email ports
+   * are wired) WITHOUT touching the queue consumers, which are a separate
+   * mechanism. An unknown name is a harmless no-op.
+   */
+  readonly disabledJobs?: ReadonlySet<string>;
 }
 
 export function buildCronJobs(input: CronJobsInput): ScheduledJob[] {
@@ -125,5 +133,10 @@ export function buildCronJobs(input: CronJobsInput): ScheduledJob[] {
     });
   }
 
-  return jobs;
+  // Deploy-time gate: drop any cron whose name is in `disabledJobs`. Only the
+  // cron timers are filtered — queue consumers are wired separately in main.ts
+  // and are unaffected.
+  return input.disabledJobs && input.disabledJobs.size > 0
+    ? jobs.filter((j) => !input.disabledJobs!.has(j.name))
+    : jobs;
 }

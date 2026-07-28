@@ -96,7 +96,7 @@ async function resolveDbSecretFromArn(fresh: boolean): Promise<DbSecret> {
  * decomposed branches read process.env directly (a credential rotation on those
  * arrives via a pod restart, since env_from is snapshot at pod start).
  */
-async function resolveDbConnectionString(fresh: boolean): Promise<string> {
+export async function resolveDbConnectionString(fresh: boolean): Promise<string> {
   // 1. Explicit URL (Scaleway / local). Used verbatim — no proxy rewrite.
   if (process.env.DATABASE_URL) return process.env.DATABASE_URL;
 

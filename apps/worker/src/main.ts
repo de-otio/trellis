@@ -15,7 +15,10 @@
 
 import { S3Client, DeleteObjectsCommand } from "@aws-sdk/client-s3";
 import { getLogger } from "../../api/src/lib/logger.js";
-import { getLambdaPrisma } from "../../api/src/lib/lambda-prisma.js";
+import {
+  getLambdaPrisma,
+  resolveDbConnectionString,
+} from "../../api/src/lib/lambda-prisma.js";
 import { resolvePseudonymSecret } from "../../api/src/lib/services/user-data-deletion.js";
 import { deleteStagingObjects } from "../../api/src/lib/media/staging-object-cleanup.js";
 import {
@@ -127,10 +130,16 @@ async function main(): Promise<void> {
   // wiring exists so CI can run it against LocalStack (§3.1).
   const profile: WorkerProfile = resolveKvProvider() === "postgres" ? "scaleway" : "aws";
   if (profile === "scaleway" && getKvSqlExecutor() === undefined) {
-    const kvUrl = process.env.KV_DATABASE_URL || process.env.DATABASE_URL;
-    if (!kvUrl) {
-      throw new Error("KV_PROVIDER=postgres requires KV_DATABASE_URL or DATABASE_URL");
-    }
+    // The KV entries table lives in the SAME Postgres as the app data, so when
+    // no explicit KV url is set fall back to the resolved app-DB connection
+    // string (decomposed DB_SECRET_* / DB_SECRET_ARN — the same source
+    // getLambdaPrisma used above). Avoids a redundant composed-URL secret and
+    // keeps ONE DB-credential source across the container. The db-secret gate
+    // above already proved this resolves, so the fallback cannot fail here.
+    const kvUrl =
+      process.env.KV_DATABASE_URL ||
+      process.env.DATABASE_URL ||
+      (await resolveDbConnectionString(false));
     setKvSqlExecutor(await makeKvSqlExecutor(kvUrl));
   }
   const cronKv = getKvStore("cron");
@@ -187,6 +196,16 @@ async function main(): Promise<void> {
         profile === "scaleway"
           ? { executor: getKvSqlExecutor()!, cronLock, clock }
           : undefined,
+      // Deploy-time cron gate: WORKER_DISABLED_CRONS is a comma-separated list
+      // of cron names to omit (e.g. "nightly" to park the scheduled GDPR
+      // deletion until its identity + email ports are wired). Queue consumers
+      // are unaffected. Empty/unset = all crons scheduled.
+      disabledJobs: new Set(
+        (process.env.WORKER_DISABLED_CRONS ?? "")
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean),
+      ),
     }),
     { logger },
   );

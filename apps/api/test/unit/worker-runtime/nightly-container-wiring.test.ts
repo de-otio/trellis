@@ -161,3 +161,58 @@ describe("container-wired nightly cron — pseudonym-secret fail-closed (critic 
     );
   });
 });
+
+// D2-A: park a specific cron (the scheduled GDPR-deletion nightly job) at
+// deploy time via WORKER_DISABLED_CRONS, WITHOUT affecting the other cron
+// cadences (queue consumers are a separate mechanism, not built here).
+describe("buildCronJobs — disabledJobs deploy-time gate", () => {
+  function buildJobs(disabledJobs?: ReadonlySet<string>) {
+    const logger = makeLogger();
+    const db = makeFakeDb();
+    const kv = new MemoryKvStore();
+    const cronLock = makeKvCronLock(kv);
+    const clock = Date.now;
+    const getDb = async () => db as never;
+    return buildCronJobs({
+      profile: "aws", // aws profile → no kv-sweep job (orthogonal here)
+      logger,
+      cleanup: { logger, cronLock },
+      hourly: { getDb, logger, metrics: noopMetrics, cronLock, clock, configSource: {} },
+      nightly: {
+        getDb,
+        logger,
+        metrics: noopMetrics,
+        cronLock,
+        clock,
+        identity: undefined,
+        email: undefined,
+        resolvePseudonymSecret: async () => "s",
+        deleteStagingObjects: vi.fn(),
+        objectStore: { deleteObjects: vi.fn() },
+        getAppEnv: async () => {
+          throw new Error("unused");
+        },
+      },
+      maintenance: { getDb, logger, cronLock, cronKv: kv, clock },
+      e2eSweeper: undefined,
+      kvSweep: undefined,
+      disabledJobs,
+    });
+  }
+
+  it("schedules all cadences when no gate is set", () => {
+    const names = buildJobs().map((j) => j.name);
+    expect(names).toEqual(["cleanup", "hourly", "nightly", "maintenance"]);
+  });
+
+  it("omits only 'nightly' when gated, leaving the others intact", () => {
+    const names = buildJobs(new Set(["nightly"])).map((j) => j.name);
+    expect(names).not.toContain("nightly");
+    expect(names).toEqual(["cleanup", "hourly", "maintenance"]);
+  });
+
+  it("treats an unknown gate name as a harmless no-op", () => {
+    const names = buildJobs(new Set(["does-not-exist"])).map((j) => j.name);
+    expect(names).toEqual(["cleanup", "hourly", "nightly", "maintenance"]);
+  });
+});

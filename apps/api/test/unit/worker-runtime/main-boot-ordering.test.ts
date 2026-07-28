@@ -51,6 +51,11 @@ vi.mock("../../../src/lib/logger.js", () => ({
 }));
 vi.mock("../../../src/lib/lambda-prisma.js", () => ({
   getLambdaPrisma: mocks.getLambdaPrisma,
+  // KV url falls back to the resolved app-DB connection string when no explicit
+  // KV_DATABASE_URL/DATABASE_URL is set (same source as getLambdaPrisma).
+  resolveDbConnectionString: vi
+    .fn()
+    .mockResolvedValue("postgresql://u:p@h:5432/db"),
 }));
 vi.mock("../../../src/lib/services/user-data-deletion.js", () => ({
   resolvePseudonymSecret: mocks.resolvePseudonymSecret,

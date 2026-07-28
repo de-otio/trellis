@@ -25,6 +25,7 @@ cadences in-process with single-fire via WS-1's
 | `MEDIA_BUCKET_NAME` | yes | staging-object cleanup + nightly GC purge |
 | `REPORT_PSEUDONYM_SECRET` / `REPORT_PSEUDONYM_SECRET_PARAM` | yes (one) | GDPR tombstone HMAC key. **Startup refuses an empty/unresolvable key (finding 2)** |
 | `ACTIVITYPUB_ENABLED` | no | federation-outbox two-mode flag (default off) |
+| `WORKER_DISABLED_CRONS` | no | comma-separated cron names to OMIT (e.g. `nightly` to park the scheduled GDPR-deletion job until its identity + email ports are wired). Queue consumers are unaffected. Empty/unset = all crons scheduled. |
 | `WORKER_HEALTH_HOST` / `WORKER_HEALTH_PORT` | no | default `127.0.0.1:8081` — **never attach to a public LB/ingress (finding 10)** |
 | `WORKER_DRAIN_TIMEOUT_MS` | no | default 25000; keep **below** the orchestrator grace period |
 
