@@ -85,6 +85,11 @@ async function main(): Promise<void> {
   const s3 = new S3Client({ region: process.env.AWS_REGION });
   const mediaBucket = process.env.MEDIA_BUCKET_NAME ?? "";
 
+  // Federation is fail-closed OFF by default (ACTIVITYPUB_ENABLED). When off,
+  // the federation-outbox queue is not provisioned (e.g. Scaleway MNQ), so its
+  // poller is skipped below — starting it would 404-loop against a missing queue.
+  const federationEnabled = process.env.ACTIVITYPUB_ENABLED === "true";
+
   const table = buildDispatchTable({
     logger,
     deleteAccount: {
@@ -105,7 +110,7 @@ async function main(): Promise<void> {
     // T11 (finding 9): the PII-schema-bearing export worker is injected from
     // the PRIVATE consuming package; un-wired ⇒ the queue fails closed.
     exportWorker: undefined,
-    federationEnabled: process.env.ACTIVITYPUB_ENABLED === "true",
+    federationEnabled,
   });
 
   const sqsClient = makeDefaultSqsClient();
@@ -113,6 +118,10 @@ async function main(): Promise<void> {
   for (const [name, worker] of Object.entries(table) as Array<
     [WorkerQueueName, (typeof table)[WorkerQueueName]]
   >) {
+    // Skip the federation-outbox poller when federation is disabled — the queue
+    // is not provisioned then, so polling it just 404-loops. (The handler's
+    // off-branch drain only matters when the queue actually exists.)
+    if (name === "federation-outbox" && !federationEnabled) continue;
     const poller = new QueuePoller(
       makeSqsQueueClient(sqsClient, { queueUrl: queueUrl(name) }),
       worker,
