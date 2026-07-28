@@ -9,7 +9,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "echo 'worker runtime tests live in apps/api/test/unit/worker-runtime (api vitest lane)'",
-    "start": "node dist/apps/worker/src/main.js"
+    "start": "node dist/apps/worker/src/main.js",
+    "migrate:deploy": "node dist/apps/worker/src/migrate.js"
   },
   "dependencies": {
     "@aws-sdk/client-sqs": "^3.996.5",

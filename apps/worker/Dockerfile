@@ -40,6 +40,11 @@ COPY --from=build /repo/apps/api/node_modules ./apps/api/node_modules
 COPY --from=build /repo/apps/worker/dist ./apps/worker/dist
 COPY --from=build /repo/prisma ./prisma
 COPY --from=build /repo/apps/api/package.json ./apps/api/package.json
+# prisma.config.ts (migration schema/datasource config) — consumed by the
+# one-shot migrate entrypoint (apps/worker/src/migrate.ts) via `prisma migrate
+# deploy` run with cwd=/repo/apps/api. Its `../../prisma` paths resolve to
+# /repo/prisma; datasource.url is read from DATABASE_URL, which migrate.ts sets.
+COPY --from=build /repo/apps/api/prisma.config.ts ./apps/api/prisma.config.ts
 COPY --from=build /repo/apps/worker/package.json ./apps/worker/package.json
 COPY package.json ./
 
