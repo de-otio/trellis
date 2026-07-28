@@ -17,7 +17,7 @@
  */
 
 import { spawnSync, type SpawnSyncOptions } from "node:child_process";
-import { resolveDbConnectionString } from "../api/src/lib/lambda-prisma.js";
+import { resolveDbConnectionString } from "../../api/src/lib/lambda-prisma.js";
 
 /** Absolute in-image paths (see apps/worker/Dockerfile runtime stage). */
 const PRISMA_CLI = "/repo/node_modules/prisma/build/index.js";
