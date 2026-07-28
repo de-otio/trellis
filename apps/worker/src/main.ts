@@ -31,6 +31,9 @@ import {
 } from "../../api/src/lib/kv/kv-provider.js";
 import { makeKvCronLock } from "../../api/src/lib/workers/cron-lock.js";
 import { noopMetrics } from "../../api/src/lib/workers/metrics-port.js";
+import { makeIdentityAdminPort } from "../../api/src/lib/identity/identity-provider.js";
+import { makeEmailPortFromEnv } from "../../api/src/lib/workers/deletion-email-port.js";
+import { assertNightlyPortsWired } from "../../api/src/lib/workers/nightly-ports-guard.js";
 import { QueuePoller } from "./consumer.js";
 import { makeDefaultSqsClient, makeSqsQueueClient } from "./sqs-queue-client.js";
 import { buildDispatchTable, type WorkerQueueName } from "./workers.js";
@@ -90,6 +93,37 @@ async function main(): Promise<void> {
   // poller is skipped below — starting it would 404-loop against a missing queue.
   const federationEnabled = process.env.ACTIVITYPUB_ENABLED === "true";
 
+  // GDPR-deletion ports, resolved ONCE and shared by both deletion paths (the
+  // immediate `delete-account` queue consumer AND the scheduled nightly cron).
+  // Both are provider-neutral (IDENTITY_PROVIDER / EMAIL_SERVICE selectors):
+  //   - identity: makeIdentityAdminPort() ⇒ Keycloak on Scaleway, Cognito on
+  //     AWS; undefined only when unconfigured (core then skips external-identity
+  //     deletion). Wiring it here fixes the previously-unwired queue path too.
+  //   - email: the configured provider (scaleway-tem / aws-ses / …) adapted to
+  //     the completion-email port; undefined ⇒ no confirmation send.
+  const identity = makeIdentityAdminPort();
+  const email = makeEmailPortFromEnv();
+
+  // Deploy-time cron gate (D2-A): WORKER_DISABLED_CRONS is a comma-separated
+  // list of cron names to omit. Resolved here so the nightly-ports guard below
+  // can key off whether the scheduled deletion cron will actually run.
+  const disabledJobs = new Set(
+    (process.env.WORKER_DISABLED_CRONS ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
+
+  // Fail closed BEFORE starting anything: an enabled nightly cron with an
+  // unwired identity port would silently under-delete (DB erased, external
+  // identity retained). See nightly-ports-guard.ts.
+  assertNightlyPortsWired({
+    nightlyEnabled: !disabledJobs.has("nightly"),
+    identity,
+    email,
+    logger,
+  });
+
   const table = buildDispatchTable({
     logger,
     deleteAccount: {
@@ -97,9 +131,9 @@ async function main(): Promise<void> {
       // LAZY at-use resolution (finding 4) — never resolved onto a context.
       resolvePseudonymSecret: () => resolvePseudonymSecret(),
       deleteStagingObjects: (keys) => deleteStagingObjects(s3, mediaBucket, keys),
-      // IdentityAdminPort: wired by the consuming deployment (WS-3.3 will
-      // supply the provider-neutral impl; Cognito-backed until then).
-      identity: undefined,
+      // IdentityAdminPort (WS-3.3): provider-neutral, resolved above. Ensures
+      // the immediate delete-account path also removes the external identity.
+      identity,
     },
     media: {
       // Completion deps are injected by the consuming deployment at startup
@@ -177,8 +211,8 @@ async function main(): Promise<void> {
         metrics: noopMetrics,
         cronLock,
         clock,
-        identity: undefined, // WS-3.3 IdentityProviderPort
-        email: undefined, // WS-5 email-provider factory
+        identity, // WS-3.3 IdentityProviderPort (provider-neutral, resolved above)
+        email, // WS-5 completion-email port (configured provider, resolved above)
         resolvePseudonymSecret: lazyPseudonym,
         deleteStagingObjects: stagingCleanup,
         objectStore: {
@@ -204,16 +238,10 @@ async function main(): Promise<void> {
         profile === "scaleway"
           ? { executor: getKvSqlExecutor()!, cronLock, clock }
           : undefined,
-      // Deploy-time cron gate: WORKER_DISABLED_CRONS is a comma-separated list
-      // of cron names to omit (e.g. "nightly" to park the scheduled GDPR
-      // deletion until its identity + email ports are wired). Queue consumers
-      // are unaffected. Empty/unset = all crons scheduled.
-      disabledJobs: new Set(
-        (process.env.WORKER_DISABLED_CRONS ?? "")
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean),
-      ),
+      // Deploy-time cron gate (resolved above): WORKER_DISABLED_CRONS is a
+      // comma-separated list of cron names to omit. Queue consumers are
+      // unaffected. Empty/unset = all crons scheduled.
+      disabledJobs,
     }),
     { logger },
   );
