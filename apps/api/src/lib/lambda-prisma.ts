@@ -59,15 +59,77 @@ function getDbSecretCache(): SecretCache {
   return dbSecretCache;
 }
 
-/** Resolve the DB secret via the ONE foundation secrets port (§5.3 — the
- *  powertools secrets path is gone; three secrets paths collapsed to one). */
-async function resolveDbSecret(fresh: boolean): Promise<DbSecret> {
+/** Resolve the DB secret JSON from AWS Secrets Manager via the ONE foundation
+ *  secrets port (§5.3 — the powertools secrets path is gone; three secrets paths
+ *  collapsed to one). ARN path only; see `resolveDbConnectionString` for the
+ *  cross-profile precedence. */
+async function resolveDbSecretFromArn(fresh: boolean): Promise<DbSecret> {
   const bytes = await resolveSecret(
     secretRef(process.env.DB_SECRET_ARN!),
     { cache: getDbSecretCache() },
     { fresh },
   );
   return JSON.parse(bytes.toString("utf-8")) as DbSecret;
+}
+
+/**
+ * Resolve the DB connection string for the standalone Lambda / long-running
+ * worker path, portable across deployment profiles.
+ *
+ * Precedence MIRRORS the request-path resolver (`env.ts` `resolveDatabaseUrl`)
+ * so the container consumes the SAME env the API already does — no divergent DB
+ * contract between the two:
+ *   1. `DATABASE_URL` — explicit (Scaleway / local); used verbatim.
+ *   2. `DB_SECRET_ARN` — AWS Secrets Manager, resolved through the foundation
+ *      `SecretCache` so the 28P01 rotation self-heal
+ *      (`invalidateDbCredentialsOnAuthError`) re-resolves a fresh credential;
+ *      honours the optional `LAMBDA_DATABASE_PROXY_HOST` (RDS Proxy) endpoint.
+ *   3. Decomposed `DB_SECRET_USERNAME`/`DB_SECRET_PASSWORD`/`DB_SECRET_HOST`
+ *      [`/DB_SECRET_PORT`] + `DB_NAME` — the Scaleway shape (external-secrets
+ *      injects `DB_SECRET_PASSWORD`; the rest ride the app ConfigMap). This is
+ *      the branch that unblocks the worker on Kapsule, where there is no AWS
+ *      Secrets Manager ARN.
+ * Fail-closed (throws) when none is configured — the worker's startup gate
+ * turns that into a `process.exit(1)` rather than booting credential-less.
+ *
+ * Only the ARN branch flows through the SecretCache; the DATABASE_URL and
+ * decomposed branches read process.env directly (a credential rotation on those
+ * arrives via a pod restart, since env_from is snapshot at pod start).
+ */
+async function resolveDbConnectionString(fresh: boolean): Promise<string> {
+  // 1. Explicit URL (Scaleway / local). Used verbatim — no proxy rewrite.
+  if (process.env.DATABASE_URL) return process.env.DATABASE_URL;
+
+  // 2. AWS Secrets Manager ARN — retains the SecretCache + rotation self-heal.
+  if (process.env.DB_SECRET_ARN) {
+    const { username, password, host, port, dbname } =
+      await resolveDbSecretFromArn(fresh);
+    // RDS Proxy endpoint override (AWS only); falls back to the direct host.
+    const dbHost = process.env.LAMBDA_DATABASE_PROXY_HOST || host;
+    return `postgresql://${username}:${encodeURIComponent(password)}@${dbHost}:${port}/${dbname}`;
+  }
+
+  // 3. Decomposed env (Scaleway). Validated to fail closed on partial config.
+  const user = process.env.DB_SECRET_USERNAME;
+  const pass = process.env.DB_SECRET_PASSWORD;
+  const host = process.env.DB_SECRET_HOST;
+  const port = process.env.DB_SECRET_PORT || "5432";
+  const dbname = process.env.DB_NAME || "trellis";
+  if (!user || !pass || !host) {
+    throw new Error(
+      "Database config missing: set DATABASE_URL, DB_SECRET_ARN (AWS), or DB_SECRET_USERNAME/PASSWORD/HOST (Scaleway)",
+    );
+  }
+  if (!/^[\w.-]+$/.test(host)) {
+    throw new Error(`Invalid DB_SECRET_HOST: must match /^[\\w.-]+$/, got "${host}"`);
+  }
+  if (!/^\d+$/.test(port)) {
+    throw new Error(`Invalid DB_SECRET_PORT: must be numeric, got "${port}"`);
+  }
+  if (!/^[\w-]+$/.test(dbname)) {
+    throw new Error(`Invalid DB_NAME: must match /^[\\w-]+$/, got "${dbname}"`);
+  }
+  return `postgresql://${user}:${encodeURIComponent(pass)}@${host}:${port}/${dbname}`;
 }
 
 /** True for a Postgres invalid_password auth failure (SQLSTATE 28P01). */
@@ -168,16 +230,12 @@ export async function withLambdaDbBreaker<T>(
  */
 export async function getLambdaPrisma(): Promise<PrismaClient> {
   if (prisma) return prisma;
-  const { username, password, host, port, dbname } = await resolveDbSecret(false);
-
-  // When an RDS Proxy is provisioned, the infra injects its endpoint here so the
-  // Lambda connects through the proxy (which multiplexes and caps the
-  // connections the DB ever sees); fall back to the direct instance endpoint
-  // when unset, so the default deployment is unchanged.
-  const dbHost = process.env.LAMBDA_DATABASE_PROXY_HOST || host;
+  // Cross-profile credential resolution (DATABASE_URL / DB_SECRET_ARN + RDS
+  // Proxy override / decomposed Scaleway env). See `resolveDbConnectionString`.
+  const connectionString = await resolveDbConnectionString(false);
 
   pool = new Pool({
-    connectionString: `postgresql://${username}:${encodeURIComponent(password)}@${dbHost}:${port}/${dbname}`,
+    connectionString,
     ssl: { rejectUnauthorized: false },
     max: Number(process.env.LAMBDA_DATABASE_POOL_MAX ?? DEFAULT_POOL_MAX),
     connectionTimeoutMillis: Number(

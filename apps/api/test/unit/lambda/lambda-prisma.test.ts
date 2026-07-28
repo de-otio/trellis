@@ -68,6 +68,14 @@ describe("lambda-prisma", () => {
     delete process.env.LAMBDA_DATABASE_PROXY_HOST;
     delete process.env.LAMBDA_DATABASE_BREAKER_THRESHOLD;
     delete process.env.LAMBDA_DATABASE_BREAKER_COOLDOWN_MS;
+    // Cross-profile DB inputs — cleared so the ARN path (above) is the default
+    // and per-test overrides don't leak between cases.
+    delete process.env.DATABASE_URL;
+    delete process.env.DB_SECRET_USERNAME;
+    delete process.env.DB_SECRET_PASSWORD;
+    delete process.env.DB_SECRET_HOST;
+    delete process.env.DB_SECRET_PORT;
+    delete process.env.DB_NAME;
   });
 
   it("caps the pool at max:1 by default with a fail-fast connect timeout", async () => {
@@ -180,6 +188,71 @@ describe("lambda-prisma", () => {
       // Invalidated: the next call rebuilds.
       await getLambdaPrisma();
       expect(PoolMock).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  // ── Cross-profile DB credential resolution (worker portability) ───────────
+  // The container must boot on Scaleway (no AWS Secrets Manager ARN) as well as
+  // AWS. Precedence mirrors env.ts resolveDatabaseUrl: DATABASE_URL → ARN →
+  // decomposed DB_SECRET_* env.
+  describe("DB credential resolution across deployment profiles", () => {
+    it("DATABASE_URL wins verbatim — no Secrets Manager call, no proxy rewrite", async () => {
+      process.env.DATABASE_URL = "postgresql://u:p@explicit.host:6543/db";
+      process.env.LAMBDA_DATABASE_PROXY_HOST = "proxy.internal"; // must be ignored
+      const { getLambdaPrisma } = await import(IMPORT);
+      await getLambdaPrisma();
+
+      expect(mockResolveSecret).not.toHaveBeenCalled();
+      const cs = PoolMock.mock.calls[0][0].connectionString;
+      expect(cs).toBe("postgresql://u:p@explicit.host:6543/db");
+      expect(cs).not.toContain("proxy.internal");
+    });
+
+    it("decomposed DB_SECRET_* env (Scaleway) builds the string without Secrets Manager", async () => {
+      delete process.env.DB_SECRET_ARN; // no ARN on Scaleway
+      process.env.DB_SECRET_USERNAME = "sky";
+      process.env.DB_SECRET_PASSWORD = "p@ss/word";
+      process.env.DB_SECRET_HOST = "10.0.0.5";
+      process.env.DB_SECRET_PORT = "5432";
+      process.env.DB_NAME = "skybber";
+      const { getLambdaPrisma } = await import(IMPORT);
+      await getLambdaPrisma();
+
+      expect(mockResolveSecret).not.toHaveBeenCalled();
+      const cs = PoolMock.mock.calls[0][0].connectionString;
+      // Password is percent-encoded; host/port/db land as given.
+      expect(cs).toBe(
+        `postgresql://sky:${encodeURIComponent("p@ss/word")}@10.0.0.5:5432/skybber`,
+      );
+    });
+
+    it("decomposed path defaults port 5432 and db 'trellis' when unset", async () => {
+      delete process.env.DB_SECRET_ARN;
+      process.env.DB_SECRET_USERNAME = "u";
+      process.env.DB_SECRET_PASSWORD = "pw";
+      process.env.DB_SECRET_HOST = "h.internal";
+      const { getLambdaPrisma } = await import(IMPORT);
+      await getLambdaPrisma();
+      expect(PoolMock.mock.calls[0][0].connectionString).toBe(
+        "postgresql://u:pw@h.internal:5432/trellis",
+      );
+    });
+
+    it("fails closed when no DB config is set (worker exits rather than boots credential-less)", async () => {
+      delete process.env.DB_SECRET_ARN;
+      const { getLambdaPrisma } = await import(IMPORT);
+      await expect(getLambdaPrisma()).rejects.toThrow(/Database config missing/);
+      expect(PoolMock).not.toHaveBeenCalled();
+    });
+
+    it("rejects a non-numeric decomposed port (fail-closed validation)", async () => {
+      delete process.env.DB_SECRET_ARN;
+      process.env.DB_SECRET_USERNAME = "u";
+      process.env.DB_SECRET_PASSWORD = "pw";
+      process.env.DB_SECRET_HOST = "h.internal";
+      process.env.DB_SECRET_PORT = "not-a-port";
+      const { getLambdaPrisma } = await import(IMPORT);
+      await expect(getLambdaPrisma()).rejects.toThrow(/Invalid DB_SECRET_PORT/);
     });
   });
 

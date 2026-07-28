@@ -21,7 +21,7 @@ cadences in-process with single-fire via WS-1's
 | `AWS_ACCOUNT_ID` | scaleway/CI | queue-URL account segment (`000000000000` on LocalStack/MNQ) |
 | `KV_PROVIDER` | scaleway | `postgres` selects the Scaleway profile (PostgresKvStore + the `kv-entries-cleanup` cron); unset/`dynamodb` = AWS-shaped wiring for CI |
 | `KV_DATABASE_URL` / `DATABASE_URL` | scaleway | shared KV pool for `KV_PROVIDER=postgres` |
-| `DB_SECRET_ARN` | yes | DB credential secret (resolved at startup — fail-closed gate) |
+| DB credential (one of) | yes | **Fail-closed startup gate.** Resolution mirrors the request path (`env.ts`): `DATABASE_URL` (explicit) → `DB_SECRET_ARN` (AWS Secrets Manager, with rotation self-heal) → decomposed `DB_SECRET_USERNAME`/`DB_SECRET_PASSWORD`/`DB_SECRET_HOST`[`/DB_SECRET_PORT`]`+DB_NAME` (the Scaleway shape — external-secrets injects the password). Missing all three ⇒ `exit(1)`. |
 | `MEDIA_BUCKET_NAME` | yes | staging-object cleanup + nightly GC purge |
 | `REPORT_PSEUDONYM_SECRET` / `REPORT_PSEUDONYM_SECRET_PARAM` | yes (one) | GDPR tombstone HMAC key. **Startup refuses an empty/unresolvable key (finding 2)** |
 | `ACTIVITYPUB_ENABLED` | no | federation-outbox two-mode flag (default off) |
