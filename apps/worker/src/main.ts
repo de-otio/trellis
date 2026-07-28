@@ -19,6 +19,7 @@ import {
   getLambdaPrisma,
   resolveDbConnectionString,
 } from "../../api/src/lib/lambda-prisma.js";
+import { buildSqsUrl } from "../../api/src/lib/sqs-url.js";
 import { resolvePseudonymSecret } from "../../api/src/lib/services/user-data-deletion.js";
 import { deleteStagingObjects } from "../../api/src/lib/media/staging-object-cleanup.js";
 import {
@@ -41,13 +42,11 @@ import { closeDefaultResources, installShutdownHandlers } from "./shutdown.js";
 
 const stage = process.env.STAGE || "dev";
 
-/** Same URL convention as `env.ts`'s `sqsUrl` (SQS_ENDPOINT-overridable). */
+/** Same URL convention as `env.ts`'s `sqsUrl` — both delegate to the shared
+ *  builder so they honour SQS_QUEUE_URL_PREFIX (the real Scaleway MNQ queue
+ *  names) and cannot drift. */
 function queueUrl(queueName: string): string {
-  const base =
-    process.env.SQS_ENDPOINT ||
-    `https://sqs.${process.env.AWS_REGION || "us-east-1"}.amazonaws.com`;
-  const accountId = process.env.AWS_ACCOUNT_ID || "000000000000";
-  return `${base}/${accountId}/${stage}-${queueName}`;
+  return buildSqsUrl(queueName, stage);
 }
 
 /** Per-queue concurrency budget (§3.6: media low — transcode is heavy). */

@@ -35,13 +35,15 @@ import { resolveDirectoryProfileConfig } from "./lib/org-category/directory-prof
 import type { DirectorySearchConfig } from "./lib/org-category/directory-search-config.js";
 import { resolveDirectorySearchEnv } from "./lib/org-category/directory-search-config.js";
 import { validateEmailEnv } from "./lib/email-provider.js";
+import { buildSqsUrl } from "./lib/sqs-url.js";
 
 const stage = process.env.STAGE || "dev";
 
+// Delegates to the shared builder (lib/sqs-url.ts) so the request path and the
+// worker container use ONE queue-URL convention — incl. SQS_QUEUE_URL_PREFIX,
+// which points at the real (name-prefixed) Scaleway MNQ queues.
 function sqsUrl(queueName: string): string {
-  const base = process.env.SQS_ENDPOINT || `https://sqs.${process.env.AWS_REGION || "us-east-1"}.amazonaws.com`;
-  const accountId = process.env.AWS_ACCOUNT_ID || "000000000000";
-  return `${base}/${accountId}/${stage}-${queueName}`;
+  return buildSqsUrl(queueName, stage);
 }
 
 /** Application environment — available to all route handlers */
