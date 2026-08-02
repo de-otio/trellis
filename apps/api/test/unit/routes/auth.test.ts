@@ -141,9 +141,40 @@ describe("Auth Routes", () => {
       (r) => r.method === "*" && r.path === "/api/auth/*",
     );
 
+    // REGRESSION (2026-08-02): every POST with a body to /api/auth/* returned
+    // 500 — `TypeError: RequestInit: duplex option is required when sending a
+    // body` — while the unaliased /auth/* path worked. It shipped because the
+    // tests below were written to AVOID bodies ("use GET to avoid body/duplex
+    // issues"), so the suite was shaped around the defect rather than catching
+    // it. This test covers the case they dodged.
+    it("forwards a POST body through the rewrite (duplex regression)", async () => {
+      const apiUrl = new URL("https://example.com/api/auth/magic-link");
+      const payload = JSON.stringify({ email: "user@example.com" });
+      const apiRequest = new Request(apiUrl.toString(), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: payload,
+      });
+
+      const response = await route!.handler(apiRequest, mockEnv, {
+        url: apiUrl,
+        pathname: "/api/auth/magic-link",
+        requestContext: mockRequestContext,
+      });
+
+      expect(response.status).toBe(200);
+
+      const rewrittenRequest = mockHandleAuthRoutes.mock.calls[0][0];
+      expect(rewrittenRequest.method).toBe("POST");
+      expect(mockHandleAuthRoutes.mock.calls[0][2].pathname).toBe(
+        "/auth/magic-link",
+      );
+      // the body must survive the rewrite, not merely not-throw
+      await expect(rewrittenRequest.text()).resolves.toBe(payload);
+    });
+
     it("should rewrite /api/auth/* to /auth/* and handle successfully", async () => {
       const apiUrl = new URL("https://example.com/api/auth/login");
-      // Use GET to avoid body/duplex issues in Node.js Request constructor
       const apiRequest = new Request(apiUrl.toString(), {
         method: "GET",
       });
@@ -173,7 +204,7 @@ describe("Auth Routes", () => {
           Authorization: "Bearer token123",
           "Content-Type": "application/json",
         },
-        // No body for DELETE request to avoid duplex requirement
+        // DELETE with no body — the null-body path (duplex must NOT be set)
       });
 
       await route!.handler(apiRequest, mockEnv, {
