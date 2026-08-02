@@ -98,9 +98,58 @@ describe("resolveAuthConfig — (d) [SEC-6] non-Cognito issuer requires OIDC_APP
       ...COGNITO_ENV,
       OIDC_ISSUER_URL: "https://keycloak.example.com/realms/trellis",
       OIDC_APP_CLIENT_ID: "trellis-api",
+      // [SEC-6b] now also required for a generic issuer — see the block below.
+      OIDC_JWKS_URL: "https://keycloak.example.com/realms/trellis/protocol/openid-connect/certs",
     });
     expect(cfg.issuerKind).toBe("generic");
     expect(cfg.audience).toBe("trellis-api");
+    expect(cfg.jwksUri).toBe(
+      "https://keycloak.example.com/realms/trellis/protocol/openid-connect/certs",
+    );
+  });
+});
+
+/**
+ * REGRESSION (live, dev, 2026-08-02): every Keycloak token was rejected with
+ * `invalid_signature`. The signature was fine — OIDC_JWKS_URL was unset, so the
+ * verifier derived Cognito's `${issuer}/.well-known/jwks.json`, which 404s on
+ * Keycloak; the missing key is reported as a signature failure, pointing at
+ * crypto rather than at config. Same failure mode as [SEC-6]: a Cognito-shaped
+ * default silently applied to a non-Cognito issuer.
+ */
+describe("resolveAuthConfig — [SEC-6b] non-Cognito issuer requires OIDC_JWKS_URL", () => {
+  const KC = "https://keycloak.example.com/realms/trellis";
+
+  it("throws for a Keycloak issuer without OIDC_JWKS_URL", () => {
+    expect(() =>
+      resolveAuthConfig({
+        ...COGNITO_ENV,
+        OIDC_ISSUER_URL: KC,
+        OIDC_APP_CLIENT_ID: "trellis-api",
+      }),
+    ).toThrow(/OIDC_JWKS_URL is required when the issuer is non-Cognito/);
+  });
+
+  it("points at the discovery document so the fix is actionable", () => {
+    expect(() =>
+      resolveAuthConfig({ ...COGNITO_ENV, OIDC_ISSUER_URL: KC, OIDC_APP_CLIENT_ID: "a" }),
+    ).toThrow(new RegExp(`${KC}/\\.well-known/openid-configuration`));
+  });
+
+  it("does NOT require OIDC_JWKS_URL for a Cognito issuer", () => {
+    // The derived default is correct there, so requiring it would be noise.
+    const cfg = resolveAuthConfig(COGNITO_ENV);
+    expect(cfg.issuerKind).toBe("cognito");
+    expect(cfg.jwksUri).toBeUndefined();
+  });
+
+  it("does not require it for a Cognito issuer named via OIDC_ISSUER_URL", () => {
+    // Same pool, spelled with the neutral var — still Cognito, still exempt.
+    const cfg = resolveAuthConfig({
+      OIDC_ISSUER_URL: "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_Pool",
+      OIDC_APP_CLIENT_ID: "client-id",
+    });
+    expect(cfg.issuerKind).toBe("cognito");
   });
 });
 

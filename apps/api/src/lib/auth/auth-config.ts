@@ -113,6 +113,24 @@ export function resolveAuthConfig(env: AuthConfigEnv): ResolvedAuthConfig {
     );
   }
 
+  // [SEC-6b] Same shape as the audience rule above, same reason: a Cognito
+  // default silently applied to a non-Cognito issuer. With OIDC_JWKS_URL unset
+  // the verifier derives `${issuer}/.well-known/jwks.json`, which is Cognito's
+  // layout; Keycloak serves `/protocol/openid-connect/certs`. The derived URL
+  // 404s and the resulting missing-key error is reported as `invalid_signature`
+  // — so the symptom is "every token is cryptographically invalid" and the
+  // cause is a URL. Verified live on dev 2026-08-02.
+  //
+  // Fail at boot rather than on the first request: a deploy that cannot verify
+  // any token should not report itself healthy.
+  if (issuerKind === "generic" && env.OIDC_JWKS_URL === undefined) {
+    throw new Error(
+      "OIDC_JWKS_URL is required when the issuer is non-Cognito — the derived " +
+        "default is Cognito-specific and 404s elsewhere. Take jwks_uri from " +
+        `${issuer}/.well-known/openid-configuration`,
+    );
+  }
+
   return {
     issuer,
     audience,

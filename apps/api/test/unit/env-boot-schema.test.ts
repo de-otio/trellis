@@ -228,6 +228,10 @@ describe("validateBootEnv — dev-only-overridable keys (required in prod, optio
       IDENTITY_PROVIDER: "keycloak",
       OIDC_ISSUER_URL: "https://id.example.test/realms/skybber-dev",
       OIDC_APP_CLIENT_ID: "trellis-app",
+      // [SEC-6b] a non-Cognito issuer must name its JWKS URI; the derived
+      // Cognito default 404s on Keycloak and fails every token as
+      // invalid_signature.
+      OIDC_JWKS_URL: "https://id.example.test/realms/skybber-dev/protocol/openid-connect/certs",
       IDENTITY_ADMIN_CLIENT_ID: "trellis-api",
       IDENTITY_ADMIN_CLIENT_SECRET: "svc-secret",
     };

@@ -1150,6 +1150,22 @@ export function validateEnv(env: Env): string[] {
       "auth audience is required — set OIDC_APP_CLIENT_ID (generic OIDC / Keycloak) or COGNITO_APP_CLIENT_ID (Cognito)",
     );
   }
+  // A non-Cognito issuer must also name its JWKS URI: the fallback the verifier
+  // derives is Cognito's `/.well-known/jwks.json`, which 404s on Keycloak and
+  // friends, and the resulting missing key is reported as `invalid_signature`
+  // — every token rejected, with the error pointing at crypto instead of at
+  // config (observed live on dev, 2026-08-02). Mirrors resolveAuthConfig()
+  // [SEC-6b]; kept here too so `validateEnv` alone catches a bad deploy.
+  if (
+    env.OIDC_ISSUER_URL &&
+    !/^https:\/\/cognito-idp\.[a-z0-9-]+\.amazonaws\.com\/[^/]+$/.test(env.OIDC_ISSUER_URL) &&
+    !env.OIDC_JWKS_URL
+  ) {
+    errors.push(
+      "OIDC_JWKS_URL is required for a non-Cognito issuer — take jwks_uri from " +
+        `${env.OIDC_ISSUER_URL}/.well-known/openid-configuration`,
+    );
+  }
 
   // SECURITY (T17): the invitation gate fails closed without this binding —
   // refuse to start rather than serve with invitation validation/redemption

@@ -321,6 +321,27 @@ export function buildBootEnvSchema(stage: BootStage) {
         });
       }
 
+      // ── [SEC-6b] non-Cognito issuer requires an explicit JWKS URI ────────
+      // Exactly the [SEC-6] failure mode one field over. Unset, the verifier
+      // derives `${issuer}/.well-known/jwks.json` — Cognito's layout. Keycloak
+      // serves `/protocol/openid-connect/certs`, so the derived URL 404s, the
+      // key is never found, and aws-jwt-verify reports `invalid_signature`:
+      // every token rejected, with the error naming crypto instead of config.
+      // Observed live on dev 2026-08-02 (plan 017 §10.7).
+      if (
+        resolvedIssuer !== undefined &&
+        !cognitoIssuerRe.test(resolvedIssuer) &&
+        env.OIDC_JWKS_URL === undefined
+      ) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["OIDC_JWKS_URL"],
+          message:
+            "required when the issuer is non-Cognito — the derived default is Cognito-specific and 404s elsewhere, " +
+            `making every token fail as invalid_signature. Take jwks_uri from ${resolvedIssuer}/.well-known/openid-configuration`,
+        });
+      }
+
       // ── IDENTITY_PROVIDER=keycloak requires its full config ──────────────
       if (env.IDENTITY_PROVIDER === "keycloak") {
         for (const key of [

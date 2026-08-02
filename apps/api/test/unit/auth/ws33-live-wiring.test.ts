@@ -19,6 +19,10 @@ import { normalizeClaims } from "../../../src/lib/auth/cognito-jwt.js";
 import { validateBootEnv } from "../../../src/env-schema.js";
 
 const KC_ISSUER = "https://id.example.test/realms/skybber-dev";
+// [SEC-6b] a generic issuer must name its JWKS URI explicitly — the derived
+// default is Cognito's `/.well-known/jwks.json`, which 404s on Keycloak and
+// makes every token look like a signature failure (live dev, 2026-08-02).
+const KC_JWKS = `${KC_ISSUER}/protocol/openid-connect/certs`;
 const COGNITO_ENV = {
   COGNITO_USER_POOL_ID: "eu-central-1_Pool1",
   COGNITO_APP_CLIENT_ID: "cognito-client-1",
@@ -35,16 +39,24 @@ describe("resolveAuthConfig — D8 OIDC_* wiring", () => {
     });
   });
 
-  it("accepts OIDC_ISSUER_URL + OIDC_APP_CLIENT_ID as the full generic config", () => {
+  it("accepts OIDC_ISSUER_URL + OIDC_APP_CLIENT_ID + OIDC_JWKS_URL as the full generic config", () => {
     const cfg = resolveAuthConfig({
       OIDC_ISSUER_URL: KC_ISSUER,
       OIDC_APP_CLIENT_ID: "trellis-app",
+      OIDC_JWKS_URL: KC_JWKS,
     });
     expect(cfg).toEqual({
       issuer: KC_ISSUER,
       audience: "trellis-app",
+      jwksUri: KC_JWKS,
       issuerKind: "generic",
     });
+  });
+
+  it("[SEC-6b] fails closed on a generic issuer with an audience but NO jwks url", () => {
+    expect(() =>
+      resolveAuthConfig({ OIDC_ISSUER_URL: KC_ISSUER, OIDC_APP_CLIENT_ID: "trellis-app" }),
+    ).toThrowError(/OIDC_JWKS_URL is required/);
   });
 
   it("[SEC-6] still fails closed on a generic issuer without ANY explicit audience", () => {
@@ -57,6 +69,7 @@ describe("resolveAuthConfig — D8 OIDC_* wiring", () => {
     const cfg = resolveAuthConfig({
       OIDC_ISSUER_URL: KC_ISSUER,
       OIDC_APP_CLIENT_ID: "trellis-app",
+      OIDC_JWKS_URL: KC_JWKS,
       ...COGNITO_ENV,
     });
     expect(cfg.audience).toBe("trellis-app");
@@ -137,8 +150,19 @@ describe("boot schema — Keycloak-profile deployment (WS-3.3 relaxation)", () =
       ...baseDev,
       OIDC_ISSUER_URL: KC_ISSUER,
       OIDC_APP_CLIENT_ID: "trellis-app",
+      OIDC_JWKS_URL: KC_JWKS,
     });
     expect(issues).toEqual([]);
+  });
+
+  it("[SEC-6b] refuses to boot a generic issuer with no OIDC_JWKS_URL", () => {
+    // Without this the deploy comes up "healthy" and 401s every request.
+    const issues = validateBootEnv({
+      ...baseDev,
+      OIDC_ISSUER_URL: KC_ISSUER,
+      OIDC_APP_CLIENT_ID: "trellis-app",
+    });
+    expect(issues.some((i) => i.startsWith("OIDC_JWKS_URL"))).toBe(true);
   });
 
   it("still fails closed when neither Cognito ids nor a generic issuer are configured", () => {
@@ -179,6 +203,7 @@ describe("boot schema — Keycloak-profile deployment (WS-3.3 relaxation)", () =
       IDENTITY_PROVIDER: "keycloak",
       OIDC_ISSUER_URL: KC_ISSUER,
       OIDC_APP_CLIENT_ID: "trellis-app",
+      OIDC_JWKS_URL: KC_JWKS, // [SEC-6b] required when non-Cognito
       IDENTITY_ADMIN_CLIENT_ID: "trellis-api",
       IDENTITY_ADMIN_CLIENT_SECRET: "svc-secret",
       APP_DOMAIN: "app.example.test", // [F4] required when keycloak

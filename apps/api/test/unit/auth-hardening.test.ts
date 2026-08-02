@@ -450,9 +450,23 @@ describe("S1.4 — validateEnv", () => {
       SESSION_SECRET: "a".repeat(32),
       OIDC_ISSUER_URL: "https://id.example.com/realms/skybber",
       OIDC_APP_CLIENT_ID: "skybber-api",
+      // [SEC-6b] non-Cognito issuers must name their JWKS URI — the derived
+      // Cognito default 404s on Keycloak and fails every token.
+      OIDC_JWKS_URL: "https://id.example.com/realms/skybber/protocol/openid-connect/certs",
       INVITATIONS_KV: {},
     } as any);
     expect(errors).toEqual([]);
+  });
+
+  it("[SEC-6b] rejects a Keycloak deployment that omits OIDC_JWKS_URL", async () => {
+    const { validateEnv } = await import("../../src/env.js");
+    const errors = validateEnv({
+      SESSION_SECRET: "a".repeat(32),
+      OIDC_ISSUER_URL: "https://id.example.com/realms/skybber",
+      OIDC_APP_CLIENT_ID: "skybber-api",
+      INVITATIONS_KV: {},
+    } as any);
+    expect(errors.some((e: string) => e.includes("OIDC_JWKS_URL is required"))).toBe(true);
   });
 
   it("should return empty array when all required vars are valid", async () => {
