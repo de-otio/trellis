@@ -29,6 +29,27 @@ export function disclosureStrength(sourceType: SyntheticSourceType): number {
   return i === -1 ? SOURCE_TYPES_BY_STRENGTH.length : i;
 }
 
+/**
+ * Every source type STRICTLY WEAKER than `sourceType`, for use as an atomic
+ * guard on a monotonic raise:
+ *
+ *   updateMany({ where: { …, embeddedSourceType: { in: weakerThan(next) } },
+ *                data:  { embeddedSourceType: next } })
+ *
+ * This is how a "set to max(existing, next)" is expressed in one statement.
+ * Prisma cannot do it in an upsert payload, and a read-then-write would race two
+ * concurrent uploads of the same bytes. The guard makes the raise idempotent and
+ * race-safe: if a stronger value is already stored, zero rows match.
+ */
+export function weakerThan(
+  sourceType: SyntheticSourceType,
+): SyntheticSourceType[] {
+  const target = disclosureStrength(sourceType);
+  return SOURCE_TYPES_BY_STRENGTH.filter(
+    (candidate) => disclosureStrength(candidate) < target,
+  );
+}
+
 /** True for the source types that constitute a synthetic-content disclosure. */
 export function isSynthetic(sourceType: SyntheticSourceType): boolean {
   return (

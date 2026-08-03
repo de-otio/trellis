@@ -51,6 +51,38 @@ describe("buildMediaUpsertArgs (T9 dedup safety)", () => {
     expect("lifecycle" in args.create).toBe(false);
   });
 
+  describe("Art. 50 provenance follows the same create-only rule", () => {
+    const withProvenance = buildMediaUpsertArgs({
+      tenantId: TENANT,
+      contentHash: HASH,
+      originalKey: `cas/${TENANT}/${HASH}`,
+      mimeType: "image/png",
+      size: 123,
+      uploadedBy: "cuser000000000000000000aa",
+      embeddedSourceType: "AI_GENERATED",
+      provenanceExamined: true,
+    });
+
+    it("create carries the intrinsic reading", () => {
+      expect(withProvenance.create.embeddedSourceType).toBe("AI_GENERATED");
+      expect(withProvenance.create.provenanceExamined).toBe(true);
+    });
+
+    it("update NEVER carries provenance — an unconditional write could LOWER it", () => {
+      // contentHash comes from the RE-ENCODED bytes, so a differently-marked
+      // original can dedup onto this row. Raising is done by an atomic guarded
+      // updateMany at the call site; it must never happen through this payload.
+      expect("embeddedSourceType" in withProvenance.update).toBe(false);
+      expect("provenanceExamined" in withProvenance.update).toBe(false);
+      expect(withProvenance.update).toEqual({});
+    });
+
+    it("omitted provenance leaves the columns to their schema defaults", () => {
+      expect("embeddedSourceType" in args.create).toBe(false);
+      expect("provenanceExamined" in args.create).toBe(false);
+    });
+  });
+
   it("dedup-hit update does NOT overwrite uploadedBy (no ownership takeover)", () => {
     expect("uploadedBy" in args.update).toBe(false);
   });

@@ -6,6 +6,7 @@ import {
   mergeProvenance,
   resolveProvenance,
   toProvenanceView,
+  weakerThan,
 } from "../../../src/lib/provenance/resolve.js";
 import {
   SOURCE_TYPES_BY_STRENGTH,
@@ -153,6 +154,42 @@ describe("provenance pure core — properties", () => {
       "labelKey",
       "sourceType",
     ]);
+  });
+});
+
+describe("weakerThan — the atomic monotonic-raise guard", () => {
+  it("returns exactly the strictly-weaker types", () => {
+    expect(weakerThan("UNKNOWN")).toEqual([]);
+    expect(weakerThan("AI_GENERATED")).toEqual([
+      "UNKNOWN",
+      "HUMAN_CREATED",
+      "AI_EDITED",
+      "AI_ASSISTED",
+    ]);
+  });
+
+  it("never includes the target itself — the raise must be idempotent", () => {
+    fc.assert(
+      fc.property(sourceType, (t) => {
+        expect(weakerThan(t)).not.toContain(t);
+      }),
+    );
+  });
+
+  it("a guard on the weakest value matches nothing (no-op raise)", () => {
+    // Guards an UPDATE ... WHERE col IN (...): an empty set matches zero rows,
+    // so raising to UNKNOWN can never overwrite anything.
+    expect(weakerThan("UNKNOWN")).toHaveLength(0);
+  });
+
+  it("every non-target type is either weaker or at-least-as-strong, never both", () => {
+    fc.assert(
+      fc.property(sourceType, sourceType, (a, b) => {
+        const aWeaker = weakerThan(b).includes(a);
+        const bWeaker = weakerThan(a).includes(b);
+        expect(aWeaker && bWeaker).toBe(false);
+      }),
+    );
   });
 });
 

@@ -1015,6 +1015,41 @@ export const mediaRoutes: Route[] = [
         // uploadBuffer is re-typed to ArrayBuffer for the upload service;
         // Buffer (a Uint8Array subclass) is structurally compatible at runtime
         // with all consumers (crypto.subtle.digest, R2 put, etc.).
+        // --- Art. 50 provenance: READ BEFORE THE STRIP ------------------------
+        // This MUST stay above reencodeImage. The re-encode drops EXIF/IPTC/XMP
+        // and any C2PA manifest — which is where the AI marking lives — and
+        // `assertNoExif` enforces that it did. Empirically verified: a JPEG
+        // carrying Iptc4xmpExt:DigitalSourceType loses it entirely after
+        // sharp(...).jpeg().
+        //
+        // Reads the ORIGINAL buffer, returns ONE enum's worth of provenance, and
+        // discards everything else. Never throws — provenance is a disclosure,
+        // not a safety gate, so it can never fail an upload. The strip itself is
+        // unchanged; we just look first.
+        const { readProvenance } = await import(
+          "../metadata/provenance-reader.js"
+        );
+        const provenance = await readProvenance(
+          new Uint8Array(fileBuffer),
+          mimeType,
+        );
+        if (provenance.examined) {
+          // Structured events, following the image_reencode.* convention below.
+          // `provenance.unrecognised` is the one worth alerting on once the
+          // programme has any observability: a rising rate means generators moved
+          // to a marking we do not parse, i.e. our coverage is silently decaying.
+          logger.info(
+            provenance.sourceType === "UNKNOWN"
+              ? "provenance.unrecognised"
+              : "provenance.recognised",
+            {
+              container: provenance.container,
+              sourceType: provenance.sourceType,
+              mimeType,
+            },
+          );
+        }
+
         let uploadBuffer: ArrayBuffer = fileBuffer;
         try {
           const reencoded = await reencodeImage(fileBuffer, env);
@@ -1237,6 +1272,12 @@ export const mediaRoutes: Route[] = [
                   height: metadata?.height,
                   duration: metadata?.duration,
                   lifecycle: decision,
+                  // Art. 50: create-side only, like lifecycle. The dedup raise
+                  // happens below.
+                  ...(provenance.sourceType !== "UNKNOWN" && {
+                    embeddedSourceType: provenance.sourceType,
+                  }),
+                  provenanceExamined: provenance.examined,
                 }),
               );
             },
@@ -1249,6 +1290,58 @@ export const mediaRoutes: Route[] = [
               },
             },
           );
+          // --- Art. 50: monotonic raise on a dedup hit ------------------------
+          // contentHash is computed from the RE-ENCODED bytes, so two DIFFERENT
+          // originals — one carrying an AI marking, one not — hash identically
+          // and dedup onto the SAME row. The upsert's `update` payload is
+          // deliberately empty (T9: a dedup hit must not mutate the shared row),
+          // so without this a marking would be lost whenever the unmarked copy
+          // happened to land first.
+          //
+          // Expressed as an atomic guarded update rather than read-then-write:
+          // the `in: weakerThan(...)` predicate means the raise only applies
+          // where the stored value is strictly weaker, so it is idempotent and
+          // safe against two concurrent uploads of the same bytes. It touches
+          // neither uploadedBy nor lifecycle, so T9's invariant holds.
+          if (provenance.sourceType !== "UNKNOWN") {
+            try {
+              const { weakerThan } = await import("../provenance/resolve.js");
+              await withQueryTimeoutAndRetry(
+                sharedDatabaseConnectionManager,
+                uploadRegion,
+                env as any,
+                async (db) =>
+                  await (db as any).mediaFile.updateMany({
+                    where: {
+                      tenantId,
+                      contentHash,
+                      embeddedSourceType: {
+                        in: weakerThan(provenance.sourceType),
+                      },
+                    },
+                    data: {
+                      embeddedSourceType: provenance.sourceType,
+                      provenanceExamined: true,
+                    },
+                  }),
+                {
+                  ...QueryTimeoutPresets.USER_FACING,
+                  maxRetries: 1,
+                  context: {
+                    operation: "mediaUpload_raiseProvenance",
+                    userId: session.userId,
+                  },
+                },
+              );
+            } catch (provError: any) {
+              // Non-fatal: the upload and its verdict stand. A missed raise means
+              // a weaker (never a wrong-direction) label on shared bytes.
+              logger.warn("provenance.raise_failed", {
+                contentHash,
+                error: provError?.message,
+              });
+            }
+          }
         } catch (dbError: any) {
           // DB record is required for post creation to validate media ownership.
           // If this fails, the upload must fail so the frontend can retry.
