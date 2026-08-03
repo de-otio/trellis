@@ -8,6 +8,24 @@
 import { z } from "zod";
 
 /**
+ * The source types a CLIENT may declare (AI Act Art. 50).
+ *
+ * `UNKNOWN` is omitted deliberately — it is the absence of a declaration, and
+ * the way to express that is to omit the field. Accepting an explicit `UNKNOWN`
+ * would give a client a way to *assert* "no signal" that is indistinguishable
+ * from silence, and on the edit path it would read as an attempt to walk a
+ * previous declaration back to nothing.
+ *
+ * `basis` is NOT declarable: see the note on `createPostSchema.provenance`.
+ */
+const declarableSourceType = z.enum([
+  "HUMAN_CREATED",
+  "AI_EDITED",
+  "AI_ASSISTED",
+  "AI_GENERATED",
+]);
+
+/**
  * Pagination query parameters
  */
 export const paginationSchema = z.object({
@@ -57,11 +75,30 @@ export const createPostSchema = z.object({
     })
     .optional(),
   contentWarnings: z.array(z.string()).max(10).optional(),
+  // Synthetic-content provenance of the post TEXT (AI Act Art. 50).
+  //
+  // `.strict()` is load-bearing, not stylistic: a client may declare WHAT the
+  // content is, never HOW WE KNOW it. `basis` is minted server-side, and
+  // accepting it here would let any client forge `PLATFORM_GENERATED` — our own
+  // strongest attestation. Strict mode REJECTS the extra key rather than
+  // silently dropping it, so a client attempting it gets a 400 instead of a
+  // false sense that its value was honoured.
+  provenance: z
+    .object({ sourceType: declarableSourceType })
+    .strict()
+    .optional(),
   media: z
     .array(
+      // NOT `.strict()` here, deliberately. Unknown keys on a media item are
+      // stripped as they always were — tightening it would 400 requests that
+      // are valid today, and there is nothing security-sensitive to smuggle:
+      // `basis` is not a field on this object.
       z.object({
         id: z.string(), // MediaFile ID
         alt: z.string().max(500).optional(), // Alt text for accessibility
+        // Per-attachment provenance: one post can mix a human photo with an
+        // AI-generated one, so this is per item, not per post.
+        sourceType: declarableSourceType.optional(),
       }),
     )
     .max(4) // Maximum 4 images per post
@@ -85,6 +122,21 @@ export const editPostSchema = z.object({
     .min(1, "Post text is required")
     .max(3000, "Post text exceeds maximum length"),
   visibility: z.enum(["public", "friends-only", "private"]).optional(),
+  // Provenance of the post TEXT, MONOTONIC: the handler accepts this only when it
+  // raises disclosure, never when it lowers it (AI Act Art. 50; see
+  // analysis/ai-act-transparency 03 §6). Omitting it leaves the stored value
+  // untouched — editing text never clears a declaration.
+  provenance: z
+    .object({ sourceType: declarableSourceType })
+    .strict()
+    .optional(),
+  // NOTE: `media` here is accepted and then IGNORED — `editPost` only writes
+  // text/editedAt/hasBlockedLinks/radius and never touches PostMedia. That is
+  // pre-existing behaviour, out of scope to fix here.
+  //
+  // Provenance is deliberately NOT offered on these items: an API that appears
+  // to accept a disclosure and silently drops it is worse than one that does not
+  // offer it. Per-attachment declaration happens at post creation.
   media: z
     .array(
       z.object({

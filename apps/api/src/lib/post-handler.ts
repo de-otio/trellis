@@ -13,6 +13,7 @@ import { getLogger, generateRequestId, Logger, type LoggerEnv } from "./logger.j
 import type { TrellisRequestContext } from "./request-context.js";
 import type { Session } from "./session-cookie.js";
 import type { PostRadius } from "./graph/types.js";
+import type { SyntheticSourceType } from "./provenance/types.js";
 
 export interface Env {
   DATABASE_URL: string;
@@ -446,6 +447,10 @@ export class PostHandler {
           contentWarnings: body.contentWarnings || [],
           hasBlockedLinks: hasBlockedLinks,
           media: body.media, // NEW: Pass media to DataRouter
+          // Art. 50: the author's declaration for the post TEXT. Only the
+          // sourceType crosses this boundary — `basis` is minted inside
+          // DataRouter, server-side, so no client can forge PLATFORM_GENERATED.
+          textSourceType: body.provenance?.sourceType,
         },
         region,
         env,
@@ -1336,6 +1341,50 @@ export class PostHandler {
         );
       }
 
+      // Art. 50 provenance MONOTONICITY (analysis/ai-act-transparency 03 §6).
+      //
+      // A declaration may move toward MORE disclosure, never toward less. That is
+      // what makes "once AI was in the loop, disclosure is permanent" real, and it
+      // blocks the obvious evasion: declare, post, then quietly undeclare once the
+      // post has traction.
+      //
+      // Enforced against the STORED row, never a client-sent previous value.
+      // Omitting `provenance` leaves the stored value untouched, so editing text
+      // can never clear a declaration by accident.
+      //
+      // Placed AFTER the ownership check on purpose: a 409 here is observable, so
+      // running it first would let a non-owner distinguish "this post carries a
+      // declaration" (409) from "not yours" (403) — an information leak about
+      // someone else's post.
+      //
+      // Downward correction is deliberately NOT on this path. A genuine
+      // mis-declaration needs a staff-reviewed audited action; that path is
+      // unbuilt pending hub Q2 (see the plan's deferral note), so today a
+      // mis-declaration is not self-correctable.
+      let provenanceTransition:
+        | { readonly from: string; readonly to: string }
+        | undefined;
+      if (body.provenance) {
+        const { disclosureStrength } = await import("./provenance/resolve.js");
+        const current = String(
+          (post as Record<string, unknown>).textSourceType ?? "UNKNOWN",
+        ) as SyntheticSourceType;
+        const next = body.provenance.sourceType as SyntheticSourceType;
+        if (disclosureStrength(next) < disclosureStrength(current)) {
+          return new Response(
+            JSON.stringify({
+              error: "PROVENANCE_NOT_REDUCIBLE",
+              message:
+                "An AI-disclosure declaration cannot be reduced. Contact support if it was set in error.",
+            }),
+            { status: 409, headers: { "content-type": "application/json" } },
+          );
+        }
+        if (next !== current) {
+          provenanceTransition = { from: current, to: next };
+        }
+      }
+
       // Check if post is deleted
       if ((post as any).deletedAt) {
         return new Response(
@@ -1461,6 +1510,13 @@ export class PostHandler {
             updateData.radius = targetRadius;
           }
 
+          // Art. 50: only a monotonic RAISE reaches here (checked above). `basis`
+          // is minted server-side — the client declares WHAT, never HOW WE KNOW.
+          if (provenanceTransition) {
+            updateData.textSourceType = provenanceTransition.to;
+            updateData.textBasis = "AUTHOR_DECLARED";
+          }
+
           return await db.post.update({
             where: { id: postId },
             data: updateData,
@@ -1493,6 +1549,47 @@ export class PostHandler {
           },
         },
       );
+
+      // Art. 50: audit every provenance transition (T2.4). Emitted only when the
+      // value actually changed, through the audit-composer facade — one of the two
+      // sanctioned paths (CLAUDE.md rule 7).
+      //
+      // `userId`, never email: the actor is PII-minimised. No ipAddress/userAgent
+      // either — a provenance change needs neither, and the analysis forbids
+      // opening a new client-metadata path for it (03 §8).
+      //
+      // Off the critical path: a failed audit write must not fail the edit, but it
+      // is logged rather than swallowed silently.
+      if (provenanceTransition) {
+        try {
+          const { TrellisAuditLogger } = await import("./audit-composer.js");
+          const { PROVENANCE_CHANGED } = await import("./audit-actions.js");
+          await new TrellisAuditLogger(env).log(
+            {
+              type: "data_update",
+              action: PROVENANCE_CHANGED,
+              resource: "post",
+              resourceId: postId,
+              userId: session.userId,
+              region,
+              metadata: {
+                field: "textSourceType",
+                from: provenanceTransition.from,
+                to: provenanceTransition.to,
+                basis: "AUTHOR_DECLARED",
+              },
+              severity: "low",
+              success: true,
+            },
+            env,
+          );
+        } catch (auditError) {
+          this.logger.warn(
+            "[PostHandler] provenance audit emission failed (edit still applied)",
+            { postId, error: auditError },
+          );
+        }
+      }
 
       // ActivityPub sync for public posts only (federation must be enabled)
       if (

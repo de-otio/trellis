@@ -786,7 +786,10 @@ export class DataRouter {
       tenantId: string; // Tenancy: active tenant the post belongs to (NON-NULL in schema)
       entityRefs?: string[];
       geoData?: unknown;
-      media?: Array<{ id: string; alt?: string }>; // NEW: Media attachments
+      // Media attachments. `sourceType` is the author's Art. 50 provenance
+      // declaration for THAT attachment; it lands on the PostMedia join row, not
+      // on the shared MediaFile (which is deduped within-tenant).
+      media?: Array<{ id: string; alt?: string; sourceType?: string }>;
       [key: string]: unknown;
     },
     region: string,
@@ -837,6 +840,16 @@ export class DataRouter {
     // provided value enters the allowlist, as a plain string.
     if (postData.radius !== undefined && postData.radius !== null) {
       sanitizedPostData.radius = String(postData.radius);
+    }
+
+    // Art. 50 provenance of the post TEXT. Enters the allowlist as a plain
+    // string, like radius. When omitted the column takes its schema default
+    // (UNKNOWN) — which is NOT "human-created".
+    if (
+      postData.textSourceType !== undefined &&
+      postData.textSourceType !== null
+    ) {
+      sanitizedPostData.textSourceType = String(postData.textSourceType);
     }
 
     // Only include optional fields if they exist and are serializable
@@ -951,6 +964,13 @@ export class DataRouter {
           createData.authorOrgRootCategoryCode =
             sanitizedPostData.authorOrgRootCategoryCode;
         }
+        // Art. 50 text provenance — same known-safe-field allowlist. `basis` is
+        // minted here, server-side; the client may declare WHAT, never HOW WE
+        // KNOW (see createPostSchema.provenance).
+        if (sanitizedPostData.textSourceType !== undefined) {
+          createData.textSourceType = sanitizedPostData.textSourceType;
+          createData.textBasis = "AUTHOR_DECLARED";
+        }
 
         const post = await (tx.post.create({
           data: createData as any, // Type assertion needed until Prisma client is regenerated
@@ -989,6 +1009,16 @@ export class DataRouter {
               mediaId: m.id,
               alt: m.alt || "",
               order: index,
+              // Art. 50: the author's declaration for THIS attachment. `basis`
+              // is minted here, server-side — never accepted from the client
+              // (see createPostSchema.provenance). Omitted declaration stays at
+              // the schema default UNKNOWN, which is NOT "human".
+              ...(m.sourceType
+                ? {
+                    declaredSourceType: m.sourceType,
+                    declaredBasis: "AUTHOR_DECLARED",
+                  }
+                : {}),
             })),
             skipDuplicates: true, // Handle race conditions
           });
