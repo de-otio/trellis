@@ -56,6 +56,7 @@ import { linkReportRoutes } from "./link-reports.js";
 import { mapRoutes } from "./map.js";
 import { mediaRoutes } from "./media.js";
 import { mediaReviewRoutes } from "./media-review.js";
+import { provenanceCorrectionRoutes } from "./provenance-correction.js";
 import { mfaRoutes } from "./mfa.js";
 import { mediaMetadataVisibilityRoutes } from "./media-metadata-visibility.js";
 import { uploadSessionRoutes } from "./upload-sessions.js";
@@ -235,6 +236,11 @@ const coreRoutes: Route[] = [
 
   // Media REVIEW-queue moderator surface (T9 — MODERATOR-only)
   ...mediaReviewRoutes,
+
+  // Staff-reviewed provenance correction (D12 — MODERATOR-only). The only path
+  // that can REDUCE a synthetic-content disclosure; the author edit path is
+  // monotonic. Closes the GDPR Art. 16 gap that monotonicity alone created.
+  ...provenanceCorrectionRoutes,
 
   // Media metadata privacy controls
   ...mediaMetadataVisibilityRoutes,

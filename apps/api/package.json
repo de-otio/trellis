@@ -84,6 +84,9 @@
   "peerDependencies": {
     "@prisma/client": "^7.8.0"
   },
+  "engines": {
+    "node": ">=22"
+  },
   "devDependencies": {
     "@aws-sdk/client-lambda": "^3.1078.0",
     "@prisma/client": "^7.8.0",
