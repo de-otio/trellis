@@ -2,13 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   attachmentProvenanceView,
   mediaProvenanceView,
-  postTextProvenanceView,
+  textProvenanceView,
 } from "../../../src/lib/provenance/response.js";
 
 describe("provenance response projection", () => {
-  describe("postTextProvenanceView", () => {
+  describe("textProvenanceView", () => {
     it("projects a declared value with its basis", () => {
-      const v = postTextProvenanceView({
+      const v = textProvenanceView({
         textSourceType: "AI_ASSISTED",
         textBasis: "AUTHOR_DECLARED",
       });
@@ -22,7 +22,7 @@ describe("provenance response projection", () => {
     it("an unselected column degrades to UNKNOWN, never throws", () => {
       // A response site that forgets to select the column must not 500 — but it
       // also must not silently claim human origin.
-      const v = postTextProvenanceView({});
+      const v = textProvenanceView({});
       expect(v.sourceType).toBe("UNKNOWN");
       expect(v.basis).toBeNull();
       expect(v.disclosureRequired).toBe(false);
@@ -31,7 +31,7 @@ describe("provenance response projection", () => {
     it("UNKNOWN is emitted, not omitted", () => {
       // An absent field is indistinguishable from an old client; clients must be
       // able to tell "we don't know" from "we didn't ask".
-      const v = postTextProvenanceView({ textSourceType: "UNKNOWN" });
+      const v = textProvenanceView({ textSourceType: "UNKNOWN" });
       expect(v).toHaveProperty("sourceType", "UNKNOWN");
       expect(v).toHaveProperty("labelKey");
     });

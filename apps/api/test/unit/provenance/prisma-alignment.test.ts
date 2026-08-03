@@ -3,6 +3,10 @@ import {
   SOURCE_TYPES_BY_STRENGTH,
   SYNTHETIC_BASES,
 } from "../../../src/lib/provenance/types.js";
+import {
+  DISCLOSURE_POSTURES,
+  declarationRequirement,
+} from "../../../src/lib/provenance/posture.js";
 
 /**
  * Drift guard between the hand-written TS unions (src/lib/provenance/types.ts)
@@ -34,6 +38,26 @@ describe("provenance vocabulary — Prisma/TS alignment", () => {
     expect(Object.values(SyntheticBasis).sort()).toEqual(
       [...SYNTHETIC_BASES].sort(),
     );
+  });
+
+  it("TenantDisclosurePosture matches the Prisma enum, member for member", async () => {
+    // Same trap, third vocabulary (D15): a posture added to the Prisma enum and
+    // not to the TS union would arrive from the database as a value
+    // `declarationRequirement`'s exhaustive switch has no case for.
+    const { TenantDisclosurePosture } = await import("@prisma/client");
+    expect(Object.values(TenantDisclosurePosture).sort()).toEqual(
+      [...DISCLOSURE_POSTURES].sort(),
+    );
+  });
+
+  it("every posture has a declaration requirement", () => {
+    // The switch in declarationRequirement is exhaustive at compile time, but only
+    // over the TS union — this asserts it at runtime over what the DB can hold.
+    for (const posture of DISCLOSURE_POSTURES) {
+      expect(["none", "prompt", "mandatory"]).toContain(
+        declarationRequirement(posture),
+      );
+    }
   });
 
   it("every source type has a distinct disclosure-strength position", () => {

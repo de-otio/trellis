@@ -34,6 +34,11 @@ import type { DirectoryProfileConfig } from "./lib/org-category/directory-profil
 import { resolveDirectoryProfileConfig } from "./lib/org-category/directory-profile-config.js";
 import type { DirectorySearchConfig } from "./lib/org-category/directory-search-config.js";
 import { resolveDirectorySearchEnv } from "./lib/org-category/directory-search-config.js";
+import type { DisclosurePosture } from "./lib/provenance/posture.js";
+import {
+  DEFAULT_DISCLOSURE_POSTURE,
+  parseDisclosurePosture,
+} from "./lib/provenance/posture.js";
 import { validateEmailEnv } from "./lib/email-provider.js";
 import { buildSqsUrl } from "./lib/sqs-url.js";
 
@@ -583,6 +588,23 @@ export interface Env {
     listPageMax: number;
   };
   // --- end Events primitive config seam ---------------------------------------
+
+  // --- Synthetic-content provenance config seam (AI Act Art. 50, D15) --------
+  // Resolved by resolveProvenanceEnv(). NOT a threshold-secrecy value — a
+  // disclosure posture is published policy, not a detection parameter — but it
+  // follows the same env-with-fallback seam so the consumer's deployment can set
+  // it per environment without a code change.
+  provenance: {
+    /**
+     * Platform-default disclosure posture for tenants with no override in
+     * `Tenant.disclosurePosture`. Source: PROVENANCE_DEFAULT_DISCLOSURE_POSTURE.
+     * Default: PROMPTED. An unrecognised value falls back to the default rather
+     * than throwing — a typo must not take the API down, and the fallback is the
+     * middle posture, so the failure is neither over- nor under-strict.
+     */
+    defaultDisclosurePosture: DisclosurePosture;
+  };
+  // --- end provenance config seam ---------------------------------------------
 }
 
 /**
@@ -997,6 +1019,25 @@ export function resolveCollectionEnv(
 }
 
 /**
+ * Resolve the synthetic-content provenance config block (AI Act Art. 50, D15).
+ *
+ * Single-writer: the ONLY place that reads PROVENANCE_* env vars. An
+ * unrecognised posture string resolves to {@link DEFAULT_DISCLOSURE_POSTURE}
+ * rather than throwing — see the field doc on `Env.provenance`.
+ */
+export function resolveProvenanceEnv(
+  source: NodeJS.ProcessEnv = process.env,
+): { provenance: { defaultDisclosurePosture: DisclosurePosture } } {
+  return {
+    provenance: {
+      defaultDisclosurePosture:
+        parseDisclosurePosture(source.PROVENANCE_DEFAULT_DISCLOSURE_POSTURE) ??
+        DEFAULT_DISCLOSURE_POSTURE,
+    },
+  };
+}
+
+/**
  * Resolve the events-primitive config block from `source` (defaults to
  * `process.env`; tests can inject a fixture object).
  *
@@ -1367,6 +1408,8 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     ...resolveCollectionEnv(),
     // Events-primitive config seam (§4.8): resolveEventEnv() reads EVENT_* vars.
     ...resolveEventEnv(),
+    // Provenance config seam (D15): reads PROVENANCE_* vars.
+    ...resolveProvenanceEnv(),
     DATABASE_URL: databaseUrl,
     DATABASE_URL_CN: process.env.DATABASE_URL_CN,
     DIRECT_URL: process.env.DIRECT_URL,

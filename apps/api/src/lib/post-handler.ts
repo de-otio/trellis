@@ -14,6 +14,7 @@ import type { TrellisRequestContext } from "./request-context.js";
 import type { Session } from "./session-cookie.js";
 import type { PostRadius } from "./graph/types.js";
 import type { SyntheticSourceType } from "./provenance/types.js";
+import type { DisclosurePosture } from "./provenance/posture.js";
 
 export interface Env {
   DATABASE_URL: string;
@@ -30,6 +31,13 @@ export interface Env {
   // Federation master switch — when falsy, outbound ActivityPub delivery is
   // skipped. Mirrors `ACTIVITYPUB_ENABLED` on the canonical Env (see ../env.ts).
   ACTIVITYPUB_ENABLED?: boolean;
+  // Art. 50 disclosure-posture platform default. Mirrors `provenance` on the
+  // canonical Env (see ../env.ts). OPTIONAL here because this is a structural
+  // subset that tests construct by hand; absent means the posture gate uses
+  // DEFAULT_DISCLOSURE_POSTURE, which is the same value the canonical resolver
+  // falls back to — so a hand-built Env behaves like production, not like
+  // "posture disabled".
+  provenance?: { defaultDisclosurePosture?: DisclosurePosture };
 }
 
 export interface CreatePostRequest {
@@ -146,6 +154,24 @@ export class PostHandler {
       // Resolve the posting radius up front: `radius` wins, legacy
       // `visibility` maps onto it, default NORMAL (see resolvePostRadius).
       const radius = resolvePostRadius(body);
+
+      // Art. 50 disclosure POSTURE (D15). A tenant on REQUIRED_FOR_AI is a
+      // professional deployer with a live Art. 50(4) duty, and for it an omitted
+      // declaration is a validation failure rather than a silent UNKNOWN. Runs
+      // before any moderation or media work so a refusal costs nothing.
+      {
+        const { createPrisma } = await import("../db.js");
+        const { gateDeclarationOrRespond } = await import(
+          "./provenance/posture-gate.js"
+        );
+        const postureResponse = await gateDeclarationOrRespond(
+          createPrisma(env),
+          activeTenantId,
+          body.provenance?.sourceType,
+          env.provenance?.defaultDisclosurePosture,
+        );
+        if (postureResponse) return postureResponse;
+      }
 
       // Check if public posting is enabled globally. radius SHOUT is the
       // legacy visibility "public" — gate both spellings identically

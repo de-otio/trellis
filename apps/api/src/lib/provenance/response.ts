@@ -19,8 +19,14 @@ import type {
   SyntheticSourceType,
 } from "./types.js";
 
-/** The provenance columns as they arrive from a `Post` row. */
-export interface PostProvenanceColumns {
+/**
+ * The text-provenance columns as they arrive from a `Post` OR a `PostComment` row.
+ *
+ * The two models carry the same column pair by design (D14), so one projection
+ * serves both. Keeping separate `post…`/`comment…` functions would have been two
+ * bodies to keep identical, which is how the post and comment paths drift.
+ */
+export interface TextProvenanceColumns {
   readonly textSourceType?: SyntheticSourceType | null;
   readonly textBasis?: SyntheticBasis | null;
 }
@@ -53,15 +59,19 @@ function toProvenance(
 }
 
 /**
- * Provenance of a post's TEXT. Media provenance is per-attachment — see
- * {@link attachmentProvenanceView} — because one post can mix a human photo with
- * an AI-generated one.
+ * Provenance of the TEXT of a post or a comment. Media provenance is
+ * per-attachment — see {@link attachmentProvenanceView} — because one post can mix
+ * a human photo with an AI-generated one.
+ *
+ * Text has no embedded metadata to read, so the `embedded` side of the resolution
+ * is always null: the value is only ever what the author declared or what our own
+ * generator minted.
  */
-export function postTextProvenanceView(
-  post: PostProvenanceColumns,
+export function textProvenanceView(
+  row: TextProvenanceColumns,
 ): ProvenanceView {
   return toProvenanceView(
-    resolveProvenance(toProvenance(post.textSourceType, post.textBasis), null),
+    resolveProvenance(toProvenance(row.textSourceType, row.textBasis), null),
   );
 }
 

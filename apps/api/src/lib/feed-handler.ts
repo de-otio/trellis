@@ -22,7 +22,7 @@ import { DataRouter } from "./data-router.js";
 import { getFriendUserIds } from "./friend-ids.js";
 import {
   attachmentProvenanceView,
-  postTextProvenanceView,
+  textProvenanceView,
 } from "./provenance/response.js";
 import type { ProvenanceView } from "./provenance/types.js";
 import { Logger, type LoggerEnv } from "./logger.js";
@@ -925,7 +925,7 @@ export class FeedHandler {
       // Art. 50 disclosure. Emitted on EVERY post in the feed, not just on post
       // detail: the duty is disclosure "at the latest at the first interaction or
       // exposure", and for most users first exposure is the scroll.
-      provenance: postTextProvenanceView(post),
+      provenance: textProvenanceView(post),
       // Safer Social Design: Apply sentiment display mode based on age tier
       ...(() => {
         if (session.ageTier && session.ageTier !== "ADULT") {

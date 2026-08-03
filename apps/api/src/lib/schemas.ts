@@ -156,6 +156,30 @@ export const createCommentSchema = z.object({
   // validation instead of passing min(1) and then trimming to "" downstream
   // (fail-closed: reject at the schema boundary, never persist empty content).
   text: z.string().trim().min(1).max(3000),
+  // Synthetic-content provenance of the comment TEXT (AI Act Art. 50, D14).
+  // Identical contract to `createPostSchema.provenance`, for the same reason:
+  // `.strict()` so a client cannot supply `basis` and forge our own
+  // PLATFORM_GENERATED attestation. Comment media is not a feature (nothing
+  // creates a PostCommentMedia row), so there is no per-attachment field here.
+  provenance: z
+    .object({ sourceType: declarableSourceType })
+    .strict()
+    .optional(),
+});
+
+/**
+ * Edit comment request body.
+ *
+ * Provenance is MONOTONIC, exactly as on `editPostSchema`: accepted only when it
+ * raises disclosure, never when it lowers it. Omitting it leaves the stored value
+ * untouched — editing a comment never clears a declaration.
+ */
+export const editCommentSchema = z.object({
+  text: z.string().trim().min(1).max(3000),
+  provenance: z
+    .object({ sourceType: declarableSourceType })
+    .strict()
+    .optional(),
 });
 
 /**

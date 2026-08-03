@@ -283,6 +283,15 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Runs BEFORE the migrations, and needs no database: `prisma migrate dev`
+      # proposes dropping the GiST / gin_trgm_ops indexes it cannot express in
+      # schema.prisma, and applying that generated SQL silently destroys
+      # geo-proximity and directory search. Two migrations have already hit it.
+      # See scripts/check-migration-sql.mjs.
+      - name: Guard against unjustified DROP INDEX in migrations
+        timeout-minutes: 2
+        run: node scripts/check-migration-sql.mjs
+
       - name: Run migrations
         timeout-minutes: 5
         run: npm run prisma:migrate:deploy

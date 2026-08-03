@@ -515,9 +515,12 @@ enum Privacy {
 // Spec: trellis-internal analysis/ai-act-transparency/03-data-model-and-api.md
 //
 // These MIRROR the TS unions in apps/api/src/lib/provenance/types.ts, which are
-// the pure core's source of truth. `assertVocabularyAlignment` in
-// lib/provenance/resolve.ts is the compile-time guard against drift — if you add
-// a member here, add it there (and vice versa) or the build fails.
+// the pure core's source of truth. The guard against drift is
+// test/unit/provenance/prisma-alignment.test.ts — a BIDIRECTIONAL test, not a
+// compile-time assertion: the core module stays Prisma-free on purpose (see the
+// note at the foot of lib/provenance/resolve.ts), so importing the generated
+// client to assert alignment would defeat that. Add a member here and you must
+// add it there, or that test fails.
 //
 // DELIBERATELY not a boolean: "is it AI?" has at least four answers with
 // different legal weight, and collapsing them is the likeliest way to ship a
@@ -539,6 +542,21 @@ enum SyntheticBasis {
   PLATFORM_GENERATED // our own generation feature produced it; never downgradable
   EMBEDDED_METADATA // read from IPTC/XMP/C2PA before the ingest metadata strip
   CLASSIFIER_INFERRED // a detector guessed. Advisory ONLY; never renders as a claim
+}
+
+/// Per-tenant disclosure posture (D15). Tenants sit on BOTH sides of the Art. 3(4)
+/// line: a B2B tenant posting professionally is a deployer with a live Art. 50(4)
+/// duty, while a B2C consumer posting personally falls in the personal
+/// non-professional carve-out. One global posture is therefore wrong for one of
+/// the two populations.
+///
+/// This governs the WRITE path and the compose hint, NOT the rendered
+/// `disclosureRequired` — see lib/provenance/posture.ts for why those turned out
+/// to be the same value under all three postures.
+enum TenantDisclosurePosture {
+  OPTIONAL // declaration accepted, never required. Fits B2C consumer tenants.
+  REQUIRED_FOR_AI // a declaration is MANDATORY and may not be UNKNOWN. Fits B2B/professional.
+  PROMPTED // the client must ask; "prefer not to say" -> UNKNOWN is a valid answer.
 }
 
 // Post model (unified for all visibility levels)
@@ -946,6 +964,16 @@ model PostComment {
   // Link security fields
   hasBlockedLinks Boolean @default(false) @map("has_blocked_links")
 
+  // Synthetic-content provenance of the comment TEXT (AI Act Art. 50, D14).
+  // Exactly parallel to Post.textSourceType — comment text is at least as
+  // AI-generatable as post text, and a labelled post carrying an unlabelled AI
+  // comment is the same defect one nesting level down. Only ever
+  // AUTHOR_DECLARED or PLATFORM_GENERATED (text has no embedded metadata to
+  // read). MONOTONIC on the author edit path; downward correction is a
+  // staff-reviewed audited action only. Deliberately NOT indexed.
+  textSourceType SyntheticSourceType @default(UNKNOWN) @map("text_source_type")
+  textBasis      SyntheticBasis?     @map("text_basis")
+
   // AR10 prune: dormant classification columns removed (see Post model note).
 
   post       Post               @relation(fields: [postId], references: [id], onDelete: Cascade)
@@ -975,6 +1003,22 @@ model PostCommentMedia {
   mediaId   String  @map("media_id")
   alt       String?
   order     Int     @default(0)
+
+  // NO provenance columns here, deliberately (AI Act Art. 50, D14).
+  //
+  // Nothing in the codebase CREATES a PostCommentMedia row — the only references
+  // are user-data-deletion.ts and user-media-erasure.ts, i.e. cleanup for a
+  // feature that was never built. Comment media does not exist, so it has no
+  // disclosure gap, and columns nothing can write would assert coverage we do
+  // not have (the exact failure mode D8 exists to prevent) while contradicting
+  // the AR10 prune, which removed columns that were "written by default and read
+  // by nothing".
+  //
+  // WHEN COMMENT MEDIA IS BUILT: add `declaredSourceType`/`declaredBasis` here,
+  // mirroring PostMedia — same reasoning about why it cannot live on the deduped
+  // MediaFile — and resolve against MediaFile.embeddedSourceType. Note this
+  // model declares no `media` relation, only the scalar `mediaId`, so the
+  // response site must join MediaFile explicitly.
 
   comment PostComment @relation(fields: [commentId], references: [id], onDelete: Cascade)
 
@@ -1920,6 +1964,17 @@ model Tenant {
   // doc/02-technical/operations/storage-accounting.md.
   storageQuotaBytes   BigInt? @map("storage_quota_bytes")
   storageQuotaObjects Int?    @map("storage_quota_objects")
+
+  // ── Per-tenant synthetic-content disclosure posture (AI Act Art. 50, D15) ──
+  // NULL = the tenant is on the platform default, which arrives via env
+  // (PROVENANCE_DEFAULT_DISCLOSURE_POSTURE) exactly like the quota columns
+  // above — a non-null value is a per-tenant OVERRIDE. Resolution:
+  // effective = override ?? env default (lib/provenance/posture.ts).
+  //
+  // FAIL-OPEN on resolution, FAIL-CLOSED on the label: if this cannot be read
+  // the post still goes through on the platform default, but no posture ever
+  // suppresses a resolved label (analysis 06 §3).
+  disclosurePosture TenantDisclosurePosture? @map("disclosure_posture")
 
   members          TenantMember[]
   domains          TenantDomain[]
