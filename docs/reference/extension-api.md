@@ -434,10 +434,28 @@ Two properties of the core design that an extension must not defeat:
   positive claim of human authorship, and never derive one from the absence of a
   marking.
 
-**This criterion is currently honour-system, not enforced in code.** `ScopedDb`
-exposes `post` and `postMedia` with full write operations, so an extension *can*
-write or lower a provenance column directly — monotonicity lives in the request
-handlers, not at the data layer. Closing that gap (a field-level denylist on the
-scoped surface, or routing provenance writes through a core call the scoped
-surface does not expose) is open work. Until then: **extension review blocks on a
-violation**, and reviewers should look for direct writes to these columns.
+**This criterion is enforced in code, not by review alone.** `ScopedDb` exposes
+`post` and `postMedia` with full write operations, and monotonicity lives in the
+request handlers — which the scoped surface bypasses. So the provenance columns
+are now a **protected-field set** on the scoped surface: `create`, `createMany`,
+`update`, `updateMany` and `upsert` are **rejected** when the payload so much as
+mentions `textSourceType`, `textBasis`, `declaredSourceType`, `declaredBasis`,
+`embeddedSourceType` or `provenanceExamined`. You will get a `ScopedDbError`
+naming the field.
+
+Three things worth knowing about how that guard behaves:
+
+- **It rejects on presence, not on value.** `{ textSourceType: undefined }` is
+  refused even though Prisma would treat it as "omit". The guard exists to make
+  the *intent* fail loudly.
+- **It is a total ban, not a monotonicity check.** The scoped planner is a pure
+  function with no database access, so it cannot compare your value against the
+  stored one. A raise is refused along with a downgrade — set provenance by
+  calling the core post/comment API, which mints `basis` server-side. An extension
+  able to write `basis` could forge `PLATFORM_GENERATED`, the platform's own
+  strongest attestation.
+- **Reads are untouched.** You may select, filter and render provenance freely.
+  Hiding a disclosure from the code that renders it would defeat the point.
+
+Extension review still blocks on a violation — the guard covers the data layer,
+not an extension that ships its own client-side AI feature.

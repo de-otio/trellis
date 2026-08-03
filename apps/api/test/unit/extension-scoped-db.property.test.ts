@@ -27,6 +27,7 @@ const REMINDER: ScopedModelMeta = {
   tenantField: "tenantId",
   fkFields: [],
   jsonFields: [],
+  protectedFields: [],
 };
 const metas = buildScopedModelMetas([REMINDER]);
 
