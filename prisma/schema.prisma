@@ -511,6 +511,36 @@ enum Privacy {
   PRIVATE
 }
 
+// --- Synthetic-content provenance (AI Act Art. 50 transparency) -------------
+// Spec: trellis-internal analysis/ai-act-transparency/03-data-model-and-api.md
+//
+// These MIRROR the TS unions in apps/api/src/lib/provenance/types.ts, which are
+// the pure core's source of truth. `assertVocabularyAlignment` in
+// lib/provenance/resolve.ts is the compile-time guard against drift — if you add
+// a member here, add it there (and vice versa) or the build fails.
+//
+// DELIBERATELY not a boolean: "is it AI?" has at least four answers with
+// different legal weight, and collapsing them is the likeliest way to ship a
+// wrong label. UNKNOWN is the default and is NOT a synonym for HUMAN_CREATED —
+// absence of a marking is absence of evidence, never evidence of human origin.
+
+/// What the content is, aligned with the IPTC DigitalSourceType vocabulary.
+enum SyntheticSourceType {
+  UNKNOWN // no signal, or a signal we could not interpret. The default.
+  HUMAN_CREATED // affirmatively declared or attested as not AI-generated
+  AI_EDITED // AI applied to human-captured content beyond standard editing
+  AI_ASSISTED // human-authored, AI in the loop (compositeWithTrainedAlgorithmicMedia)
+  AI_GENERATED // wholly synthetic (trainedAlgorithmicMedia)
+}
+
+/// How we came to believe the source type — this is what carries legal weight.
+enum SyntheticBasis {
+  AUTHOR_DECLARED // the posting author said so
+  PLATFORM_GENERATED // our own generation feature produced it; never downgradable
+  EMBEDDED_METADATA // read from IPTC/XMP/C2PA before the ingest metadata strip
+  CLASSIFIER_INFERRED // a detector guessed. Advisory ONLY; never renders as a claim
+}
+
 // Post model (unified for all visibility levels)
 model Post {
   id              String     @id @default(cuid())
@@ -558,6 +588,16 @@ model Post {
 
   // Link security fields
   hasBlockedLinks Boolean @default(false) @map("has_blocked_links")
+
+  // Synthetic-content provenance of the post TEXT only (AI Act Art. 50).
+  // Media provenance lives on PostMedia (author declaration) and MediaFile
+  // (intrinsic reading) — see analysis/ai-act-transparency 03 §3. Text has no
+  // embedded metadata to read, so this is only ever AUTHOR_DECLARED or
+  // PLATFORM_GENERATED. Deliberately NOT indexed: read on an already-selected
+  // row, never a query predicate, and posts is the hottest write path (AR10
+  // pruned it 17 indexes -> 7 on purpose).
+  textSourceType SyntheticSourceType @default(UNKNOWN) @map("text_source_type")
+  textBasis      SyntheticBasis?     @map("text_basis")
 
   // AR10 prune: the dormant classification columns (sensitivityLevel,
   // ownerContext, screeningRiskLevel, contentCategory) were written-by-default
@@ -627,7 +667,17 @@ model MediaFile {
   height   Int? // Image/video height in pixels
   duration Int? @map("duration") // Video duration in seconds
 
-  // Raw metadata payloads (JSON)
+  // Raw metadata payloads (JSON).
+  //
+  // NEAR-EMPTY ON THE SYNC-IMAGE PATH, by construction. Extraction runs on the
+  // RE-ENCODED bytes (routes/media.ts: reencodeImage at ~:1020, extractAll at
+  // ~:1058 reading uploadBuffer), and the re-encode has already dropped
+  // EXIF/GPS/ICC/IPTC/XMP. So for uploaded images these hold little beyond
+  // dimensions; they populate only on paths that bypass the re-encode.
+  // Recorded, NOT fixed — the `metadataVisible` feature that surfaces them is a
+  // separate decision (analysis/ai-act-transparency 02 §2.2, 03 §7).
+  // This is also WHY provenance needs its own pre-strip reader rather than a
+  // widened pick-list here: by the time this runs, the marking is gone.
   exifData      Json? @map("exif_data")
   iptcData      Json? @map("iptc_data")
   videoMetadata Json? @map("video_metadata")
@@ -665,6 +715,24 @@ model MediaFile {
   attachedToPost Boolean   @default(false) @map("attached_to_post") // Whether media is attached to a post
   orphanedAt     DateTime? @map("orphaned_at") // When media was marked as orphaned
   lastAccessedAt DateTime  @default(now()) @map("last_accessed_at") // Last time media was accessed
+
+  // --- Synthetic-content provenance: INTRINSIC only (AI Act Art. 50) --------
+  // Read from the ORIGINAL bytes BEFORE the T7 re-encode strips them
+  // (lib/metadata/provenance-reader.ts). NEVER author input — an author's
+  // declaration goes on PostMedia, because this row is SHARED: dedup is
+  // @@unique([tenantId, contentHash]).
+  //
+  // CONTESTED STATE — write with mergeProvenance(), never a bare overwrite.
+  // contentHash is computed from the RE-ENCODED bytes, so two different
+  // originals (one carrying an AI marking, one not) re-encode to identical
+  // bytes, hash identically, and dedup onto THIS row. A bare write would let
+  // whichever upload lands second erase the other's marking. See
+  // analysis/ai-act-transparency 03 §3.0.
+  embeddedSourceType SyntheticSourceType @default(UNKNOWN) @map("embedded_source_type")
+  // True once any upload of these bytes examined them for a provenance
+  // container, whatever it said. Distinguishes "looked, found nothing" from
+  // "never looked" — needed for coverage metrics and any future backfill.
+  provenanceExamined Boolean             @default(false) @map("provenance_examined")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -788,6 +856,25 @@ model PostMedia {
   alt      String?
   order    Int     @default(0)
 
+  // --- Synthetic-content provenance: the AUTHOR'S DECLARATION (Art. 50) -----
+  // Lives here, NOT on MediaFile, because MediaFile is deduped within-tenant:
+  // two authors uploading identical bytes share one MediaFile row, so a
+  // declaration there would be cross-author shared state — one author's
+  // silence could erase another's disclosure, or worse, one author's AI
+  // declaration could attach to another's post. That is data corruption, not
+  // a modelling preference (analysis/ai-act-transparency 03 §3, D5).
+  //
+  // MONOTONIC: may move toward more disclosure, never less, on the author edit
+  // path. Downward correction is a staff-reviewed audited action only, and
+  // PLATFORM_GENERATED is never downgradable by anyone (03 §6).
+  //
+  // RE-ATTACHMENT INHERITS: these rows are destroyed and recreated by edits
+  // (@@unique([postId, mediaId])), so detach + re-attach would otherwise reset
+  // a declaration to UNKNOWN and launder the disclosure. Use
+  // mergeProvenance() against any prior value for this (postId, mediaId).
+  declaredSourceType SyntheticSourceType @default(UNKNOWN) @map("declared_source_type")
+  declaredBasis      SyntheticBasis?     @map("declared_basis")
+
   post   Post      @relation(fields: [postId], references: [id], onDelete: Cascade)
   media  MediaFile @relation(fields: [mediaId], references: [id], onDelete: Restrict)
   tenant Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -799,7 +886,14 @@ model PostMedia {
   @@map("post_media")
 }
 
-// Post sentiment reactions
+// Post sentiment reactions.
+//
+// NOT an AI emotion-recognition system, despite the name. This is a USER'S OWN
+// REACTION to a post — one row per (post, author), self-selected. AI Act
+// Art. 50(3) covers emotion inference from BIOMETRIC data; a self-selected
+// reaction is neither inferred nor biometric, so this model is outside Art. 50
+// entirely. Recorded because the name invites the misreading
+// (analysis/ai-act-transparency 02 §6 F1).
 model PostSentiment {
   id        String   @id @default(cuid())
   // Multi-tenancy — denormalized from the owning post; same scope.

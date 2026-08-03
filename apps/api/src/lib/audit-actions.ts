@@ -73,6 +73,14 @@ export const EXPERIMENT_ASSIGN: AuditAction = "experiment.assign";
 // where changedBy is the admin's USER ID (not email).
 export const FEATURE_TOGGLE_CHANGED: AuditAction = "feature_toggle.changed";
 
+// PROVENANCE_CHANGED: every synthetic-content provenance transition, up or
+// down (AI Act Art. 50). Metadata is { old, new, basis, resourceType,
+// resourceId } with the actor as `userId` — NEVER an email. Downward
+// corrections are staff-reviewed and this is their audit trail, which is why
+// the action covers both directions rather than only escalations.
+// See trellis-internal analysis/ai-act-transparency/03 §6.
+export const PROVENANCE_CHANGED: AuditAction = "provenance.changed";
+
 // CONSENT_CHANGED: canonical action for user consent mutations emitted
 // by the consent-management layer (another agent owns the emit sites).
 export const CONSENT_CHANGED: AuditAction = "consent.changed";
@@ -149,4 +157,5 @@ export const AuditEventType = {
   EXPERIMENT_ASSIGN,
   FEATURE_TOGGLE_CHANGED,
   CONSENT_CHANGED,
+  PROVENANCE_CHANGED,
 } as const;

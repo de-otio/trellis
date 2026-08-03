@@ -129,21 +129,19 @@ export function mergeProvenance(
   return resolveProvenance(existing, incoming);
 }
 
-/**
- * Compile-time guard that the Prisma enums have not drifted from the TS unions.
- *
- * NOT WIRED YET: the Prisma enums land with the migration (T0.1), and this
- * assertion is switched on in the same change. Written here so the wiring step
- * is a two-line edit rather than a design decision.
- *
- * @example
- * import { SyntheticSourceType as PrismaSourceType } from "@prisma/client";
- * assertVocabularyAlignment<`${PrismaSourceType}`, SyntheticSourceType>();
- */
-export function assertVocabularyAlignment<
-  A extends B,
-  B extends string,
->(): void {
-  // Type-level only; the constraint above is the whole assertion.
-  void 0;
-}
+// --- Drift guard: where it lives, and why not here --------------------------
+//
+// The vocabulary is declared twice on purpose — as TS unions in ./types.ts and
+// as Prisma enums in prisma/schema.prisma — so drift needs a guard. That guard
+// deliberately does NOT live in this module.
+//
+// The house pattern for a hand-written union mirrored by a Prisma enum is
+// `lib/media/media-lifecycle.ts`, which keeps "zero dependency on the
+// Prisma-generated client so the serve gate and worker code can compile in
+// worktrees that have not regenerated the client". Importing `@prisma/client`
+// here to assert alignment would reintroduce exactly that coupling and make this
+// pure core un-compilable on a fresh checkout.
+//
+// So the assertion lives in `test/unit/provenance/prisma-alignment.test.ts`,
+// where importing the generated client is free. A failing test is as good a gate
+// as a failing compile, and it costs the core module nothing.
