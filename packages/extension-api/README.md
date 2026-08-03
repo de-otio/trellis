@@ -9,8 +9,9 @@ to add domain-specific routes, metadata schemas, and terminology.
 ## Reference
 
 The canonical Extension API reference — the full `TrellisExtension` contract,
-how a vertical registers an extension, and the tracker-free / anonymized-metadata
-review criterion — lives in the Trellis docs:
+how a vertical registers an extension, and the review criteria (tracker-free /
+anonymized client metadata, and AI Act Art. 50 synthetic-content provenance
+disclosure) — lives in the Trellis docs:
 
 **→ [Extension API reference](../../docs/reference/extension-api.md)**
 
