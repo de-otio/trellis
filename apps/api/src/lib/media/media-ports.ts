@@ -71,8 +71,21 @@ export interface TranscodePort {
 
 export interface StoragePort {
   /** Read an object. `options.versionId` pins the read to that EXACT stored
-   * version (AR-SEC F3) — S3 `GetObject` with `VersionId`. */
-  getObject(key: string, options?: { versionId?: string }): Promise<Buffer>;
+   * version (AR-SEC F3) — S3 `GetObject` with `VersionId`.
+   *
+   * `options.range` reads only `[start, end]` INCLUSIVE (S3 `Range:
+   * bytes=start-end`). Added for the Art. 50 provenance sniff on video/audio
+   * originals, which must inspect a few hundred bytes of a possibly
+   * hundreds-of-megabytes object and must not pull the whole thing into a
+   * worker's memory to do it. An implementation MAY return fewer bytes than
+   * requested (short object) but must never return more. */
+  getObject(
+    key: string,
+    options?: {
+      versionId?: string;
+      range?: { readonly start: number; readonly end: number };
+    },
+  ): Promise<Buffer>;
   putObject(key: string, body: Buffer, contentType: string): Promise<void>;
   /** Copy an object. `options.fromVersionId` pins the SOURCE to that exact
    * version (AR-SEC F3) — on S3 a versioned `CopySource`; without it the
@@ -95,7 +108,18 @@ export interface StoragePort {
   headObject(
     key: string,
     options?: { versionId?: string },
-  ): Promise<{ exists: boolean; versionId?: string }>;
+  ): Promise<{
+    exists: boolean;
+    versionId?: string;
+    /**
+     * Object size in bytes, when the adapter reports it (S3 `HeadObject`
+     * `ContentLength`). OPTIONAL so an existing consumer adapter still satisfies
+     * this interface. Used by the Art. 50 provenance sniff to locate the TAIL
+     * range of a video original; when absent the sniff simply skips the tail read
+     * and inspects the head slice only.
+     */
+    size?: number;
+  }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -232,8 +256,22 @@ export class MockStoragePort implements StoragePort {
 
   async getObject(
     key: string,
-    options?: { versionId?: string },
+    options?: {
+      versionId?: string;
+      range?: { readonly start: number; readonly end: number };
+    },
   ): Promise<Buffer> {
+    // Honour `range` rather than ignoring it: a mock that returned the WHOLE
+    // object for a ranged read would let a test pass while the production path
+    // (which really does get a slice) finds nothing.
+    const slice = (body: Buffer): Buffer =>
+      options?.range === undefined
+        ? body
+        : body.subarray(
+            Math.max(0, options.range.start),
+            Math.min(body.length, options.range.end + 1),
+          );
+
     if (options?.versionId !== undefined) {
       const v = this.objects
         .get(key)
@@ -243,13 +281,13 @@ export class MockStoragePort implements StoragePort {
           `MockStoragePort: no version "${options.versionId}" at key "${key}"`,
         );
       }
-      return v.body;
+      return slice(v.body);
     }
     const obj = this.current(key);
     if (!obj) {
       throw new Error(`MockStoragePort: no object at key "${key}"`);
     }
-    return obj.body;
+    return slice(obj.body);
   }
 
   async putObject(key: string, body: Buffer, contentType: string): Promise<void> {
@@ -285,17 +323,19 @@ export class MockStoragePort implements StoragePort {
   async headObject(
     key: string,
     options?: { versionId?: string },
-  ): Promise<{ exists: boolean; versionId?: string }> {
+  ): Promise<{ exists: boolean; versionId?: string; size?: number }> {
     if (options?.versionId !== undefined) {
-      const found = this.objects
+      const v = this.objects
         .get(key)
-        ?.versions.some((x) => x.versionId === options.versionId);
-      return found
-        ? { exists: true, versionId: options.versionId }
+        ?.versions.find((x) => x.versionId === options.versionId);
+      return v
+        ? { exists: true, versionId: options.versionId, size: v.body.length }
         : { exists: false };
     }
     const obj = this.current(key);
-    return obj ? { exists: true, versionId: obj.versionId } : { exists: false };
+    return obj
+      ? { exists: true, versionId: obj.versionId, size: obj.body.length }
+      : { exists: false };
   }
 
   /** Test helper: read the content-type a key was stored with. */

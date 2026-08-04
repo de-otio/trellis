@@ -47,6 +47,7 @@ import { exceedsDurationCap } from "../media/duration-cap.js";
 import { classifyWorkerError } from "../media/classify-worker-error.js";
 import type { Track } from "../media/track-verdict.js";
 import type { ModerationDecision } from "../media/media-lifecycle.js";
+import type { SyntheticSourceType } from "../provenance/types.js";
 import type {
   StoragePort,
   TranscodePort,
@@ -165,6 +166,32 @@ export interface MediaPersistencePort {
       stagingVersionId: string;
     },
   ): Promise<void>;
+  /**
+   * Record the synthetic-content provenance read from the ORIGINAL video/audio
+   * bytes, before the transcode destroys it (AI Act Art. 50).
+   *
+   * MONOTONIC RAISE, not a write. The adapter must implement this as a guarded
+   * `updateMany` — `where: { id, embeddedSourceType: { in: weakerThan(next) } }`
+   * — exactly as the image path does in routes/media.ts, because `MediaFile` is
+   * content-addressed and deduped within a tenant: two different originals can
+   * transcode to identical bytes and land on the same row, and whichever upload
+   * lands second must not erase the other's marking. Also set
+   * `provenanceExamined: true` when `examined` is true.
+   *
+   * OPTIONAL, so an existing consumer adapter still satisfies this interface —
+   * this is a published package and a required method would be a breaking change.
+   * The consequence is stated plainly rather than hidden: until a consumer
+   * implements it, video and audio provenance is READ AND DISCARDED, and the
+   * worker logs a warning saying so on every marked upload. See the
+   * consuming-application contract (analysis 08).
+   */
+  recordEmbeddedProvenance?(
+    mediaId: string,
+    reading: {
+      readonly sourceType: SyntheticSourceType;
+      readonly examined: boolean;
+    },
+  ): Promise<void>;
   /** Drive a media object's lifecycle to REVIEW (poison path). */
   markMediaForReview(mediaId: string): Promise<void>;
   /**
@@ -198,7 +225,24 @@ export interface MediaProcessingConfig {
    * running unguarded. Values are Env/SSM-sourced, never literals.
    */
   readonly spend?: MediaSpendConfig;
+  /**
+   * Byte budget for each end of the Art. 50 provenance sniff on video/audio
+   * originals (head slice AND tail slice, so the total read is twice this).
+   *
+   * Runtime config with a conservative default rather than a compiled literal —
+   * this bounds a scan of attacker-supplied input, and the npm tarball is public
+   * (CLAUDE.md rule 8). Omitted ⇒ {@link DEFAULT_PROVENANCE_SNIFF_BYTES}.
+   */
+  readonly provenanceSniffBytes?: number;
 }
+
+/**
+ * Default per-end sniff budget: 256 KiB, matching the image path's JUMBF sniff
+ * bound. Large enough for an `ftyp` + `uuid` XMP box at either end of a
+ * well-formed MP4, small enough that a malicious 500 MB upload cannot make the
+ * worker read itself out of memory.
+ */
+export const DEFAULT_PROVENANCE_SNIFF_BYTES = 256 * 1024;
 
 /**
  * All capability seams the orchestration core binds to. The handler builds this
@@ -491,6 +535,25 @@ export async function processObjectKey(
       }
     }
 
+    // --- 3b. Art. 50 provenance: read the ORIGINAL before the transcode. ---
+    //
+    // The transcode destroys the marking. Verified empirically against ffmpeg 8.1
+    // with the production argv: an XMP `uuid` box carrying
+    // `Iptc4xmpExt:DigitalSourceType` is present in the input bytes and absent
+    // from the output. (The same audit found that `-dn` alone did NOT strip the
+    // container metadata dictionary, so GPS survived — fixed separately in
+    // ffmpeg-args.ts with `-map_metadata -1`, which is also what destroys the
+    // marking outright rather than partially.)
+    //
+    // So this is the video/audio analogue of the image path's read-then-strip:
+    // look first, keep one enum's worth, discard the rest.
+    //
+    // BOUNDED, and never able to fail the upload. Two ranged reads instead of
+    // pulling a possibly-huge original into the worker; any error at all is
+    // swallowed to UNKNOWN. Provenance is a disclosure, not a safety gate — an
+    // unreadable original must not poison a media object.
+    await recordOriginalProvenance(deps, row.id, triggeringKey);
+
     // --- 4. Transcode-and-discard ⇒ cleaned bytes. ---
     // The cleaned output is written to a transient staging key OUTSIDE pending/
     // (so re-uploading the cleaned bytes can never re-trigger this worker).
@@ -657,6 +720,89 @@ export async function processObjectKey(
  *   operator INTENDED a cap, so running unguarded would fail OPEN. The caller
  *   fails the record closed instead.
  */
+/**
+ * Read the Art. 50 provenance marking off an ORIGINAL video/audio object and
+ * record it, before the transcode destroys it.
+ *
+ * TOTALLY NON-FATAL. Every failure mode — an unreadable original, a storage
+ * adapter with no `range` support, a consumer whose persistence adapter has not
+ * implemented `recordEmbeddedProvenance`, a throw from anywhere — resolves to
+ * "nothing recorded" plus a log line. A disclosure field must never be able to
+ * fail an upload or poison a media object, so this function returns `void` and
+ * swallows everything.
+ *
+ * Two ranged reads (head + tail), because MP4 writers put the XMP `uuid` box at
+ * either end and pulling a several-hundred-megabyte original into the worker to
+ * find a few hundred bytes is not acceptable. An adapter that IGNORES `range` and
+ * returns the whole object still works — the sniff simply searches more bytes
+ * than it asked for — so this degrades gracefully on a consumer that has not
+ * updated its StoragePort.
+ */
+async function recordOriginalProvenance(
+  deps: MediaProcessingDeps,
+  mediaId: string,
+  originalKey: string,
+): Promise<void> {
+  try {
+    const budget =
+      deps.config.provenanceSniffBytes ?? DEFAULT_PROVENANCE_SNIFF_BYTES;
+
+    const head = await deps.storage.getObject(originalKey, {
+      range: { start: 0, end: budget - 1 },
+    });
+
+    // The tail read is a SEPARATE best-effort: a short object makes the tail
+    // range unsatisfiable on some S3-compatible stores (416), and the head read
+    // has usually already covered the whole file in that case.
+    let tail: Buffer = Buffer.alloc(0);
+    try {
+      const size = (await deps.storage.headObject(originalKey)).size;
+      if (typeof size === "number" && size > budget) {
+        tail = await deps.storage.getObject(originalKey, {
+          range: { start: Math.max(0, size - budget), end: size - 1 },
+        });
+      }
+    } catch {
+      // No tail. The head slice still yields a reading for front-loaded markings.
+    }
+
+    const { readTimedMediaProvenance } = await import(
+      "../metadata/provenance-reader.js"
+    );
+    const reading = readTimedMediaProvenance(head, tail);
+
+    if (!reading.examined) return; // Nothing found; nothing to record.
+
+    if (typeof deps.persistence.recordEmbeddedProvenance !== "function") {
+      // Said out loud, on every marked upload, rather than failing silently:
+      // the read worked and the value is being thrown away because the
+      // consuming application has not implemented the port method yet.
+      deps.logger.warn(
+        "provenance.discarded: read an AI provenance marking from a video/audio original but the persistence adapter does not implement recordEmbeddedProvenance — the marking is being DISCARDED (see analysis 08, consuming-application contract)",
+        { mediaId, sourceType: reading.sourceType, container: reading.container },
+      );
+      return;
+    }
+
+    await deps.persistence.recordEmbeddedProvenance(mediaId, {
+      sourceType: reading.sourceType,
+      examined: reading.examined,
+    });
+
+    deps.logger.info("provenance.recognised", {
+      mediaId,
+      sourceType: reading.sourceType,
+      container: reading.container,
+      kind: "timed-media",
+    });
+  } catch (error) {
+    deps.logger.warn(
+      "provenance.read-failed: could not read provenance from the original (upload unaffected)",
+      { mediaId, error },
+    );
+  }
+}
+
 function resolveSpendGuard(
   deps: MediaProcessingDeps,
 ):

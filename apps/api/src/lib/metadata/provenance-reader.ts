@@ -113,7 +113,9 @@ export async function readProvenance(
   mimeType: string,
 ): Promise<ProvenanceReading> {
   // Images only. Video/audio originals never transit the API (presigned
-  // direct-to-S3), so their read belongs in the worker — a later phase.
+  // direct-to-S3), so their read happens in the media-processing worker via
+  // {@link readTimedMediaProvenance} — a different function because it takes
+  // bounded RANGES of a possibly-enormous object rather than a whole buffer.
   if (!mimeType.startsWith("image/")) return NOTHING;
 
   try {
@@ -150,6 +152,92 @@ export async function readProvenance(
     return NOTHING;
   } catch {
     // Belt and braces: the contract is "never throws".
+    return NOTHING;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Video / audio — the worker-side read
+// ---------------------------------------------------------------------------
+
+/**
+ * The XMP-in-ISOBMFF `uuid` box GUID, from the Adobe XMP specification. An MP4 /
+ * MOV / M4A carrying an XMP packet stores it in a top-level `uuid` box prefixed
+ * with exactly these 16 bytes.
+ */
+const XMP_ISOBMFF_UUID = Buffer.from("BE7ACFCB97A942E89C71999491E3AFAC", "hex");
+
+/** `Iptc4xmpExt:DigitalSourceType` as it appears in a raw XMP packet. */
+const DIGITAL_SOURCE_TYPE_RE =
+  /DigitalSourceType\s*>\s*([^<\s]{1,512})\s*</;
+
+/**
+ * Read provenance from bounded RANGES of an original video or audio object.
+ *
+ * WHY RANGES AND NOT THE WHOLE FILE. A video original can be hundreds of
+ * megabytes; the worker must not pull one into memory to look for a few hundred
+ * bytes of XMP. Callers pass a head slice and a tail slice. Both are searched
+ * because MP4 writers put the `uuid` box in both places in practice — after
+ * `ftyp` at the front, or appended after `mdat` at the very end (ffmpeg's own
+ * output does the latter).
+ *
+ * ACCEPTED LIMITATION, stated rather than hidden: a marking that sits in neither
+ * the head nor the tail slice — e.g. wedged between huge `mdat` chunks in the
+ * middle of a long file — is MISSED, and the result is `examined: false`, which
+ * reads as "no marking found", not as "there is no marking". This is a deliberate
+ * bound on a resource-unbounded scan of attacker-supplied input, and it fails in
+ * the safe direction only for *over*-disclosure (we may miss an AI marking; we can
+ * never invent one). Widening it means streaming the container and parsing box
+ * headers properly, which is a different module with a different review.
+ *
+ * Takes no mime type, unlike {@link readProvenance}: the only caller is the
+ * media-processing worker, which is already on the timed-media path by
+ * construction, and a mime string there would be a parameter that can only ever
+ * hold one family of values — an invitation to pass the wrong one.
+ *
+ * NEVER THROWS, same contract as {@link readProvenance}.
+ */
+export function readTimedMediaProvenance(
+  head: Uint8Array,
+  tail: Uint8Array,
+): ProvenanceReading {
+  try {
+    for (const slice of [head, tail]) {
+      if (slice.length === 0) continue;
+      const buf = Buffer.from(slice.buffer, slice.byteOffset, slice.length);
+
+      // C2PA in ISOBMFF lives in a `uuid` box too, but presence-only: a real
+      // manifest usually attests camera capture, so mapping presence to "AI"
+      // would mislabel provenance-enabled cameras. Same rule as the image path.
+      const c2paPresent = buf.includes("jumb") || buf.includes("c2pa");
+
+      const xmpAt = buf.indexOf(XMP_ISOBMFF_UUID);
+      if (xmpAt !== -1) {
+        // Search only from the packet start, and only within a bounded window —
+        // an XMP packet is small, and scanning the remainder of a big slice for a
+        // regex match is the DoS this whole module avoids.
+        const window = buf
+          .subarray(xmpAt, Math.min(xmpAt + 64 * 1024, buf.length))
+          .toString("latin1");
+        const match = DIGITAL_SOURCE_TYPE_RE.exec(window);
+        if (match?.[1]) {
+          const mapped = SOURCE_TYPE_BY_NEWSCODE[newsCodeOf(match[1])];
+          if (mapped) {
+            return { sourceType: mapped, examined: true, container: "xmp" };
+          }
+          // Recognised container, unrecognised or disclosure-reducing assertion.
+          return { sourceType: "UNKNOWN", examined: true, container: "xmp" };
+        }
+        return { sourceType: "UNKNOWN", examined: true, container: "xmp" };
+      }
+
+      if (c2paPresent) {
+        return { sourceType: "UNKNOWN", examined: true, container: "c2pa" };
+      }
+    }
+
+    return NOTHING;
+  } catch {
     return NOTHING;
   }
 }

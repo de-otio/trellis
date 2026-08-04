@@ -186,6 +186,31 @@ describe("buildFfmpegArgs", () => {
     );
   });
 
+  // Property: -map_metadata -1 is always present (container metadata dictionary
+  // drop). This is a SEPARATE control from -dn and the difference was a live
+  // privacy gap: -dn drops data STREAMS, while MP4 keeps GPS in the metadata
+  // dictionary as `©xyz` (`location`), which ffmpeg COPIES input-to-output by
+  // default. Verified empirically against ffmpeg 8.1 with the production argv —
+  // `location=+50.0000+008.0000/` and `comment` both survived a transcode that
+  // had -dn -sn but not -map_metadata -1.
+  //
+  // If this test fails because someone removed the flag: videos are leaking the
+  // uploader's GPS coordinates, and the AI-provenance marking is no longer being
+  // destroyed consistently either.
+  it("always includes -map_metadata -1 (GPS and container tags must not survive)", () => {
+    fc.assert(
+      fc.property(specArb, (spec) => {
+        const args = buildFfmpegArgs(spec);
+        const at = args.indexOf("-map_metadata");
+        expect(at).toBeGreaterThanOrEqual(0);
+        // The VALUE matters: "-map_metadata" with anything other than -1 copies
+        // metadata from some input stream rather than dropping it.
+        expect(args[at + 1]).toBe("-1");
+      }),
+      FC,
+    );
+  });
+
   // Property: output is a string array with no undefined/null items
   it("returns a non-empty string array with no undefined items", () => {
     fc.assert(
@@ -397,6 +422,21 @@ describe("buildPosterArgs", () => {
     fc.assert(
       fc.property(specWithPosterArb, (spec) => {
         expect(buildPosterArgs(spec)).toContain("-sn");
+      }),
+      FC,
+    );
+  });
+
+  // Property: -map_metadata -1 always present. A poster is an IMAGE derived from
+  // the video, so it inherits the same strip — a stripped video with a
+  // GPS-carrying thumbnail is the worst of both worlds.
+  it("always includes -map_metadata -1", () => {
+    fc.assert(
+      fc.property(specWithPosterArb, (spec) => {
+        const args = buildPosterArgs(spec);
+        const at = args.indexOf("-map_metadata");
+        expect(at).toBeGreaterThanOrEqual(0);
+        expect(args[at + 1]).toBe("-1");
       }),
       FC,
     );
