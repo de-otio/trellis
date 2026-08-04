@@ -90,12 +90,42 @@ export class ActivityProcessor {
       return;
     }
 
+    // Art. 50 inbound provenance (analysis 06 §1). Extracted HERE, at the point
+    // the object arrives, because the alternative is discovering later that the
+    // marking was already gone.
+    //
+    // There is nowhere to persist it yet — regular-post ingestion is unimplemented
+    // (see the Phase 2 note below), so this feeds observability instead: it is how
+    // an operator learns whether remote instances actually send markings, which is
+    // the evidence needed to prioritise the store. When ingestion lands, write
+    // `remoteProvenance` onto the post and persist `unrecognised` untouched.
+    //
+    // `unrecognised` exists so we do not become the node that destroys other
+    // people's markings: there is no settled vocabulary, so other implementations
+    // will use terms we have never heard of, and dropping them silently is the
+    // ingest-strip mistake one layer up.
+    const { provenanceFromJsonLd, unknownProvenanceProperties } = await import(
+      "./provenance-jsonld.js"
+    );
+    const remoteObject = activity.object;
+    const remoteProvenance = provenanceFromJsonLd(remoteObject);
+    const unrecognised = unknownProvenanceProperties(remoteObject);
+
     // Regular post processing (Phase 2+)
     logger.info("[ActivityProcessor] Processing Create activity", {
       activityId: activity.id,
       actorUri,
+      // A recognised inbound marking. Null when the object carried none, or
+      // carried only a HUMAN_CREATED claim — which we decline to honour, because
+      // a peer server can put any JSON in an object and honouring it would let a
+      // hostile instance stamp "this is a real photo" onto synthetic media.
+      remoteProvenance: remoteProvenance?.sourceType ?? null,
+      // Key names only, never values: the values are third-party content and this
+      // is a log line, not a store.
+      unrecognisedProvenanceKeys: Object.keys(unrecognised),
     });
     // Phase 2: Store post in database, add to user's feed, deliver to followers
+    // — and when that lands, persist remoteProvenance + unrecognised with it.
   }
 
   /**
