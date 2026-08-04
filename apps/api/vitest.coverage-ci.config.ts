@@ -46,6 +46,24 @@ const PHASE0_NEW_FILES = [
   "src/lib/extension-schema-composer.ts",
   "src/lib/extension-job-runner.ts",
   "src/lib/mint-tenant-id.ts",
+  // AI Act Art. 50 — synthetic-content provenance. The pure cores, all of which
+  // are at or near 100%; listing them here is what stops that eroding, since a
+  // disclosure that silently stops being computed is the failure mode with legal
+  // consequences rather than merely a broken feature.
+  //
+  // `src/lib/routes/provenance-correction.ts` is deliberately NOT here: it is a
+  // route shell (auth preamble + Prisma writes + audit) with no route-level test
+  // yet, so adding it would fail the gate rather than protect anything. Its pure
+  // decision logic lives in provenance/correction.ts, which IS covered.
+  "src/lib/provenance/types.ts",
+  "src/lib/provenance/resolve.ts",
+  "src/lib/provenance/response.ts",
+  "src/lib/provenance/posture.ts",
+  "src/lib/provenance/posture-gate.ts",
+  "src/lib/provenance/correction.ts",
+  "src/lib/provenance/metrics.ts",
+  "src/lib/metadata/provenance-reader.ts",
+  "src/lib/activitypub/provenance-jsonld.ts",
 ];
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

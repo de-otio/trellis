@@ -35,12 +35,8 @@
 // mechanism available to us changes that, which is why the compliance narrative
 // must never claim federated disclosure is end-to-end assured.
 
-import { SOURCE_TYPES_BY_STRENGTH, SYNTHETIC_BASES } from "../provenance/types.js";
-import type {
-  Provenance,
-  SyntheticBasis,
-  SyntheticSourceType,
-} from "../provenance/types.js";
+import { SOURCE_TYPES_BY_STRENGTH } from "../provenance/types.js";
+import type { Provenance, SyntheticSourceType } from "../provenance/types.js";
 
 /** Our extension namespace. Versionless: the term semantics are the IPTC ones. */
 export const TRELLIS_NS = "https://trellis.de-otio.org/ns#";
@@ -115,12 +111,13 @@ function isSourceType(value: unknown): value is SyntheticSourceType {
   );
 }
 
-function isBasis(value: unknown): value is SyntheticBasis {
-  return (
-    typeof value === "string" &&
-    (SYNTHETIC_BASES as readonly string[]).includes(value)
-  );
-}
+// NOTE: there is deliberately no `isBasis` narrower here. An earlier draft had
+// one, and it became dead the moment we decided to DISCARD the inbound basis and
+// record `EMBEDDED_METADATA` instead — a remote `AUTHOR_DECLARED` is not a
+// declaration made to us, and a remote `PLATFORM_GENERATED` is another instance's
+// platform. Since no inbound basis value is ever trusted, none needs validating.
+// Removed rather than left in place: an unused validator invites a future reader
+// to "fix" the omission by starting to honour the field.
 
 /**
  * Read provenance off an inbound object.
