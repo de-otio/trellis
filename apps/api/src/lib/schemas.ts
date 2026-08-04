@@ -130,18 +130,36 @@ export const editPostSchema = z.object({
     .object({ sourceType: declarableSourceType })
     .strict()
     .optional(),
-  // NOTE: `media` here is accepted and then IGNORED — `editPost` only writes
-  // text/editedAt/hasBlockedLinks/radius and never touches PostMedia. That is
-  // pre-existing behaviour, out of scope to fix here.
-  //
-  // Provenance is deliberately NOT offered on these items: an API that appears
-  // to accept a disclosure and silently drops it is worse than one that does not
-  // offer it. Per-attachment declaration happens at post creation.
+  /**
+   * Updates to EXISTING attachments. `id` is the `MediaFile` id, matching
+   * `createPostSchema.media[].id`.
+   *
+   * This used to be accepted and then silently DISCARDED — `editPost` wrote only
+   * text/editedAt/hasBlockedLinks/radius and never touched `PostMedia`, so a
+   * client correcting alt text got a 200 and no change. It is now honoured, for
+   * the two fields that can be changed safely:
+   *
+   *  - `alt` — an accessibility fix, and there was never a reason to refuse one.
+   *  - `sourceType` — a MONOTONIC RAISE only, for the author who realises after
+   *    posting that an image was AI-generated. Previously impossible: an
+   *    attachment declaration could only be made at creation, so an honest
+   *    late correction had nowhere to go. A downgrade attempt is refused exactly
+   *    as it is for post text.
+   *
+   * What this deliberately does NOT do is change the attachment SET. Adding or
+   * removing attachments here would mean creating and deleting `PostMedia` rows on
+   * the edit path, and `PostMedia` rows being created in exactly one place is what
+   * makes the detach/re-attach laundering route unreachable (REVIEW N1). Keeping
+   * edits to in-place field updates preserves that.
+   */
   media: z
     .array(
       z.object({
-        id: z.string().optional(), // Existing media ID
-        alt: z.string().max(500).optional(), // Alt text for accessibility
+        // Required now: an item with no id identified nothing, so it could only
+        // ever have been a no-op.
+        id: z.string().min(1),
+        alt: z.string().max(500).optional(),
+        sourceType: declarableSourceType.optional(),
       }),
     )
     .max(10) // Maximum 10 media attachments

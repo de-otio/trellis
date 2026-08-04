@@ -102,10 +102,13 @@ describe("provenance write path — schema boundary", () => {
       expect(r.success).toBe(false);
     });
 
-    it("does not offer provenance on media items", () => {
-      // editPost ignores `media` entirely, so offering a disclosure there would
-      // accept it and silently drop it — worse than not offering it. The key is
-      // stripped, so the parse succeeds but the value cannot be honoured.
+    it("NOW accepts provenance on media items, and keeps the value", () => {
+      // This assertion is the inverse of what it used to be, deliberately.
+      // `editPostSchema.media` was previously accepted and then discarded
+      // wholesale by the handler, so offering a per-attachment disclosure would
+      // have accepted it and silently dropped it — worse than not offering it.
+      // The handler now honours `alt` and a MONOTONIC RAISE of `sourceType`, so
+      // the field is real and the schema must preserve it.
       const r = editPostSchema.safeParse({
         text: "hello",
         media: [{ id: "m1", sourceType: "AI_GENERATED" }],
@@ -113,7 +116,41 @@ describe("provenance write path — schema boundary", () => {
       expect(r.success).toBe(true);
       const media = (r as { data: { media?: Array<Record<string, unknown>> } })
         .data.media;
-      expect(media?.[0]).not.toHaveProperty("sourceType");
+      expect(media?.[0]?.sourceType).toBe("AI_GENERATED");
+    });
+
+    it("still refuses a client-supplied basis on a media item", () => {
+      // `sourceType` is declarable; `basis` never is, on any path — a client that
+      // could set it could forge PLATFORM_GENERATED. The media item object is not
+      // `.strict()` (tightening it would 400 requests that are valid today), so
+      // the key is STRIPPED rather than rejected. Either way it cannot be
+      // honoured, and this pins that it does not survive parsing.
+      const r = editPostSchema.safeParse({
+        text: "hello",
+        media: [{ id: "m1", sourceType: "AI_EDITED", basis: "PLATFORM_GENERATED" }],
+      });
+      expect(r.success).toBe(true);
+      const media = (r as { data: { media?: Array<Record<string, unknown>> } })
+        .data.media;
+      expect(media?.[0]).not.toHaveProperty("basis");
+    });
+
+    it("requires an id on a media item — an idless item identified nothing", () => {
+      const r = editPostSchema.safeParse({
+        text: "hello",
+        media: [{ alt: "no id" }],
+      });
+      expect(r.success).toBe(false);
+    });
+
+    it("rejects UNKNOWN as an attachment declaration", () => {
+      // Same rule as everywhere else: the way to express "no declaration" is to
+      // omit the field, not to assert UNKNOWN.
+      const r = editPostSchema.safeParse({
+        text: "hello",
+        media: [{ id: "m1", sourceType: "UNKNOWN" }],
+      });
+      expect(r.success).toBe(false);
     });
   });
 });

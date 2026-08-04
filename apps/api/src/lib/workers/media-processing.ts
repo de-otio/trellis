@@ -48,6 +48,8 @@ import { classifyWorkerError } from "../media/classify-worker-error.js";
 import type { Track } from "../media/track-verdict.js";
 import type { ModerationDecision } from "../media/media-lifecycle.js";
 import type { SyntheticSourceType } from "../provenance/types.js";
+import { provenanceMetric } from "../provenance/metrics.js";
+import type { MetricsPort } from "./metrics-port.js";
 import type {
   StoragePort,
   TranscodePort,
@@ -262,6 +264,14 @@ export interface MediaProcessingDeps {
    * jobs were started.
    */
   readonly spendGuard?: MediaSpendGuardPort;
+  /**
+   * Provider-neutral metric emission (WS-2 §5.2). OPTIONAL: this worker predates
+   * the port and consumers wire it at their own pace. Absent means the Art. 50
+   * provenance counters are not emitted and the log lines are the only signal —
+   * which is why the discarded-marking case logs at WARN with the mediaId, rather
+   * than relying on a counter that may not be wired.
+   */
+  readonly metrics?: MetricsPort;
   /** The object-storage bucket handle moderation/transcription refs carry. */
   readonly bucket: string;
   /**
@@ -773,7 +783,24 @@ async function recordOriginalProvenance(
 
     if (!reading.examined) return; // Nothing found; nothing to record.
 
+    // A container was found but carried nothing usable — worth counting
+    // separately from "recognised", because a rising unrecognised rate means the
+    // vocabulary map is falling behind what tools actually emit.
+    if (reading.sourceType === "UNKNOWN") {
+      emitProvenanceMetric(deps, {
+        kind: "unrecognised",
+        container: reading.container ?? "xmp",
+        mediaKind: "timed-media",
+      });
+      return;
+    }
+
     if (typeof deps.persistence.recordEmbeddedProvenance !== "function") {
+      emitProvenanceMetric(deps, {
+        kind: "discarded",
+        reason: "no-persistence-port",
+        mediaKind: "timed-media",
+      });
       // Said out loud, on every marked upload, rather than failing silently:
       // the read worked and the value is being thrown away because the
       // consuming application has not implemented the port method yet.
@@ -789,6 +816,13 @@ async function recordOriginalProvenance(
       examined: reading.examined,
     });
 
+    emitProvenanceMetric(deps, {
+      kind: "recognised",
+      sourceType: reading.sourceType,
+      basis: "EMBEDDED_METADATA",
+      mediaKind: "timed-media",
+    });
+
     deps.logger.info("provenance.recognised", {
       mediaId,
       sourceType: reading.sourceType,
@@ -796,10 +830,34 @@ async function recordOriginalProvenance(
       kind: "timed-media",
     });
   } catch (error) {
+    emitProvenanceMetric(deps, {
+      kind: "read-failed",
+      mediaKind: "timed-media",
+    });
     deps.logger.warn(
       "provenance.read-failed: could not read provenance from the original (upload unaffected)",
       { mediaId, error },
     );
+  }
+}
+
+/**
+ * Emit one provenance counter, if a MetricsPort is wired. Fail-open twice over:
+ * the port is optional, and adapters are themselves required to swallow their own
+ * failures — but this catches anyway, because a metrics bug must not be able to
+ * turn into a media-pipeline bug.
+ */
+function emitProvenanceMetric(
+  deps: MediaProcessingDeps,
+  event: Parameters<typeof provenanceMetric>[0],
+): void {
+  if (!deps.metrics) return;
+  try {
+    const { dimensions, metrics } = provenanceMetric(event);
+    deps.metrics.emitCounts(dimensions, metrics);
+  } catch {
+    // Intentionally silent: we are already on a best-effort observability path,
+    // and logging a metrics failure from inside a metrics helper invites a loop.
   }
 }
 
