@@ -20,16 +20,39 @@ export class RelationshipHandler {
       const { z } = await import("zod");
       const body = await request.json() as Record<string, unknown>;
 
-      const schema = z.object({
-        targetType: z.enum(["user", "entity"]),
-        targetId: z.string().min(1).max(100),
-        connectionMethod: z.enum(["code", "import", "suggestion", "discovery"]).optional().default("discovery"),
-      });
+      // `connectionMethod` is deliberately NOT accepted from the client (V1).
+      // It feeds the initial relationship score, and "code" scores 0.7 — enough
+      // to land the caller in the target's tier 0. A client that could name its
+      // own connection method could therefore award itself inner-circle
+      // standing with one request, with no action by the target. The server
+      // decides the method: an edge created through this generic endpoint is
+      // "discovery", the lowest-trust value. The only path that may claim
+      // "code" is connection-code redemption, which verifies a real code
+      // server-side before setting it.
+      //
+      // Rejected rather than silently ignored: a caller passing it is either
+      // relying on the escalation or has a wrong mental model, and both deserve
+      // an explicit error rather than a quiet downgrade.
+      const schema = z
+        .object({
+          targetType: z.enum(["user", "entity"]),
+          targetId: z.string().min(1).max(100),
+        })
+        .strict();
 
       const parsed = schema.safeParse(body);
       if (!parsed.success) {
+        const suppliedConnectionMethod = Object.hasOwn(
+          body ?? {},
+          "connectionMethod",
+        );
         return new Response(
-          JSON.stringify({ error: "VALIDATION_ERROR", message: parsed.error.issues[0]?.message }),
+          JSON.stringify({
+            error: "VALIDATION_ERROR",
+            message: suppliedConnectionMethod
+              ? "connectionMethod is determined by the server and cannot be supplied"
+              : parsed.error.issues[0]?.message,
+          }),
           { status: 400, headers: { "content-type": "application/json" } },
         );
       }
@@ -49,7 +72,8 @@ export class RelationshipHandler {
         userId: session.userId,
         targetType: parsed.data.targetType,
         targetId: parsed.data.targetId,
-        connectionMethod: parsed.data.connectionMethod,
+        // Server-attested, not client-supplied. See the schema comment above.
+        connectionMethod: "discovery",
       });
 
       return new Response(JSON.stringify(relationship), {
