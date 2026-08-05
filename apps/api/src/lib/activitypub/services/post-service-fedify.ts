@@ -22,6 +22,23 @@ import { getLogger, Logger } from "../../logger.js";
 import { fedifyCreateToActivityStreams } from "./fedify-converters.js";
 
 /**
+ * Exhaustiveness check for the post-radius switch in `determineAudience`.
+ *
+ * The parameter is typed `never`, so adding a value to `PostRadius` without
+ * giving it an explicit ActivityPub audience becomes a COMPILE error here
+ * rather than a silent fall-through to "public". That is the point: federated
+ * delivery is irrevocable, so the failure mode this prevents — a new enum value
+ * quietly addressing the public collection — is not recoverable at runtime.
+ */
+function assertNeverRadius(radius: never): never {
+  throw new Error(
+    `determineAudience: unhandled post radius ${String(
+      radius,
+    )} — refusing to guess an ActivityPub audience`,
+  );
+}
+
+/**
  * Service for managing posts as Fedify ActivityPub activities
  */
 export class PostActivityServiceFedify {
@@ -110,6 +127,19 @@ export class PostActivityServiceFedify {
           to: [new URL(`${actorUri}/followers`)],
         };
 
+      case "LOUD":
+        // LOUD previously fell through to the `default:` branch below and was
+        // addressed to the public collection — the same audience as SHOUT —
+        // even though no local read path has ever admitted a LOUD post to
+        // anyone but its author. Followers-only is the narrowest addressing
+        // that is still consistent with where LOUD is headed: the audience
+        // model maps it to CONNECTIONS (see trellis-internal
+        // plans/audience-and-reach, delta 6), and CONNECTIONS is what
+        // followers-only expresses in ActivityPub.
+        return {
+          to: [new URL(`${actorUri}/followers`)],
+        };
+
       case "WHISPER":
         // Whisper = private/friends-only, use bto (blind recipients)
         return {
@@ -117,10 +147,13 @@ export class PostActivityServiceFedify {
         };
 
       default:
-        // Default to public
-        return {
-          to: [PUBLIC_COLLECTION],
-        };
+        // NO FAIL-OPEN DEFAULT. This branch used to return the public
+        // collection for any unrecognised radius, which meant a new or
+        // mistyped enum value silently published to the whole fediverse — and
+        // federated delivery cannot be recalled. An unknown audience is a
+        // programming error, so it throws; the caller's federation attempt
+        // fails and the post is simply not delivered.
+        return assertNeverRadius(post.radius);
     }
   }
 
