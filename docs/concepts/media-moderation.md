@@ -33,7 +33,7 @@ A media object's `moderationStatus` is one of five states, persisted on the
 | `QUARANTINED` | The classifier flagged it — awaiting a human moderator. |
 | `REJECTED` | Terminal. Never serves. |
 
-The legal transitions are a pure state machine (`moderation-status.ts`):
+The legal transitions are a pure state machine (`media-lifecycle.ts`):
 
 ```
 PENDING            --decision approved-->   APPROVED
@@ -188,11 +188,36 @@ guard refuses to run it outside development: an un-moderated, fail-closed
 backend in production would silently send all media to review with no path to
 approval, so the wiring fails loudly instead.
 
+## Boundary invariants
+
+The pipeline separates two layers with different rules, and the separation is
+enforced, not aspirational:
+
+- **The decision core is dependency-free.** The lifecycle state machine, track
+  fan-in, promotion decision, serve-gate predicate, and the provider/port
+  interfaces import nothing but Node built-ins and each other — no Prisma, no
+  cloud SDKs, no env, no worker or route code. This is enforced by an
+  architectural test
+  (`test/unit/media/decision-core-boundary.test.ts`); an import from outside
+  that set fails the suite.
+- **Enforcement is platform code.** The serve gate's wiring, CAS promotion,
+  quarantine prefixes, quotas, the spend guard, and the processing/completion
+  workers are integrated with storage, queues, and tenancy — deliberately.
+  Fail-closed serving is a property of the platform, not of any provider.
+- **New moderation intelligence goes behind the seams.** Any new
+  classification capability — a provider integration, a shared detection
+  service, a future standard protocol — enters as an implementation of the
+  existing provider interfaces (or a new seam beside them), never inline in
+  workers or handlers, and obeys the binding rules above: 3-value verdicts,
+  fail-closed on any doubt.
+
+Rule of thumb: **enforcement in the core, intelligence behind a port.**
+
 ## Where to look in the code
 
 | Concern | Module |
 |---------|--------|
-| Lifecycle states + state machine | `apps/api/src/lib/media/moderation-status.ts` |
+| Lifecycle states + state machine | `apps/api/src/lib/media/media-lifecycle.ts` |
 | Serve gate predicate | `apps/api/src/lib/media/serve-gate.ts` |
 | Track fan-in | `apps/api/src/lib/media/track-verdict.ts` |
 | Promotion decision | `apps/api/src/lib/media/promote-decision.ts` |
