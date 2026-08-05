@@ -1,0 +1,108 @@
+/**
+ * Unit Tests: friend-set resolution (V1)
+ *
+ * `getFriendUserIds` decides who may read a NORMAL-radius post. It had no
+ * direct test coverage, which is how the following went unnoticed: the query
+ * read *outgoing* edges only, so creating a relationship to a stranger — an
+ * action needing no involvement from that stranger — put the caller in their
+ * friend set and granted read access to their close-friends posts.
+ *
+ * The invariant these tests protect is narrow and worth stating exactly:
+ *
+ *   No field the reader can write may increase the set this function returns.
+ *
+ * `tier` is reader-writable (it derives from manual_score, which the reader
+ * sets through PATCH /api/relationships/score). `reciprocated` is not — the
+ * server sets it only when the reverse edge exists. So the predicate must
+ * require reciprocation, and these tests assert the query does.
+ */
+
+import { describe, expect, it, vi } from "vitest";
+import {
+  FRIEND_TIER_MAX,
+  getFriendUserIds,
+  type RelationshipReader,
+} from "../../src/lib/friend-ids.js";
+
+function readerReturning(rows: Array<{ targetId: string }>) {
+  const findMany = vi.fn().mockResolvedValue(rows);
+  return {
+    db: { relationship: { findMany } } as unknown as RelationshipReader,
+    findMany,
+  };
+}
+
+describe("getFriendUserIds", () => {
+  it("returns the target ids of qualifying edges", async () => {
+    const { db } = readerReturning([
+      { targetId: "user-a" },
+      { targetId: "user-b" },
+    ]);
+
+    await expect(getFriendUserIds(db, "viewer-1")).resolves.toEqual([
+      "user-a",
+      "user-b",
+    ]);
+  });
+
+  it("returns an empty array when the viewer has no qualifying edges", async () => {
+    const { db } = readerReturning([]);
+
+    await expect(getFriendUserIds(db, "viewer-1")).resolves.toEqual([]);
+  });
+
+  // The defect. A one-directional edge must not qualify, so the query has to
+  // constrain `reciprocated`. Asserting the predicate rather than the result,
+  // because the mock returns whatever rows it is told to regardless of the
+  // where — which is exactly why this hole survived: no test looked here.
+  it("requires the relationship to be reciprocated", async () => {
+    const { db, findMany } = readerReturning([]);
+
+    await getFriendUserIds(db, "viewer-1");
+
+    expect(findMany).toHaveBeenCalledWith({
+      where: {
+        userId: "viewer-1",
+        targetType: "user",
+        tier: { lte: FRIEND_TIER_MAX },
+        reciprocated: true,
+      },
+      select: { targetId: true },
+    });
+  });
+
+  it("scopes the query to the viewer and to user targets", async () => {
+    const { db, findMany } = readerReturning([]);
+
+    await getFriendUserIds(db, "viewer-9");
+
+    const where = findMany.mock.calls[0][0].where;
+    expect(where.userId).toBe("viewer-9");
+    expect(where.targetType).toBe("user");
+  });
+
+  it("bounds the tier rather than accepting every reciprocated edge", async () => {
+    const { db, findMany } = readerReturning([]);
+
+    await getFriendUserIds(db, "viewer-1");
+
+    // Retained on top of reciprocation: dropping it would widen the set to
+    // every mutual edge however distant.
+    expect(findMany.mock.calls[0][0].where.tier).toEqual({
+      lte: FRIEND_TIER_MAX,
+    });
+    expect(FRIEND_TIER_MAX).toBe(1);
+  });
+
+  it("never omits the reciprocated constraint, whatever the viewer id", async () => {
+    const { db, findMany } = readerReturning([]);
+
+    for (const viewer of ["a", "b-with-dash", "c".repeat(30)]) {
+      await getFriendUserIds(db, viewer);
+    }
+
+    for (const call of findMany.mock.calls) {
+      expect(call[0].where.reciprocated).toBe(true);
+    }
+  });
+});
