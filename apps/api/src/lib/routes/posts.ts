@@ -886,6 +886,15 @@ export const postsRoutes: Route[] = [
         );
       }
 
+      // Get tenant ID from authenticated JWT
+      const auth = await authMiddleware(request, env);
+      if (!auth || !auth.activeTenantId) {
+        return securityHeaders.createSecureResponse(
+          JSON.stringify({ error: "Unauthorized" }),
+          { status: 401, headers: { "content-type": "application/json" } },
+        );
+      }
+
       try {
         const postId = pathname.replace(/^\/api\/posts\//, "");
         const post = await feedHandler.getPost(
@@ -893,6 +902,7 @@ export const postsRoutes: Route[] = [
           session,
           env as any,
           requestContext,
+          auth.activeTenantId,
         );
 
         if (!post) {

@@ -162,6 +162,41 @@ function encodeFeedCursor(createdAt: Date, postId: string): string {
   ).toString("base64");
 }
 
+/**
+ * The audience predicate for reading posts: public, or own, or a friend's
+ * connections-level post.
+ *
+ * ONE definition, deliberately. Both read paths in this file — the home feed
+ * and the single-post fetch — must agree, because a viewer who is denied a row
+ * in the feed and then granted the same row by id has no audience boundary at
+ * all. Keeping this in one function is what makes that agreement checkable.
+ *
+ * This is an interim home. It reproduces today's semantics only; it does not
+ * consult `LOUD` (which the feed has never admitted for anyone but the author),
+ * group membership, or blocks. It is scheduled to be replaced wholesale by the
+ * single audience resolver — see trellis-internal plans/audience-and-reach,
+ * task P1.4 — at which point this function and its two call sites go away
+ * together. Do not add a third call site: thread the resolver in instead.
+ *
+ * @param viewerUserId the cuid of the viewing user (never an OIDC `sub`)
+ * @param friendUserIds ids this viewer is connected to, resolved by the caller
+ */
+export function buildPostAudienceFilter(
+  viewerUserId: string,
+  friendUserIds: string[],
+) {
+  return {
+    OR: [
+      { radius: PostRadius.SHOUT },
+      { authorId: viewerUserId }, // Own posts
+      {
+        radius: PostRadius.NORMAL,
+        authorId: { in: friendUserIds },
+      },
+    ],
+  };
+}
+
 export class FeedHandler {
   private logger: Logger;
 
@@ -273,18 +308,13 @@ export class FeedHandler {
       // tier ≤ 1 — see lib/friend-ids.ts for the convergence definition)
       const friendIds = await getFriendUserIds(db, session.userId);
 
-      // Build visibility filter
+      // Build visibility filter (shared with getPost — see
+      // buildPostAudienceFilter; the two paths must not diverge).
       // Note: This OR condition is at the top level, not nested
-      const visibilityFilter = {
-        OR: [
-          { radius: PostRadius.SHOUT },
-          { authorId: session.userId }, // Own posts
-          {
-            radius: PostRadius.NORMAL,
-            authorId: { in: friendIds },
-          },
-        ],
-      };
+      const visibilityFilter = buildPostAudienceFilter(
+        session.userId,
+        friendIds,
+      );
 
       // Build entity filter for multi-entity tagging
       let entityFilter: any = undefined;
@@ -634,12 +664,17 @@ export class FeedHandler {
   /**
    * Get a single post by ID, enriched with sentiment counts and comment count.
    * Returns null if the post is not found or not accessible.
+   *
+   * "Not accessible" is indistinguishable from "not found" on purpose: the
+   * caller renders both as 404, so this method must never signal that a post it
+   * refuses to return exists.
    */
   async getPost(
     postId: string,
     session: Session,
     env: Env,
     requestContext: TrellisRequestContext,
+    activeTenantId: string,
   ): Promise<FeedPost | null> {
     const region = requestContext.region;
     const { sharedDatabaseConnectionManager } = await import(
@@ -650,13 +685,38 @@ export class FeedHandler {
     );
     const apiDomain = FeedHandler.getApiDomain(env);
 
+    // Same reasoning as getHomeFeed: Prisma drops an `undefined` where key, so a
+    // falsy tenant would silently remove tenant isolation from the query below.
+    if (!activeTenantId) {
+      throw new Error(
+        "getPost: activeTenantId is required for tenant isolation",
+      );
+    }
+
+    // Resolve the viewer's connections once, before the post lookup, so that
+    // "post absent" and "post denied" perform the same work and cannot be
+    // distinguished by timing.
+    const friendIds = await getFriendUserIds(
+      DataRouter.getDatabaseForRegion(region, env, undefined, session.userId),
+      session.userId,
+    );
+
     const post = await withQueryTimeoutAndRetry(
       sharedDatabaseConnectionManager,
       region,
       env,
       async (db) => {
         return db.post.findUnique({
-          where: { id: postId, deletedAt: null, hiddenByAuthor: false },
+          where: {
+            id: postId,
+            deletedAt: null,
+            hiddenByAuthor: false,
+            // V3: this path previously applied NO tenant and NO audience
+            // predicate, so any authenticated caller could read any post —
+            // including WHISPER — by id. Both are now required.
+            tenantId: activeTenantId,
+            ...buildPostAudienceFilter(session.userId, friendIds),
+          },
           include: {
             author: {
               select: {
