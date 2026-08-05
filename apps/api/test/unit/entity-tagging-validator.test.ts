@@ -62,11 +62,35 @@ describe("validateEntityTagging", () => {
       validateEntityTagging("user-123", ["entity-1"], mockDb as any),
     ).resolves.not.toThrow();
 
-    // Friend set must come from the caller's outgoing user-edges, tier ≤ 1
+    // Friend set must come from the caller's MUTUAL user-edges, tier ≤ 1.
+    // `reciprocated` was added when the one-directional read was found to be a
+    // self-grant (V1): without it, unilaterally adding a stranger was enough to
+    // tag that stranger's entities — their dog, their business — in your own
+    // posts, with no action by them. Tagging is exactly the kind of capability
+    // that must require the other party's consent, so this validator inherits
+    // the constraint rather than opting out of it.
     expect(mockDb.relationship.findMany).toHaveBeenCalledWith({
-      where: { userId: "user-123", targetType: "user", tier: { lte: 1 } },
+      where: {
+        userId: "user-123",
+        targetType: "user",
+        tier: { lte: 1 },
+        reciprocated: true,
+      },
       select: { targetId: true },
     });
+  });
+
+  it("should refuse to tag the entity of a one-directional connection", async () => {
+    mockDb.entity.findMany.mockResolvedValue([
+      { id: "entity-1", owners: [{ userId: "stranger-789", role: "PRIMARY" }] },
+    ]);
+    // The query now constrains `reciprocated`, so a unilateral edge simply is
+    // not returned — the friend set comes back empty and the tag is refused.
+    mockDb.relationship.findMany.mockResolvedValue([]);
+
+    await expect(
+      validateEntityTagging("user-123", ["entity-1"], mockDb as any),
+    ).rejects.toThrow(EntityTaggingPermissionError);
   });
 
   it("should allow tagging mix of own and friends entities", async () => {
