@@ -223,9 +223,15 @@ export class FeedHandler {
           status: 200,
           headers: {
             "content-type": "application/json",
-            // Add cache headers if aggressive caching enabled
+            // Add cache headers if aggressive caching enabled.
+            // MUST stay `private`: the response body is resolved per viewer
+            // (the cache key carries session.userId, and the visibility filter
+            // is built from this viewer's friend set), so a shared cache — CDN
+            // or proxy — that stored it would serve one viewer's feed to
+            // another. `private` keeps the browser-side TTL that the
+            // aggressive-caching flag is there to buy.
             ...(aggressiveCaching && {
-              "Cache-Control": "public, max-age=300", // 5 minutes
+              "Cache-Control": "private, max-age=300", // 5 minutes
             }),
           },
         });
@@ -272,6 +278,17 @@ export class FeedHandler {
 
       // Tenant ID comes from the authenticated caller's JWT (passed in by the route).
       const tenantId = activeTenantId;
+
+      // Fail loudly rather than silently widening. Prisma DROPS a `where` key
+      // whose value is `undefined`, so a falsy tenant here would remove the
+      // tenant predicate from the post query below and return every tenant's
+      // posts — with no error anywhere. Throwing keeps that failure mode
+      // impossible to reach silently.
+      if (!tenantId) {
+        throw new Error(
+          "getHomeFeed: activeTenantId is required for tenant isolation",
+        );
+      }
 
       // Build taxonomy filter
       let taxonomyFilter: any = undefined;
@@ -376,6 +393,15 @@ export class FeedHandler {
                 {
                   deletedAt: null,
                   hiddenByAuthor: false,
+                  // CRITICAL: tenant isolation. This predicate is the only thing
+                  // separating tenants on this path — it must not be removed and
+                  // must not be made optional. Ambient tenant scoping does NOT
+                  // cover this query: TENANT_SCOPE_MODE defaults to "off" (see
+                  // tenant-scope.ts), in which case runWithTenantContext never
+                  // runs and the Prisma tenant-scope extension is not attached,
+                  // and there is no PostgreSQL RLS backstop yet. So this is the
+                  // first line of defence, not a redundant second one.
+                  tenantId,
                   // CRITICAL: Only get posts from the correct region
                   // For empty database, this filter returns 0 results instantly
                   // For production, all posts should have dataRegion set
@@ -558,7 +584,13 @@ export class FeedHandler {
 
       return new Response(JSON.stringify(feedResponse), {
         status: 200,
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          // Per-viewer body: mark it private even on the freshly-computed path.
+          // Absent a directive a shared cache may still store this
+          // heuristically, which is the same leak as the cached path above.
+          "Cache-Control": "private, no-store",
+        },
       });
     } catch (error: any) {
       this.logger.error("Error getting home feed:", error);
