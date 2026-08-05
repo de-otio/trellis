@@ -108,6 +108,42 @@ function resolvePostRadius(body: {
   return "NORMAL";
 }
 
+/**
+ * Whether a post may be federated to ActivityPub.
+ *
+ * ONE definition for all three delivery sites — createPost, editPost and
+ * deliverSystemPostActivity. They used to disagree: editPost checked
+ * `radius === "SHOUT"` and the other two did not, so a WHISPER post created
+ * through the ordinary path was given a public objectId, written to the
+ * world-readable outbox and delivered to remote servers (V10). Delivery is
+ * irrevocable per post, so a disagreement between these sites is not a bug you
+ * can fix after the fact — hence one predicate rather than three conditions.
+ *
+ * Deliberately conservative: only fully-public posts federate, and anything
+ * unrecognised or absent returns false. A post that should have federated and
+ * did not is a visible product complaint; a post that federated and should not
+ * have is unrecoverable.
+ *
+ * This is the precursor to the audience model's `federate` column, which makes
+ * the choice explicit and author-owned instead of derived from the radius —
+ * see trellis-internal plans/audience-and-reach, axis 3.
+ */
+export function mayFederatePost(
+  post:
+    | {
+        radius?: string | null;
+        deletedAt?: Date | null;
+        hiddenByAuthor?: boolean | null;
+      }
+    | null
+    | undefined,
+): boolean {
+  if (!post) return false;
+  if (post.deletedAt) return false;
+  if (post.hiddenByAuthor) return false;
+  return post.radius === "SHOUT";
+}
+
 export class PostHandler {
   private logger: Logger;
 
@@ -633,8 +669,13 @@ export class PostHandler {
       // Create ActivityPub activity if federation is enabled and the author has
       // ActivityPub fields. The flag check keeps outbound delivery off even if a
       // row happens to carry actorUri/publicKey while federation is disabled.
+      //
+      // V10 — the radius check was missing here while editPost has always had
+      // it, so creating a WHISPER or NORMAL post federated it. See
+      // mayFederatePost: all three delivery sites now share one predicate.
       if (
         env.ACTIVITYPUB_ENABLED &&
+        mayFederatePost(postWithAuthor) &&
         postWithAuthor?.author?.actorUri &&
         postWithAuthor.author.publicKey
       ) {
@@ -1494,10 +1535,12 @@ export class PostHandler {
         },
       );
 
-      // ActivityPub sync for public posts only (federation must be enabled)
+      // ActivityPub sync for public posts only (federation must be enabled).
+      // Shares mayFederatePost with the create and system-delivery sites so the
+      // three cannot drift apart again (V10).
       if (
         env.ACTIVITYPUB_ENABLED &&
-        updatedPost.radius === "SHOUT" &&
+        mayFederatePost(updatedPost) &&
         updatedPost.author?.actorUri &&
         updatedPost.author?.publicKey
       ) {
@@ -2018,6 +2061,12 @@ export class PostHandler {
       );
 
       if (!postWithAuthor?.author?.actorUri || !postWithAuthor.author.publicKey) {
+        return;
+      }
+
+      // V10 — this path mirrors createPost's delivery block and inherited its
+      // missing radius check. Same shared predicate as the other two sites.
+      if (!mayFederatePost(postWithAuthor)) {
         return;
       }
 
