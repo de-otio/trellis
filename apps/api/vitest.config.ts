@@ -38,6 +38,10 @@ export default defineConfig({
       // Run separately: npm run test:integration:ci (CI lane added in P1).
       "test/integration/interaction-events.integration.test.ts",
       "test/integration/report-migration.integration.test.ts",
+      // P0 post READ isolation — needs a real DATABASE_URL, which this config's
+      // test/setup.ts overrides to a fake hyperdrive URL. Runs in the Phase0
+      // integration lane instead (npm run test:integration:ci).
+      "test/integration/post-read-isolation.integration.test.ts",
       // Events primitive integration tests — live Postgres only.
       // Run separately: npm run test:integration:ci (registered in PHASE0_INTEGRATION).
       "test/integration/events.integration.test.ts",
