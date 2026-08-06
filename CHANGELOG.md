@@ -15,6 +15,66 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ## [Unreleased]
 
+## [0.24.0] — 2026-08-06
+
+Closes out the `0.24.0-alpha.0`–`alpha.3` series; entries below cover
+everything since 0.23.0.
+
+### Added
+
+- **AI Act Art. 50 synthetic-content provenance** (phases A, B, D).
+  Provenance is read from uploads **before** the metadata strip; declarations
+  are accepted with enforced monotonicity (re-attachment inherits the stronger
+  declaration); per-tenant disclosure posture (`OPTIONAL` /
+  `REQUIRED_FOR_AI` / `PROMPTED`); staff-only audited correction path; the
+  extension-API disclosure criterion enforced at the data layer; the label
+  federates over ActivityPub; video/audio (timed-media) provenance via the
+  worker pipeline. Two schema migrations. Client contract:
+  [`docs/reference/provenance-api.md`](docs/reference/provenance-api.md).
+  Consumers should implement `MediaPersistencePort.recordEmbeddedProvenance`
+  (optional) — until then timed-media provenance is read and discarded,
+  signalled by the `provenance.discarded` metric.
+- **Keycloak JIT provisioning on first authenticated request** (plan 016
+  WS-0). When `IDENTITY_PROVIDER=keycloak` and a verified token carries no
+  `userId`/`activeTenantId` claims, the API resolves them server-side
+  (claims cache → DB → first-contact provisioning through the
+  provider-neutral core), concurrency-safe. The Cognito path is unchanged.
+- **Provider-neutral runtime** for non-AWS deployments: Scaleway TEM and
+  generic SMTP email providers, OTLP metrics exporter, software HMAC-SHA256
+  pseudonym fallback (`PSEUDONYM_MAC_PROVIDER=software`), `OIDC_*` env names,
+  a one-shot worker DB-migrate entrypoint, GDPR-deletion identity/email
+  ports with a boot-time wiring guard, `WORKER_DISABLED_CRONS`, and
+  `SQS_QUEUE_URL_PREFIX` support.
+- **O-1 extension-owned schema: first-consumer seam**, and extension-owned
+  rows are included in the GDPR data export.
+
+### Fixed
+
+- **Video uploads leaked the uploader's GPS coordinates** through the
+  metadata strip (`-dn` never touched the container metadata dictionary) —
+  transcode and poster argv now pass `-map_metadata -1`, property-tested.
+- **The published tarball shipped no `dist/`** (apps/api inherited the root
+  tsconfig's new `noEmit`); caught by the consumer-install smoke gate, never
+  published.
+- Security hardening: magic-link URL escaped in email HTML (F1);
+  create-auth-challenge rate limit fails closed (F2); Keycloak
+  privilege-attribute lockdown verified at boot (F3); empty `APP_DOMAIN`
+  fails magic-link initiation closed (F4); `OIDC_JWKS_URL` required for
+  non-Cognito issuers (SEC-6b); precise location stripped from non-owner
+  entity profiles.
+- Magic-link emails honour `FROM_EMAIL` + `EMAIL_BRAND_NAME` (CRLF header
+  guard included).
+
+### Changed
+
+- **Node ≥ 22 is now declared** (`engines`, `.nvmrc`) — undici v8 is a
+  runtime dependency and requires it; previously a Node 20 consumer crashed
+  at import with no warning.
+- A repo-root `tsc` no longer writes shadow `.js` next to sources (root
+  tsconfig `noEmit`); package builds emit explicitly.
+- Migration SQL is CI-guarded against unintended `DROP INDEX` statements
+  (`scripts/check-migration-sql.mjs`).
+
 ## [0.23.0] — 2026-07-16
 
 ### Added
