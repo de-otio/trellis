@@ -74,6 +74,7 @@ import { linkReportRoutes } from "./routes/link-reports.js";
 import { mapRoutes } from "./routes/map.js";
 import { mediaRoutes } from "./routes/media.js";
 import { mediaReviewRoutes } from "./routes/media-review.js";
+import { provenanceCorrectionRoutes } from "./routes/provenance-correction.js";
 import { mediaMetadataVisibilityRoutes } from "./routes/media-metadata-visibility.js";
 import { mfaRoutes } from "./routes/mfa.js";
 import { notificationsRoutes } from "./routes/notifications.js";
@@ -416,6 +417,7 @@ const PORTED_ROUTE_SETS: ReadonlyArray<ReadonlyArray<Route>> = [
   tenantDirectorySearchRoutes, // T4 — /api/directory/search
   platformCategoryAdminRoutes, // T5 — /api/admin/platform-categories[...]
   mediaReviewRoutes, // T9 — /api/admin/media-review[...] (MODERATOR-only)
+  provenanceCorrectionRoutes, // D12 — POST /api/admin/provenance-correction (MODERATOR-only)
   // H12 — open social web. All gated OFF-by-default via featureToggleMiddleware;
   // curatedCollectionRoutes is distinct from the AP `collectionRoutes` above.
   emailSubscriptionRoutes, // /api/subscriptions/email[...] + /api/entities/:id/subscribers/summary

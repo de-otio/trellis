@@ -33,6 +33,9 @@ const REMINDER: ScopedModelMeta = {
     { field: "entityId", targetModel: "entity", targetTenantField: "tenantId" },
   ],
   jsonFields: ["payload"],
+  // An ext model's columns are the extension's own — nothing for core to protect.
+  // Core models it may reach (post, postMedia) carry PROVENANCE_PROTECTED_FIELDS.
+  protectedFields: [],
 };
 
 // ---------------------------------------------------------------------------
@@ -720,7 +723,13 @@ describe("buildScopedModelMetas — config validation", () => {
       { model: "dogReminder", tenantField: "tenantId", erasureSubjectField: "userId" },
     ]);
     expect(metas).toEqual([
-      { model: "dogReminder", tenantField: "tenantId", fkFields: [], jsonFields: [] },
+      {
+        model: "dogReminder",
+        tenantField: "tenantId",
+        fkFields: [],
+        jsonFields: [],
+        protectedFields: [],
+      },
     ]);
   });
 });

@@ -8,8 +8,31 @@
  * Hardening applied unconditionally on every invocation:
  *   - "-protocol_whitelist","file,pipe"   blocks SSRF (no http/https/rtmp/etc.)
  *   - "-t", String(maxDurationSeconds)    bounds processing time (from spec; never a literal)
- *   - "-dn"                               drop data tracks
- *   - "-sn"                               drop subtitle tracks
+ *   - "-dn"                               drop data STREAMS
+ *   - "-sn"                               drop subtitle streams
+ *   - "-map_metadata","-1"                drop the container metadata DICTIONARY
+ *
+ * `-dn` and `-map_metadata -1` are NOT the same control, and the difference was a
+ * live privacy gap. `-dn` drops data *streams*; it does nothing to the container's
+ * metadata dictionary, which is where MP4 actually keeps `©xyz` GPS coordinates
+ * (`location`), `comment`, `title` and friends. ffmpeg COPIES that dictionary
+ * input-to-output by default, so before `-map_metadata -1` a video kept its GPS
+ * coordinates through the "strip" while the image path was busy removing exactly
+ * that. Verified empirically against ffmpeg 8.1 with the production argv:
+ * `location=+50.0000+008.0000/` and `comment` both survived; with
+ * `-map_metadata -1` only the structural brands (`major_brand`, `minor_version`,
+ * `compatible_brands`, `encoder`) remain.
+ *
+ * That makes the video path consistent with the image re-encode, and consistent
+ * with the data-minimization rule in
+ * doc/02-technical/surveillance-threat-model/07-data-minimization.md.
+ *
+ * CONSEQUENCE FOR AI ACT ART. 50: this strip destroys provenance markings too. An
+ * XMP `uuid` box carrying `Iptc4xmpExt:DigitalSourceType` does NOT survive the
+ * transcode (verified: present in the input bytes, absent from the output). So a
+ * video's provenance MUST be read from the ORIGINAL bytes before this runs — the
+ * same read-then-strip ordering the image path uses. See
+ * lib/metadata/provenance-reader.ts and the worker's pre-transcode read.
  *
  * Video additionally gets:
  *   - "-c:v","libx264","-c:a","aac"       re-encode to safe codecs
@@ -81,10 +104,17 @@ export function buildFfmpegArgs(spec: FfmpegJobSpec): string[] {
     "-i",
     spec.inputPath,
 
-    // Drop data tracks (camera metadata, GPS, etc.) and subtitle tracks.
-    // Neither is needed for the re-encoded output and both can carry payloads.
+    // Drop data STREAMS and subtitle streams. Neither is needed for the
+    // re-encoded output and both can carry payloads.
     "-dn",
     "-sn",
+
+    // Drop the container metadata DICTIONARY — this is a SEPARATE control from
+    // -dn, and omitting it leaked GPS. See the module header for the empirical
+    // result. Also destroys AI-provenance markings, which is why provenance is
+    // read from the original bytes before the transcode.
+    "-map_metadata",
+    "-1",
   ];
 
   if (spec.kind === "video") {
@@ -148,6 +178,13 @@ export function buildPosterArgs(
 
     "-dn",
     "-sn",
+
+    // The poster is an IMAGE derived from the video, so it inherits the same
+    // metadata-dictionary strip. Without this, ffmpeg would copy the source's
+    // tags (incl. GPS) onto the poster — a strip on the video and a leak on the
+    // thumbnail is the worst of both.
+    "-map_metadata",
+    "-1",
 
     // Extract exactly one video frame.
     "-frames:v",

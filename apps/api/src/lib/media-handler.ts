@@ -7,6 +7,7 @@
 import type { Env } from "../env.js";
 import { getLogger, Logger } from "./logger.js";
 import { MediaMetrics } from "./media-metrics.js";
+import { mediaProvenanceView } from "./provenance/response.js";
 
 export class MediaHandler {
   private logger: Logger;
@@ -1479,6 +1480,12 @@ export class MediaHandler {
         }),
         // videoMetadata does not contain privacy-sensitive EXIF; gated separately
         videoMetadata: media.videoMetadata ?? undefined,
+        // Art. 50 provenance — DELIBERATELY NOT behind `metadataVisible`. That
+        // gate protects privacy-sensitive metadata (EXIF/GPS/camera identity);
+        // provenance is the opposite kind of thing, a disclosure meant to be
+        // seen. Intrinsic reading only: an author's declaration belongs to a
+        // *use* of the bytes (PostMedia), not to the bytes.
+        provenance: mediaProvenanceView(media),
         metadataVisible,
         locationVisible,
         createdAt: media.createdAt.toISOString(),

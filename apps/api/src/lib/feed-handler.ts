@@ -20,6 +20,11 @@ import { getLogger } from "./logger.js";
 
 import { DataRouter } from "./data-router.js";
 import { getFriendUserIds } from "./friend-ids.js";
+import {
+  attachmentProvenanceView,
+  textProvenanceView,
+} from "./provenance/response.js";
+import type { ProvenanceView } from "./provenance/types.js";
 import { Logger, type LoggerEnv } from "./logger.js";
 import type { TrellisRequestContext } from "./request-context.js";
 import { getSentimentDisplayMode, SentimentDisplayMode } from "./sentiment-display.js";
@@ -63,6 +68,18 @@ export interface FeedPost {
     place?: string;
   };
   contentWarnings?: string[];
+  /**
+   * Synthetic-content provenance of the post TEXT (AI Act Art. 50).
+   *
+   * ALWAYS PRESENT, never omitted: an absent field is indistinguishable from an
+   * old client or a pre-migration row, and clients need to tell "we don't know"
+   * (`UNKNOWN`) from "we didn't ask".
+   *
+   * `UNKNOWN` MUST render as nothing — never as "human-created". Rendering a
+   * human claim we never made is the one client-side mistake that turns this
+   * field into misinformation. Per-attachment provenance is on `media[].provenance`.
+   */
+  provenance: ProvenanceView;
   sentimentCounts?: Record<string, number>;
   sentimentTypes?: string[];                    // only when display mode = DISTRIBUTION
   sentimentDisplayMode?: string;                // "full" | "distribution" | "hidden"
@@ -84,6 +101,12 @@ export interface FeedPost {
       width: number | null;
       height: number | null;
     };
+    /**
+     * Provenance of THIS attachment (AI Act Art. 50) — per-attachment, not
+     * per-post, because one post can mix a human photo with an AI-generated one.
+     * Always present; `UNKNOWN` renders as nothing, never as "human".
+     */
+    provenance: ProvenanceView;
   }>;
 }
 
@@ -473,6 +496,10 @@ export class FeedHandler {
                       optimizedKey: true,
                       width: true,
                       height: true,
+                      // Art. 50 provenance. Adding a column to an existing
+                      // select on an already-joined row: no extra query, no
+                      // extra join (plan T3.0 join audit).
+                      embeddedSourceType: true,
                     },
                   },
                 },
@@ -623,6 +650,8 @@ export class FeedHandler {
                     optimizedKey: true,
                     width: true,
                     height: true,
+                    // Art. 50 provenance — see note above.
+                    embeddedSourceType: true,
                   },
                 },
               },
@@ -893,6 +922,10 @@ export class FeedHandler {
         | { lat: number; lng: number; place?: string }
         | undefined,
       contentWarnings: post.contentWarnings || [],
+      // Art. 50 disclosure. Emitted on EVERY post in the feed, not just on post
+      // detail: the duty is disclosure "at the latest at the first interaction or
+      // exposure", and for most users first exposure is the scroll.
+      provenance: textProvenanceView(post),
       // Safer Social Design: Apply sentiment display mode based on age tier
       ...(() => {
         if (session.ageTier && session.ageTier !== "ADULT") {
@@ -938,6 +971,7 @@ export class FeedHandler {
             width: pm.media.width,
             height: pm.media.height,
           },
+          provenance: attachmentProvenanceView(pm),
         })) || undefined,
     }));
   }

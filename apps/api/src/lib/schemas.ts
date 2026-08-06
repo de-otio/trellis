@@ -8,6 +8,24 @@
 import { z } from "zod";
 
 /**
+ * The source types a CLIENT may declare (AI Act Art. 50).
+ *
+ * `UNKNOWN` is omitted deliberately — it is the absence of a declaration, and
+ * the way to express that is to omit the field. Accepting an explicit `UNKNOWN`
+ * would give a client a way to *assert* "no signal" that is indistinguishable
+ * from silence, and on the edit path it would read as an attempt to walk a
+ * previous declaration back to nothing.
+ *
+ * `basis` is NOT declarable: see the note on `createPostSchema.provenance`.
+ */
+const declarableSourceType = z.enum([
+  "HUMAN_CREATED",
+  "AI_EDITED",
+  "AI_ASSISTED",
+  "AI_GENERATED",
+]);
+
+/**
  * Pagination query parameters
  */
 export const paginationSchema = z.object({
@@ -57,11 +75,30 @@ export const createPostSchema = z.object({
     })
     .optional(),
   contentWarnings: z.array(z.string()).max(10).optional(),
+  // Synthetic-content provenance of the post TEXT (AI Act Art. 50).
+  //
+  // `.strict()` is load-bearing, not stylistic: a client may declare WHAT the
+  // content is, never HOW WE KNOW it. `basis` is minted server-side, and
+  // accepting it here would let any client forge `PLATFORM_GENERATED` — our own
+  // strongest attestation. Strict mode REJECTS the extra key rather than
+  // silently dropping it, so a client attempting it gets a 400 instead of a
+  // false sense that its value was honoured.
+  provenance: z
+    .object({ sourceType: declarableSourceType })
+    .strict()
+    .optional(),
   media: z
     .array(
+      // NOT `.strict()` here, deliberately. Unknown keys on a media item are
+      // stripped as they always were — tightening it would 400 requests that
+      // are valid today, and there is nothing security-sensitive to smuggle:
+      // `basis` is not a field on this object.
       z.object({
         id: z.string(), // MediaFile ID
         alt: z.string().max(500).optional(), // Alt text for accessibility
+        // Per-attachment provenance: one post can mix a human photo with an
+        // AI-generated one, so this is per item, not per post.
+        sourceType: declarableSourceType.optional(),
       }),
     )
     .max(4) // Maximum 4 images per post
@@ -85,11 +122,44 @@ export const editPostSchema = z.object({
     .min(1, "Post text is required")
     .max(3000, "Post text exceeds maximum length"),
   visibility: z.enum(["public", "friends-only", "private"]).optional(),
+  // Provenance of the post TEXT, MONOTONIC: the handler accepts this only when it
+  // raises disclosure, never when it lowers it (AI Act Art. 50; see
+  // analysis/ai-act-transparency 03 §6). Omitting it leaves the stored value
+  // untouched — editing text never clears a declaration.
+  provenance: z
+    .object({ sourceType: declarableSourceType })
+    .strict()
+    .optional(),
+  /**
+   * Updates to EXISTING attachments. `id` is the `MediaFile` id, matching
+   * `createPostSchema.media[].id`.
+   *
+   * This used to be accepted and then silently DISCARDED — `editPost` wrote only
+   * text/editedAt/hasBlockedLinks/radius and never touched `PostMedia`, so a
+   * client correcting alt text got a 200 and no change. It is now honoured, for
+   * the two fields that can be changed safely:
+   *
+   *  - `alt` — an accessibility fix, and there was never a reason to refuse one.
+   *  - `sourceType` — a MONOTONIC RAISE only, for the author who realises after
+   *    posting that an image was AI-generated. Previously impossible: an
+   *    attachment declaration could only be made at creation, so an honest
+   *    late correction had nowhere to go. A downgrade attempt is refused exactly
+   *    as it is for post text.
+   *
+   * What this deliberately does NOT do is change the attachment SET. Adding or
+   * removing attachments here would mean creating and deleting `PostMedia` rows on
+   * the edit path, and `PostMedia` rows being created in exactly one place is what
+   * makes the detach/re-attach laundering route unreachable (REVIEW N1). Keeping
+   * edits to in-place field updates preserves that.
+   */
   media: z
     .array(
       z.object({
-        id: z.string().optional(), // Existing media ID
-        alt: z.string().max(500).optional(), // Alt text for accessibility
+        // Required now: an item with no id identified nothing, so it could only
+        // ever have been a no-op.
+        id: z.string().min(1),
+        alt: z.string().max(500).optional(),
+        sourceType: declarableSourceType.optional(),
       }),
     )
     .max(10) // Maximum 10 media attachments
@@ -104,6 +174,30 @@ export const createCommentSchema = z.object({
   // validation instead of passing min(1) and then trimming to "" downstream
   // (fail-closed: reject at the schema boundary, never persist empty content).
   text: z.string().trim().min(1).max(3000),
+  // Synthetic-content provenance of the comment TEXT (AI Act Art. 50, D14).
+  // Identical contract to `createPostSchema.provenance`, for the same reason:
+  // `.strict()` so a client cannot supply `basis` and forge our own
+  // PLATFORM_GENERATED attestation. Comment media is not a feature (nothing
+  // creates a PostCommentMedia row), so there is no per-attachment field here.
+  provenance: z
+    .object({ sourceType: declarableSourceType })
+    .strict()
+    .optional(),
+});
+
+/**
+ * Edit comment request body.
+ *
+ * Provenance is MONOTONIC, exactly as on `editPostSchema`: accepted only when it
+ * raises disclosure, never when it lowers it. Omitting it leaves the stored value
+ * untouched — editing a comment never clears a declaration.
+ */
+export const editCommentSchema = z.object({
+  text: z.string().trim().min(1).max(3000),
+  provenance: z
+    .object({ sourceType: declarableSourceType })
+    .strict()
+    .optional(),
 });
 
 /**

@@ -409,3 +409,53 @@ telemetry must use the host's sanctioned, retention-bound audit/event paths.
 This is a guarantee about the **core API surface and server-side handling** — it
 is not a promise about what a vertical chooses to embed in its own client
 applications.
+
+## Review criterion: synthetic-content provenance disclosure
+
+Trellis records whether content is AI-generated on `Post.textSourceType`,
+`PostMedia.declaredSourceType` and `MediaFile.embeddedSourceType`, and emits a
+`provenance` object on every post and media response. Under **EU AI Act
+Article 50** (applicable since 2 August 2026) that disclosure is a legal duty for
+the party publishing the content, so extensions are a review criterion here too:
+
+> An extension that generates or transforms user-visible content with an AI
+> system **must** record provenance through the core provenance API, and **must
+> not** write the provenance columns directly, suppress an existing value, or
+> downgrade one. An extension that puts an AI system into service under the
+> vertical's name makes that vertical a **provider** under Article 50(2), which
+> carries a machine-readable marking duty for the system's output.
+
+Two properties of the core design that an extension must not defeat:
+
+- **Disclosure is monotonic.** A value may move toward more disclosure, never
+  less. The author-facing edit path enforces this; downward correction is a
+  staff-reviewed, audited action.
+- **`UNKNOWN` is not "human".** It means no signal. Never present it as a
+  positive claim of human authorship, and never derive one from the absence of a
+  marking.
+
+**This criterion is enforced in code, not by review alone.** `ScopedDb` exposes
+`post` and `postMedia` with full write operations, and monotonicity lives in the
+request handlers — which the scoped surface bypasses. So the provenance columns
+are now a **protected-field set** on the scoped surface: `create`, `createMany`,
+`update`, `updateMany` and `upsert` are **rejected** when the payload so much as
+mentions `textSourceType`, `textBasis`, `declaredSourceType`, `declaredBasis`,
+`embeddedSourceType` or `provenanceExamined`. You will get a `ScopedDbError`
+naming the field.
+
+Three things worth knowing about how that guard behaves:
+
+- **It rejects on presence, not on value.** `{ textSourceType: undefined }` is
+  refused even though Prisma would treat it as "omit". The guard exists to make
+  the *intent* fail loudly.
+- **It is a total ban, not a monotonicity check.** The scoped planner is a pure
+  function with no database access, so it cannot compare your value against the
+  stored one. A raise is refused along with a downgrade — set provenance by
+  calling the core post/comment API, which mints `basis` server-side. An extension
+  able to write `basis` could forge `PLATFORM_GENERATED`, the platform's own
+  strongest attestation.
+- **Reads are untouched.** You may select, filter and render provenance freely.
+  Hiding a disclosure from the code that renders it would defeat the point.
+
+Extension review still blocks on a violation — the guard covers the data layer,
+not an extension that ships its own client-side AI feature.
