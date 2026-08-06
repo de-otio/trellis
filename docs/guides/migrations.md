@@ -47,8 +47,7 @@ follows the operational guidance in Braintree's
 ["Safe Operations For High Volume PostgreSQL"](https://braintreepayments.github.io/pgrst/2018/11/13/safe-operations-for-high-volume-postgresql.html),
 [`strong_migrations`](https://github.com/ankane/strong_migrations), and
 [`squawk`](https://squawkhq.com/) (the linter wired into CI — see
-[`migration-lint.yml`](../../.github/workflows/migration-rehearsal.yml)'s
-sibling gate).
+[`migration-lint.yml`](../../.github/workflows/migration-lint.yml)).
 
 | Change | Safe? | Notes |
 |---|---|---|

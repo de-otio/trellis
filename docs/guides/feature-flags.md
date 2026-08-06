@@ -88,6 +88,54 @@ feature configuration for a request (region from the `region` query parameter
 or detected from the request), falling back to the static region config if the
 database is unavailable.
 
+## Platform capability flags (the `platform` block)
+
+`GET /api/feature-flags` additionally serves a `platform` block: one boolean
+per platform-level feature toggle, resolved from `FeatureToggleService`
+**global** values only —
+
+```json
+"platform": {
+  "posts": true,
+  "comments": true,
+  "friends": true,
+  "sentiments": true,
+  "feeds": true,
+  "map": true,
+  "events": false,
+  "collections": false,
+  "email_subscriptions": false,
+  "year_in_review": false,
+  "entity_profiles": true
+}
+```
+
+This is additive: the existing `region`, `features`, `endpoints`, and
+`timeouts` fields are unchanged, so an existing client that ignores unknown
+top-level keys (a tolerant reader — see
+[Client Compatibility](client-compatibility.md)) is unaffected.
+
+**Global-only, by design.** This route is unauthenticated and carries no
+tenant context, so a tenant-scoped override on one of these toggle keys is
+**not** reflected in this block — it continues to act server-side at the
+point of enforcement (`featureToggleMiddleware`, described below). A toggle
+absent from the database defaults to `false` here, the same safe default
+`FeatureFlagsManager` uses.
+
+The eleven keys map to the underlying toggle rows by appending `_enabled`
+(`posts` → `posts_enabled`, `entity_profiles` → `entity_profiles_enabled`,
+etc.) — the same toggle rows described under
+[Capability toggles](#capability-toggles-open-social-web) below and seeded by
+`seed:feature-toggles`.
+
+This block is resolved by a standalone `getPlatformFlags()` function
+(`apps/api/src/lib/feature-flags.ts`), not by `FeatureFlagsManager` above:
+that class's `FeatureFlags` shape uses an incompatible key (`entities`, not
+`entity_profiles`) for one of these toggles, is missing several of the keys
+this block requires, and its exact shape is pinned by an existing test. See
+that function's doc comment for the full reasoning; `FeatureFlagsManager`
+remains otherwise-dead code (no route imports it for its own shape).
+
 ## Capability toggles: Open Social Web
 
 Three capabilities ship **off by default** behind global toggles and are gated
