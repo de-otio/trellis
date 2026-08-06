@@ -118,6 +118,55 @@ function resolvePostRadius(body: {
 }
 
 /**
+ * Whether the operator's global public-posting kill switch permits a post at
+ * this radius.
+ *
+ * ONE definition for every site that creates or re-scopes a post, for the same
+ * reason `mayFederatePost` exists below: the gate was open-coded at two sites
+ * (createPost, editPost) and simply absent from a third (createSystemPost), so
+ * an operator who switched public posting off still got public, federating
+ * posts from the events companion-post path — `planCompanionPost` maps an event
+ * with `visibility: "PUBLIC"` to `radius: "SHOUT"`, and event visibility is
+ * caller-supplied with no privilege check beyond authentication.
+ *
+ * Fail-closed by construction: `isEnabled` returns false when the toggle is
+ * unseeded or unreadable, so an unknown state denies public reach rather than
+ * granting it.
+ *
+ * Returns true when the post is permitted. Callers at an HTTP boundary turn
+ * false into 403 PUBLIC_POSTING_DISABLED; non-HTTP callers must refuse too —
+ * silently downgrading the radius would publish under a scope the author did
+ * not choose.
+ *
+ * NOTE (audience model): this keys on `radius === "SHOUT"`, which is the field
+ * scheduled for removal. Re-key it onto the audience axes BEFORE `radius` is
+ * dropped, or the kill switch loses its input and the rebuild becomes a net
+ * regression in operator control — see trellis-internal plans/audience-and-reach §5.
+ */
+export async function publicPostingAllowed(
+  radius: string | null | undefined,
+  env: Env,
+): Promise<boolean> {
+  if (radius !== "SHOUT") return true;
+  const { FeatureToggleService } = await import("./feature-toggle-service.js");
+  const { createPrisma } = await import("../db.js");
+  const toggleService = new FeatureToggleService(createPrisma(env));
+  return await toggleService.isEnabled("global_public_posting_enabled");
+}
+
+/** The single 403 body for a post refused by the public-posting kill switch. */
+export function publicPostingDisabledResponse(): Response {
+  return new Response(
+    JSON.stringify({
+      error: "PUBLIC_POSTING_DISABLED",
+      message:
+        'Public posting is currently disabled. Please use "Friends Only" or "Private" visibility.',
+    }),
+    { status: 403, headers: { "content-type": "application/json" } },
+  );
+}
+
+/**
  * Whether a post may be federated to ActivityPub.
  *
  * ONE definition for all three delivery sites — createPost, editPost and
@@ -212,27 +261,8 @@ export class PostHandler {
       // Check if public posting is enabled globally. radius SHOUT is the
       // legacy visibility "public" — gate both spellings identically
       // (fail-closed: SHOUT must not bypass the toggle).
-      if (radius === "SHOUT") {
-        const { FeatureToggleService } = await import(
-          "./feature-toggle-service.js"
-        );
-        const { createPrisma } = await import("../db.js");
-        const db = createPrisma(env);
-        const toggleService = new FeatureToggleService(db);
-        const publicPostingEnabled = await toggleService.isEnabled(
-          "global_public_posting_enabled",
-        );
-
-        if (!publicPostingEnabled) {
-          return new Response(
-            JSON.stringify({
-              error: "PUBLIC_POSTING_DISABLED",
-              message:
-                'Public posting is currently disabled. Please use "Friends Only" or "Private" visibility.',
-            }),
-            { status: 403, headers: { "content-type": "application/json" } },
-          );
-        }
+      if (!(await publicPostingAllowed(radius, env))) {
+        return publicPostingDisabledResponse();
       }
 
       // Check if content moderation is enabled via feature toggle
@@ -1531,20 +1561,8 @@ export class PostHandler {
 
       // Gate an edit that makes the post public (radius SHOUT) behind the same
       // global toggle create uses — fail-closed, nothing persisted if disabled.
-      if (targetRadius === "SHOUT") {
-        const publicPostingEnabled = await toggleService.isEnabled(
-          "global_public_posting_enabled",
-        );
-        if (!publicPostingEnabled) {
-          return new Response(
-            JSON.stringify({
-              error: "PUBLIC_POSTING_DISABLED",
-              message:
-                'Public posting is currently disabled. Please use "Friends Only" or "Private" visibility.',
-            }),
-            { status: 403, headers: { "content-type": "application/json" } },
-          );
-        }
+      if (!(await publicPostingAllowed(targetRadius, env))) {
+        return publicPostingDisabledResponse();
       }
 
       // Content moderation on edited text (if moderation is enabled) through
@@ -2248,6 +2266,20 @@ export class PostHandler {
     env: Env,
   ): Promise<{ postId: string }> {
     const requestId = generateRequestId();
+
+    // The operator kill switch applies here too. This path had no gate at all,
+    // so with public posting switched off any authenticated user could still
+    // publish a SHOUT post — and federate it — by creating an event with
+    // `visibility: "PUBLIC"`, which planCompanionPost maps to radius SHOUT.
+    //
+    // Refuse rather than silently narrow the radius: a companion post published
+    // under a scope the caller did not ask for is its own defect, and the caller
+    // (PostFeedAnnouncer) can surface the refusal.
+    if (!(await publicPostingAllowed(input.radius, env))) {
+      throw new Error(
+        "createSystemPost: public posting is disabled by global_public_posting_enabled",
+      );
+    }
 
     const post = await DataRouter.createPost(
       {
