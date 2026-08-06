@@ -98,7 +98,11 @@ describe("Report erasure (GDPR Art. 17, P4)", () => {
       data: { reportType: "ACCOUNT", resourceType: "user", resourceId: subject, reporterUserId: reporter, status: "pending" },
     });
 
-    const result = await deleteUserData(prisma, subject);
+    const result = await deleteUserData(prisma, subject, {
+      // Any non-empty key satisfies the fail-closed gate; the tombstone's
+      // irreversibility is proven by the unit HMAC-seam tests, not here.
+      pseudonymSecret: "integration-test-tombstone-key",
+    });
     expect(result.accountReportsPseudonymized).toBe(1);
 
     // Filed-by-subject reports are gone (reporter cascade).

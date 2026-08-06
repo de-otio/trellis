@@ -15,7 +15,7 @@
  * secrets the pollers DO start (so the failure case isn't vacuous).
  */
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   getLambdaPrisma: vi.fn(),
@@ -104,9 +104,25 @@ vi.mock("../../../../worker/src/shutdown.js", () => ({
 import { main } from "../../../../worker/src/main.js";
 import { StartupValidationError } from "../../../../worker/src/startup-validation.js";
 
+// Park the nightly cron: this suite proves boot ORDERING (validation before
+// pollers), not port wiring. With nightly enabled, assertNightlyPortsWired
+// correctly refuses to boot without an identity-admin port (plan 015 WS-B),
+// which would fail the green-path sanity for reasons unrelated to ordering.
+// The guard itself is covered by nightly-ports-guard.test.ts.
+const PRIOR_DISABLED_CRONS = process.env.WORKER_DISABLED_CRONS;
+process.env.WORKER_DISABLED_CRONS = "nightly";
+
 afterEach(() => {
   vi.clearAllMocks();
   mocks.pollerInstances.length = 0;
+});
+
+afterAll(() => {
+  if (PRIOR_DISABLED_CRONS === undefined) {
+    delete process.env.WORKER_DISABLED_CRONS;
+  } else {
+    process.env.WORKER_DISABLED_CRONS = PRIOR_DISABLED_CRONS;
+  }
 });
 
 describe("main() boot ordering (critic F5)", () => {
