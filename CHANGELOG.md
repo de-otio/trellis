@@ -15,6 +15,116 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ## [Unreleased]
 
+### Added
+
+- **Client-version policy endpoint + forced-upgrade backstop.**
+  `GET /api/app/version-policy` (new, unauthenticated, session-free, no
+  DB/KV read — the whole response comes from four optional env vars,
+  `Cache-Control: public, max-age=300`, `Access-Control-Allow-Origin: *`
+  without credentials) serves `minimumVersion`, `recommendedVersion`, and
+  `storeUrls.{android,ios}` — all nullable; unset means the mechanism is
+  dormant. Configured via four new optional env vars, boot-validated and
+  fail-closed on a malformed value: `CLIENT_MIN_SUPPORTED_VERSION`,
+  `CLIENT_RECOMMENDED_VERSION` (bounded semver `x.y.z[+-suffix]`, ≤64
+  chars), `CLIENT_STORE_URL_ANDROID`, `CLIENT_STORE_URL_IOS` (must be
+  `https:` on `play.google.com` / `apps.apple.com` respectively). Clients
+  send `X-Client-Version` / `X-Client-Platform` on every call; a new 426
+  backstop middleware returns a `StructuredError` body
+  (`UPGRADE_REQUIRED`, no URL in the body) when a configured minimum is
+  set and a parsed client version is strictly below it — equal versions
+  are allowed, `OPTIONS` is never intercepted, and absent/unparseable
+  headers pass through untouched (federation peers, health probes,
+  curl). Both new headers are added to `Access-Control-Allow-Headers` at
+  every CORS site the request/preflight path uses (`middleware.ts`,
+  `cors-handler.ts`), now sourced from one shared
+  `CORS_ALLOWED_REQUEST_HEADERS` constant. Version telemetry is emitted
+  only for a strictly parsed header, re-serialized from the parsed
+  triple (never the raw string), platform coerced to a closed vocabulary,
+  and capped at 100 distinct version dimensions per process. See the new
+  [Client Compatibility guide](docs/guides/client-compatibility.md).
+- **`platform` block on `GET /api/feature-flags`.** Additive: one boolean
+  per platform-level feature toggle (`posts`, `comments`, `friends`,
+  `sentiments`, `feeds`, `map`, `events`, `collections`,
+  `email_subscriptions`, `year_in_review`, `entity_profiles`), resolved
+  from `FeatureToggleService` **global** values only — this route is
+  unauthenticated and carries no tenant context, so per-tenant overrides
+  are not reflected here (they continue to act server-side at
+  enforcement). Existing response fields are unchanged. See
+  [Feature Flags](docs/guides/feature-flags.md).
+- **`extensionApiVersion` startup compatibility check.** `TrellisExtension`
+  gains an optional `extensionApiVersion` field — the
+  `@de-otio/trellis-extension-api` semver an extension was built against
+  (normally just `EXTENSION_API_VERSION` re-exported from the package).
+  Core validates it before serving: absent → one warning, never fatal;
+  a differing major (or, while the extension API is still `0.x`, a
+  differing minor) → **fails startup**, naming both versions; patch
+  drift → logged only; an unparseable declared value → a clean
+  validation failure, never a deep throw. See
+  [Extension API: `extensionApiVersion`](docs/reference/extension-api.md#extensionapiversion).
+- **squawk migration lint gate** (`migration-lint.yml`, new, `pull_request`
+  only): lints added/changed Prisma migration SQL (pre-existing migrations
+  exempt) against `.squawk.toml` (PG 16) using a pinned, checksum-verified
+  squawk `v2.62.0` binary — never `npx`/`latest`. Local reproduction via
+  `apps/api/scripts/lint-migrations.sh`.
+- **Migrations guide expansion**: safe-vs-unsafe Postgres DDL reference
+  table, the `lock_timeout` prologue convention for hand-edited
+  migrations, an expanded expand-contract sequence (dual-write →
+  backfill → shadow-read → toggle-flip → soak → contract, with an RDS
+  snapshot before the contract step), and a documented, time-boxed
+  pre-launch exemption from staged expand-contract. See
+  [Migrations](docs/guides/migrations.md).
+- **`migration-rehearsal.sh` + `migration-rehearsal.yml`** (new,
+  `workflow_dispatch` only): times `prisma migrate deploy` against a
+  configurable time budget so a migration touching a large/hot table can
+  be rehearsed before it ships.
+- **OpenAPI additivity gate** (`openapi-gate.yml`, new, `pull_request`
+  only): a committed snapshot (`apps/api/openapi.snapshot.json`) and a
+  pure, unit-tested classifier
+  (`apps/api/scripts/openapi-additivity-core.mjs`) fail a PR that removes
+  a path, method, or parameter from the currently-generated
+  `publicSpec: true` surface (field/type/enum/required-addition rules
+  are built and unit-tested against synthetic documents; they become
+  live once the OpenAPI generator emits richer schema detail — see that
+  script's own documented limitation). `npm run openapi:snapshot` /
+  `openapi:check`.
+- **Public API type snapshots + version lockstep gate**
+  (`api-snapshot-gate.yml`, new, `pull_request` only): committed `.d.ts`
+  snapshots for both publishable packages
+  (`packages/extension-api/etc/public-api.snapshot.d.ts`,
+  `apps/api/etc/public-api.snapshot.d.ts`), diff-gated in CI
+  (`npm run api-snapshot:update` / `:check`), plus
+  `check-extension-api-version.mjs` failing the build if
+  `EXTENSION_API_VERSION` and `packages/extension-api/package.json`'s
+  `version` drift apart.
+- **Backfill and rebuild script conventions**
+  (`apps/api/scripts/backfills/`, `apps/api/scripts/rebuilds/`): READMEs
+  documenting the batched/idempotent/throttled/resumable/observable
+  rules for one-time backfills versus repeatable denormalized-counter
+  rebuilds, a backfill `_template.ts`, and a worked rebuild example,
+  `rebuild-collection-item-count.ts` (batched, idempotent, `--dry-run`
+  by default). All seven denormalized counters in the current schema are
+  enumerated in the rebuilds README, with two documented as **not**
+  mechanically rebuildable from current rows (recorded, not
+  implemented — see the README for why).
+- New [Client Compatibility guide](docs/guides/client-compatibility.md):
+  the additive-only API evolution rules, the version-policy contract,
+  the `platform` flags block, and the alias-for-one-release standing
+  rule for cross-repo renames at either the HTTP or the npm boundary.
+
+### Changed
+
+- **`@de-otio/trellis-extension-api` 0.8.0.** Additive minor bump (from
+  0.7.0): adds the optional `TrellisExtension.extensionApiVersion` field
+  (see the startup check above and the
+  [Extension API reference](docs/reference/extension-api.md#extensionapiversion)).
+  No existing extension needs a change to keep working; declaring the
+  field is recommended, not required. **`apps/api`'s own dependency
+  constraint moves from `^0.7.0` to `^0.8.0`** — a caret range on a `0.x`
+  version does not accept a minor bump, so this was required for
+  `npm install` to resolve; consuming applications that pin
+  `@de-otio/trellis-extension-api` themselves (rather than accepting
+  trellis's own dependency resolution) should move to `^0.8.0` too.
+
 ## [0.24.0] — 2026-08-06
 
 Closes out the `0.24.0-alpha.0`–`alpha.3` series; entries below cover

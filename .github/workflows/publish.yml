@@ -116,10 +116,12 @@ jobs:
       # cleans up afterwards. We rely on this — do NOT add
       # --ignore-scripts.
       #
-      # No --provenance: npm provenance requires a public source repo,
-      # but this repo is private. TP (OIDC auth) still works; we just
-      # skip the sigstore attestation. If the repo is later made public,
-      # add --provenance back.
+      # --provenance: this repo (de-otio/trellis) is public, so npm can
+      # verify the sigstore provenance bundle against the GitHub Actions
+      # source repository. (npm provenance 422s with "Unsupported GitHub
+      # Actions source repository visibility: private" on a private repo —
+      # not applicable here. If this workflow is ever reused from a fork
+      # or a private mirror, drop --provenance there.)
       - name: Publish ${{ steps.pkg.outputs.name }}@${{ steps.pkg.outputs.expected_version }}
         working-directory: ${{ steps.pkg.outputs.dir }}
-        run: npm publish --access public --tag "${{ steps.disttag.outputs.tag }}"
+        run: npm publish --access public --tag "${{ steps.disttag.outputs.tag }}" --provenance
