@@ -40,7 +40,7 @@ jobs:
     steps:
       # Action majors verified node24 per the pinned shas already vetted in
       # ci.yml (checkout v7 / setup-node v5).
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Fetch verified Keycloak magic-link provider (sha256 + GPG)
         timeout-minutes: 5
