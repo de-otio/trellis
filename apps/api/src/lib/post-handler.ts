@@ -13,6 +13,8 @@ import { getLogger, generateRequestId, Logger, type LoggerEnv } from "./logger.j
 import type { TrellisRequestContext } from "./request-context.js";
 import type { Session } from "./session-cookie.js";
 import type { PostRadius } from "./graph/types.js";
+import type { SyntheticSourceType } from "./provenance/types.js";
+import type { DisclosurePosture } from "./provenance/posture.js";
 
 export interface Env {
   DATABASE_URL: string;
@@ -29,6 +31,13 @@ export interface Env {
   // Federation master switch — when falsy, outbound ActivityPub delivery is
   // skipped. Mirrors `ACTIVITYPUB_ENABLED` on the canonical Env (see ../env.ts).
   ACTIVITYPUB_ENABLED?: boolean;
+  // Art. 50 disclosure-posture platform default. Mirrors `provenance` on the
+  // canonical Env (see ../env.ts). OPTIONAL here because this is a structural
+  // subset that tests construct by hand; absent means the posture gate uses
+  // DEFAULT_DISCLOSURE_POSTURE, which is the same value the canonical resolver
+  // falls back to — so a hand-built Env behaves like production, not like
+  // "posture disabled".
+  provenance?: { defaultDisclosurePosture?: DisclosurePosture };
 }
 
 export interface CreatePostRequest {
@@ -181,6 +190,24 @@ export class PostHandler {
       // Resolve the posting radius up front: `radius` wins, legacy
       // `visibility` maps onto it, default NORMAL (see resolvePostRadius).
       const radius = resolvePostRadius(body);
+
+      // Art. 50 disclosure POSTURE (D15). A tenant on REQUIRED_FOR_AI is a
+      // professional deployer with a live Art. 50(4) duty, and for it an omitted
+      // declaration is a validation failure rather than a silent UNKNOWN. Runs
+      // before any moderation or media work so a refusal costs nothing.
+      {
+        const { createPrisma } = await import("../db.js");
+        const { gateDeclarationOrRespond } = await import(
+          "./provenance/posture-gate.js"
+        );
+        const postureResponse = await gateDeclarationOrRespond(
+          createPrisma(env),
+          activeTenantId,
+          body.provenance?.sourceType,
+          env.provenance?.defaultDisclosurePosture,
+        );
+        if (postureResponse) return postureResponse;
+      }
 
       // Check if public posting is enabled globally. radius SHOUT is the
       // legacy visibility "public" — gate both spellings identically
@@ -482,6 +509,10 @@ export class PostHandler {
           contentWarnings: body.contentWarnings || [],
           hasBlockedLinks: hasBlockedLinks,
           media: body.media, // NEW: Pass media to DataRouter
+          // Art. 50: the author's declaration for the post TEXT. Only the
+          // sourceType crosses this boundary — `basis` is minted inside
+          // DataRouter, server-side, so no client can forge PLATFORM_GENERATED.
+          textSourceType: body.provenance?.sourceType,
         },
         region,
         env,
@@ -1377,6 +1408,98 @@ export class PostHandler {
         );
       }
 
+      // Art. 50 provenance MONOTONICITY (analysis/ai-act-transparency 03 §6).
+      //
+      // A declaration may move toward MORE disclosure, never toward less. That is
+      // what makes "once AI was in the loop, disclosure is permanent" real, and it
+      // blocks the obvious evasion: declare, post, then quietly undeclare once the
+      // post has traction.
+      //
+      // Enforced against the STORED row, never a client-sent previous value.
+      // Omitting `provenance` leaves the stored value untouched, so editing text
+      // can never clear a declaration by accident.
+      //
+      // Placed AFTER the ownership check on purpose: a 409 here is observable, so
+      // running it first would let a non-owner distinguish "this post carries a
+      // declaration" (409) from "not yours" (403) — an information leak about
+      // someone else's post.
+      //
+      // Downward correction is deliberately NOT on this path. A genuine
+      // mis-declaration is corrected by a staff-reviewed audited action —
+      // POST /api/admin/provenance-correction (D12) — which is the only route
+      // that can reduce a disclosure, and the reason this one does not need to.
+      let provenanceTransition:
+        | { readonly from: string; readonly to: string }
+        | undefined;
+      if (body.provenance) {
+        const { disclosureStrength } = await import("./provenance/resolve.js");
+        const current = String(
+          (post as Record<string, unknown>).textSourceType ?? "UNKNOWN",
+        ) as SyntheticSourceType;
+        const next = body.provenance.sourceType as SyntheticSourceType;
+        if (disclosureStrength(next) < disclosureStrength(current)) {
+          return new Response(
+            JSON.stringify({
+              error: "PROVENANCE_NOT_REDUCIBLE",
+              message:
+                "An AI-disclosure declaration cannot be reduced. Contact support if it was set in error.",
+            }),
+            { status: 409, headers: { "content-type": "application/json" } },
+          );
+        }
+        if (next !== current) {
+          provenanceTransition = { from: current, to: next };
+        }
+      }
+
+      // The same monotonicity rule for PER-ATTACHMENT declarations, checked here
+      // rather than at write time so a reduction attempt gets the same 409 the
+      // text path gives — and gets it BEFORE the post text is committed. Doing
+      // this after the update would leave the caller with a 409 and a text edit
+      // that had already landed.
+      //
+      // Also after the ownership check, for the same leak reason.
+      const attachmentDeclarations = (body.media ?? []).filter(
+        (m): m is typeof m & { sourceType: string } =>
+          m.sourceType !== undefined,
+      );
+      if (attachmentDeclarations.length > 0) {
+        const { disclosureStrength } = await import("./provenance/resolve.js");
+        const { createPrisma: createPrismaForCheck } = await import("../db.js");
+        const stored = await createPrismaForCheck(env).postMedia.findMany({
+          where: {
+            postId,
+            mediaId: { in: attachmentDeclarations.map((m) => m.id) },
+          },
+          select: { mediaId: true, declaredSourceType: true },
+        });
+        const currentByMediaId = new Map(
+          stored.map((row) => [row.mediaId, row.declaredSourceType]),
+        );
+        for (const item of attachmentDeclarations) {
+          // An id that is not attached to this post has no stored value to
+          // compare against; treat it as UNKNOWN so any declaration is a raise,
+          // and let the scoped write below match zero rows and report
+          // `applied: false`. A 404 here would tell the caller which media ids
+          // are attached to a post they can already read anyway, but it would also
+          // fail an otherwise-valid text edit over a stale client cache.
+          const current = (currentByMediaId.get(item.id) ??
+            "UNKNOWN") as SyntheticSourceType;
+          const next = item.sourceType as SyntheticSourceType;
+          if (disclosureStrength(next) < disclosureStrength(current)) {
+            return new Response(
+              JSON.stringify({
+                error: "PROVENANCE_NOT_REDUCIBLE",
+                message:
+                  "An AI-disclosure declaration on an attachment cannot be reduced. Contact support if it was set in error.",
+                details: { mediaId: item.id },
+              }),
+              { status: 409, headers: { "content-type": "application/json" } },
+            );
+          }
+        }
+      }
+
       // Check if post is deleted
       if ((post as any).deletedAt) {
         return new Response(
@@ -1502,6 +1625,13 @@ export class PostHandler {
             updateData.radius = targetRadius;
           }
 
+          // Art. 50: only a monotonic RAISE reaches here (checked above). `basis`
+          // is minted server-side — the client declares WHAT, never HOW WE KNOW.
+          if (provenanceTransition) {
+            updateData.textSourceType = provenanceTransition.to;
+            updateData.textBasis = "AUTHOR_DECLARED";
+          }
+
           return await db.post.update({
             where: { id: postId },
             data: updateData,
@@ -1534,6 +1664,152 @@ export class PostHandler {
           },
         },
       );
+
+      // Apply per-attachment updates, if any. This block is why
+      // `editPostSchema.media` is no longer a lie: it used to be accepted and
+      // discarded.
+      //
+      // Two fields only, and no change to the attachment SET — `PostMedia` rows
+      // are created in exactly one place, which is what makes the detach/
+      // re-attach laundering route unreachable (REVIEW N1). In-place updates keep
+      // that property.
+      //
+      // Every write is scoped by `postId` as well as `mediaId`, so a `mediaId`
+      // belonging to someone else's post matches zero rows rather than being
+      // updated. Ownership of the POST was already checked above.
+      const attachmentUpdates: {
+        mediaId: string;
+        alt: boolean;
+        provenanceRaised: boolean;
+      }[] = [];
+      if (body.media && body.media.length > 0) {
+        const { weakerThan } = await import("./provenance/resolve.js");
+        const { createPrisma } = await import("../db.js");
+        const db = createPrisma(env);
+
+        for (const item of body.media) {
+          let altApplied = false;
+          let provenanceRaised = false;
+          try {
+            if (item.alt !== undefined) {
+              const res = await db.postMedia.updateMany({
+                where: { postId, mediaId: item.id },
+                data: { alt: item.alt },
+              });
+              altApplied = res.count > 0;
+            }
+
+            if (item.sourceType !== undefined) {
+              // The monotonic raise as ONE atomic statement: the `in` guard means
+              // a row already carrying an equal-or-stronger declaration matches
+              // zero rows. Same primitive as the CAS dedup raise — a
+              // read-then-write here would race two concurrent edits.
+              const res = await db.postMedia.updateMany({
+                where: {
+                  postId,
+                  mediaId: item.id,
+                  declaredSourceType: {
+                    in: weakerThan(item.sourceType as SyntheticSourceType),
+                  },
+                },
+                data: {
+                  declaredSourceType: item.sourceType,
+                  declaredBasis: "AUTHOR_DECLARED",
+                },
+              });
+              provenanceRaised = res.count > 0;
+            }
+          } catch (attachmentError) {
+            // An attachment update must not fail an otherwise-good text edit: the
+            // post is already committed by this point. Logged, and reported back
+            // as not-applied so the client can retry rather than assume success.
+            this.logger.warn(
+              "[PostHandler] attachment update failed (text edit still applied)",
+              { postId, mediaId: item.id, error: attachmentError },
+            );
+          }
+          attachmentUpdates.push({
+            mediaId: item.id,
+            alt: altApplied,
+            provenanceRaised,
+          });
+
+          // Audit each attachment raise, same sanctioned path and same
+          // PII-minimised actor as the text transition below. Emitted only when a
+          // row actually changed, so a no-op edit produces no audit noise.
+          if (provenanceRaised) {
+            try {
+              const { TrellisAuditLogger } = await import("./audit-composer.js");
+              const { PROVENANCE_CHANGED } = await import("./audit-actions.js");
+              await new TrellisAuditLogger(env).log(
+                {
+                  type: "data_update",
+                  action: PROVENANCE_CHANGED,
+                  resource: "post_media",
+                  resourceId: item.id,
+                  userId: session.userId,
+                  region,
+                  metadata: {
+                    field: "declaredSourceType",
+                    to: item.sourceType,
+                    basis: "AUTHOR_DECLARED",
+                    postId,
+                  },
+                  severity: "low",
+                  success: true,
+                },
+                env,
+              );
+            } catch (auditError) {
+              this.logger.warn(
+                "[PostHandler] attachment provenance audit failed (edit still applied)",
+                auditError,
+              );
+            }
+          }
+        }
+      }
+
+      // Art. 50: audit every provenance transition (T2.4). Emitted only when the
+      // value actually changed, through the audit-composer facade — one of the two
+      // sanctioned paths (CLAUDE.md rule 7).
+      //
+      // `userId`, never email: the actor is PII-minimised. No ipAddress/userAgent
+      // either — a provenance change needs neither, and the analysis forbids
+      // opening a new client-metadata path for it (03 §8).
+      //
+      // Off the critical path: a failed audit write must not fail the edit, but it
+      // is logged rather than swallowed silently.
+      if (provenanceTransition) {
+        try {
+          const { TrellisAuditLogger } = await import("./audit-composer.js");
+          const { PROVENANCE_CHANGED } = await import("./audit-actions.js");
+          await new TrellisAuditLogger(env).log(
+            {
+              type: "data_update",
+              action: PROVENANCE_CHANGED,
+              resource: "post",
+              resourceId: postId,
+              userId: session.userId,
+              region,
+              metadata: {
+                field: "textSourceType",
+                from: provenanceTransition.from,
+                to: provenanceTransition.to,
+                basis: "AUTHOR_DECLARED",
+              },
+              severity: "low",
+              success: true,
+            },
+            env,
+          );
+        } catch (auditError) {
+          this.logger.warn(
+            "[PostHandler] provenance audit emission failed (edit still applied)",
+            { postId, error: auditError },
+          );
+        }
+      }
 
       // ActivityPub sync for public posts only (federation must be enabled).
       // Shares mayFederatePost with the create and system-delivery sites so the
@@ -1656,6 +1932,33 @@ export class PostHandler {
         },
       );
 
+      // `updatedPost.media` was included in the update query, i.e. read BEFORE
+      // the per-attachment writes above — so it would echo stale alt text and a
+      // stale declaration. Re-read only when we actually changed something.
+      let mediaRows: any[] = (updatedPost as any).media ?? [];
+      if (attachmentUpdates.length > 0) {
+        try {
+          const { createPrisma: createPrismaForRead } = await import("../db.js");
+          mediaRows = await createPrismaForRead(env).postMedia.findMany({
+            where: { postId },
+            include: { media: true },
+            orderBy: { order: "asc" },
+          });
+        } catch (rereadError) {
+          // Fall back to the pre-update rows rather than failing the response.
+          // `attachmentUpdates` still tells the client what landed, so it can
+          // reconcile without trusting these fields.
+          this.logger.warn(
+            "[PostHandler] attachment re-read failed; response media may be stale",
+            rereadError,
+          );
+        }
+      }
+
+      const { textProvenanceView, attachmentProvenanceView } = await import(
+        "./provenance/response.js"
+      );
+
       // Build response with all required fields for PostModel
       const responseData = {
         id: updatedPost.id,
@@ -1689,12 +1992,22 @@ export class PostHandler {
         },
         commentCount,
         contentWarnings: updatedPost.contentWarnings || [],
+        // Art. 50: the post's own text provenance, through the shared choke point.
+        provenance: textProvenanceView(updatedPost as any),
+        // Which of the requested attachment updates actually landed. Present only
+        // when `media` was supplied. `false` means the row was not matched (an id
+        // not attached to this post, or a declaration already at least as strong)
+        // or the write failed — either way the client should not assume success.
+        ...(attachmentUpdates.length > 0
+          ? { attachmentUpdates }
+          : {}),
         media:
-          updatedPost.media?.map((pm: any) => ({
+          mediaRows.map((pm: any) => ({
             id: pm.id,
             mediaId: pm.mediaId,
             alt: pm.alt || null,
             order: pm.order,
+            provenance: attachmentProvenanceView(pm),
             file: {
               id: pm.media.id,
               contentHash: pm.media.contentHash,

@@ -20,6 +20,30 @@ import { UserActorDispatcher } from "../dispatchers/user-actor.js";
 import { ActivityService } from "../activity-service.js";
 import { getLogger, Logger } from "../../logger.js";
 import { fedifyCreateToActivityStreams } from "./fedify-converters.js";
+import {
+  provenanceToJsonLd,
+  withProvenanceContext,
+} from "../provenance-jsonld.js";
+import type { Provenance, SyntheticBasis, SyntheticSourceType } from "../../provenance/types.js";
+
+/**
+ * A post's TEXT provenance, as a {@link Provenance}, for federation (Art. 50).
+ *
+ * Reads the columns off the row the caller already has — no extra query. Tolerant
+ * of a partially-selected `Post`: a caller that did not select the columns gets
+ * `null`, which serialises to no terms at all rather than to a false `UNKNOWN`
+ * claim. Media provenance is per-attachment and does not federate yet; posts
+ * federate their text, and the attachment mapping is a separate piece of work.
+ */
+function postTextProvenance(post: Post): Provenance | null {
+  const columns = post as unknown as {
+    textSourceType?: SyntheticSourceType | null;
+    textBasis?: SyntheticBasis | null;
+  };
+  const sourceType = columns.textSourceType;
+  if (!sourceType) return null;
+  return { sourceType, basis: columns.textBasis ?? null };
+}
 
 /**
  * Exhaustiveness check for the post-radius switch in `determineAudience`.
@@ -345,12 +369,16 @@ export class PostActivityServiceFedify {
       author.username || "",
       env,
     );
+    // Art. 50: carry the post's text provenance onto the federated object. Read
+    // off the Post row we already have — no extra query — and null-safe because
+    // callers may pass a partially-selected Post.
     const activityStreamsFormat = fedifyCreateToActivityStreams(
       activity,
       note,
       actorUri,
       uris.activityId.toString(),
       uris.objectId.toString(),
+      postTextProvenance(post),
     );
     await ActivityService.storeOutboxActivity(
       prisma,
@@ -391,6 +419,12 @@ export class PostActivityServiceFedify {
     const updated = post.editedAt || post.updatedAt;
     const note = await this.createNote(post, author, env, requestUrl);
 
+    const terms = provenanceToJsonLd(postTextProvenance(post));
+    const provenanceProps = {
+      terms,
+      hasAny: Object.keys(terms).length > 0,
+    };
+
     // Convert Date to Temporal.Instant for Fedify
     const updatedInstant = TemporalPolyfill.Instant.from(
       updated.toISOString(),
@@ -425,6 +459,12 @@ export class PostActivityServiceFedify {
       id: activity.id?.toString(),
       actor: actorUri,
       object: {
+        // Art. 50: an Update must carry provenance too. Omitting it here would
+        // make an edit silently strip the disclosure from every remote copy — the
+        // exact failure the monotonicity rule exists to prevent, on the wire.
+        "@context": provenanceProps.hasAny
+          ? withProvenanceContext("https://www.w3.org/ns/activitystreams")
+          : "https://www.w3.org/ns/activitystreams",
         type: "Note",
         id: uris.objectId.toString(),
         content: post.text || "",
@@ -433,6 +473,7 @@ export class PostActivityServiceFedify {
         updated: updated.toISOString(),
         to: audience.to?.map((r) => (typeof r === "string" ? r : r.toString())),
         cc: audience.cc?.map((r) => (typeof r === "string" ? r : r.toString())),
+        ...provenanceProps.terms,
       },
       published: updated.toISOString(),
       to: audience.to?.map((r) => (typeof r === "string" ? r : r.toString())),

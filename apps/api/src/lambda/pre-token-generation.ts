@@ -33,6 +33,7 @@ import {
   type CachedClaims,
 } from "../lib/auth/claims-cache.js";
 import { resolveTenantRole, type RoleMappingInput } from "../lib/tenant/resolve-role.js";
+import { loadClaimsFromDb } from "../lib/identity/load-claims.js";
 
 const logger = new Logger({ serviceName: "pre-token-generation" });
 let cache: ClaimsCache | null = null;
@@ -95,84 +96,9 @@ function isFederatedEvent(event: PreTokenGenerationV2TriggerEvent): boolean {
   }
 }
 
-interface RdsClaimsLoad {
-  user: {
-    id: string;
-    role: string;
-    handle: string | null;
-    suspended: boolean;
-    suspendedAt: Date | null;
-  } | null;
-  activeMembership: {
-    tenantId: string;
-    role: TenantRole;
-    tenant: { slug: string; status: string };
-  } | null;
-}
-
-async function loadFromRds(
-  db: PrismaClient,
-  sub: string,
-  preferOrgTenant: boolean,
-  preferredTenantId: string | null,
-): Promise<RdsClaimsLoad> {
-  const user = await db.user.findUnique({
-    where: { subject: sub },
-    select: {
-      id: true,
-      role: true,
-      handle: true,
-      suspended: true,
-      suspendedAt: true,
-      personalTenantId: true,
-    },
-  });
-  if (!user) return { user: null, activeMembership: null };
-
-  const memberships = await db.tenantMember.findMany({
-    where: { userId: user.id, status: "ACTIVE" },
-    include: { tenant: { select: { id: true, slug: true, status: true, type: true } } },
-  });
-
-  // Honor an explicit user choice (from a prior switch-tenant call) above
-  // any heuristic, provided the membership is still active.
-  let active = preferredTenantId
-    ? memberships.find(
-        (m) => m.tenant.id === preferredTenantId && m.tenant.status === "ACTIVE",
-      )
-    : undefined;
-  if (!active) {
-    active = memberships.find(
-      (m) =>
-        preferOrgTenant && m.tenant.type === "ORGANIZATION" && m.tenant.status === "ACTIVE",
-    );
-  }
-  if (!active) {
-    active = memberships.find(
-      (m) => m.tenant.id === user.personalTenantId && m.tenant.status === "ACTIVE",
-    );
-  }
-  if (!active) {
-    active = memberships.find((m) => m.tenant.status === "ACTIVE");
-  }
-
-  return {
-    user: {
-      id: user.id,
-      role: user.role,
-      handle: user.handle,
-      suspended: user.suspended,
-      suspendedAt: user.suspendedAt,
-    },
-    activeMembership: active
-      ? {
-          tenantId: active.tenantId,
-          role: active.role,
-          tenant: { slug: active.tenant.slug, status: active.tenant.status },
-        }
-      : null,
-  };
-}
+// Claims derivation lives in lib/identity/load-claims.ts (shared with the
+// Keycloak JIT path — WS-0, plan 016); this Lambda keeps only the Cognito
+// event handling, retry policy, and drift-sentinel semantics around it.
 
 async function maybeRefreshFederatedRole(
   db: PrismaClient,
@@ -261,14 +187,14 @@ export const handler: PreTokenGenerationV2TriggerHandler = async (event) => {
       Number(process.env.PRETOKEN_RDS_RETRY_DELAY_MS ?? DEFAULT_RDS_RETRY_DELAY_MS),
     );
     let loaded = await withLambdaDbBreaker(
-      () => loadFromRds(db, sub, federated, preferredTenantId),
+      () => loadClaimsFromDb(db, sub, federated, preferredTenantId),
       "pretoken.load_from_rds",
     );
     let rdsAttempts = 1;
     while (!loaded.user && rdsAttempts < retryMax) {
       await sleep(retryDelayMs);
       loaded = await withLambdaDbBreaker(
-        () => loadFromRds(db, sub, federated, preferredTenantId),
+        () => loadClaimsFromDb(db, sub, federated, preferredTenantId),
         "pretoken.load_from_rds",
       );
       rdsAttempts++;

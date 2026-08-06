@@ -1,0 +1,193 @@
+import sharp from "sharp";
+import { beforeAll, describe, expect, it } from "vitest";
+import { readProvenance } from "../../../src/lib/metadata/provenance-reader.js";
+
+/**
+ * Fixtures are BUILT here rather than committed as binaries: deterministic, no
+ * third-party AI imagery of unclear licence, and the construction documents the
+ * on-disk format. The APP1/XMP layout is per the XMP spec (namespace
+ * "http://ns.adobe.com/xap/1.0/\0" then the packet, in an 0xFFE1 segment).
+ */
+const XMP_NS = "http://ns.adobe.com/xap/1.0/\0";
+
+function xmpPacket(digitalSourceType: string): string {
+  return `<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?><x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:Iptc4xmpExt="http://iptc.org/std/Iptc4xmpExt/2008-02-29/"><Iptc4xmpExt:DigitalSourceType>${digitalSourceType}</Iptc4xmpExt:DigitalSourceType></rdf:Description></rdf:RDF></x:xmpmeta><?xpacket end="w"?>`;
+}
+
+/** Insert an APP1 XMP segment immediately after SOI. */
+function injectXmp(jpeg: Buffer, xmp: string): Buffer {
+  const payload = Buffer.concat([
+    Buffer.from(XMP_NS, "latin1"),
+    Buffer.from(xmp, "utf8"),
+  ]);
+  const len = payload.length + 2; // the length field includes itself
+  const header = Buffer.from([0xff, 0xe1, (len >> 8) & 0xff, len & 0xff]);
+  return Buffer.concat([
+    jpeg.subarray(0, 2),
+    header,
+    payload,
+    jpeg.subarray(2),
+  ]);
+}
+
+const CV = "http://cv.iptc.org/newscodes/digitalsourcetype";
+
+let clean: Buffer;
+beforeAll(async () => {
+  clean = await sharp({
+    create: {
+      width: 8,
+      height: 8,
+      channels: 3,
+      background: { r: 1, g: 2, b: 3 },
+    },
+  })
+    .jpeg()
+    .toBuffer();
+});
+
+describe("readProvenance — positive recognition (anti-vacuity)", () => {
+  // WHY THESE MATTER: a reader that returns UNKNOWN unconditionally would pass
+  // every negative test. These are the cases that fail if the reader does
+  // nothing, which is the only direction that actually proves it works.
+
+  it("recognises trainedAlgorithmicMedia as AI_GENERATED", async () => {
+    const bytes = injectXmp(clean, xmpPacket(`${CV}/trainedAlgorithmicMedia`));
+    const r = await readProvenance(bytes, "image/jpeg");
+    expect(r).toEqual({
+      sourceType: "AI_GENERATED",
+      examined: true,
+      container: "xmp",
+    });
+  });
+
+  it("recognises compositeWithTrainedAlgorithmicMedia as AI_ASSISTED", async () => {
+    const bytes = injectXmp(
+      clean,
+      xmpPacket(`${CV}/compositeWithTrainedAlgorithmicMedia`),
+    );
+    const r = await readProvenance(bytes, "image/jpeg");
+    expect(r.sourceType).toBe("AI_ASSISTED");
+  });
+
+  it("recognises algorithmicallyEnhanced as AI_EDITED", async () => {
+    const bytes = injectXmp(clean, xmpPacket(`${CV}/algorithmicallyEnhanced`));
+    const r = await readProvenance(bytes, "image/jpeg");
+    expect(r.sourceType).toBe("AI_EDITED");
+  });
+
+  it("accepts a bare NewsCode token, not just a full CV URI", async () => {
+    const bytes = injectXmp(clean, xmpPacket("trainedAlgorithmicMedia"));
+    const r = await readProvenance(bytes, "image/jpeg");
+    expect(r.sourceType).toBe("AI_GENERATED");
+  });
+});
+
+describe("readProvenance — the fail-closed asymmetry", () => {
+  it("does NOT honour an unsigned digitalCapture claim of human origin", async () => {
+    // XMP is plain text and trivially forged. Honouring this would let anyone
+    // stamp "this is a real photo" onto synthetic media. We looked (examined)
+    // but decline to assert human origin on an unauthenticated claim.
+    const bytes = injectXmp(clean, xmpPacket(`${CV}/digitalCapture`));
+    const r = await readProvenance(bytes, "image/jpeg");
+    expect(r.sourceType).toBe("UNKNOWN");
+    expect(r.examined).toBe(true);
+  });
+
+  it("an unrecognised assertion is examined-but-UNKNOWN, never AI", async () => {
+    const bytes = injectXmp(clean, xmpPacket(`${CV}/somethingInventedIn2027`));
+    const r = await readProvenance(bytes, "image/jpeg");
+    expect(r).toEqual({
+      sourceType: "UNKNOWN",
+      examined: true,
+      container: "xmp",
+    });
+  });
+});
+
+describe("readProvenance — absence and hostility", () => {
+  it("a clean image is UNKNOWN and NOT examined", async () => {
+    const r = await readProvenance(clean, "image/jpeg");
+    expect(r).toEqual({ sourceType: "UNKNOWN", examined: false });
+  });
+
+  it("never infers HUMAN_CREATED from the absence of a marking", async () => {
+    const r = await readProvenance(clean, "image/jpeg");
+    expect(r.sourceType).not.toBe("HUMAN_CREATED");
+  });
+
+  it("garbage bytes do not throw", async () => {
+    const r = await readProvenance(
+      Buffer.from("not an image at all, just text"),
+      "image/jpeg",
+    );
+    expect(r.sourceType).toBe("UNKNOWN");
+  });
+
+  it("a truncated JPEG does not throw", async () => {
+    const r = await readProvenance(clean.subarray(0, 12), "image/jpeg");
+    expect(r.sourceType).toBe("UNKNOWN");
+  });
+
+  it("an empty buffer does not throw", async () => {
+    const r = await readProvenance(Buffer.alloc(0), "image/jpeg");
+    expect(r).toEqual({ sourceType: "UNKNOWN", examined: false });
+  });
+
+  it("a declared XMP value that is absurdly long is ignored", async () => {
+    const bytes = injectXmp(clean, xmpPacket("x".repeat(2000)));
+    const r = await readProvenance(bytes, "image/jpeg");
+    expect(r.sourceType).toBe("UNKNOWN");
+  });
+
+  it("skips non-image media (video originals never transit the API)", async () => {
+    const bytes = injectXmp(clean, xmpPacket(`${CV}/trainedAlgorithmicMedia`));
+    const r = await readProvenance(bytes, "video/mp4");
+    expect(r).toEqual({ sourceType: "UNKNOWN", examined: false });
+  });
+});
+
+describe("readProvenance — C2PA container presence", () => {
+  it("detects a JUMBF container without asserting AI", async () => {
+    // Presence only. A real C2PA manifest usually attests CAMERA CAPTURE, so
+    // mapping presence to "AI" would mislabel provenance-enabled cameras.
+    const withJumbf = Buffer.concat([
+      clean.subarray(0, 2),
+      // Built from explicit bytes, NOT a string literal: the real APP11
+      // payload contains NUL bytes, and embedding those in the source makes
+      // git treat this file as BINARY (no diffs, unreviewable).
+      Buffer.from([0xff, 0xeb]), // APP11 marker
+      Buffer.from([0x00, 0x10]), // segment length
+      Buffer.from("JP", "latin1"), // APP11 common identifier
+      Buffer.from([0x00, 0x01]), // box instance number
+      Buffer.from([0x00, 0x00, 0x00, 0x08]), // JUMBF box length
+      Buffer.from("jumb", "latin1"), // the box type the sniff looks for
+      Buffer.from([0x00, 0x00, 0x00, 0x00]), // box payload padding
+      clean.subarray(2),
+    ]);
+    const r = await readProvenance(withJumbf, "image/jpeg");
+    expect(r.examined).toBe(true);
+    expect(r.container).toBe("c2pa");
+    expect(r.sourceType).toBe("UNKNOWN");
+  });
+});
+
+describe("the co-existence invariant — read the marking, still strip the bytes", () => {
+  it("sharp's re-encode destroys the marking that readProvenance recovers", async () => {
+    // THE test for this task. It proves both halves at once:
+    //  1. the marking IS readable from the original (so the read is real), and
+    //  2. the re-encode still destroys it (so the privacy strip was NOT weakened
+    //     to make the read work).
+    // If someone "fixes" provenance by adding .withMetadata(), this fails.
+    const bytes = injectXmp(clean, xmpPacket(`${CV}/trainedAlgorithmicMedia`));
+
+    const before = await readProvenance(bytes, "image/jpeg");
+    expect(before.sourceType).toBe("AI_GENERATED");
+
+    const reencoded = await sharp(bytes).jpeg().toBuffer();
+    expect(reencoded.includes(Buffer.from("DigitalSourceType"))).toBe(false);
+
+    const after = await readProvenance(reencoded, "image/jpeg");
+    expect(after).toEqual({ sourceType: "UNKNOWN", examined: false });
+  });
+});

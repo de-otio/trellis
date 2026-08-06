@@ -8,6 +8,11 @@
 
 import { Create, Note } from "@fedify/fedify/vocab";
 import type { ActivityStreamsActivity } from "../activity-service.js";
+import {
+  provenanceToJsonLd,
+  withProvenanceContext,
+} from "../provenance-jsonld.js";
+import type { Provenance } from "../../provenance/types.js";
 
 /**
  * Data extracted from Fedify Create activity for conversion
@@ -29,6 +34,16 @@ export interface CreateActivityData {
     cc?: string[];
     bto?: string[];
     bcc?: string[];
+    /**
+     * Synthetic-content provenance of the post text (AI Act Art. 50).
+     *
+     * Threaded through the extracted-data shape rather than read off the Fedify
+     * `Note` because Fedify's vocab classes are typed and drop properties they do
+     * not know — an extension term set with `(note as any).x = …` is not
+     * guaranteed to survive its serialization. This plain object IS the outbound
+     * payload we control, so carrying it here is what actually reaches the wire.
+     */
+    provenance?: Provenance | null;
   };
 }
 
@@ -44,6 +59,7 @@ export function extractCreateActivityData(
   actorUri: string,
   activityId: string,
   noteId: string,
+  provenance?: Provenance | null,
 ): CreateActivityData {
   // Helper to convert recipient arrays
   const convertRecipients = (
@@ -93,6 +109,7 @@ export function extractCreateActivityData(
       cc: convertRecipients(noteAny.cc),
       bto: convertRecipients(noteAny.bto),
       bcc: convertRecipients(noteAny.bcc),
+      provenance: provenance ?? null,
     },
   };
 }
@@ -104,6 +121,12 @@ export function extractCreateActivityData(
 export function createActivityDataToActivityStreams(
   data: CreateActivityData,
 ): ActivityStreamsActivity {
+  // Art. 50: the provenance terms and the `@context` entry that defines them.
+  // Both are empty/unchanged when the provenance is UNKNOWN, so an undeclared
+  // post's JSON-LD is byte-identical to what it was before this existed.
+  const provenanceProps = provenanceToJsonLd(data.object.provenance);
+  const hasProvenance = Object.keys(provenanceProps).length > 0;
+
   return {
     "@context": "https://www.w3.org/ns/activitystreams",
     type: "Create",
@@ -111,7 +134,12 @@ export function createActivityDataToActivityStreams(
     actor: data.actor,
     published: data.published,
     object: {
-      "@context": "https://www.w3.org/ns/activitystreams",
+      // The extension context goes on the OBJECT, where the terms are, not on the
+      // activity: a relaying instance may forward the object alone, and a term
+      // whose definition stayed behind on the wrapper is an undefined term.
+      "@context": hasProvenance
+        ? withProvenanceContext("https://www.w3.org/ns/activitystreams")
+        : "https://www.w3.org/ns/activitystreams",
       type: "Note",
       id: data.object.id,
       attributedTo: data.object.attributedTo,
@@ -121,6 +149,7 @@ export function createActivityDataToActivityStreams(
       ...(data.object.cc && { cc: data.object.cc }),
       ...(data.object.bto && { bto: data.object.bto }),
       ...(data.object.bcc && { bcc: data.object.bcc }),
+      ...provenanceProps,
     },
     ...(data.to && { to: data.to }),
     ...(data.cc && { cc: data.cc }),
@@ -141,6 +170,7 @@ export function fedifyCreateToActivityStreams(
   actorUri: string,
   activityId: string,
   noteId: string,
+  provenance?: Provenance | null,
 ): ActivityStreamsActivity {
   const data = extractCreateActivityData(
     activity,
@@ -148,6 +178,7 @@ export function fedifyCreateToActivityStreams(
     actorUri,
     activityId,
     noteId,
+    provenance,
   );
   return createActivityDataToActivityStreams(data);
 }

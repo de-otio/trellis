@@ -51,6 +51,16 @@ export default defineConfig({
       // (ephemeral shadow DBs). Self-skips without the env vars, but excluded
       // here too so the default suite never spawns the prisma CLI.
       "test/integration/extension-schema-baseline.integration.test.ts",
+      // P0 radius test needs a real DATABASE_URL (this config's test/setup.ts
+      // overrides it to a fake hyperdrive URL, so it falls back to the
+      // docker-compose credentials, which don't exist in the CI lint lane) —
+      // runs in the Phase0 integration lane instead (registered there).
+      "test/integration/post-create-radius.integration.test.ts",
+      // GDPR-erasure worker e2e needs the full docker-compose stack (Postgres
+      // admin URL + localstack S3 + dynamodb-local) — no CI lane provides
+      // localstack, so this is a LOCAL-ONLY suite. Run it with
+      // `docker compose up` and the default suite's test:integration script.
+      "test/integration/gdpr-erasure-worker.integration.test.ts",
     ],
     setupFiles: ["test/setup.ts"],
     globalTeardown: "test/teardown.ts",

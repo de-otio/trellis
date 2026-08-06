@@ -663,8 +663,11 @@ describe("T2 — Pre-token-generation cache TTL and suspension", () => {
   it("should include suspendedAt in Prisma select clause", async () => {
     const fs = await import("node:fs");
     const path = await import("node:path");
+    // The claims derivation (incl. the select) moved to the shared
+    // lib/identity/load-claims.ts (WS-0, plan 016 — reused by the Keycloak
+    // JIT path); the Lambda keeps the suspension POLICY, checked below.
     const source = fs.readFileSync(
-      path.resolve(process.cwd(), "src/lambda/pre-token-generation.ts"),
+      path.resolve(process.cwd(), "src/lib/identity/load-claims.ts"),
       "utf-8",
     );
     expect(source).toContain("suspendedAt: true");
