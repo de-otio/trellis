@@ -45,6 +45,8 @@ const VIEWER = uuid(1);
 const MUTUAL = uuid(2);
 const ONE_WAY = uuid(3);
 const OTHER_TENANT_AUTHOR = uuid(4);
+/** Author who reciprocated the viewer but kept them at a DISTANT tier. */
+const DISTANT_AUTHOR = uuid(5);
 
 let prisma: PrismaClient;
 
@@ -137,6 +139,7 @@ beforeAll(async () => {
   await makeUser(MUTUAL, `${RUN}-pt-mutual`);
   await makeUser(ONE_WAY, `${RUN}-pt-oneway`);
   await makeUser(OTHER_TENANT_AUTHOR, `${RUN}-pt-foreign`);
+  await makeUser(DISTANT_AUTHOR, `${RUN}-pt-distant`);
 
   // A mutual, close connection: both directions present, reciprocated true.
   await prisma.relationship.createMany({
@@ -158,6 +161,33 @@ beforeAll(async () => {
         tier: 0,
         reciprocated: true,
         connectionMethod: "code",
+      },
+    ],
+  });
+
+  // The residual attack shape after `reciprocated` was required: MUTUAL in the
+  // flag, asymmetric in the tier. The author reciprocated at tier 2 — an ordinary
+  // follow-back — and the viewer promoted their OWN edge to tier 0, which
+  // PATCH /api/relationships/score permits for one's own edge.
+  await prisma.relationship.createMany({
+    data: [
+      {
+        tenantId: TENANT_A,
+        userId: VIEWER,
+        targetType: "user",
+        targetId: DISTANT_AUTHOR,
+        tier: 0, // self-set via manualScore 1.0
+        reciprocated: true,
+        connectionMethod: "discovery",
+      },
+      {
+        tenantId: TENANT_A,
+        userId: DISTANT_AUTHOR,
+        targetType: "user",
+        targetId: VIEWER,
+        tier: 2, // "community" — what a follow-back actually produces
+        reciprocated: true,
+        connectionMethod: "discovery",
       },
     ],
   });
@@ -184,7 +214,9 @@ afterAll(async () => {
     where: { tenantId: { in: [TENANT_A, TENANT_B] } },
   });
   await prisma.user.deleteMany({
-    where: { id: { in: [VIEWER, MUTUAL, ONE_WAY, OTHER_TENANT_AUTHOR] } },
+    where: {
+      id: { in: [VIEWER, MUTUAL, ONE_WAY, OTHER_TENANT_AUTHOR, DISTANT_AUTHOR] },
+    },
   });
   // Both the post tenants and the four personal tenants, all run-tagged.
   await prisma.tenant.deleteMany({ where: { id: { in: [TENANT_A, TENANT_B] } } });
@@ -205,6 +237,32 @@ describe("friend-set resolution requires mutual consent (V1)", () => {
     // tier 0, and claimed connectionMethod "code" — and still gets nothing,
     // because the other party never reciprocated.
     expect(friends).not.toContain(ONE_WAY);
+  });
+
+  // The residual attack that survived requiring `reciprocated`, and the reason
+  // the query now reads the AUTHOR's edge instead of the viewer's.
+  //
+  // Shape: the author reciprocated — so `reciprocated` is true on BOTH rows, and
+  // no amount of checking that flag helps — but kept the viewer at tier 2
+  // ("community"), which is what an ordinary follow-back produces. The viewer
+  // then set their OWN edge to tier 0, which they can do for themselves through
+  // PATCH /api/relationships/score with manualScore 1.0.
+  //
+  // Under the old direction the viewer's self-set tier 0 was the tier being read,
+  // so this returned DISTANT_AUTHOR and the attacker read their friends-only
+  // posts. The author could not revoke it by lowering their own tier, because
+  // their tier was never consulted.
+  it("EXCLUDES an author who reciprocated but kept the viewer at a distant tier", async () => {
+    const friends = await getFriendUserIds(prisma, VIEWER);
+
+    expect(friends).not.toContain(DISTANT_AUTHOR);
+    // Non-vacuity: the fixture really is reciprocated and really is close on the
+    // viewer's side, so exclusion can only come from reading the author's tier.
+    const viewerSide = await prisma.relationship.findFirst({
+      where: { userId: VIEWER, targetId: DISTANT_AUTHOR },
+      select: { tier: true, reciprocated: true },
+    });
+    expect(viewerSide).toMatchObject({ tier: 0, reciprocated: true });
   });
 });
 
