@@ -497,11 +497,66 @@ model Consent {
 }
 
 // Posting radius — how far content radiates on the author's social graph
+//
+// DEPRECATED, and retained deliberately during the audience-model migration.
+// `radius` conflates three independent questions (who may read, may this be
+// promoted to strangers, may this leave the server) into one ordered scale that
+// cannot express any of them precisely. It is superseded by the three axes
+// below: `Post.audienceScopes`/`audienceClass`, `Post.discoverability`, and
+// `Post.federate`.
+//
+// It still exists because the read paths flip to the new columns in ONE merge
+// rather than lane by lane — a window in which some endpoints believed `radius`
+// and others believed `audienceClass` would let a caller take the union of both.
+// Until that flip, `radius` is written as a DERIVED SHADOW of `audienceScopes`
+// (one direction only: scopes are authoritative, radius follows). It is dropped
+// in a separate destructive migration once every read path is adopted.
 enum PostRadius {
   WHISPER // Inner circle only (tier 0)
   NORMAL // Close friends + inner circle (tiers 0-1)
   LOUD // Community and closer (tiers 0-2)
   SHOUT // Everyone (all tiers)
+}
+
+// AXIS 1 (coarse) — a denormalised summary of `Post.audienceScopes`, used ONLY
+// to shrink the candidate set on the feed's hot path before the precise
+// per-post check runs. It is a cache, never the authority.
+//
+// It is maintained by a database TRIGGER derived from `audience_scopes`, not by
+// application code. A stale value here is a DISCLOSURE, not a slow query, and
+// the write path cannot be trusted to keep it fresh: `DataRouter.createPost`
+// builds its payload as `Record<string, any>` and casts it `as any`, so the
+// compiler cannot enforce that a scope change also updates the class. The
+// trigger makes the invariant hold for raw SQL, migrations and backfills too.
+//
+// Values are intentionally MINIMAL. `CONTAINER`, `TENANT` and
+// `CONNECTIONS_OF_CONNECTIONS` are deliberately ABSENT rather than unused:
+// group membership admission is currently a no-op (an unauthenticated inbox
+// Follow adds a member to a PRIVATE group regardless), so a container audience
+// would be self-granted — strictly worse than the scoring hole it replaces.
+// `RESTRICTED` (a hand-curated list) is absent because the list scope itself is
+// deferred. Adding an enum value later is a one-line additive migration; having
+// one present-but-unenforced is how a half-built gate ships.
+enum AudienceClass {
+  SELF // Only the author
+  CONNECTIONS // Mutually-connected users (bilateral, server-attested)
+  PUBLIC // Anyone who may reach it — readability only, NOT amplification
+}
+
+// AXIS 2 — may this be pushed to people who did not ask for it?
+//
+// Independent of audience: "anyone may read this, nobody will have it pushed at
+// them" is a coherent and frequently-wanted state that no point on a single
+// ordered scale can name. This is also the only correct place to attach a reach
+// credential, because charging for readability breaks legitimate open
+// publishing while charging for amplification targets exactly the capability
+// that abuse needs.
+//
+// Unlike the audience axis this IS a total order, so an enum is right.
+enum Discoverability {
+  UNLISTED // Readable per the audience; never injected into a stranger's feed, search or recommendations
+  CONNECTIONS_FEED // Appears in the feeds of people already in the audience
+  DISCOVERABLE // May be surfaced to people with no relationship to the author
 }
 
 // Privacy levels for follow relationships
@@ -566,8 +621,62 @@ model Post {
   tenantId        String     @map("tenant_id")
   authorId        String     @map("author_id")
   text            String     @db.Text
-  radius          PostRadius @default(NORMAL)
+  radius          PostRadius @default(NORMAL) // DEPRECATED — derived shadow of audienceScopes; see the enum's doc
   geoData         Json?      @map("geo_data")
+
+  // ── The three audience axes ────────────────────────────────────────────────
+  // Replacing `radius`. Separate columns because the three questions are not
+  // ordered with respect to each other: "readable by anyone, promoted to
+  // nobody, never federated" is coherent and desirable, and no point on a
+  // four-value scale can express it.
+
+  // AXIS 1 — who may read this. A set of scope components, OR'd together.
+  // Shape: [{"k":"CONNECTIONS"}] — an array of tagged objects, so a scope that
+  // needs a parameter (a list id, later) is expressible without a schema change.
+  // Parsed at the write boundary with a Zod discriminated union; an unknown
+  // discriminant is REJECTED, and an unparseable blob resolves to deny.
+  //
+  // The `[]` default is TRANSITIONAL and load-bearing. Every writer that exists
+  // today omits this column, and the column is NOT NULL — so without a default
+  // this migration would break post creation outright rather than being
+  // additive. An empty set admits nobody and is therefore never a meaningful
+  // authored intent, so the DB trigger reads it as "not specified" and derives
+  // the scopes from `radius`. That keeps existing writers correct, unchanged,
+  // and fail-closed. Removed once the write path always supplies scopes.
+  audienceScopes Json @default("[]") @map("audience_scopes")
+
+  // Gates, AND'd on top of the scopes. Each is a property the VIEWER must
+  // satisfy (minimum age tier, an entitlement, …). Nullable because having no
+  // gates is the common case, and because a gate can only ever narrow: an
+  // absent gate list cannot grant anything, so NULL is fail-safe here in a way
+  // it would not be for the scopes above.
+  audienceGates Json? @map("audience_gates")
+
+  // Denormalised coarse summary of audienceScopes, maintained by a DB trigger.
+  // A cache for the feed's index, never the authority — the precise per-post
+  // check still runs over the rows the index returns.
+  //
+  // The default is the NARROWEST class, and it exists so callers can OMIT this
+  // field rather than pass a value the trigger will overwrite: setting the
+  // scopes is the only way to set the class. If a caller does send one it is
+  // silently corrected, not honoured.
+  audienceClass AudienceClass @default(SELF) @map("audience_class")
+
+  // AXIS 2 — may this be pushed at people who did not ask for it?
+  // Column default is the NARROWEST value, so a row that somehow reaches the DB
+  // without an explicit choice is unpromoted rather than broadcast. This is
+  // distinct from the product default for a NEW post (CONNECTIONS_FEED), which
+  // the write path sets explicitly — a fail-closed storage default and a
+  // sensible authoring default are different decisions.
+  discoverability Discoverability @default(UNLISTED)
+
+  // AXIS 3 — may this leave this server? Federation was previously DERIVED from
+  // radius, and derived wrongly: NORMAL ("close friends") mapped to ActivityPub
+  // followers-only, and remote followers are unilateral, unverifiable, and hold
+  // no relationship, score or tier — a strictly weaker bar than the local rule
+  // it was supposed to mirror. Now an explicit author choice, defaulting off,
+  // because delivery is irrevocable per post: a wrong `true` cannot be undone.
+  federate Boolean @default(false)
   uri             String? // ActivityPub URI (for public posts)
   contentWarnings String[]   @map("content_warnings")
   deletedAt       DateTime?  @map("deleted_at")
@@ -644,6 +753,15 @@ model Post {
   @@index([tenantId, createdAt])
   @@index([authorId, createdAt])
   @@index([authorId, radius, createdAt])
+  // The feed's predicate, in selectivity order: tenant is a hard equality and
+  // the most selective, then the audience class, then residency, then the
+  // keyset scan on createdAt. `audienceClass` leading (as originally sketched)
+  // loses to the existing [tenantId, createdAt] index, which would leave the
+  // denormalisation earning nothing — the whole justification for carrying a
+  // cached column is that it shrinks this query. P8 checks an EXPLAIN actually
+  // uses this index; if it does not, the honest conclusion is that
+  // audienceClass should not exist and scopes belong in a child table.
+  @@index([tenantId, audienceClass, dataRegion, createdAt(sort: Desc)])
   @@index([primaryEntityId])
   @@index([createdAt])
   @@index([groupId]) // Index for group posts

@@ -6,7 +6,10 @@
 
 import { PostRadius } from "@prisma/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { FeedHandler } from "../../src/lib/feed-handler.js";
+import {
+  buildPostAudienceFilter,
+  FeedHandler,
+} from "../../src/lib/feed-handler.js";
 import type { TrellisRequestContext } from "../../src/lib/request-context.js";
 import type { Session } from "../../src/lib/session-cookie.js";
 
@@ -217,12 +220,35 @@ describe("FeedHandler", () => {
               expect.objectContaining({
                 deletedAt: null,
                 hiddenByAuthor: false,
+                // Tenant isolation (V2). Pinned here because the mocked lane
+                // returns canned rows regardless of the `where`, so asserting
+                // the predicate SHAPE is the only way this lane can catch the
+                // predicate being dropped.
+                tenantId: TEST_TENANT_ID,
                 dataRegion: "US",
               }),
             ]),
           }),
         }),
       );
+    });
+
+    it("should reject a request with no active tenant rather than querying every tenant", async () => {
+      const request = new Request("http://test.com/feeds/home");
+
+      const response = await handler.getHomeFeed(
+        mockSession,
+        request,
+        mockEnv,
+        { limit: 20 },
+        mockRequestContext,
+        "" as unknown as string,
+      );
+
+      // Fail closed: no query is issued at all, so no cross-tenant rows can be
+      // returned. A silent `tenantId: undefined` would have queried everything.
+      expect(response.status).toBe(500);
+      expect(mockDb.post.findMany).not.toHaveBeenCalled();
     });
 
     it("should filter by multiple entityRefs", async () => {
@@ -1427,6 +1453,7 @@ describe("FeedHandler", () => {
         mockEnv,
         { limit: 0 },
         mockRequestContext,
+        TEST_TENANT_ID,
       );
       expect(mockDb.post.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -1443,6 +1470,7 @@ describe("FeedHandler", () => {
         mockEnv,
         { limit: 200 },
         mockRequestContext,
+        TEST_TENANT_ID,
       );
       expect(mockDb.post.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -1499,6 +1527,7 @@ describe("FeedHandler", () => {
         mockEnv,
         { limit: 20, cursor: "invalid-date" },
         mockRequestContext,
+        TEST_TENANT_ID,
       );
 
       // Invalid date should result in cursor being undefined, but feed should still work
@@ -1583,6 +1612,7 @@ describe("FeedHandler", () => {
         mockEnv,
         { limit: 20 },
         mockRequestContext,
+        TEST_TENANT_ID,
       );
 
       // Wait a bit to let the timeout mechanism start
@@ -1615,6 +1645,7 @@ describe("FeedHandler", () => {
           envWithoutKV,
           { limit: 20 },
           mockRequestContext,
+          TEST_TENANT_ID,
         );
 
         // Should query database (not use cache)
@@ -1838,6 +1869,7 @@ describe("FeedHandler", () => {
             taxonomyTags: ["behavior:training:recall", "life-stage:puppy"],
           },
           mockRequestContext,
+          TEST_TENANT_ID,
         );
 
         // Verify taxonomy filter was applied
@@ -1894,6 +1926,7 @@ describe("FeedHandler", () => {
             taxonomyTags: ["nonexistent:tag:here"],
           },
           mockRequestContext,
+          TEST_TENANT_ID,
         );
 
         const data = await response.json();
@@ -1943,6 +1976,7 @@ describe("FeedHandler", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TEST_TENANT_ID,
       );
 
       expect(result).not.toBeNull();
@@ -1963,9 +1997,75 @@ describe("FeedHandler", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TEST_TENANT_ID,
       );
 
       expect(result).toBeNull();
+    });
+
+    // V3 — this path previously applied NO tenant and NO audience predicate, so
+    // any authenticated caller could read any post by id, WHISPER included.
+    // These assert the predicate SHAPE: the mock resolves canned rows whatever
+    // the `where` is, so outcome assertions here would be vacuous. The
+    // corresponding outcome coverage belongs to the integration lane.
+    it("should scope the single-post lookup to the caller's tenant", async () => {
+      mockDb.post.findUnique.mockResolvedValue(basePost);
+
+      await handler.getPost(
+        "post-1",
+        mockSession,
+        mockEnv,
+        mockRequestContext,
+        TEST_TENANT_ID,
+      );
+
+      expect(mockDb.post.findUnique).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            id: "post-1",
+            tenantId: TEST_TENANT_ID,
+            deletedAt: null,
+            hiddenByAuthor: false,
+          }),
+        }),
+      );
+    });
+
+    it("should apply the same audience predicate as the home feed", async () => {
+      mockDb.post.findUnique.mockResolvedValue(basePost);
+      mockGetFriendUserIds.mockResolvedValue(["friend-1"]);
+
+      await handler.getPost(
+        "post-1",
+        mockSession,
+        mockEnv,
+        mockRequestContext,
+        TEST_TENANT_ID,
+      );
+
+      const where = mockDb.post.findUnique.mock.calls[0][0].where;
+
+      // Deep-equal against the single shared definition, so the two read paths
+      // cannot drift apart without this failing.
+      expect(where.OR).toEqual(
+        buildPostAudienceFilter(mockSession.userId, ["friend-1"]).OR,
+      );
+    });
+
+    it("should refuse to query at all when no tenant is supplied", async () => {
+      mockDb.post.findUnique.mockResolvedValue(basePost);
+
+      await expect(
+        handler.getPost(
+          "post-1",
+          mockSession,
+          mockEnv,
+          mockRequestContext,
+          "" as unknown as string,
+        ),
+      ).rejects.toThrow(/activeTenantId is required/);
+
+      expect(mockDb.post.findUnique).not.toHaveBeenCalled();
     });
 
     it("should include sentiment counts in enriched result", async () => {
@@ -1989,6 +2089,7 @@ describe("FeedHandler", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TEST_TENANT_ID,
       );
 
       expect(result).not.toBeNull();
@@ -2007,6 +2108,7 @@ describe("FeedHandler", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TEST_TENANT_ID,
       );
 
       expect(result).not.toBeNull();
@@ -2024,6 +2126,7 @@ describe("FeedHandler", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TEST_TENANT_ID,
       );
 
       expect(result).not.toBeNull();
@@ -2060,6 +2163,7 @@ describe("FeedHandler", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TEST_TENANT_ID,
       );
 
       expect(result).not.toBeNull();
@@ -2077,6 +2181,7 @@ describe("FeedHandler", () => {
         mockSession, // userId: "user-123"
         mockEnv,
         mockRequestContext,
+        TEST_TENANT_ID,
       );
 
       expect(result).not.toBeNull();
@@ -2100,6 +2205,7 @@ describe("FeedHandler", () => {
         mockSession, // userId: "user-123"
         mockEnv,
         mockRequestContext,
+        TEST_TENANT_ID,
       );
 
       expect(result).not.toBeNull();

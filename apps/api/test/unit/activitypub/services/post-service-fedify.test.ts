@@ -47,7 +47,12 @@ describe("PostActivityServiceFedify", () => {
     mockPost = {
       id: "post-123",
       text: "Hello, world!",
-      visibility: "PUBLIC",
+      // `radius`, not the long-dead `visibility` field this fixture used to
+      // carry. Post.radius is non-nullable with a default in the schema, so a
+      // post without one does not exist in production — and leaving it unset
+      // here previously exercised determineAudience's fail-open branch, which
+      // is precisely the branch that has been removed.
+      radius: "SHOUT",
       authorId: mockUser.id,
       createdAt: new Date("2024-01-01T00:00:00Z"),
       published: new Date("2024-01-01T00:00:00Z"),
@@ -96,7 +101,7 @@ describe("PostActivityServiceFedify", () => {
   describe("determineAudience", () => {
     it("should return PUBLIC_COLLECTION for public posts", async () => {
       const audience = await PostActivityServiceFedify.determineAudience(
-        { ...mockPost, visibility: "PUBLIC" },
+        { ...mockPost, radius: "SHOUT" },
         mockUser,
         mockEnv,
       );
@@ -107,6 +112,59 @@ describe("PostActivityServiceFedify", () => {
 
     // Tests for FOLLOWERS/FRIENDS/PRIVATE visibility removed:
     // post.visibility (PostVisibilityLevel) replaced by post.radius (PostRadius: SHOUT/NORMAL/WHISPER)
+
+    // V9 — LOUD had no case of its own and fell through to a `default:` branch
+    // that addressed the public collection, making it indistinguishable from
+    // SHOUT over the wire even though no local read path admits a LOUD post to
+    // anyone but its author.
+    it("should address LOUD to followers, never to the public collection", async () => {
+      const audience = await PostActivityServiceFedify.determineAudience(
+        { ...mockPost, radius: "LOUD" },
+        mockUser,
+        mockEnv,
+      );
+
+      expect(audience.to?.[0].toString()).toBe(
+        "https://example.com/users/testuser/followers",
+      );
+      expect(audience.to).not.toContain(PUBLIC_COLLECTION);
+    });
+
+    it("should address NORMAL to followers, not the public collection", async () => {
+      const audience = await PostActivityServiceFedify.determineAudience(
+        { ...mockPost, radius: "NORMAL" },
+        mockUser,
+        mockEnv,
+      );
+
+      expect(audience.to?.[0].toString()).toBe(
+        "https://example.com/users/testuser/followers",
+      );
+      expect(audience.to).not.toContain(PUBLIC_COLLECTION);
+    });
+
+    it("should address WHISPER to nobody", async () => {
+      const audience = await PostActivityServiceFedify.determineAudience(
+        { ...mockPost, radius: "WHISPER" },
+        mockUser,
+        mockEnv,
+      );
+
+      expect(audience.to).toBeUndefined();
+      expect(audience.bto).toEqual([]);
+    });
+
+    // The load-bearing one. Federated delivery is irrevocable, so an
+    // unrecognised radius must fail rather than be guessed as "public".
+    it("should throw on an unrecognised radius instead of defaulting to public", async () => {
+      await expect(
+        PostActivityServiceFedify.determineAudience(
+          { ...mockPost, radius: "NOT_A_RADIUS" as never },
+          mockUser,
+          mockEnv,
+        ),
+      ).rejects.toThrow(/unhandled post radius/);
+    });
 
     it("should use existing post.to field if present", async () => {
       const customAudience = [

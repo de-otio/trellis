@@ -36,6 +36,17 @@ const PHASE0_INTEGRATION = [
   // cancellation, quota, authorization, and shift/RSVP status semantics
   // complement to events.integration.test.ts's concurrency proofs.
   "test/integration/events-lifecycle.integration.test.ts",
+  // P0 — post READ isolation: tenant boundary (V2), the audience predicate on
+  // the single-post path (V3), and mutual-consent friend resolution (V1), as
+  // outcome assertions. The unit lane mocks post.findMany and returns canned
+  // rows regardless of the `where`, so it can only assert predicate shape —
+  // only a real Postgres decides whether a row actually comes back.
+  "test/integration/post-read-isolation.integration.test.ts",
+  // P1.1a — the audience_class DB invariant: the denormalised class is a
+  // faithful function of audience_scopes, enforced by trigger. A stale class
+  // is a disclosure (the feed index selects on it), and the write path cannot
+  // be trusted to maintain it, so the assertion belongs against the database.
+  "test/integration/audience-class-invariant.integration.test.ts",
 ];
 
 export default defineConfig({
