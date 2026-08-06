@@ -82,29 +82,29 @@
     "zod": "^4.4.3"
   },
   "peerDependencies": {
-    "@prisma/client": "^7.8.0"
+    "@prisma/client": "^7.9.1"
   },
   "engines": {
     "node": ">=22"
   },
   "devDependencies": {
-    "@aws-sdk/client-lambda": "^3.1078.0",
-    "@prisma/client": "^7.8.0",
+    "@aws-sdk/client-lambda": "^3.1101.0",
+    "@prisma/client": "^7.9.1",
     "@types/aws-lambda": "^8.10.162",
-    "@types/node": "^26.1.0",
-    "@types/pg": "^8.18.0",
+    "@types/node": "^26.1.2",
+    "@types/pg": "^8.20.3",
     "@types/sharp": "^0.32.0",
-    "@vitest/coverage-v8": "^4.1.9",
-    "@vitest/ui": "^4.1.8",
+    "@vitest/coverage-v8": "^4.1.10",
+    "@vitest/ui": "^4.1.10",
     "aws-sdk-client-mock": "^4.1.0",
     "esbuild": "^0.28.1",
-    "fast-check": "^4.8.0",
+    "fast-check": "^4.9.0",
     "form-data": "^4.0.1",
-    "mailparser": "^3.9.12",
-    "prettier": "^3.9.4",
-    "prisma": "^7.8.0",
-    "tsx": "^4.22.4",
-    "typescript": "^6.0.3",
+    "mailparser": "^3.9.14",
+    "prettier": "^3.9.6",
+    "prisma": "^7.9.1",
+    "tsx": "^4.23.5",
+    "typescript": "^7.0.2",
     "vitest": "^4.0.0"
   },
   "repository": {
