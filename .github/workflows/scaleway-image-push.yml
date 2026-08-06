@@ -15,9 +15,11 @@
 #      the SCW_SECRET_KEY secret holds a key with ContainerRegistryFullAccess on
 #      that project.
 #
-# PLATFORM: Scaleway runs linux/amd64 (an arm64 image ImagePullBackOffs on the
-# nodes — hit live on the identity image). ubuntu-latest runners are amd64, so
-# --platform linux/amd64 builds natively; no buildx/qemu cross-build needed.
+# PLATFORM: the consolidated dev cluster (plan 017) runs ARM64 Ampere nodes
+# (BASIC2-A2C-*), so images must be linux/arm64 — an amd64 image would fail
+# with `exec format error` on the nodes. (The pre-017 note here claiming
+# Scaleway is amd64 described the OLD cluster.) ubuntu-24.04-arm runners are
+# arm64-native and free for public repos; no buildx/qemu cross-build needed.
 
 name: Scaleway image push
 
@@ -47,12 +49,12 @@ concurrency:
 
 env:
   REGISTRY: rg.fr-par.scw.cloud
-  PLATFORM: linux/amd64
+  PLATFORM: linux/arm64
 
 jobs:
   build-push:
     name: build + push (${{ inputs.environment }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
