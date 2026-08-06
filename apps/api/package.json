@@ -44,7 +44,12 @@
     "prisma:migrate:dev": "prisma migrate dev",
     "prisma:migrate:deploy": "prisma migrate deploy",
     "seed:feature-toggles": "tsx scripts/seed-feature-toggles.ts",
-    "seed:platform-categories": "tsx scripts/seed-platform-categories.ts"
+    "seed:platform-categories": "tsx scripts/seed-platform-categories.ts",
+    "openapi:snapshot": "tsx scripts/check-openapi-additivity.mjs update",
+    "openapi:check": "tsx scripts/check-openapi-additivity.mjs check",
+    "api-snapshot:update": "node scripts/update-api-snapshot.mjs",
+    "api-snapshot:check": "node scripts/check-api-snapshot.mjs",
+    "extension-api:version-check": "node scripts/check-extension-api-version.mjs"
   },
   "dependencies": {
     "@aws-lambda-powertools/logger": "^2.34.0",
@@ -68,7 +73,7 @@
     "@aws-sdk/s3-request-presigner": "^3.1101.0",
     "@aws-sdk/util-dynamodb": "^3.996.7",
     "@de-otio/saas-foundation": "^0.4.0",
-    "@de-otio/trellis-extension-api": "^0.7.0",
+    "@de-otio/trellis-extension-api": "^0.8.0",
     "@de-otio/vestibulum": "^0.4.0",
     "@fedify/fedify": "2.3.4",
     "@js-temporal/polyfill": "^0.5.1",
