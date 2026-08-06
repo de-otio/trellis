@@ -264,12 +264,30 @@ export class FeedHandler {
       const pageNumber = parseInt(url.searchParams.get("pageNumber") || "1", 10);
       const sessionDurationMinutes = parseInt(url.searchParams.get("sessionDurationMinutes") || "0", 10);
 
+      // The tenant guard runs BEFORE the cache is consulted, not after the
+      // database predicate is built. A cache hit returns without ever reaching
+      // the query, so a guard placed further down cannot protect the cached
+      // path — it would let a request with no active tenant be answered from
+      // whatever a previous request stored.
+      if (!activeTenantId) {
+        throw new Error(
+          "getHomeFeed: activeTenantId is required for tenant isolation",
+        );
+      }
+
       // PREPARATORY: Use region in cache key to ensure region-specific caching
       const region = requestContext.region;
       const cacheVersion = await FeedHandler.getCacheVersion(env);
       // Include entityRefs in cache key for proper cache invalidation
       const entityRefsKey = options.entityRefs?.sort().join(",") || "";
-      const cacheKey = `feed:home:${region}:v${cacheVersion}:${session.userId}:${entityRefsKey}:${options.cursor || "initial"}:${limit}`;
+      // EVERY input to the response body must appear in this key. The body is
+      // resolved per viewer AND per tenant: `activeTenantId` comes from a JWT
+      // claim that changes when a user switches tenant, and it is an AND in the
+      // post query below. Omitting it means a user who belongs to two tenants
+      // gets tenant A's posts served from cache while reading as tenant B —
+      // defeating the tenant predicate entirely for the cache TTL, with no
+      // error anywhere.
+      const cacheKey = `feed:home:${region}:${activeTenantId}:v${cacheVersion}:${session.userId}:${entityRefsKey}:${options.cursor || "initial"}:${limit}`;
 
       // PREPARATORY: Check aggressive caching feature flag
       // If enabled, use longer cache TTL and more aggressive cache strategies
@@ -281,16 +299,25 @@ export class FeedHandler {
           status: 200,
           headers: {
             "content-type": "application/json",
-            // Add cache headers if aggressive caching enabled.
-            // MUST stay `private`: the response body is resolved per viewer
-            // (the cache key carries session.userId, and the visibility filter
-            // is built from this viewer's friend set), so a shared cache — CDN
-            // or proxy — that stored it would serve one viewer's feed to
-            // another. `private` keeps the browser-side TTL that the
-            // aggressive-caching flag is there to buy.
-            ...(aggressiveCaching && {
-              "Cache-Control": "private, max-age=300", // 5 minutes
-            }),
+            // MUST stay `private`, and must be present unconditionally. The
+            // response body is resolved per viewer and per tenant (the cache key
+            // carries both, and the visibility filter is built from this
+            // viewer's friend set), so a shared cache — CDN or proxy — that
+            // stored it would serve one viewer's feed to another.
+            //
+            // Emitting nothing when aggressive caching is off is NOT the safe
+            // default: under RFC 9111 a 200 with no explicit freshness is
+            // heuristically storable, and a cookie-authenticated request carries
+            // no `Authorization` header to suppress that. So the flag chooses
+            // the browser-side TTL it exists to buy; it does not choose whether
+            // to say `private`.
+            "Cache-Control": aggressiveCaching
+              ? "private, max-age=300" // 5 minutes
+              : "private, no-store",
+            // Identity lives in the cookie/header, not the URL — every viewer
+            // requests the same path, so a shared cache needs telling that the
+            // response varies by credential.
+            Vary: "Authorization, Cookie",
           },
         });
       }
@@ -329,19 +356,12 @@ export class FeedHandler {
         };
       }
 
-      // Tenant ID comes from the authenticated caller's JWT (passed in by the route).
+      // Tenant ID comes from the authenticated caller's JWT (passed in by the
+      // route). Already proven non-empty above, before the cache was consulted:
+      // Prisma DROPS a `where` key whose value is `undefined`, so a falsy tenant
+      // would remove the tenant predicate from the post query below and return
+      // every tenant's posts with no error anywhere.
       const tenantId = activeTenantId;
-
-      // Fail loudly rather than silently widening. Prisma DROPS a `where` key
-      // whose value is `undefined`, so a falsy tenant here would remove the
-      // tenant predicate from the post query below and return every tenant's
-      // posts — with no error anywhere. Throwing keeps that failure mode
-      // impossible to reach silently.
-      if (!tenantId) {
-        throw new Error(
-          "getHomeFeed: activeTenantId is required for tenant isolation",
-        );
-      }
 
       // Build taxonomy filter
       let taxonomyFilter: any = undefined;
@@ -647,6 +667,7 @@ export class FeedHandler {
           // Absent a directive a shared cache may still store this
           // heuristically, which is the same leak as the cached path above.
           "Cache-Control": "private, no-store",
+          Vary: "Authorization, Cookie",
         },
       });
     } catch (error: any) {

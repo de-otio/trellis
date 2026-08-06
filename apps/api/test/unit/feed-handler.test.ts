@@ -682,6 +682,54 @@ describe("FeedHandler", () => {
         expect(mockDb.post.findMany).not.toHaveBeenCalled();
         // Verify cache was checked
         expect(cacheKeyUsed).toContain("feed:home:");
+
+        // Every input to the body must be in the key. A cache hit bypasses the
+        // tenant AND in the post query entirely, so a key missing either of
+        // these serves one viewer's or one tenant's feed to another —
+        // `toContain("feed:home:")` alone cannot see that.
+        expect(cacheKeyUsed).toContain(TEST_TENANT_ID);
+        expect(cacheKeyUsed).toContain(mockSession.userId);
+
+        // Per-viewer body must never be storable by a shared cache, including
+        // when aggressive caching is off (this mockRequestContext has it off).
+        expect(response.headers.get("Cache-Control")).toBe("private, no-store");
+        expect(response.headers.get("Vary")).toContain("Cookie");
+      });
+
+      it("refuses a cache-hit request that carries no active tenant", async () => {
+        // The guard must run BEFORE the cache is consulted. With a warm cache and
+        // no tenant, a guard placed after the query would never be reached and the
+        // request would be answered from whatever a previous request stored.
+        mockEnv.FEED_CACHE_KV.get = vi
+          .fn()
+          .mockImplementation((key: string, type?: string) => {
+            if (key === "feed:cache:version") return Promise.resolve("1");
+            if (type === "json" && key.includes("feed:home:")) {
+              return Promise.resolve({
+                posts: [{ id: "other-tenant-post", text: "leaked" }],
+                hasMore: false,
+              });
+            }
+            return Promise.resolve(null);
+          });
+
+        const response = await handler.getHomeFeed(
+          mockSession,
+          new Request("http://test.com/feeds/home"),
+          mockEnv,
+          { limit: 20 },
+          mockRequestContext,
+          "",
+        );
+
+        // The guard throws and the handler's own catch turns it into a 500. What
+        // matters is that the cached body did NOT go out: assert on the payload,
+        // not just the status, or a future refactor that returns the cache with a
+        // 500 would still pass.
+        expect(response.status).toBe(500);
+        const body = await response.text();
+        expect(body).not.toContain("other-tenant-post");
+        expect(body).not.toContain("leaked");
       });
 
       it("should query database and cache result on cache miss", async () => {
