@@ -384,11 +384,16 @@ export interface ExtensionJobDecl {
  * the expected API version (useful during coordinated Trellis + extension
  * upgrades).
  *
+ * The sanctioned way to do that is to assign it to
+ * {@link TrellisExtension.extensionApiVersion} — core then performs the
+ * compatibility check itself at boot and fails startup on an incompatible
+ * pairing, instead of every extension hand-rolling the comparison.
+ *
  * When to update:
  *   - Bump alongside every `package.json` version change.
  *   - Never change one without changing the other.
  */
-export const EXTENSION_API_VERSION = "0.7.0" as const;
+export const EXTENSION_API_VERSION = "0.8.0" as const;
 
 // ---------------------------------------------------------------------------
 // Strategy Interfaces — pluggable domain-specific behavior
@@ -567,6 +572,42 @@ export interface ExtensionRouteDefinition {
 export interface TrellisExtension {
   /** Unique ID — must be lowercase alphanumeric, 2-32 chars, not a reserved word */
   id: string;
+
+  /**
+   * The semver of `@de-otio/trellis-extension-api` this extension was **built
+   * against** — normally `EXTENSION_API_VERSION` imported from this package,
+   * so a rebuild keeps it truthful automatically:
+   *
+   * ```ts
+   * import { EXTENSION_API_VERSION } from "@de-otio/trellis-extension-api";
+   * export const dogExtension: TrellisExtension = {
+   *   id: "dog",
+   *   extensionApiVersion: EXTENSION_API_VERSION,
+   *   // …
+   * };
+   * ```
+   *
+   * Core checks this at startup, before serving:
+   * - **Absent** → core logs one warning at boot and continues. Declaring it
+   *   is strongly recommended (an undeclared extension gets no protection
+   *   against a silently incompatible core), but it is never fatal — existing
+   *   extensions keep working across an upgrade.
+   * - **Declared and incompatible** → core **fails startup**, naming both
+   *   versions. Incompatible means a differing major, or (while the extension
+   *   API is still `0.x`, where minors are breaking) a differing minor.
+   * - **Declared and merely drifted** (same compatibility window, different
+   *   patch — or different minor once the API reaches `1.x`) → core logs;
+   *   rebuild at your convenience.
+   * - **Declared but unparseable** → core fails startup with a validation
+   *   error naming the offending value.
+   *
+   * Format: `<major>.<minor>.<patch>`, each part 1–4 digits, with an optional
+   * `-`/`+` suffix that is ignored for comparison (e.g. `"0.8.0"`,
+   * `"0.8.0-alpha.1"`). Values longer than 64 characters are rejected.
+   *
+   * Optional and additive — omitting it is valid.
+   */
+  extensionApiVersion?: string;
 
   /** Display terminology */
   terminology: {
