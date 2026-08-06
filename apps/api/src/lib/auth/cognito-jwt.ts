@@ -81,6 +81,12 @@ export interface TrellisClaims {
   sub: string;
   username: string;
   email?: string;
+  /**
+   * OIDC `email_verified` (Cognito emits boolean; some IdPs emit "true").
+   * Mapping only — consumed by the JIT provisioning input (WS-0), never by
+   * an authorization decision here.
+   */
+  emailVerified?: boolean;
   /** was `custom:userId` — Trellis `User.id` (cuid). */
   userId?: string;
   /** was `custom:globalRole` / legacy `custom:role`. */
@@ -99,6 +105,14 @@ export interface TrellisClaims {
 
 function asString(v: unknown): string | undefined {
   return typeof v === "string" ? v : undefined;
+}
+
+/** OIDC boolean claims arrive as boolean (spec) or "true"/"false" strings. */
+function asBool(v: unknown): boolean | undefined {
+  if (typeof v === "boolean") return v;
+  if (v === "true") return true;
+  if (v === "false") return false;
+  return undefined;
 }
 
 /**
@@ -135,6 +149,7 @@ export function normalizeClaims(
       sub,
       username: asString(raw["cognito:username"]) ?? asString(raw.username) ?? "",
       ...pick("email", asString(raw.email)),
+      ...pickBool("emailVerified", asBool(raw.email_verified)),
       ...pick("userId", asString(raw["custom:userId"])),
       ...pick("globalRole", asString(raw["custom:globalRole"]) ?? asString(raw["custom:role"])),
       ...pick("activeTenantId", asString(raw["custom:activeTenantId"])),
@@ -162,6 +177,7 @@ export function normalizeClaims(
       asString(raw.email) ??
       "",
     ...pick("email", asString(raw.email)),
+    ...pickBool("emailVerified", asBool(raw.email_verified)),
     ...pick("userId", asString(raw["custom:userId"])),
     ...pick("globalRole", asString(raw["custom:globalRole"]) ?? asString(raw["custom:role"])),
     ...pick("activeTenantId", asString(raw["custom:activeTenantId"])),
@@ -174,6 +190,13 @@ export function normalizeClaims(
 
 function pick<K extends string>(key: K, value: string | undefined): Partial<Record<K, string>> {
   return value !== undefined ? ({ [key]: value } as Record<K, string>) : {};
+}
+
+function pickBool<K extends string>(
+  key: K,
+  value: boolean | undefined,
+): Partial<Record<K, boolean>> {
+  return value !== undefined ? ({ [key]: value } as Record<K, boolean>) : {};
 }
 
 /**
