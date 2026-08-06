@@ -163,6 +163,22 @@ export interface Env {
    */
   ACTIVITYPUB_ENABLED: boolean;
 
+  // ── Client version policy (served by GET /api/app/version-policy) ─────────
+  // All four are OPTIONAL and all four are DORMANT by default: unset means the
+  // endpoint returns nulls and the 426 backstop is a no-op. Values are
+  // operational configuration, never compiled constants — the npm tarball is
+  // public, so a hard-coded minimum version would be a published one.
+  // Formats are enforced at boot in env-schema.ts (bounded semver; store URLs
+  // must be https on an allow-listed store host).
+  /** Oldest client version the server still accepts; older ones get 426. */
+  CLIENT_MIN_SUPPORTED_VERSION?: string;
+  /** Version the client should nudge users toward (never enforced). */
+  CLIENT_RECOMMENDED_VERSION?: string;
+  /** Android store URL (https, play.google.com). */
+  CLIENT_STORE_URL_ANDROID?: string;
+  /** iOS store URL (https, apps.apple.com). */
+  CLIENT_STORE_URL_IOS?: string;
+
   /**
    * Trusted-proxy mode for client-IP derivation. See
    * `lib/net/trusted-client-ip.ts`. Values: "none" (default), "alb",
@@ -1478,6 +1494,14 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     // Federation master switch — fail closed: anything other than the exact
     // string "true" leaves federation disabled.
     ACTIVITYPUB_ENABLED: process.env.ACTIVITYPUB_ENABLED === "true",
+
+    // Client version policy — raw passthrough; boot validation (env-schema.ts)
+    // has already rejected malformed values, and resolveVersionPolicy() treats
+    // anything unparseable as "unset" (dormant) as defense in depth.
+    CLIENT_MIN_SUPPORTED_VERSION: process.env.CLIENT_MIN_SUPPORTED_VERSION,
+    CLIENT_RECOMMENDED_VERSION: process.env.CLIENT_RECOMMENDED_VERSION,
+    CLIENT_STORE_URL_ANDROID: process.env.CLIENT_STORE_URL_ANDROID,
+    CLIENT_STORE_URL_IOS: process.env.CLIENT_STORE_URL_IOS,
 
     // Trusted-proxy hint for client-IP derivation; defaults to "none".
     TRUSTED_PROXY: process.env.TRUSTED_PROXY,
