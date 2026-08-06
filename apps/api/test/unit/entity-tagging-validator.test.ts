@@ -14,8 +14,13 @@ import {
   EntityTaggingPermissionError,
 } from "../../src/lib/entity-tagging-errors.js";
 
-/** Build a friend-edge row as `relationship.findMany` would return it. */
-const friendEdge = (targetId: string) => ({ targetId });
+/**
+ * Build a friend-edge row as `relationship.findMany` would return it.
+ *
+ * The row carries `userId` — the AUTHOR of the edge — because the query reads the
+ * edge whose TARGET is the viewer. See friend-ids.ts on why the direction matters.
+ */
+const friendEdge = (userId: string) => ({ userId });
 
 describe("validateEntityTagging", () => {
   let mockDb: any;
@@ -62,21 +67,28 @@ describe("validateEntityTagging", () => {
       validateEntityTagging("user-123", ["entity-1"], mockDb as any),
     ).resolves.not.toThrow();
 
-    // Friend set must come from the caller's MUTUAL user-edges, tier ≤ 1.
+    // The friend set must come from MUTUAL user-edges at tier ≤ 1 that the OTHER
+    // party authored — `targetId` is the caller, so the tier is the one the entity
+    // owner assigned. Both halves matter here:
+    //
     // `reciprocated` was added when the one-directional read was found to be a
     // self-grant (V1): without it, unilaterally adding a stranger was enough to
     // tag that stranger's entities — their dog, their business — in your own
-    // posts, with no action by them. Tagging is exactly the kind of capability
-    // that must require the other party's consent, so this validator inherits
-    // the constraint rather than opting out of it.
+    // posts, with no action by them.
+    //
+    // The direction was then flipped because `reciprocated` alone was not enough:
+    // `tier` is reader-writable via PATCH /api/relationships/score, so reading the
+    // caller's own edge let the caller promote themselves into a stranger's close
+    // circle after any follow-back. Tagging must require the other party's
+    // consent, so this validator inherits both constraints.
     expect(mockDb.relationship.findMany).toHaveBeenCalledWith({
       where: {
-        userId: "user-123",
+        targetId: "user-123",
         targetType: "user",
         tier: { lte: 1 },
         reciprocated: true,
       },
-      select: { targetId: true },
+      select: { userId: true },
     });
   });
 

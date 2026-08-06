@@ -24,7 +24,7 @@ import {
   type RelationshipReader,
 } from "../../src/lib/friend-ids.js";
 
-function readerReturning(rows: Array<{ targetId: string }>) {
+function readerReturning(rows: Array<{ userId: string }>) {
   const findMany = vi.fn().mockResolvedValue(rows);
   return {
     db: { relationship: { findMany } } as unknown as RelationshipReader,
@@ -33,15 +33,15 @@ function readerReturning(rows: Array<{ targetId: string }>) {
 }
 
 describe("getFriendUserIds", () => {
-  it("returns the target ids of qualifying edges", async () => {
+  it("returns the ids of the authors who placed this viewer close", async () => {
     const { db } = readerReturning([
-      { targetId: "user-a" },
-      { targetId: "user-b" },
+      { userId: "author-a" },
+      { userId: "author-b" },
     ]);
 
     await expect(getFriendUserIds(db, "viewer-1")).resolves.toEqual([
-      "user-a",
-      "user-b",
+      "author-a",
+      "author-b",
     ]);
   });
 
@@ -62,22 +62,27 @@ describe("getFriendUserIds", () => {
 
     expect(findMany).toHaveBeenCalledWith({
       where: {
-        userId: "viewer-1",
+        targetId: "viewer-1",
         targetType: "user",
         tier: { lte: FRIEND_TIER_MAX },
         reciprocated: true,
       },
-      select: { targetId: true },
+      select: { userId: true },
     });
   });
 
-  it("scopes the query to the viewer and to user targets", async () => {
+  // The direction is the whole point: `tier` must be the tier the AUTHOR
+  // assigned, so the viewer has to appear as the edge's TARGET. Reading the
+  // viewer's own outgoing edge hands the audience boundary to the reader, who
+  // sets their own tier via PATCH /api/relationships/score.
+  it("reads the author's edge — the viewer is the target, never the source", async () => {
     const { db, findMany } = readerReturning([]);
 
     await getFriendUserIds(db, "viewer-9");
 
     const where = findMany.mock.calls[0][0].where;
-    expect(where.userId).toBe("viewer-9");
+    expect(where.targetId).toBe("viewer-9");
+    expect(where.userId).toBeUndefined();
     expect(where.targetType).toBe("user");
   });
 
