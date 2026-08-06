@@ -176,7 +176,7 @@ Browsers preflight any non-simple request header. `X-Client-Version` and
 `X-Client-Platform` are sent on every call by a client that implements this
 contract, so both are part of the `Access-Control-Allow-Headers` list served
 by every CORS-handling site in the API
-(`CorsHandler.CORS_ALLOWED_REQUEST_HEADERS` in `lib/cors-handler.ts`, and the
+(`CORS_ALLOWED_REQUEST_HEADERS` in `lib/cors-handler.ts`, and the
 preflight/response paths in `lib/middleware.ts`). If you add a new
 client-sent header in the future, it must go on that same allow-list at
 every site — a header the client sends but the allow-list omits fails the
@@ -233,9 +233,13 @@ own version of the mechanisms above:
     `1.x`) → logged only.
   - a declared but unparseable value → a clean boot-time validation
     failure, never a deep throw.
-- **Constraint lockstep.** `apps/api`'s dependency on
-  `@de-otio/trellis-extension-api` is a caret range
-  (`^<extension-api-version>`), checked against the package's own
-  `EXTENSION_API_VERSION` const by `check-extension-api-version.mjs`
-  (also gated in `api-snapshot-gate.yml`) — the two are not allowed to
-  drift apart.
+- **Constraint lockstep (extension-api package only).**
+  `check-extension-api-version.mjs` (also gated in `api-snapshot-gate.yml`)
+  compares `packages/extension-api/src/extension.ts`'s
+  `EXTENSION_API_VERSION` const against `packages/extension-api/package.json`'s
+  own `version` field, failing the build if they drift apart — this keeps the
+  runtime version string truthful to what's published to npm. It does **not**
+  check `apps/api`'s caret-range dependency on
+  `@de-otio/trellis-extension-api`; gating that range against the same
+  source of truth is a possible follow-up, not something this script does
+  today.

@@ -12,6 +12,12 @@ A rebuild differs from a backfill (`../backfills/README.md`): a rebuild is
 **re-run whenever drift is suspected**, for the life of the feature; it is
 not deleted after one successful run.
 
+**Known gap:** `apps/api/scripts/**/*.ts` (this directory and its siblings)
+are outside `apps/api/tsconfig.json`'s `include` — adding them conflicts
+with the package's `rootDir: "src"` build config — so these scripts are not
+covered by `tsc --build`'s typecheck gate; type errors in them surface only
+at `tsx` runtime or via editor tooling.
+
 ## Rebuild script rules
 
 - **Batched**, over the child rows the counter is derived from, not loaded
@@ -37,11 +43,11 @@ obvious derivation from a child table. Seven found:
 | # | Field | Model | Derived from | Rebuild status |
 |---|---|---|---|---|
 | 1 | `itemCount` | `Collection` | `count(CollectionItem where collectionId = X)` | **`rebuild-collection-item-count.ts`** — worked example in this directory |
-| 2 | `useCount` | `ConnectionCode` | `count(ConnectionCodeRedemption where connectionCodeId = X)` | Not yet implemented — follow the worked example's shape (swap model/relation names) |
+| 2 | `useCount` | `ConnectionCode` | `count(ConnectionCodeRedemption where codeId = X)` | Not yet implemented — follow the worked example's shape (swap model/relation names) |
 | 3 | `rsvpCount` | `Event` | `count(Rsvp where eventId = X and status in (GOING, MAYBE))` | Not yet implemented — note the status filter (`WAITLISTED` rows count toward `waitlistCount`, not this field) before writing it |
 | 4 | `waitlistCount` | `Event` | `count(Rsvp where eventId = X and status = WAITLISTED)` | Not yet implemented |
 | 5 | `filledCount` | `EventShift` | `count(ShiftSignup where shiftId = X)` | Not yet implemented |
-| 6 | `interactionCount` | `Relationship` | `count(InteractionEvent where actorUserId = X and targetId/targetType match)` | **Known limitation: not exactly rebuildable.** `InteractionEvent` rows are retention-bound and pruned (`expiresAt`, hourly cron) — a rebuild from current rows would *undercount* relationships whose interactions have aged out and does not reproduce the scoring engine's decay function (`graph/postgres/scoring.ts`). Do not write a rebuild script that silently overwrites this field from a partial event window; if this ever needs correcting, it needs a design decision (accept the undercount explicitly, or reconstruct from an archival copy of expired events), not a mechanical rebuild. Recorded here, not implemented. |
+| 6 | `interactionCount` | `Relationship` | `count(InteractionEvent where actorUserId = X and targetId/targetType match)` | **Known limitation: not exactly rebuildable.** `InteractionEvent` rows are retention-bound and pruned (`expiresAt`, hourly cron) — a rebuild from current rows would *undercount* relationships whose interactions have aged out and does not reproduce the scoring engine's decay function (`lib/graph/postgres/scoring.ts`). Do not write a rebuild script that silently overwrites this field from a partial event window; if this ever needs correcting, it needs a design decision (accept the undercount explicitly, or reconstruct from an archival copy of expired events), not a mechanical rebuild. Recorded here, not implemented. |
 | 7 | `bounceCount` | `EmailSubscription` | Incremented directly by the bounce-webhook handler; there is no child table recording individual bounce events | **Not rebuildable from stored rows** — no source-of-truth table exists to recompute from (the email provider's own delivery log is the only such source, and it is external to this database). If this field drifts, correcting it requires reconciling against the provider's bounce log out of band; it is out of scope for a `rebuilds/` script. Recorded here, not implemented. |
 
 Only #1 has a worked-example script in this initial pass (T6 of the

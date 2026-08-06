@@ -15,7 +15,7 @@
   "dependencies": {
     "@aws-sdk/client-sqs": "^3.1101.0",
     "@de-otio/saas-foundation": "^0.4.0",
-    "@de-otio/trellis-extension-api": "^0.7.0",
+    "@de-otio/trellis-extension-api": "^0.8.0",
     "@de-otio/vestibulum": "^0.4.0"
   }
 }

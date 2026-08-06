@@ -100,10 +100,10 @@ For changes that could break a running API instance, apply migrations in stages 
 | Step | Action | Deploy? |
 |------|--------|---------|
 | 1. Expand | Add new nullable column / table | Deploy |
-| 2. Write dual | Code writes to old + new column (`ops_dual_write` toggle on) | Deploy |
+| 2. Write dual | Code writes to old + new column (`ops_dual_write_<change>` toggle on — e.g. `ops_dual_write`, a naming convention, not an existing toggle; create one per change) | Deploy |
 | 3. Backfill | Script (`scripts/backfills/`) populates new column from old | Run out-of-band, batched |
 | 4. Shadow-read | Code reads both, compares, logs mismatches; still serves the old column | Deploy |
-| 5. Switch reads | Flip `ops_read_new` toggle; code serves the new column | Deploy (toggle flip, not a migration) |
+| 5. Switch reads | Flip `ops_read_new_<change>` toggle (e.g. `ops_read_new` — naming convention, create per change); code serves the new column | Deploy (toggle flip, not a migration) |
 | 6. Soak | Run on the new read path under real traffic for a full cycle before touching anything else | Observe |
 | 7. Contract | Drop the old column in a new migration, after taking an RDS snapshot | Deploy |
 

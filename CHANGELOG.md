@@ -124,6 +124,11 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   `npm install` to resolve; consuming applications that pin
   `@de-otio/trellis-extension-api` themselves (rather than accepting
   trellis's own dependency resolution) should move to `^0.8.0` too.
+- **`npm publish --provenance` enabled** in `publish.yml` now that
+  `de-otio/trellis` is a public repository: npm can verify the sigstore
+  provenance bundle against the GitHub Actions source repository, so
+  published tarballs carry a verifiable build attestation. Requires no
+  new secrets — Node 24 + OIDC trusted publishing were already wired.
 
 ## [0.24.0] — 2026-08-06
 
