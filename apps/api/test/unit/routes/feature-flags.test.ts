@@ -295,6 +295,78 @@ describe("Feature Flags Routes", () => {
     });
   });
 
+  describe("platform block (T9, plan §2.2)", () => {
+    it("includes a platform block with all eleven keys, defaulting false when db is absent", async () => {
+      // mockCreatePrisma has no return value configured in this suite's
+      // beforeEach, so createPrisma(env) returns undefined here — exercising
+      // getPlatformFlags's no-db path.
+      const response = await route.handler(mockRequest, mockEnv);
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.platform).toEqual({
+        posts: false,
+        comments: false,
+        friends: false,
+        sentiments: false,
+        feeds: false,
+        map: false,
+        events: false,
+        collections: false,
+        email_subscriptions: false,
+        year_in_review: false,
+        entity_profiles: false,
+      });
+    });
+
+    it("does not change any existing response field (additive-only)", async () => {
+      const mockDb = { user: { findMany: vi.fn() } };
+      mockCreatePrisma.mockReturnValue(mockDb);
+      mockGetFeatureFlagsAsync.mockResolvedValue({
+        authentication: { emailPassword: true, microsoftSSO: true },
+        features: { offlineMode: true },
+        performance: { extendedTimeouts: true },
+        security: { encryption: true },
+      });
+
+      const response = await route.handler(mockRequest, mockEnv);
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.region).toBe("US");
+      expect(body.features.authentication).toEqual({
+        emailPassword: true,
+        microsoftSSO: true,
+      });
+      expect(body.features.application).toEqual({ offlineMode: true });
+      expect(body.features.performance).toEqual({ extendedTimeouts: true });
+      expect(body.features.security).toEqual({ encryption: true });
+      expect(body.endpoints).toEqual({
+        api: "https://api.example.com",
+        frontend: "https://www.example.com",
+        cdn: "https://cdn.example.com",
+      });
+      expect(body.timeouts).toEqual({ api: 10000, database: 5000, storage: 5000 });
+      // ...and the new field is present alongside them.
+      expect(body).toHaveProperty("platform");
+    });
+
+    it("still returns a platform block (all-false) when createPrisma throws", async () => {
+      mockCreatePrisma.mockImplementation(() => {
+        throw new Error("Database connection failed");
+      });
+
+      const response = await route.handler(mockRequest, mockEnv);
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.platform).toBeDefined();
+      expect(Object.values(body.platform).every((v: any) => v === false)).toBe(
+        true,
+      );
+    });
+  });
+
   describe("Route configuration", () => {
     it("should have correct route path and method", () => {
       expect(route).toBeDefined();
