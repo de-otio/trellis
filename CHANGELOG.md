@@ -17,6 +17,36 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ### Added
 
+- **`POST /auth/register` — invitation-gated registration on a brokered IdP.**
+  On the Cognito path registration is client-side (`Amplify.Auth.signUp`, with
+  the PreSignUp trigger running the invitation gate server-side and the signup
+  attributes riding the trigger event). A brokered IdP has no hook the client
+  can reach, and the client must never hold the realm admin credential — so
+  **a Keycloak deployment could sign existing users in but could not register
+  new ones at all.** Worse than an outright failure: `POST /auth/magic-link`
+  never passes `forceCreate`, so an unknown email returned the deliberate
+  anti-enumeration `200 {"status":"sent"}` while creating no user and sending
+  no mail.
+
+  The endpoint validates the invitation code **before** creating the user
+  (fail-closed; a rejected attempt leaves nothing behind that could later be
+  sent a sign-in link), then creates it carrying the attributes the app
+  provisions from on first sign-in — `invitationCode`, `dateOfBirth`,
+  `guardianEmail`, `handle`, `signupMethod`. Those attributes are the point:
+  dropping them does not fail, it produces an un-gated adult account.
+
+  The address is **not** created pre-verified — the magic link that follows is
+  what proves it. Registration deliberately does not send that link, mirroring
+  the Cognito contract so one client flow drives both providers. An
+  already-registered email is indistinguishable from a fresh one (C-13/F10) and
+  is never rewritten, so a replayed registration cannot overwrite a date of
+  birth or re-consume an invitation. Its own 3/900s per-email bucket, separate
+  from the sign-in budget, failing closed. Returns 501 on a provider without
+  `registerUser` rather than quietly doing nothing.
+
+  Requires `@de-otio/saas-foundation` with the optional `registerUser` port
+  method.
+
 - **`GET /api/users/me` — the caller's resolved identity.** Returns
   `{ userId, activeTenantId, email, globalRole, tenantSlug, tenantRole,
   handle }`, authenticated, `private, no-store`, and included in the
