@@ -17,6 +17,23 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ### Added
 
+- **`GET /api/users/me` — the caller's resolved identity.** Returns
+  `{ userId, activeTenantId, email, globalRole, tenantSlug, tenantRole,
+  handle }`, authenticated, `private, no-store`, and included in the
+  curated OpenAPI document. It exists so clients stop decoding
+  `custom:userId` / `custom:activeTenantId` out of the ID token: those
+  claim names are written by a Cognito pre-token-generation Lambda and are
+  a per-deployment choice on any other OIDC issuer (a Keycloak realm maps
+  whatever its `claim_mappers` say — possibly nothing), so a
+  token-decoding client silently receives `null` and degrades. The server
+  resolves the identity from the token `sub` instead, so the endpoint
+  behaves identically across providers. It is also fresher than a claim:
+  `activeTenantId` is correct on the request after a tenant switch rather
+  than after the next token refresh. All fields but `email` come from the
+  identity `authMiddleware` already resolved; `email` costs one
+  primary-key read. Fails closed with `401` if the user row disappears
+  mid-request.
+
 - **Client-version policy endpoint + forced-upgrade backstop.**
   `GET /api/app/version-policy` (new, unauthenticated, session-free, no
   DB/KV read — the whole response comes from four optional env vars,

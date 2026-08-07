@@ -204,8 +204,8 @@ export interface ExtensionRecapSubject {
  * and the restricted context they receive at runtime.
  */
 import type { ZodSchema } from "zod";
-import type { Route } from "./route-types";
-import type { ExtensionCircleEntityStatus, ExtensionCircleMember, ExtensionCircleTierStatus, ExtensionEntity, ExtensionEntityRelationship, ExtensionGlanceItem, ExtensionPaginatedResult, ExtensionPost, ExtensionRecapPayload, ExtensionRecapSubject, ExtensionRelationship, ExtensionVisiblePost } from "./dto";
+import type { Route } from "./route-types.js";
+import type { ExtensionCircleEntityStatus, ExtensionCircleMember, ExtensionCircleTierStatus, ExtensionEntity, ExtensionEntityRelationship, ExtensionGlanceItem, ExtensionPaginatedResult, ExtensionPost, ExtensionRecapPayload, ExtensionRecapSubject, ExtensionRelationship, ExtensionVisiblePost } from "./dto.js";
 /**
  * Opaque tenant identifier — a branded string **minted only by core**.
  *
@@ -493,7 +493,7 @@ export interface ExtensionJobDecl {
  *   - Bump alongside every `package.json` version change.
  *   - Never change one without changing the other.
  */
-export declare const EXTENSION_API_VERSION: "0.8.0";
+export declare const EXTENSION_API_VERSION: "0.8.1";
 /** Signal provider for domain-specific relationship scoring */
 export interface RelationshipSignalProvider {
     /**
@@ -758,10 +758,10 @@ export {};
  *
  * Public types for building Trellis extensions.
  */
-export type { TrellisExtension, ExtensionContext, ExtensionGraphService, ExtensionDb, ScopedDb, ScopedDelegate, TenantId, ExtensionHooks, ExtensionJobDecl, ExtensionJobContext, ExtensionJobSchedule, CrossTenantReadDelegate, ExtensionRouteDefinition, ExtensionHandler, ExtensionSession, ExtensionResponse, DiscoverDb, RelationshipSignalProvider, RelationshipSignalContext, DiscoveryFacet, RecommendationStrategy, Recommendation, ActorEnrichment, TaxonomySeedData, TaxonomySeedDimension, TaxonomySeedCategory, TaxonomySeedTaxon, } from "./extension";
-export { EXTENSION_API_VERSION } from "./extension";
-export type { Route, RoutePattern, Middleware, MiddlewareContext, } from "./route-types";
-export type { ExtensionNodeType, ExtensionCircleTier, ExtensionConnectionMethod, ExtensionPaginatedResult, ExtensionEntity, ExtensionPost, ExtensionRelationship, ExtensionCircleMember, ExtensionCircleTierStatus, ExtensionCircleEntityStatus, ExtensionGlanceItem, ExtensionVisiblePost, ExtensionEntityRelationship, ExtensionRecapWindow, ExtensionRecapPayload, ExtensionRecapSubject, } from "./dto";
+export type { TrellisExtension, ExtensionContext, ExtensionGraphService, ExtensionDb, ScopedDb, ScopedDelegate, TenantId, ExtensionHooks, ExtensionJobDecl, ExtensionJobContext, ExtensionJobSchedule, CrossTenantReadDelegate, ExtensionRouteDefinition, ExtensionHandler, ExtensionSession, ExtensionResponse, DiscoverDb, RelationshipSignalProvider, RelationshipSignalContext, DiscoveryFacet, RecommendationStrategy, Recommendation, ActorEnrichment, TaxonomySeedData, TaxonomySeedDimension, TaxonomySeedCategory, TaxonomySeedTaxon, } from "./extension.js";
+export { EXTENSION_API_VERSION } from "./extension.js";
+export type { Route, RoutePattern, Middleware, MiddlewareContext, } from "./route-types.js";
+export type { ExtensionNodeType, ExtensionCircleTier, ExtensionConnectionMethod, ExtensionPaginatedResult, ExtensionEntity, ExtensionPost, ExtensionRelationship, ExtensionCircleMember, ExtensionCircleTierStatus, ExtensionCircleEntityStatus, ExtensionGlanceItem, ExtensionVisiblePost, ExtensionEntityRelationship, ExtensionRecapWindow, ExtensionRecapPayload, ExtensionRecapSubject, } from "./dto.js";
 
 // ===== route-types.d.ts =====
 /**

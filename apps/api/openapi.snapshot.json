@@ -129,6 +129,29 @@
         }
       }
     },
+    "/api/users/me": {
+      "get": {
+        "summary": "Get the caller's resolved identity",
+        "operationId": "get__api_users_me",
+        "tags": [
+          "other"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        }
+      }
+    },
     "/api/tenants": {
       "post": {
         "summary": "Create organization tenant",

@@ -673,11 +673,12 @@ describe("User Routes", () => {
 
   describe("Route configuration", () => {
     it("should have all required routes", () => {
-      expect(userRoutes).toHaveLength(3);
+      expect(userRoutes).toHaveLength(4);
     });
 
     it("should have correct paths and methods", () => {
       const paths = userRoutes.map((r) => r.path);
+      expect(paths).toContain("/api/users/me");
       expect(paths).toContain("/api/user/profile");
       expect(paths).toContain("/api/user/region-preference");
       expect(paths).toContain("/api/user/cross-region-consent");

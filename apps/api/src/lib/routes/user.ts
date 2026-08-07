@@ -1,10 +1,13 @@
 /**
  * User Routes
  *
- * Routes for user profile management
+ * - GET   /api/users/me       — the caller's resolved identity
+ * - PATCH /api/user/profile   — profile management
  */
 
 import { addCorsHeaders } from "../../worker.js";
+import { authMiddleware } from "../auth/auth-middleware.js";
+import { unauthorizedError } from "./errors.js";
 import { sharedDatabaseConnectionManager } from "../database-connection-manager.js";
 import {
   QueryTimeoutPresets,
@@ -20,6 +23,79 @@ import { Validator } from "../validation.js";
 import type { Route } from "./types.js";
 
 export const userRoutes: Route[] = [
+  // ── GET /api/users/me ─────────────────────────────────────────────────────
+  //
+  // The caller's own identity, as the SERVER resolved it.
+  //
+  // Why this exists: clients used to read `custom:userId` and
+  // `custom:activeTenantId` out of the ID token. That only ever worked on
+  // Cognito, where a pre-token-generation Lambda wrote those claims. On any
+  // other OIDC issuer the claim names are a per-deployment choice — the
+  // Keycloak realm backing skybber dev maps neither — so a token-decoding
+  // client silently gets null and degrades (skybber's realtime transport fell
+  // back to polling with no error surfaced). Serving the identity from here
+  // instead means the client depends on no claim at all and keeps working
+  // across an IdP swap.
+  //
+  // `authMiddleware` has already resolved everything below (claims cache -> DB
+  // -> first-contact provisioning), so all fields but `email` are free; `email`
+  // costs one primary-key read. Cheap enough to call at startup, and the values
+  // are request-fresh rather than as-old-as-the-token — which matters for
+  // `activeTenantId`, since a tenant switch must not wait for a token refresh.
+  {
+    path: "/api/users/me",
+    method: "GET",
+    handler: async (request, env) => {
+      const securityHeaders = new SecurityHeaders(env);
+      const auth = await authMiddleware(request, env);
+      if (!auth) return securityHeaders.addSecurityHeaders(unauthorizedError(securityHeaders));
+
+      const { createPrisma } = await import("../../db.js");
+      const db = createPrisma(env);
+      const user = await db.user.findUnique({
+        where: { id: auth.userId },
+        select: { email: true },
+      });
+
+      // authMiddleware resolved this id against the DB, so a miss here means
+      // the row vanished mid-request (deletion). Treat it as unauthenticated
+      // rather than serving a half-populated identity.
+      if (!user) {
+        return securityHeaders.addSecurityHeaders(unauthorizedError(securityHeaders));
+      }
+
+      return securityHeaders.addSecurityHeaders(
+        new Response(
+          JSON.stringify({
+            userId: auth.userId,
+            activeTenantId: auth.activeTenantId,
+            email: user.email,
+            globalRole: auth.globalRole,
+            tenantSlug: auth.tenantSlug,
+            tenantRole: auth.tenantRole,
+            handle: auth.handle,
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json",
+              // Identity is per-caller and changes on tenant switch.
+              "cache-control": "private, no-store",
+            },
+          },
+        ),
+      );
+    },
+    middleware: [corsMiddleware()],
+    description: "Get the caller's resolved identity",
+    // Flagged individually rather than via `markPublicSpec(userRoutes)`, which
+    // would also publish `PATCH /api/user/profile`. Its sibling
+    // `GET /api/users/me/tenants` is already in the curated spec (it rides
+    // `tenantRoutes`), so leaving this one out would document half of the
+    // identity surface — and this endpoint IS the contract that replaces
+    // client-side claim decoding, so it is the half worth documenting.
+    publicSpec: true,
+  },
   {
     path: "/api/user/profile",
     method: "PATCH",
