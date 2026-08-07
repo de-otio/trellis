@@ -70,6 +70,16 @@ export class AuthHandler {
         return securityHeaders.addSecurityHeaders(response);
       }
 
+      // Invitation-gated registration. Only meaningful on a brokered IdP:
+      // the Cognito path registers client-side through Amplify with the
+      // PreSignUp trigger running the same gate, and this returns 501 there.
+      // See identity/register.ts for why it must be a server endpoint.
+      if (pathname === "/auth/register" && request.method === "POST") {
+        const { handleRegister } = await import("./identity/register.js");
+        const response = await handleRegister(request, env, rateLimiter, corsHeaders);
+        return securityHeaders.addSecurityHeaders(response);
+      }
+
       // Get reCAPTCHA site key (public endpoint)
       if (pathname === "/auth/recaptcha-site-key" && request.method === "GET") {
         const siteKey = env.RECAPTCHA_SITE_KEY || "";
