@@ -130,6 +130,36 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   published tarballs carry a verifiable build attestation. Requires no
   new secrets — Node 24 + OIDC trusted publishing were already wired.
 
+### Fixed
+
+- **`SessionManager.getSession` now resolves the trellis user id on
+  non-Cognito issuers, and fails closed when it cannot.** Trellis has two
+  independent Bearer-token paths; 0.24.0 wired Keycloak JIT claim
+  resolution into `auth-middleware.ts` only. The other —
+  `SessionManager.getSession` Strategy 1a, used by ~46 call sites
+  including every media route — still read
+  `claims["custom:userId"] || claims.sub`. Keycloak issues no
+  `custom:userId` (its realm protocol mappers emit deployer-chosen claim
+  names), so `session.userId` silently became the IdP `sub`: a UUID,
+  matching no `User.id` (a cuid). Every affected route answered
+  *"User not found"* (404) — the same failure mode as the 0.12.1/0.12.2
+  Cognito-era bug, reopened by the provider swap. Strategy 1a now
+  (a) validates the claim against `CUID_RE` instead of trusting it,
+  (b) falls back to the same server-side resolution auth-middleware uses
+  (claims cache → DB by `sub` → first-contact provisioning), which also
+  supplies `activeTenantId` and the global role, and (c) **returns `null`
+  rather than seating a non-cuid id**.
+
+  **Behaviour change:** a verified token that resolves to no trellis user
+  now yields **401** instead of a session that 404s deeper in the stack.
+  On Cognito this is reachable only via the known intermittent
+  pre-token-generation race (a first token missing `custom:userId`); such
+  requests previously produced a confusing 404 and now fail cleanly,
+  prompting the client to re-authenticate. Deployments whose tokens always
+  carry `custom:userId` are unaffected, and the JIT resolver remains a
+  no-op unless `IDENTITY_PROVIDER=keycloak`, so the Cognito hot path skips
+  it entirely.
+
 ## [0.24.0] — 2026-08-06
 
 Closes out the `0.24.0-alpha.0`–`alpha.3` series; entries below cover

@@ -26,6 +26,7 @@ import {
 } from "@de-otio/saas-foundation/session";
 import { getLogger } from "./logger.js";
 import { CUID_RE } from "./auth/cuid.js";
+import type { Env } from "../env.js";
 
 export type UserRole =
   | "END_USER"
@@ -417,22 +418,87 @@ export class SessionManager {
           // short-circuit the wrapper's personal-tenant fallback. A malformed
           // claim is dropped (undefined), never trusted.
           const rawActiveTenant = claimsRecord["custom:activeTenantId"];
-          const activeTenantId =
+          let activeTenantId =
             typeof rawActiveTenant === "string" &&
             rawActiveTenant !== "" &&
             CUID_RE.test(rawActiveTenant)
               ? rawActiveTenant
               : undefined;
+
+          // `userId` MUST be the DB cuid (`User.id`): every handler looks the
+          // session user up with `where: { id: session.userId }`. Cognito's
+          // pre-token-generation Lambda writes it into `custom:userId`;
+          // Keycloak has no such hook, and its realm protocol mappers emit
+          // their own claim names, so a verified Keycloak token carries no
+          // usable cuid here at all.
+          //
+          // VALIDATE, don't trust: this used to be
+          // `claims["custom:userId"] || claims.sub`, and the `sub` fallback is
+          // what seated an IdP UUID as the user id — "User not found" (404) on
+          // every one of the ~46 getSession call sites, and the original
+          // "Tenant resolution failed" on media upload.
+          const rawUserId = claimsRecord["custom:userId"];
+          let userId =
+            typeof rawUserId === "string" && CUID_RE.test(rawUserId)
+              ? rawUserId
+              : undefined;
+          let role = claimsRecord["custom:role"] as UserRole | undefined;
+
+          if (!userId || !activeTenantId) {
+            // The same server-side resolution `auth-middleware.ts` performs
+            // (claims cache → DB by `sub` → first-contact provisioning). WS-0
+            // wired it into that path only, leaving this one — the two Bearer
+            // paths disagreed, which is the whole defect. Imported lazily so
+            // the DB/provisioning graph stays off the cold path, and a no-op
+            // returning null unless IDENTITY_PROVIDER=keycloak, so Cognito
+            // behaviour is unchanged apart from the fail-closed check below.
+            if (env) {
+              try {
+                const { resolveJitClaims } = await import(
+                  "./identity/jit-claims.js"
+                );
+                const jit = await resolveJitClaims(
+                  {
+                    sub: claims.sub,
+                    username: claims.username,
+                    ...(claims.email !== undefined
+                      ? { email: claims.email }
+                      : {}),
+                  },
+                  env as unknown as Env,
+                );
+                if (jit) {
+                  if (!userId && CUID_RE.test(jit.userId)) userId = jit.userId;
+                  if (!activeTenantId && CUID_RE.test(jit.activeTenantId)) {
+                    activeTenantId = jit.activeTenantId;
+                  }
+                  if (!role && jit.globalRole) role = jit.globalRole as UserRole;
+                }
+              } catch (jitErr) {
+                // Fail closed via the guard below — never widen access.
+                logger.warn(
+                  "[SessionManager] JIT claim resolution failed",
+                  jitErr,
+                );
+              }
+            }
+          }
+
+          // Fail closed, matching `auth-middleware.ts`. A verified token that
+          // resolves to no trellis user is a 401, not a session carrying a
+          // foreign identifier that 404s deeper in the stack.
+          if (!userId) {
+            logger.warn(
+              "[SessionManager] Verified token yielded no trellis user id",
+              { sub: claims.sub },
+            );
+            return null;
+          }
+
           return {
-            // Prefer the cuid in `custom:userId` (the DB `User.id`, written by
-            // pre-token-generation) over the Cognito `sub`. The app looks up the
-            // session user via `where: { id: session.userId }`, so the raw `sub`
-            // (a UUID) misses the cuid-keyed row — which broke media uploads
-            // ("Tenant resolution failed"). This mirrors the route-helpers fix;
-            // SessionManager.getSession is the Bearer path the media routes use.
-            userId: claims["custom:userId"] || claims.sub,
+            userId,
             email: claims.email || claims.username,
-            role: (claimsRecord["custom:role"] as UserRole) || "END_USER",
+            role: role || "END_USER",
             expiresAt,
             dataRegion:
               (claimsRecord["custom:dataRegion"] as string) || "EU",

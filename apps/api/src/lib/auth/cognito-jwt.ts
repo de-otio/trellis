@@ -160,15 +160,26 @@ export function normalizeClaims(
     };
   }
 
-  // Generic OIDC (Keycloak/Zitadel) — WS-3.3 live wiring. G2 proved (C-10 /
-  // E-3, live 2026-07-19) that Keycloak protocol mappers emit the LITERAL
-  // `custom:*` claim names (the `:` passes through KC's token JSON unchanged),
+  // Generic OIDC (Keycloak/Zitadel) — WS-3.3 live wiring. Keycloak protocol
+  // mappers CAN emit literal `custom:*` claim names (the `:` passes through
+  // KC's token JSON unchanged — proven in G2, C-10 / E-3, live 2026-07-19),
   // so the generic mapping mirrors the Cognito table 1:1 for those claims;
   // only the username source differs (`preferred_username` vs
-  // `cognito:username`). [SEC-7] this stays a mapping layer: no defaults are
-  // injected here — an unmapped/missing role claim falls through to
-  // auth-middleware's least-privilege defaults (END_USER / GUEST), never
-  // higher.
+  // `cognito:username`).
+  //
+  // But whether a given realm ACTUALLY does is the deployer's choice: the
+  // claim names come from the realm's `claim_mappers`, and the skybber dev
+  // realm maps the bare names `userId` / `role`, which nothing below reads.
+  // Do not assume the claims are present. The identity of record is resolved
+  // server-side from `sub` (`identity/jit-claims.ts`), which is why a realm
+  // whose mappers do not match this table still authenticates correctly —
+  // it just pays a cache lookup. Deliberately NOT widened to read the bare
+  // names: an unprefixed `userId` from an arbitrary OIDC issuer is not
+  // something this layer should trust, and the DB-derived path needs no claim.
+  //
+  // [SEC-7] this stays a mapping layer: no defaults are injected here — an
+  // unmapped/missing role claim falls through to auth-middleware's
+  // least-privilege defaults (END_USER / GUEST), never higher.
   return {
     sub,
     username:
