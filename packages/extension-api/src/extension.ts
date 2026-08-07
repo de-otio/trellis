@@ -6,7 +6,7 @@
  */
 
 import type { ZodSchema } from "zod";
-import type { Route } from "./route-types";
+import type { Route } from "./route-types.js";
 import type {
   ExtensionCircleEntityStatus,
   ExtensionCircleMember,
@@ -20,7 +20,7 @@ import type {
   ExtensionRecapSubject,
   ExtensionRelationship,
   ExtensionVisiblePost,
-} from "./dto";
+} from "./dto.js";
 
 // ---------------------------------------------------------------------------
 // Extension Context — the restricted runtime environment extensions receive
@@ -393,7 +393,7 @@ export interface ExtensionJobDecl {
  *   - Bump alongside every `package.json` version change.
  *   - Never change one without changing the other.
  */
-export const EXTENSION_API_VERSION = "0.8.0" as const;
+export const EXTENSION_API_VERSION = "0.8.1" as const;
 
 // ---------------------------------------------------------------------------
 // Strategy Interfaces — pluggable domain-specific behavior
