@@ -167,7 +167,27 @@ describe("Comment Rate Limiting", () => {
   });
 
   describe("KV unavailable handling", () => {
-    it("should fail-open when RATE_LIMIT_KV is not configured", async () => {
+    /** A binding that is PRESENT but unreachable — the half-migrated shape. */
+    function throwingEnv(
+      commentRateLimit?: CommentRateLimitEnv["commentRateLimit"],
+    ): CommentRateLimitEnv {
+      return {
+        RATE_LIMIT_KV: {
+          get: vi.fn(async () => {
+            throw new Error("getaddrinfo ENOTFOUND kv.example.invalid");
+          }),
+          put: vi.fn(async () => {
+            throw new Error("getaddrinfo ENOTFOUND kv.example.invalid");
+          }),
+        } as any,
+        commentRateLimit,
+      };
+    }
+
+    it("allows when RATE_LIMIT_KV is not configured at all", async () => {
+      // ABSENCE is a deployment shape (local dev, unit tests), not a
+      // malfunction — so this branch keeps allowing. It is the *error* path
+      // below that changed.
       const envWithoutKV: CommentRateLimitEnv = {};
 
       const result = await commentRateLimit("user123", "post456", envWithoutKV);
@@ -176,21 +196,91 @@ describe("Comment Rate Limiting", () => {
       expect(result.retryAfter).toBeUndefined();
     });
 
-    it("should fail-open when KV throws error", async () => {
-      const errorEnv: CommentRateLimitEnv = {
-        RATE_LIMIT_KV: {
-          get: vi.fn(async () => {
-            throw new Error("KV unavailable");
-          }),
-          put: vi.fn(async () => {
-            throw new Error("KV unavailable");
-          }),
-        } as any,
-      };
+    // REVERSED. This previously read "should fail-open when KV throws error"
+    // and asserted `allowed === true`, which made the hole a specification:
+    // on a platform where the store ALWAYS throws, comment rate limiting was
+    // not degraded but entirely absent, and this test said that was correct.
+    it("DENIES by default when the KV call throws (fail-closed)", async () => {
+      const result = await commentRateLimit("user123", "post456", throwingEnv());
 
-      const result = await commentRateLimit("user123", "post456", errorEnv);
+      expect(result.allowed).toBe(false);
+      expect(result.retryAfter).toBeGreaterThan(0);
+      expect(result.remaining).toBe(0);
+    });
+
+    it("denies on a throwing store even when the config block is absent", async () => {
+      // The default must live in the middleware, not only in env.ts: a caller
+      // holding a partial env must not silently re-open the hole.
+      const env = throwingEnv(undefined);
+      expect((await commentRateLimit("u", "p", env)).allowed).toBe(false);
+    });
+
+    it.each([
+      ["unset", undefined],
+      ["empty", "" as never],
+      ["misspelt", "opne" as never],
+      ["wrong case", "OPEN" as never],
+    ])(
+      "treats a %s fail-mode as closed — only an exact 'open' disables the control",
+      async (_label, mode) => {
+        const env = throwingEnv({ failMode: mode as never });
+        expect((await commentRateLimit("u", "p", env)).allowed).toBe(false);
+      },
+    );
+
+    it("allows on a throwing store when the operator opts into fail-open", async () => {
+      // The escape hatch must actually work, or operators will patch it out.
+      const env = throwingEnv({ failMode: "open" });
+
+      const result = await commentRateLimit("user123", "post456", env);
 
       expect(result.allowed).toBe(true);
+    });
+  });
+
+  describe("threshold-secrecy config (rule 8)", () => {
+    it("honours a configured per-minute ceiling instead of a compiled constant", async () => {
+      const env: CommentRateLimitEnv = {
+        ...mockEnv,
+        commentRateLimit: { perMinute: 3, postCooldownSeconds: 0 },
+      };
+
+      // 3 allowed on distinct posts (cooldown 0 keeps the per-post rule out).
+      for (let i = 0; i < 3; i++) {
+        expect((await commentRateLimit("u1", `p${i}`, env)).allowed).toBe(true);
+      }
+      // The 4th trips the configured ceiling — not the default 10.
+      expect((await commentRateLimit("u1", "p9", env)).allowed).toBe(false);
+    });
+
+    it("reports remaining against the CONFIGURED ceiling", async () => {
+      const env: CommentRateLimitEnv = {
+        ...mockEnv,
+        commentRateLimit: { perMinute: 5 },
+      };
+      expect((await commentRateLimit("u2", "p1", env)).remaining).toBe(4);
+    });
+
+    it("honours a configured per-post cooldown", async () => {
+      const env: CommentRateLimitEnv = {
+        ...mockEnv,
+        commentRateLimit: { postCooldownSeconds: 120 },
+      };
+
+      expect((await commentRateLimit("u3", "p1", env)).allowed).toBe(true);
+      const blocked = await commentRateLimit("u3", "p1", env);
+
+      expect(blocked.allowed).toBe(false);
+      // Would be ≤30 under the old compiled constant.
+      expect(blocked.retryAfter).toBeGreaterThan(30);
+      expect(blocked.retryAfter).toBeLessThanOrEqual(120);
+    });
+
+    it("falls back to the previous compiled defaults when unconfigured", async () => {
+      // The seam must be a config change, not a policy change: 10/min, 30s.
+      expect((await commentRateLimit("u4", "p1", mockEnv)).remaining).toBe(9);
+      const blocked = await commentRateLimit("u4", "p1", mockEnv);
+      expect(blocked.retryAfter).toBeLessThanOrEqual(30);
     });
   });
 

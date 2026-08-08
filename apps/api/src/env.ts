@@ -575,6 +575,29 @@ export interface Env {
   };
   // --- end Collections config seam ---------------------------------------------
 
+  // --- Comment rate-limit config seam ------------------------------------------
+  // Threshold-secrecy seam (CLAUDE.md rule 8): these were compiled-in constants
+  // (`const maxPerMinute = 10`, `const waitTime = 30000`) sitting in a public
+  // npm tarball — i.e. published limits, telling anyone who reads them exactly
+  // how to pace an abuse campaign to stay under the ceiling. Resolved by
+  // resolveCommentRateLimitEnv(); the middleware reads env.commentRateLimit.*
+  // and never hardcodes.
+  commentRateLimit: {
+    /** Max comments per user per minute. Source: COMMENT_RATE_LIMIT_PER_MINUTE. */
+    perMinute: number;
+    /** Cooldown between a user's comments on ONE post, in seconds. Source: COMMENT_RATE_LIMIT_POST_COOLDOWN_SECONDS. */
+    postCooldownSeconds: number;
+    /**
+     * What to do when the rate-limit store THROWS. "closed" denies (the
+     * default: an abuse control that cannot count must not wave traffic
+     * through); "open" restores the previous allow-everything behaviour for
+     * operators who would rather lose the control than the endpoint.
+     * Source: COMMENT_RATE_LIMIT_FAIL_MODE.
+     */
+    failMode: "closed" | "open";
+  };
+  // --- end Comment rate-limit config seam --------------------------------------
+
   // --- Events primitive config seam (events-primitive/README.md §4.8) ---------
   // Threshold-secrecy seam (CLAUDE.md rule 8): every operational cap/threshold
   // is runtime config, never a compiled constant, so no number ships in the
@@ -1035,6 +1058,38 @@ export function resolveCollectionEnv(
 }
 
 /**
+ * Resolve the comment rate-limit config block (threshold-secrecy, rule 8).
+ *
+ * Single-writer: the ONLY place that reads COMMENT_RATE_LIMIT_* env vars. The
+ * defaults reproduce the previous compiled-in behaviour exactly (10/min, 30s
+ * per-post cooldown) so this is a config seam, not a policy change — except
+ * `failMode`, which deliberately flips: see the middleware for why.
+ */
+export function resolveCommentRateLimitEnv(
+  source: NodeJS.ProcessEnv = process.env,
+): {
+  commentRateLimit: {
+    perMinute: number;
+    postCooldownSeconds: number;
+    failMode: "closed" | "open";
+  };
+} {
+  return {
+    commentRateLimit: {
+      perMinute: parsePositiveInt(source.COMMENT_RATE_LIMIT_PER_MINUTE, 10),
+      postCooldownSeconds: parsePositiveInt(
+        source.COMMENT_RATE_LIMIT_POST_COOLDOWN_SECONDS,
+        30,
+      ),
+      // Anything other than an explicit "open" is closed. An unset, misspelt
+      // or empty value must not silently disable the control — that is the
+      // failure mode this whole change exists to remove.
+      failMode: source.COMMENT_RATE_LIMIT_FAIL_MODE === "open" ? "open" : "closed",
+    },
+  };
+}
+
+/**
  * Resolve the synthetic-content provenance config block (AI Act Art. 50, D15).
  *
  * Single-writer: the ONLY place that reads PROVENANCE_* env vars. An
@@ -1422,6 +1477,8 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     ...resolveEmailSubscriptionEnv(),
     // Collections config seam (§3): resolveCollectionEnv() reads COLLECTION_* vars.
     ...resolveCollectionEnv(),
+    // Comment rate-limit seam (rule 8): reads COMMENT_RATE_LIMIT_* vars.
+    ...resolveCommentRateLimitEnv(),
     // Events-primitive config seam (§4.8): resolveEventEnv() reads EVENT_* vars.
     ...resolveEventEnv(),
     // Provenance config seam (D15): reads PROVENANCE_* vars.
