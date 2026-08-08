@@ -15,6 +15,24 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ## [Unreleased]
 
+### Changed
+
+- **`@de-otio/saas-foundation` floor raised to `^0.4.3`** (was `^0.4.0`), in
+  `apps/api` and `apps/worker`.
+
+  0.4.3 is what teaches `createDefaultS3Client` to read an optional,
+  S3-specific `S3_ACCESS_KEY_ID`/`S3_SECRET_ACCESS_KEY` pair. That matters
+  wherever object storage and message queues issue **separate** credentials: the
+  AWS SDK reads one credential pair from the environment for all services, so
+  the S3 client would otherwise sign as whichever principal owns the ambient
+  `AWS_*` pair and get a 403 — indistinguishable from a permissions problem.
+
+  The floor is load-bearing rather than incidental. The old `^0.4.0` caret
+  already *accepted* 0.4.3, but it also accepts 0.4.0, and an install that
+  resolved the older version would leave object-storage uploads failing with no
+  signal beyond a 403. Deployments on AWS are unaffected either way: with no
+  `S3_*` variable set the factory behaves exactly as before.
+
 ### Added
 
 - **`POST /auth/register` — invitation-gated registration on a brokered IdP.**
