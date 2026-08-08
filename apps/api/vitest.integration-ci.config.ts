@@ -47,6 +47,13 @@ const PHASE0_INTEGRATION = [
   // the real handlers, because the unit lane's Prisma mocks resolve canned rows
   // regardless of the `where` and so cannot tell "authorized" from "not asked".
   "test/integration/post-attachment-read-authz.integration.test.ts",
+  // H1 — circle READ authorization: the circle feed/depth/glance/status queries
+  // decided audience from the READER's own relationship score (settable via
+  // PATCH /api/relationships/score) and carried no tenant predicate. Raw SQL
+  // with no Prisma `where` to inspect, and the unit lane's `$queryRaw` mock
+  // resolves canned rows regardless of the SQL — only real Postgres decides
+  // whether a row comes back.
+  "test/integration/circle-read-authz.integration.test.ts",
 ];
 
 export default defineConfig({

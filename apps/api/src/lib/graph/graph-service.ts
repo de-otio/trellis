@@ -253,18 +253,30 @@ export interface GraphService {
    *
    * @param userId - The viewer's user ID
    * @param tier - Circle tier (0-3)
+   * @param activeTenantId - The caller's verified active tenant. REQUIRED; the
+   *   implementation refuses to query without it (there is no ambient fallback
+   *   and no RLS backstop — see lib/graph/postgres/circles.ts, H1).
    * @returns List of circle members in the tier
    */
-  getCircleMembers(userId: string, tier: CircleTier): Promise<CircleMember[]>;
+  getCircleMembers(
+    userId: string,
+    tier: CircleTier,
+    activeTenantId: string,
+  ): Promise<CircleMember[]>;
 
   /**
    * Get post IDs visible to the user in a specific circle tier.
    *
    * Uses dual-gated visibility:
-   * 1. Posts where the viewer has a relationship with ANY subject entity,
-   *    and the closest such relationship falls within the post's radius
-   * 2. Posts where the viewer has a relationship with the author,
-   *    and the author's posting radius reaches the viewer's tier
+   * 1. Posts about a subject entity the viewer relates to in this tier band,
+   *    that the post's AUTHOR has admitted this viewer to (radius vs the
+   *    author's own placement of the viewer)
+   * 2. Posts by a user who placed THIS VIEWER in this tier band on a
+   *    reciprocated edge, whose radius reaches that tier
+   *
+   * Both gates are author-owned. Reading the VIEWER's relationship score to
+   * decide either one is defect H1 — the reader sets that score on their own
+   * edge, so it granted read access to strangers' WHISPER posts.
    *
    * For multi-entity posts, the resolved tier is the minimum (closest)
    * tier across all matching subject entity relationships.
@@ -273,6 +285,7 @@ export interface GraphService {
    * @param tier - Circle tier to query
    * @param since - Only return posts created after this timestamp
    * @param pagination - Pagination parameters
+   * @param activeTenantId - The caller's verified active tenant. REQUIRED.
    * @param orgFilter - Optional org-category feed-declutter filter (see
    *   {@link OrgCategoryFeedFilter}). Omitted/undefined = no org filtering.
    * @returns Paginated post IDs with creation timestamps and resolved tiers
@@ -282,6 +295,7 @@ export interface GraphService {
     tier: CircleTier,
     since: Date,
     pagination: PaginationInput,
+    activeTenantId: string,
     orgFilter?: OrgCategoryFeedFilter,
   ): Promise<PaginatedResult<VisiblePostResult>>;
 
@@ -295,6 +309,7 @@ export interface GraphService {
    * @param userId - The viewer's user ID
    * @param tier - Circle tier
    * @param limit - Maximum number of glance items (one per entity/user)
+   * @param activeTenantId - The caller's verified active tenant. REQUIRED.
    * @param orgFilter - Optional org-category feed-declutter filter (see
    *   {@link OrgCategoryFeedFilter}). Omitted/undefined = no org filtering.
    * @returns List of glance items, one per member with new content
@@ -303,6 +318,7 @@ export interface GraphService {
     userId: string,
     tier: CircleTier,
     limit: number,
+    activeTenantId: string,
     orgFilter?: OrgCategoryFeedFilter,
   ): Promise<GlanceItem[]>;
 
@@ -317,6 +333,7 @@ export interface GraphService {
    * @param targetId - The target user or entity ID
    * @param since - Only return posts created after this timestamp
    * @param limit - Maximum number of post IDs to return
+   * @param activeTenantId - The caller's verified active tenant. REQUIRED.
    * @returns Post IDs ordered by creation time descending
    */
   getDepthPostIds(
@@ -325,6 +342,7 @@ export interface GraphService {
     targetId: string,
     since: Date,
     limit: number,
+    activeTenantId: string,
   ): Promise<string[]>;
 
   /**
@@ -334,9 +352,13 @@ export interface GraphService {
    * the count of unseen posts, and the last-read timestamp.
    *
    * @param userId - The viewer's user ID
+   * @param activeTenantId - The caller's verified active tenant. REQUIRED.
    * @returns Status for all four tiers
    */
-  getCircleStatus(userId: string): Promise<CircleTierStatus[]>;
+  getCircleStatus(
+    userId: string,
+    activeTenantId: string,
+  ): Promise<CircleTierStatus[]>;
 
   /**
    * Get per-entity status within a circle tier.
@@ -346,11 +368,13 @@ export interface GraphService {
    *
    * @param userId - The viewer's user ID
    * @param tier - Circle tier
+   * @param activeTenantId - The caller's verified active tenant. REQUIRED.
    * @returns Per-entity status list, sorted by unseen count descending
    */
   getCircleEntityStatus(
     userId: string,
     tier: CircleTier,
+    activeTenantId: string,
   ): Promise<CircleEntityStatus[]>;
 
   /**
