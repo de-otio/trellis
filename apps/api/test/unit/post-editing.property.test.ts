@@ -311,8 +311,9 @@ describe("Property 3: Text length validation", () => {
   /**
    * **Property 3: Text length validation**
    *
-   * For any edit request with text longer than 3000 characters,
-   * the system rejects the request with a 400 error and the post remains unchanged.
+   * For any edit request whose text is longer than 3000 characters *after
+   * trimming*, the system rejects the request with a 400 error and the post
+   * remains unchanged.
    *
    * **Validates: Requirements 2.3, 4.5**
    */
@@ -321,8 +322,15 @@ describe("Property 3: Text length validation", () => {
 
     fc.assert(
       fc.property(
-        // Generate strings longer than 3000 characters
-        fc.string({ minLength: 3001, maxLength: 5000 }),
+        // `.trim()` runs BEFORE `.max(3000)` in editPostSchema, so the bound is
+        // on the TRIMMED length. Anchoring a non-whitespace character at each
+        // end makes every generated value genuinely over-length.
+        //
+        // Generating on the RAW length is what made this property flaky: it
+        // eventually produced 3000 spaces followed by "!", which is raw-3001
+        // but trimmed-1, and is therefore correctly ACCEPTED. The property was
+        // wrong, not the schema — see the boundary test below.
+        fc.string({ minLength: 3001, maxLength: 5000 }).map((s) => `x${s}x`),
         (longText) => {
           const result = editPostSchema.safeParse({ text: longText });
 
@@ -335,6 +343,11 @@ describe("Property 3: Text length validation", () => {
               issue.path.includes("text"),
             );
             expect(textError).toBeDefined();
+            // ...and specifically the LENGTH error. Without this, a value
+            // rejected by `.min(1)` (any whitespace-only string, however long)
+            // would satisfy the assertion above and the property would pass
+            // vacuously for exactly the inputs it is meant to cover.
+            expect(textError?.message).toBe("Post text exceeds maximum length");
           }
 
           return true;
@@ -342,6 +355,29 @@ describe("Property 3: Text length validation", () => {
       ),
       { numRuns: 100 },
     );
+  });
+
+  it("draws the length bound at the trimmed length, not the raw length", async () => {
+    const { editPostSchema } = await import("../../src/lib/schemas.js");
+
+    // The boundary itself, stated deterministically rather than searched for.
+    expect(editPostSchema.safeParse({ text: "x".repeat(3000) }).success).toBe(
+      true,
+    );
+    expect(editPostSchema.safeParse({ text: "x".repeat(3001) }).success).toBe(
+      false,
+    );
+
+    // The counterexample that used to fail Property 3 roughly one run in six:
+    // raw length 3001, trimmed length 1. It is accepted, and that is correct —
+    // the schema trims first, and what gets stored is the trimmed value.
+    const padded = `${" ".repeat(3000)}!`;
+    expect(padded.length).toBeGreaterThan(3000);
+    const result = editPostSchema.safeParse({ text: padded });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.text).toBe("!");
+    }
   });
 
   it("should accept edit requests with text up to 3000 characters", async () => {
