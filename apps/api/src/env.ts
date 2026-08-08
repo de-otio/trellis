@@ -6,7 +6,13 @@
  */
 
 import { DynamoKv, createDefaultDynamoClient } from "@de-otio/saas-foundation/kv";
-import { resolveKvProvider, setKvSqlExecutor, makeKvSqlExecutor } from "./lib/kv/kv-provider.js";
+import {
+  resolveKvProvider,
+  setKvSqlExecutor,
+  getKvSqlExecutor,
+  makeKvSqlExecutor,
+} from "./lib/kv/kv-provider.js";
+import { PostgresKv } from "./lib/kv/postgres-kv-namespace.js";
 import { S3Storage, createDefaultS3Client } from "@de-otio/saas-foundation/storage";
 import { SqsQueue, createDefaultSqsClient } from "@de-otio/saas-foundation/queue";
 import {
@@ -1432,14 +1438,6 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     );
   }
 
-  const kvCursorSecret = sessionSecret || process.env.CURSOR_SECRET;
-  const kv = (namespace: string) =>
-    new DynamoKv(dynamoClient, {
-      tableName: kvTableName,
-      namespace,
-      ...(kvCursorSecret ? { cursorSecret: kvCursorSecret } : {}),
-    });
-
   // Resolve DB URL: local DATABASE_URL wins; else fetch from Secrets Manager at
   // runtime. The resulting string stays on the returned Env object only — we do
   // NOT write it to process.env so it can't leak through env-var exposure.
@@ -1449,11 +1447,40 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
   // KvStore hot-spot namespaces resolve to DynamoKvStore over their byte-compat
   // layouts — existing AWS deployments see ZERO change. "postgres" builds a
   // small dedicated KV pool (bypassing the tenant-scoped Prisma pool) and
-  // registers it so the same namespaces resolve to PostgresKvStore. The 13
-  // Cloudflare-compat string-KV bindings above are untouched (they stay DynamoKv).
-  if (resolveKvProvider() === "postgres") {
+  // registers it so the same namespaces resolve to PostgresKvStore.
+  //
+  // MUST stay above the `kv()` helper below: the string-KV bindings now read
+  // the same executor, and a `kv()` call that ran first would fail closed.
+  const kvProvider = resolveKvProvider();
+  if (kvProvider === "postgres") {
     setKvSqlExecutor(await makeKvSqlExecutor(databaseUrl));
   }
+
+  const kvCursorSecret = sessionSecret || process.env.CURSOR_SECRET;
+  // The 13 Cloudflare-compat string-KV bindings. These used to construct a
+  // DynamoKv UNCONDITIONALLY while the typed `getKvStore()` honoured
+  // KV_PROVIDER — a split-brain in which, on a Postgres deployment, the
+  // invitation pre-signup record went to `kv_entries` and the invitation
+  // session token went to a DynamoDB endpoint that does not resolve. Both
+  // ports now follow the same switch. See lib/kv/postgres-kv-namespace.ts.
+  const kv = (namespace: string): KVNamespace => {
+    if (kvProvider === "postgres") {
+      const executor = getKvSqlExecutor();
+      if (executor === undefined) {
+        // Fail closed, loudly. Serving with a silently-absent KV would disable
+        // the invitation gate, CSRF-token validation and the session blocklist.
+        throw new Error(
+          `KV_PROVIDER=postgres but the KV SQL executor is not wired (buildEnv) for namespace=${namespace}`,
+        );
+      }
+      return new PostgresKv(executor, { namespace });
+    }
+    return new DynamoKv(dynamoClient, {
+      tableName: kvTableName,
+      namespace,
+      ...(kvCursorSecret ? { cursorSecret: kvCursorSecret } : {}),
+    });
+  };
 
   return {
     // Realtime transport seam: resolveRealtimeEnv() reads the REALTIME_* vars
