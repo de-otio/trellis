@@ -19,16 +19,9 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// getCurrentTenantId is read inside CircleOps; default to "no tenant" (matches
-// the Neo4j behavior of not constraining on tenant). Individual tests can
-// override via mockReturnValue.
-const { mockGetCurrentTenantId } = vi.hoisted(() => ({
-  mockGetCurrentTenantId: vi.fn<() => string | undefined>(() => undefined),
-}));
-
-vi.mock("@de-otio/saas-foundation/tenant", () => ({
-  getCurrentTenantId: mockGetCurrentTenantId,
-}));
+// H1: CircleOps no longer reads an ambient tenant — every method takes one
+// explicitly and refuses without it. There is nothing left to mock here; the
+// tenant now arrives as an argument, which is the point.
 
 import { CircleOps } from "../../../../src/lib/graph/postgres/circles.js";
 import type { CircleTier } from "../../../../src/lib/graph/types.js";
@@ -58,6 +51,7 @@ function makePrisma(): MockPrisma {
 }
 
 const USER = "user-1";
+const TENANT = "tenant-1";
 
 describe("CircleOps", () => {
   let prisma: MockPrisma;
@@ -65,7 +59,6 @@ describe("CircleOps", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    mockGetCurrentTenantId.mockReturnValue(undefined);
     prisma = makePrisma();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ops = new CircleOps(prisma as any);
@@ -82,7 +75,7 @@ describe("CircleOps", () => {
         { id: "u2", type: "user", name: "alice", score: 0.85 },
       ]);
 
-      const members = await ops.getCircleMembers(USER, 0);
+      const members = await ops.getCircleMembers(USER, 0, TENANT);
 
       expect(members).toEqual([
         { id: "e1", type: "entity", name: "Bunsen", score: 0.9, tier: 0 },
@@ -94,7 +87,7 @@ describe("CircleOps", () => {
       prisma.$queryRaw.mockResolvedValue([
         { id: "u3", type: "user", name: null, score: 0.6 },
       ]);
-      const members = await ops.getCircleMembers(USER, 1);
+      const members = await ops.getCircleMembers(USER, 1, TENANT);
       expect(members[0].name).toBe("");
       expect(members[0].type).toBe("user");
     });
@@ -117,7 +110,7 @@ describe("CircleOps", () => {
         .mockResolvedValueOnce([makeRow("p1", "2026-02-01T00:00:00.000Z", 2)]) // entity branch
         .mockResolvedValueOnce([makeRow("p1", "2026-02-01T00:00:00.000Z", 0)]); // author branch
 
-      const res = await ops.getVisiblePostIds(USER, 0, since, { limit: 10 });
+      const res = await ops.getVisiblePostIds(USER, 0, since, { limit: 10 }, TENANT);
 
       expect(res.items).toHaveLength(1);
       expect(res.items[0].postId).toBe("p1");
@@ -138,7 +131,7 @@ describe("CircleOps", () => {
           makeRow("pBa", "2026-02-03T00:00:00.000Z", 3),
         ]);
 
-      const res = await ops.getVisiblePostIds(USER, 1, since, { limit: 10 });
+      const res = await ops.getVisiblePostIds(USER, 1, since, { limit: 10 }, TENANT);
 
       expect(res.items.map((i) => i.postId)).toEqual([
         "pBa", // 02-03, postId DESC: "pBa" > "pB"
@@ -157,7 +150,7 @@ describe("CircleOps", () => {
         ])
         .mockResolvedValueOnce([makeRow("p1", "2026-02-01T00:00:00.000Z", 0)]);
 
-      const res = await ops.getVisiblePostIds(USER, 0, since, { limit: 2 });
+      const res = await ops.getVisiblePostIds(USER, 0, since, { limit: 2 }, TENANT);
 
       expect(res.items.map((i) => i.postId)).toEqual(["p3", "p2"]);
       expect(res.hasMore).toBe(true);
@@ -178,13 +171,13 @@ describe("CircleOps", () => {
         ])
         .mockResolvedValueOnce([]);
 
-      const res = await ops.getVisiblePostIds(USER, 2, since, { limit: 10 });
+      const res = await ops.getVisiblePostIds(USER, 2, since, { limit: 10 }, TENANT);
       expect(res.items[0].resolvedTier).toBe(2);
       expect(typeof res.items[0].resolvedTier).toBe("number");
     });
 
     it("issues two parallel branch queries", async () => {
-      await ops.getVisiblePostIds(USER, 0, since, { limit: 5 });
+      await ops.getVisiblePostIds(USER, 0, since, { limit: 5 }, TENANT);
       expect(prisma.$queryRaw).toHaveBeenCalledTimes(2);
     });
   });
@@ -195,12 +188,13 @@ describe("CircleOps", () => {
 
   describe("getGlanceItems", () => {
     it("assembles entity + user branches, sorts by recency, applies limit", async () => {
-      // Step 1: members
+      // Step 1a: ENTITY roster (the viewer's own subscriptions)
       prisma.$queryRaw
-        .mockResolvedValueOnce([
-          { targetId: "e1", targetType: "entity", targetName: "Bunsen" },
-          { targetId: "u1", targetType: "user", targetName: "alice" },
-        ])
+        .mockResolvedValueOnce([{ targetId: "e1", targetName: "Bunsen" }])
+        // Step 1b: USER roster — H1: authors who placed THIS VIEWER at the tier,
+        // reciprocated. A separate query now, because it reads the opposite
+        // direction of the edge from the entity roster.
+        .mockResolvedValueOnce([{ targetId: "u1", targetName: "alice" }])
         // Step 2a: entity latest posts
         .mockResolvedValueOnce([
           { targetId: "e1", postId: "pe1", postCreatedAt: new Date("2026-02-01T00:00:00.000Z") },
@@ -210,7 +204,7 @@ describe("CircleOps", () => {
           { targetId: "u1", postId: "pu1", postCreatedAt: new Date("2026-02-05T00:00:00.000Z") },
         ]);
 
-      const items = await ops.getGlanceItems(USER, 0, 10);
+      const items = await ops.getGlanceItems(USER, 0, 10, TENANT);
 
       expect(items.map((i) => i.postId)).toEqual(["pu1", "pe1"]); // recency DESC
       expect(items[0]).toMatchObject({ targetId: "u1", targetType: "user", targetName: "alice" });
@@ -218,33 +212,33 @@ describe("CircleOps", () => {
     });
 
     it("skips the entity/user post queries when no members of that kind exist", async () => {
-      // Only a user member → entity branch query must be skipped.
+      // Only a user member → the entity POSTS query must be skipped.
       prisma.$queryRaw
-        .mockResolvedValueOnce([
-          { targetId: "u1", targetType: "user", targetName: "alice" },
-        ])
+        .mockResolvedValueOnce([]) // entity roster: empty
+        .mockResolvedValueOnce([{ targetId: "u1", targetName: "alice" }])
         .mockResolvedValueOnce([
           { targetId: "u1", postId: "pu1", postCreatedAt: new Date("2026-02-05T00:00:00.000Z") },
         ]);
 
-      const items = await ops.getGlanceItems(USER, 0, 10);
-      // members query + user-posts query only (no entity-posts query)
-      expect(prisma.$queryRaw).toHaveBeenCalledTimes(2);
+      const items = await ops.getGlanceItems(USER, 0, 10, TENANT);
+      // two roster queries + user-posts query only (no entity-posts query)
+      expect(prisma.$queryRaw).toHaveBeenCalledTimes(3);
       expect(items).toHaveLength(1);
     });
 
     it("truncates to the requested limit", async () => {
       prisma.$queryRaw
         .mockResolvedValueOnce([
-          { targetId: "e1", targetType: "entity", targetName: "A" },
-          { targetId: "e2", targetType: "entity", targetName: "B" },
+          { targetId: "e1", targetName: "A" },
+          { targetId: "e2", targetName: "B" },
         ])
+        .mockResolvedValueOnce([]) // user roster: empty
         .mockResolvedValueOnce([
           { targetId: "e1", postId: "p1", postCreatedAt: new Date("2026-02-01T00:00:00.000Z") },
           { targetId: "e2", postId: "p2", postCreatedAt: new Date("2026-02-02T00:00:00.000Z") },
         ]);
 
-      const items = await ops.getGlanceItems(USER, 0, 1);
+      const items = await ops.getGlanceItems(USER, 0, 1, TENANT);
       expect(items).toHaveLength(1);
       expect(items[0].postId).toBe("p2"); // most recent
     });
@@ -257,13 +251,13 @@ describe("CircleOps", () => {
   describe("getDepthPostIds", () => {
     it("returns post IDs for an entity target", async () => {
       prisma.$queryRaw.mockResolvedValue([{ postId: "p1" }, { postId: "p2" }]);
-      const ids = await ops.getDepthPostIds(USER, "entity", "e1", new Date(0), 10);
+      const ids = await ops.getDepthPostIds(USER, "entity", "e1", new Date(0), 10, TENANT);
       expect(ids).toEqual(["p1", "p2"]);
     });
 
     it("returns post IDs for a user target", async () => {
       prisma.$queryRaw.mockResolvedValue([{ postId: "pa" }]);
-      const ids = await ops.getDepthPostIds(USER, "user", "u1", new Date(0), 10);
+      const ids = await ops.getDepthPostIds(USER, "user", "u1", new Date(0), 10, TENANT);
       expect(ids).toEqual(["pa"]);
     });
   });
@@ -282,7 +276,7 @@ describe("CircleOps", () => {
         .mockResolvedValueOnce([{ unseenCount: 3n }])
         .mockResolvedValue([{ unseenCount: 0n }]);
 
-      const statuses = await ops.getCircleStatus(USER);
+      const statuses = await ops.getCircleStatus(USER, TENANT);
 
       expect(statuses).toHaveLength(4);
       const byTier = new Map(statuses.map((s) => [s.tier, s]));
@@ -309,7 +303,7 @@ describe("CircleOps", () => {
       ]);
       prisma.$queryRaw.mockResolvedValue([{ unseenCount: 0n }]);
 
-      const statuses = await ops.getCircleStatus(USER);
+      const statuses = await ops.getCircleStatus(USER, TENANT);
       const tier2 = statuses.find((s) => s.tier === 2);
       expect(tier2?.lastReadAt).toEqual(lr);
       const tier0 = statuses.find((s) => s.tier === 0);
@@ -338,7 +332,7 @@ describe("CircleOps", () => {
         },
       ]);
 
-      const rows = await ops.getCircleEntityStatus(USER, 1);
+      const rows = await ops.getCircleEntityStatus(USER, 1, TENANT);
 
       expect(rows[0]).toMatchObject({
         entityId: "e1",
@@ -352,6 +346,44 @@ describe("CircleOps", () => {
         caughtUp: true,
         latestPostAt: null,
       });
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Tenant guard (H1)
+  // -------------------------------------------------------------------------
+
+  describe("tenant guard", () => {
+    // The predecessor resolved an ambient tenant and produced `Prisma.empty`
+    // when there was none — a query with NO tenant predicate, returning every
+    // tenant's rows. An absent tenant must reach no SQL at all.
+    it("refuses every read that touches tenant-scoped rows, and issues no query", async () => {
+      await expect(ops.getCircleMembers(USER, 0, "")).rejects.toThrow(
+        /activeTenantId is required/,
+      );
+      await expect(
+        ops.getVisiblePostIds(USER, 0, new Date(0), { limit: 10 }, ""),
+      ).rejects.toThrow(/activeTenantId is required/);
+      await expect(ops.getGlanceItems(USER, 0, 10, "")).rejects.toThrow(
+        /activeTenantId is required/,
+      );
+      await expect(
+        ops.getDepthPostIds(USER, "user", "u1", new Date(0), 10, ""),
+      ).rejects.toThrow(/activeTenantId is required/);
+      await expect(ops.getCircleStatus(USER, "")).rejects.toThrow(
+        /activeTenantId is required/,
+      );
+      await expect(ops.getCircleEntityStatus(USER, 0, "")).rejects.toThrow(
+        /activeTenantId is required/,
+      );
+
+      expect(prisma.$queryRaw).not.toHaveBeenCalled();
+    });
+
+    it("still allows markCircleRead, which touches no tenant-scoped row", async () => {
+      // CircleReadState is keyed (userId, tier) and has no tenant column, so it
+      // deliberately takes no tenant. This pins that asymmetry.
+      await expect(ops.markCircleRead(USER, 0)).resolves.toBeUndefined();
     });
   });
 
@@ -389,7 +421,7 @@ describe("CircleOps", () => {
 
   describe("threshold resolution", () => {
     it("loads CircleConfig once per request", async () => {
-      await ops.getCircleMembers(USER, 0);
+      await ops.getCircleMembers(USER, 0, TENANT);
       expect(prisma.circleConfig.findUnique).toHaveBeenCalledTimes(1);
       expect(prisma.circleConfig.findUnique).toHaveBeenCalledWith(
         expect.objectContaining({ where: { userId: USER } }),
@@ -399,7 +431,7 @@ describe("CircleOps", () => {
     it("falls back to defaults when no CircleConfig exists", async () => {
       prisma.circleConfig.findUnique.mockResolvedValue(null);
       // Should not throw; defaults are used internally.
-      await expect(ops.getCircleMembers(USER, 0)).resolves.toEqual([]);
+      await expect(ops.getCircleMembers(USER, 0, TENANT)).resolves.toEqual([]);
     });
   });
 });

@@ -3,6 +3,16 @@
  *
  * Endpoints for circle views: members, feeds, glance mode, depth mode,
  * read status, and per-entity status.
+ *
+ * TENANT (H1). Every read here reaches tenant-scoped rows, and the graph layer
+ * no longer resolves a tenant from ambient context — it took one from an
+ * `AsyncLocalStorage` that is never populated in the default configuration
+ * (`TENANT_SCOPE_MODE=off`), producing queries with NO tenant predicate at all.
+ * The caller's verified `activeTenantId` (from `authMiddleware`, i.e. the JWT
+ * claim the pre-token-generation Lambda signs after an ACTIVE-membership check —
+ * never the cookie) is threaded in explicitly and every handler refuses without
+ * it. The routes also reject earlier, so {@link CircleHandler.tenantError} is a
+ * belt-and-braces guard for a handler called directly.
  */
 
 import type { Env } from "../env.js";
@@ -29,8 +39,11 @@ export class CircleHandler {
     session: Session,
     env: Env,
     _requestContext: TrellisRequestContext,
+    activeTenantId: string,
   ): Promise<Response> {
     try {
+      if (!activeTenantId) return this.tenantError();
+
       const tier = this.parseTier(request);
       if (tier === null) {
         return this.tierError();
@@ -39,7 +52,11 @@ export class CircleHandler {
       const { createGraphServiceFromEnv } = await import("./graph/index.js");
       const graphService = await createGraphServiceFromEnv(env);
 
-      const members = await graphService.getCircleMembers(session.userId, tier);
+      const members = await graphService.getCircleMembers(
+        session.userId,
+        tier,
+        activeTenantId,
+      );
 
       return new Response(JSON.stringify({ members }), {
         status: 200,
@@ -55,8 +72,11 @@ export class CircleHandler {
     session: Session,
     env: Env,
     _requestContext: TrellisRequestContext,
+    activeTenantId: string,
   ): Promise<Response> {
     try {
+      if (!activeTenantId) return this.tenantError();
+
       const tier = this.parseTier(request);
       if (tier === null) {
         return this.tierError();
@@ -87,6 +107,7 @@ export class CircleHandler {
         tier,
         since,
         { limit, cursor: cursor || undefined },
+        activeTenantId,
         orgFilter,
       );
 
@@ -104,8 +125,11 @@ export class CircleHandler {
     session: Session,
     env: Env,
     _requestContext: TrellisRequestContext,
+    activeTenantId: string,
   ): Promise<Response> {
     try {
+      if (!activeTenantId) return this.tenantError();
+
       const tier = this.parseTier(request);
       if (tier === null) {
         return this.tierError();
@@ -120,7 +144,13 @@ export class CircleHandler {
       const { createGraphServiceFromEnv } = await import("./graph/index.js");
       const graphService = await createGraphServiceFromEnv(env);
 
-      const items = await graphService.getGlanceItems(session.userId, tier, limit, orgFilter);
+      const items = await graphService.getGlanceItems(
+        session.userId,
+        tier,
+        limit,
+        activeTenantId,
+        orgFilter,
+      );
 
       return new Response(JSON.stringify({ items }), {
         status: 200,
@@ -136,8 +166,11 @@ export class CircleHandler {
     session: Session,
     env: Env,
     _requestContext: TrellisRequestContext,
+    activeTenantId: string,
   ): Promise<Response> {
     try {
+      if (!activeTenantId) return this.tenantError();
+
       const url = new URL(request.url);
       const targetType = url.searchParams.get("targetType");
       const targetId = url.searchParams.get("targetId");
@@ -171,6 +204,7 @@ export class CircleHandler {
         targetId,
         since,
         limit,
+        activeTenantId,
       );
 
       return new Response(JSON.stringify({ postIds }), {
@@ -187,12 +221,18 @@ export class CircleHandler {
     session: Session,
     env: Env,
     _requestContext: TrellisRequestContext,
+    activeTenantId: string,
   ): Promise<Response> {
     try {
+      if (!activeTenantId) return this.tenantError();
+
       const { createGraphServiceFromEnv } = await import("./graph/index.js");
       const graphService = await createGraphServiceFromEnv(env);
 
-      const status = await graphService.getCircleStatus(session.userId);
+      const status = await graphService.getCircleStatus(
+        session.userId,
+        activeTenantId,
+      );
 
       return new Response(JSON.stringify({ tiers: status }), {
         status: 200,
@@ -208,8 +248,11 @@ export class CircleHandler {
     session: Session,
     env: Env,
     _requestContext: TrellisRequestContext,
+    activeTenantId: string,
   ): Promise<Response> {
     try {
+      if (!activeTenantId) return this.tenantError();
+
       const tier = this.parseTier(request);
       if (tier === null) {
         return this.tierError();
@@ -218,7 +261,11 @@ export class CircleHandler {
       const { createGraphServiceFromEnv } = await import("./graph/index.js");
       const graphService = await createGraphServiceFromEnv(env);
 
-      const entities = await graphService.getCircleEntityStatus(session.userId, tier);
+      const entities = await graphService.getCircleEntityStatus(
+        session.userId,
+        tier,
+        activeTenantId,
+      );
 
       return new Response(JSON.stringify({ entities }), {
         status: 200,
@@ -229,6 +276,12 @@ export class CircleHandler {
     }
   }
 
+  /**
+   * Mark a tier read. Takes no tenant: `CircleReadState` is keyed
+   * `(userId, tier)` and carries no `tenantId` column, so there is nothing to
+   * scope. Adding an unused parameter here would suggest a check that is not
+   * happening.
+   */
   async handleMarkRead(
     request: Request,
     session: Session,
@@ -302,6 +355,21 @@ export class CircleHandler {
     const tier = parseInt(tierStr, 10);
     if (isNaN(tier) || tier < 0 || tier > 3 || !Number.isInteger(tier)) return null;
     return tier as CircleTier;
+  }
+
+  /**
+   * Refusal for a caller with no verified active tenant. 403, not 500: the
+   * request is well-formed and authenticated, it just carries no scope to read
+   * in. Deliberately says nothing about what exists in any tenant.
+   */
+  private tenantError(): Response {
+    return new Response(
+      JSON.stringify({
+        error: "FORBIDDEN",
+        message: "An active tenant is required",
+      }),
+      { status: 403, headers: { "content-type": "application/json" } },
+    );
   }
 
   private tierError(): Response {

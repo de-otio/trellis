@@ -49,6 +49,8 @@ function makeSession(overrides: Partial<Session> = {}): Session {
 
 const mockEnv = { DATABASE_URL: "postgresql://test:test@localhost/test" } as unknown as Env;
 const mockRequestContext = {} as TrellisRequestContext;
+/** The caller's verified active tenant (H1) — every circle read requires one. */
+const TENANT = "tenant-1";
 
 function buildUrl(path: string, params: Record<string, string> = {}): string {
   const url = new URL(`https://api.example.com${path}`);
@@ -88,12 +90,13 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(200);
       const body = await response.json();
       expect(body).toEqual({ members });
-      expect(mockGraphService.getCircleMembers).toHaveBeenCalledWith("user-123", 1);
+      expect(mockGraphService.getCircleMembers).toHaveBeenCalledWith("user-123", 1, TENANT);
     });
 
     it("accepts all valid tier values (0, 1, 2, 3)", async () => {
@@ -108,9 +111,14 @@ describe("CircleHandler", () => {
           session,
           mockEnv,
           mockRequestContext,
+          TENANT,
         );
         expect(response.status).toBe(200);
-        expect(mockGraphService.getCircleMembers).toHaveBeenCalledWith("user-123", Number(tier));
+        expect(mockGraphService.getCircleMembers).toHaveBeenCalledWith(
+          "user-123",
+          Number(tier),
+          TENANT,
+        );
       }
     });
 
@@ -120,6 +128,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(400);
@@ -134,6 +143,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(400);
@@ -147,6 +157,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(400);
@@ -158,6 +169,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(400);
@@ -171,6 +183,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(503);
@@ -188,6 +201,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(503);
@@ -208,6 +222,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
       const elapsed = Date.now() - start;
 
@@ -225,6 +240,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(500);
@@ -247,6 +263,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(200);
@@ -257,6 +274,7 @@ describe("CircleHandler", () => {
         2,
         expect.any(Date),
         { limit: 20, cursor: undefined },
+        TENANT,
         undefined, // orgFilter (T2): no org-category params on this request
       );
     });
@@ -274,6 +292,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(mockGraphService.getVisiblePostIds).toHaveBeenCalledWith(
@@ -281,6 +300,7 @@ describe("CircleHandler", () => {
         0,
         new Date("2025-01-01T00:00:00.000Z"),
         { limit: 10, cursor: "tok-123" },
+        TENANT,
         undefined, // orgFilter (T2): no org-category params on this request
       );
     });
@@ -293,6 +313,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(mockGraphService.getVisiblePostIds).toHaveBeenCalledWith(
@@ -300,6 +321,7 @@ describe("CircleHandler", () => {
         1,
         expect.any(Date),
         { limit: 50, cursor: undefined },
+        TENANT,
         undefined, // orgFilter (T2): no org-category params on this request
       );
     });
@@ -312,6 +334,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(mockGraphService.getVisiblePostIds).toHaveBeenCalledWith(
@@ -319,6 +342,7 @@ describe("CircleHandler", () => {
         1,
         expect.any(Date),
         { limit: 1, cursor: undefined },
+        TENANT,
         undefined, // orgFilter (T2): no org-category params on this request
       );
     });
@@ -329,6 +353,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(400);
@@ -342,6 +367,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(400);
@@ -353,6 +379,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(400);
@@ -370,6 +397,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       const after = Date.now() - 7 * 24 * 60 * 60 * 1000;
@@ -386,6 +414,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(503);
@@ -399,6 +428,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(500);
@@ -419,12 +449,19 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(200);
       const body = await response.json();
       expect(body).toEqual({ items });
-      expect(mockGraphService.getGlanceItems).toHaveBeenCalledWith("user-123", 3, 20, undefined);
+      expect(mockGraphService.getGlanceItems).toHaveBeenCalledWith(
+        "user-123",
+        3,
+        20,
+        TENANT,
+        undefined,
+      );
     });
 
     it("passes custom limit", async () => {
@@ -435,9 +472,16 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
-      expect(mockGraphService.getGlanceItems).toHaveBeenCalledWith("user-123", 1, 5, undefined);
+      expect(mockGraphService.getGlanceItems).toHaveBeenCalledWith(
+        "user-123",
+        1,
+        5,
+        TENANT,
+        undefined,
+      );
     });
 
     it("clamps limit to max 50", async () => {
@@ -448,9 +492,16 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
-      expect(mockGraphService.getGlanceItems).toHaveBeenCalledWith("user-123", 1, 50, undefined);
+      expect(mockGraphService.getGlanceItems).toHaveBeenCalledWith(
+        "user-123",
+        1,
+        50,
+        TENANT,
+        undefined,
+      );
     });
 
     it("returns 400 when tier is missing", async () => {
@@ -459,6 +510,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(400);
@@ -472,6 +524,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(400);
@@ -485,6 +538,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(503);
@@ -498,6 +552,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(500);
@@ -518,6 +573,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(200);
@@ -529,6 +585,7 @@ describe("CircleHandler", () => {
         "user-456",
         expect.any(Date),
         20,
+        TENANT,
       );
     });
 
@@ -540,6 +597,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(200);
@@ -549,6 +607,7 @@ describe("CircleHandler", () => {
         "ent-1",
         expect.any(Date),
         20,
+        TENANT,
       );
     });
 
@@ -565,6 +624,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(mockGraphService.getDepthPostIds).toHaveBeenCalledWith(
@@ -573,6 +633,7 @@ describe("CircleHandler", () => {
         "user-456",
         new Date("2025-06-01T00:00:00.000Z"),
         30,
+        TENANT,
       );
     });
 
@@ -584,6 +645,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(mockGraphService.getDepthPostIds).toHaveBeenCalledWith(
@@ -592,6 +654,7 @@ describe("CircleHandler", () => {
         "u-1",
         expect.any(Date),
         50,
+        TENANT,
       );
     });
 
@@ -604,6 +667,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       const after = Date.now() - 30 * 24 * 60 * 60 * 1000;
@@ -618,6 +682,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(400);
@@ -631,6 +696,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(400);
@@ -642,6 +708,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(400);
@@ -657,6 +724,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(400);
@@ -673,6 +741,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(503);
@@ -686,6 +755,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(500);
@@ -706,12 +776,13 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(200);
       const body = await response.json();
       expect(body).toEqual({ tiers: status });
-      expect(mockGraphService.getCircleStatus).toHaveBeenCalledWith("user-123");
+      expect(mockGraphService.getCircleStatus).toHaveBeenCalledWith("user-123", TENANT);
     });
 
     it("returns 503 on GraphConnectionError", async () => {
@@ -722,6 +793,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(503);
@@ -735,6 +807,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(500);
@@ -755,12 +828,17 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(200);
       const body = await response.json();
       expect(body).toEqual({ entities });
-      expect(mockGraphService.getCircleEntityStatus).toHaveBeenCalledWith("user-123", 2);
+      expect(mockGraphService.getCircleEntityStatus).toHaveBeenCalledWith(
+        "user-123",
+        2,
+        TENANT,
+      );
     });
 
     it("returns 400 when tier is missing", async () => {
@@ -769,6 +847,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(400);
@@ -782,6 +861,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(400);
@@ -793,6 +873,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(400);
@@ -806,6 +887,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(503);
@@ -819,6 +901,7 @@ describe("CircleHandler", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(500);
