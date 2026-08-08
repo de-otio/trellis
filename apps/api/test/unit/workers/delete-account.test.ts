@@ -185,9 +185,70 @@ describe("runDeleteAccount", () => {
     });
 
     await expect(runDeleteAccount({ userId: "u1" }, ctx)).resolves.toBeUndefined();
-    expect(ctx.logger.warn).toHaveBeenCalledWith(
+    // error, not warn. An Art. 17 erasure that left bytes in the bucket is a
+    // compliance failure; at warn it sat below every alerting threshold, which
+    // is how "account deletion reports success while media remains" persisted.
+    expect(ctx.logger.error).toHaveBeenCalledWith(
       "Staging object cleanup incomplete",
       expect.objectContaining({ failedBatches: 1 }),
+    );
+    expect(ctx.logger.warn).not.toHaveBeenCalledWith(
+      "Staging object cleanup incomplete",
+      expect.anything(),
+    );
+  });
+
+  it("qualifies the completion record when staging cleanup was incomplete", async () => {
+    // The failed delete is not the whole defect; the unqualified success line
+    // is. "Account deleted" is what an operator — or an Art. 17 response —
+    // reads, and it said the same thing whether or not the bytes went away.
+    const ctx = makeCtx();
+    ctx._deleteStaging.mockResolvedValueOnce({
+      requested: 5,
+      failedBatches: 1,
+      truncated: false,
+    });
+
+    await runDeleteAccount({ userId: "u1" }, ctx);
+
+    expect(ctx.logger.info).toHaveBeenCalledWith(
+      "Account deleted",
+      expect.objectContaining({ userId: "u1", stagingCleanupIncomplete: true }),
+    );
+  });
+
+  it("marks the completion record complete when cleanup succeeded", async () => {
+    // The other half: a flag that is always true carries no information.
+    const ctx = makeCtx();
+    await runDeleteAccount({ userId: "u1" }, ctx);
+
+    expect(ctx.logger.info).toHaveBeenCalledWith(
+      "Account deleted",
+      expect.objectContaining({ stagingCleanupIncomplete: false }),
+    );
+    expect(ctx.logger.error).not.toHaveBeenCalled();
+  });
+
+  it("treats a truncated run as incomplete, not just a failed batch", async () => {
+    // `truncated` fires when the 100-batch circuit breaker cuts the run short:
+    // every key past 100_000 was never even submitted. Silent by construction,
+    // since no batch "failed".
+    const ctx = makeCtx();
+    ctx._deleteStaging.mockResolvedValueOnce({
+      requested: 100_000,
+      failedBatches: 0,
+      truncated: true,
+    });
+
+    await runDeleteAccount({ userId: "u1" }, ctx);
+
+    expect(ctx.logger.error).toHaveBeenCalledWith(
+      "Staging object cleanup incomplete",
+      expect.objectContaining({ truncated: true }),
+    );
+    expect(ctx.logger.info).toHaveBeenCalledWith(
+      "Account deleted",
+      expect.objectContaining({ stagingCleanupIncomplete: true }),
     );
   });
 });
