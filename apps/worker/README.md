@@ -19,7 +19,7 @@ cadences in-process with single-fire via WS-1's
 | `AWS_REGION` | yes | SDK region (MNQ accepts any; endpoint decides) |
 | `SQS_ENDPOINT` | scaleway/CI | MNQ-SQS or LocalStack endpoint; unset = AWS SQS |
 | `AWS_ACCOUNT_ID` | scaleway/CI | queue-URL account segment (`000000000000` on LocalStack/MNQ) |
-| `KV_PROVIDER` | scaleway | `postgres` selects the Scaleway profile (PostgresKvStore + the `kv-entries-cleanup` cron); unset/`dynamodb` = AWS-shaped wiring for CI |
+| `KV_PROVIDER` | scaleway | `postgres` selects the Scaleway profile (PostgresKvStore + the `kv-entries-cleanup` cron); unset/`dynamodb` = AWS-shaped wiring for CI. Selects **both** KV ports — see [`doc/02-technical/operations/kv-provider.md`](../../doc/02-technical/operations/kv-provider.md) |
 | `KV_DATABASE_URL` / `DATABASE_URL` | scaleway | shared KV pool for `KV_PROVIDER=postgres` |
 | DB credential (one of) | yes | **Fail-closed startup gate.** Resolution mirrors the request path (`env.ts`): `DATABASE_URL` (explicit) → `DB_SECRET_ARN` (AWS Secrets Manager, with rotation self-heal) → decomposed `DB_SECRET_USERNAME`/`DB_SECRET_PASSWORD`/`DB_SECRET_HOST`[`/DB_SECRET_PORT`]`+DB_NAME` (the Scaleway shape — external-secrets injects the password). Missing all three ⇒ `exit(1)`. |
 | `MEDIA_BUCKET_NAME` | yes | staging-object cleanup + nightly GC purge |
