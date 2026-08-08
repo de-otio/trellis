@@ -42,6 +42,10 @@ export default defineConfig({
       // test/setup.ts overrides to a fake hyperdrive URL. Runs in the Phase0
       // integration lane instead (npm run test:integration:ci).
       "test/integration/post-read-isolation.integration.test.ts",
+      // H3 post ATTACHMENT read authorization — same reason as above: it drives
+      // the real handlers against a real Postgres, which this config's
+      // test/setup.ts cannot provide. Runs in the Phase0 integration lane.
+      "test/integration/post-attachment-read-authz.integration.test.ts",
       // Events primitive integration tests — live Postgres only.
       // Run separately: npm run test:integration:ci (registered in PHASE0_INTEGRATION).
       "test/integration/events.integration.test.ts",

@@ -171,12 +171,26 @@ function encodeFeedCursor(createdAt: Date, postId: string): string {
  * in the feed and then granted the same row by id has no audience boundary at
  * all. Keeping this in one function is what makes that agreement checkable.
  *
+ * THREE call sites, and no more:
+ *
+ *   1. `getHomeFeed` (this file)
+ *   2. `getPost` (this file)
+ *   3. `canReadPost` (lib/post-read-authorizer.ts)
+ *
+ * The third was added for H3 and is the one to reuse. The post's ATTACHMENTS —
+ * comments, sentiment counts, the who-reacted list — were audience-blind, each
+ * testing only that the post row existed. Rather than give each endpoint its
+ * own predicate (three more places to diverge), they all call `canReadPost`,
+ * which calls this. So the rule is now: an endpoint that needs to decide
+ * whether a viewer may read a post calls `canReadPost`; it does not call this
+ * function directly, and it certainly does not write its own predicate.
+ *
  * This is an interim home. It reproduces today's semantics only; it does not
  * consult `LOUD` (which the feed has never admitted for anyone but the author),
  * group membership, or blocks. It is scheduled to be replaced wholesale by the
  * single audience resolver — see trellis-internal plans/audience-and-reach,
- * task P1.4 — at which point this function and its two call sites go away
- * together. Do not add a third call site: thread the resolver in instead.
+ * task P1.4 — at which point this function and its three call sites go away
+ * together. Thread the resolver into those three; do not add a fourth.
  *
  * @param viewerUserId the cuid of the viewing user (never an OIDC `sub`)
  * @param friendUserIds ids this viewer is connected to, resolved by the caller

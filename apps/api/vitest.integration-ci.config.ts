@@ -42,6 +42,11 @@ const PHASE0_INTEGRATION = [
   // rows regardless of the `where`, so it can only assert predicate shape —
   // only a real Postgres decides whether a row actually comes back.
   "test/integration/post-read-isolation.integration.test.ts",
+  // H3 — post ATTACHMENT read authorization: the comment thread, the sentiment
+  // counts and the who-reacted list must be as hard to read as the post. Drives
+  // the real handlers, because the unit lane's Prisma mocks resolve canned rows
+  // regardless of the `where` and so cannot tell "authorized" from "not asked".
+  "test/integration/post-attachment-read-authz.integration.test.ts",
 ];
 
 export default defineConfig({

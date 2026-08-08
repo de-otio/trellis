@@ -52,6 +52,16 @@ vi.mock("../../src/lib/feed-handler", () => ({
   },
 }));
 
+// Mock the shared read authorizer (H3), default ALLOW. Whether the predicate
+// inside it is CORRECT is decided against real Postgres in
+// test/integration/post-attachment-read-authz.integration.test.ts.
+const mockCanReadPost = vi.fn();
+vi.mock("../../src/lib/post-read-authorizer", () => ({
+  canReadPost: (...args: any[]) => mockCanReadPost(...args),
+}));
+
+const TENANT = "tenant-123";
+
 describe("ReactionHandler - Caching", () => {
   let handler: ReactionHandler;
   let mockEnv: any;
@@ -67,6 +77,7 @@ describe("ReactionHandler - Caching", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     handler = new ReactionHandler();
+    mockCanReadPost.mockResolvedValue(true);
 
     mockKV = {
       get: vi.fn(),
@@ -159,6 +170,7 @@ describe("ReactionHandler - Caching", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(200);
@@ -168,10 +180,12 @@ describe("ReactionHandler - Caching", () => {
       // Should NOT query database
       expect(mockDb.postSentiment.groupBy).not.toHaveBeenCalled();
 
-      // Should have cache-control header
-      expect(response.headers.get("cache-control")).toBe(
-        "public, max-age=30, stale-while-revalidate=60",
-      );
+      // The body is audience-gated AND carries per-viewer `userSentiment`, so a
+      // SHARED cache must never store it: `public, max-age=30` would hand one
+      // viewer's reaction to another and would serve a private post's counts to
+      // callers the gate refused, for the whole TTL.
+      expect(response.headers.get("cache-control")).toBe("private, no-store");
+      expect(response.headers.get("vary")).toBe("Authorization, Cookie");
     });
 
     it("should query database and cache results when cache miss", async () => {
@@ -187,6 +201,7 @@ describe("ReactionHandler - Caching", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(200);
@@ -216,6 +231,7 @@ describe("ReactionHandler - Caching", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(200);
@@ -241,6 +257,7 @@ describe("ReactionHandler - Caching", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(200);
@@ -262,6 +279,7 @@ describe("ReactionHandler - Caching", () => {
         mockSession,
         envWithoutKV,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(200);
@@ -283,6 +301,7 @@ describe("ReactionHandler - Caching", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(200);
@@ -306,25 +325,34 @@ describe("ReactionHandler - Caching", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       const data = await response.json();
       expect(data.userSentiment).toBe("joy");
     });
 
-    it("should not include user sentiment for unauthenticated users", async () => {
+    // H3: there is no longer an "unauthenticated user" case on this endpoint —
+    // it required no session at all, which is how a private post's reaction
+    // activity was readable by anyone with the id. What replaces that case is
+    // the refusal, and the refusal must not be served from cache either.
+    it("does not serve a cached count to a viewer who may not read the post", async () => {
+      mockCanReadPost.mockResolvedValue(false);
       mockKV.get.mockResolvedValue(JSON.stringify({ joy: 5 }));
 
       const response = await handler.getPostSentiments(
         "post-123",
-        null,
+        mockSession,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
-      const data = await response.json();
-      expect(data.userSentiment).toBeUndefined();
-      expect(mockDb.postSentiment.findUnique).not.toHaveBeenCalled();
+      expect(response.status).toBe(404);
+      expect(await response.text()).toBe(
+        JSON.stringify({ error: "Post not found" }),
+      );
+      expect(mockKV.get).not.toHaveBeenCalled();
     });
   });
 
@@ -517,9 +545,10 @@ describe("ReactionHandler - Caching", () => {
 
       await handler.getPostSentiments(
         "post-123",
-        null,
+        mockSession,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       // Should NOT call database groupBy
@@ -536,6 +565,7 @@ describe("ReactionHandler - Caching", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(mockKV.put).toHaveBeenCalledWith(
@@ -555,6 +585,7 @@ describe("ReactionHandler - Caching", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(mockKV.put).toHaveBeenCalledWith(

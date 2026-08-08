@@ -36,16 +36,27 @@ const mockGetPostSentiments = vi.fn();
 const mockAddCommentSentiment = vi.fn();
 const mockRemoveCommentSentiment = vi.fn();
 const mockGetCommentSentiments = vi.fn();
+const mockGetPostSentimentUsers = vi.fn();
 vi.mock("../../../src/lib/reaction-handler", () => ({
   ReactionHandler: class {
     addPostSentiment = mockAddPostSentiment;
     removePostSentiment = mockRemovePostSentiment;
     getPostSentiments = mockGetPostSentiments;
+    getPostSentimentUsers = mockGetPostSentimentUsers;
     addCommentSentiment = mockAddCommentSentiment;
     removeCommentSentiment = mockRemoveCommentSentiment;
     getCommentSentiments = mockGetCommentSentiments;
   },
 }));
+
+// Mock authMiddleware — the GET routes now need the caller's ACTIVE TENANT
+// (H3), which the session cookie alone does not carry.
+const mockAuthMiddleware = vi.fn();
+vi.mock("../../../src/lib/auth/auth-middleware", () => ({
+  authMiddleware: (...args: any[]) => mockAuthMiddleware(...args),
+}));
+
+const TENANT = "tenant-123";
 
 // Mock Validator
 const mockSanitizeError = vi.fn((error) => error?.message || "Unknown error");
@@ -65,6 +76,9 @@ vi.mock("../../../src/lib/validate-request", () => ({
 vi.mock("../../../src/lib/schemas", () => ({
   sentimentSchema: {
     parse: vi.fn(),
+  },
+  getSentimentUsersSchema: {
+    safeParse: (value: any) => ({ success: true, data: value }),
   },
 }));
 
@@ -107,6 +121,7 @@ describe("Sentiments Routes", () => {
     );
 
     mockGetSession.mockResolvedValue(mockSession);
+    mockAuthMiddleware.mockResolvedValue({ activeTenantId: TENANT });
     mockCreateSecureResponse.mockImplementation((body, options) => {
       return new Response(body, options);
     });
@@ -332,24 +347,21 @@ describe("Sentiments Routes", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
       expect(mockAddSecurityHeaders).toHaveBeenCalledWith(mockResponse);
       expect(response.status).toBe(200);
     });
 
-    it("should get post sentiments successfully without session", async () => {
-      const mockResponse = new Response(
-        JSON.stringify({ sentiments: [{ sentiment: "like", count: 10 }] }),
-        { status: 200 },
-      );
-      mockGetPostSentiments.mockResolvedValue(mockResponse);
+    // H3: this route used to pass `session || null` straight through, so it
+    // served a post's reaction activity to callers with no session at all —
+    // while the post itself requires one. It now refuses.
+    it("REFUSES an unauthenticated caller (401), and never reaches the handler", async () => {
       mockGetSession.mockResolvedValue(null);
 
       const getRequest = new Request(
         "https://example.com/api/posts/post-123/sentiments",
-        {
-          method: "GET",
-        },
+        { method: "GET" },
       );
 
       const response = await route!.handler(getRequest, mockEnv, {
@@ -357,13 +369,28 @@ describe("Sentiments Routes", () => {
         requestContext: mockRequestContext,
       });
 
-      expect(mockGetPostSentiments).toHaveBeenCalledWith(
-        "post-123",
-        null,
-        mockEnv,
-        mockRequestContext,
+      expect(response.status).toBe(401);
+      expect(mockGetPostSentiments).not.toHaveBeenCalled();
+    });
+
+    it("REFUSES a caller with a session but no active tenant (401)", async () => {
+      // No tenant means no tenant predicate, and TENANT_SCOPE_MODE defaults to
+      // `off` with no RLS backstop — so there would be nothing left to isolate
+      // one tenant's posts from another's.
+      mockAuthMiddleware.mockResolvedValue({ activeTenantId: undefined });
+
+      const getRequest = new Request(
+        "https://example.com/api/posts/post-123/sentiments",
+        { method: "GET" },
       );
-      expect(response.status).toBe(200);
+
+      const response = await route!.handler(getRequest, mockEnv, {
+        pathname: "/api/posts/post-123/sentiments",
+        requestContext: mockRequestContext,
+      });
+
+      expect(response.status).toBe(401);
+      expect(mockGetPostSentiments).not.toHaveBeenCalled();
     });
 
     it("should return 500 when request context is missing", async () => {
@@ -670,6 +697,94 @@ describe("Sentiments Routes", () => {
         expect(route.description).toBeDefined();
         expect(typeof route.description).toBe("string");
       });
+    });
+  });
+
+  // =========================================================================
+  // GET /api/v1/posts/:postId/sentiments/users — the who-reacted list (H3)
+  // =========================================================================
+  describe("GET /api/v1/posts/:postId/sentiments/users", () => {
+    const route = sentimentsRoutes.find(
+      (r) =>
+        r.method === "GET" && r.path.toString().includes("sentiments\\/users"),
+    );
+    const pathname = "/api/v1/posts/post-123/sentiments/users";
+    const usersRequest = () =>
+      new Request(`https://example.com${pathname}?sentiment=joy&limit=20`);
+
+    const call = () =>
+      route!.handler(usersRequest(), mockEnv, {
+        pathname,
+        requestContext: mockRequestContext,
+      });
+
+    // This endpoint discloses IDENTITIES. It previously required no session at
+    // all, so the reader list of a private post was available anonymously.
+    it("REFUSES an unauthenticated caller (401), and never reaches the handler", async () => {
+      mockGetSession.mockResolvedValue(null);
+
+      const response = await call();
+
+      expect(response.status).toBe(401);
+      expect(mockGetPostSentimentUsers).not.toHaveBeenCalled();
+    });
+
+    it("REFUSES a caller with a session but no active tenant (401)", async () => {
+      mockAuthMiddleware.mockResolvedValue({ activeTenantId: undefined });
+
+      const response = await call();
+
+      expect(response.status).toBe(401);
+      expect(mockGetPostSentimentUsers).not.toHaveBeenCalled();
+    });
+
+    it("passes the caller's active tenant through to the handler", async () => {
+      mockGetPostSentimentUsers.mockResolvedValue(
+        new Response(JSON.stringify({ users: [] }), { status: 200 }),
+      );
+
+      await call();
+
+      const args = mockGetPostSentimentUsers.mock.calls[0];
+      expect(args[0]).toBe("post-123");
+      expect(args[4]).toBe(mockSession);
+      expect(args[7]).toBe(TENANT);
+    });
+
+    // The TEEN branch rewrites the handler's body. Applied unconditionally it
+    // parses a 404 refusal as if it were a user list and re-emits it as a 200 —
+    // laundering the deny into a success for exactly the accounts the platform
+    // is most careful with.
+    it("does not launder a refusal into a 200 for a TEEN session", async () => {
+      mockGetSession.mockResolvedValue({ ...mockSession, ageTier: "TEEN" });
+      const deny = new Response(
+        JSON.stringify({ title: "Post Not Found", status: 404 }),
+        { status: 404, headers: { "content-type": "application/problem+json" } },
+      );
+      mockGetPostSentimentUsers.mockResolvedValue(deny);
+
+      const response = await call();
+
+      expect(response.status).toBe(404);
+    });
+
+    it("still strips identities for a TEEN on a permitted read", async () => {
+      mockGetSession.mockResolvedValue({ ...mockSession, ageTier: "TEEN" });
+      mockGetPostSentimentUsers.mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            users: [{ userId: "user-456", handle: "someone", sentiment: "joy" }],
+          }),
+          { status: 200 },
+        ),
+      );
+
+      const response = await call();
+
+      expect(response.status).toBe(200);
+      const body = await response.text();
+      expect(body).not.toContain("user-456");
+      expect(JSON.parse(body).sentimentTypes).toEqual(["joy"]);
     });
   });
 });

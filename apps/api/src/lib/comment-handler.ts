@@ -44,6 +44,25 @@ export interface CreateCommentRequest {
   }>;
 }
 
+/**
+ * The single refusal for `GET /api/posts/:id/comments` (H3).
+ *
+ * "No such post", "another tenant's post" and "you are not in that post's
+ * audience" must be byte-identical, for the same reason the ActivityPub object
+ * routes were made identical: a distinguishable refusal is an existence oracle
+ * for exactly the private post ids an attacker is fishing for. This reuses the
+ * body the not-found branch already returned, so the refusal is not a new
+ * observable either.
+ *
+ * A new refusal branch on this endpoint must call this, not describe itself.
+ */
+function commentsDenyResponse(): Response {
+  return new Response(JSON.stringify({ error: "Post not found" }), {
+    status: 404,
+    headers: { "content-type": "application/json" },
+  });
+}
+
 export class CommentHandler {
   // No need to create FeedHandler instance - use static methods to avoid circular dependency
 
@@ -664,6 +683,13 @@ export class CommentHandler {
    * Get comments for a post
    *
    * PREPARATORY: Uses DataRouter for region-aware operations.
+   *
+   * H3: the thread is gated by {@link canReadPost}, not by "does the post row
+   * exist". `DataRouter.getPost` is a bare `findUnique({ where: { id } })` — no
+   * tenant, no audience — so using it as the gate let any authenticated caller
+   * in any tenant read the full thread (author ids and comment text) of a
+   * WHISPER post by id. The comment query below is tenant-scoped but
+   * audience-blind, and always was.
    */
   async getComments(
     postId: string,
@@ -680,7 +706,26 @@ export class CommentHandler {
       const limit = Math.min(options.limit || 20, 100);
       const cursor = options.cursor ? new Date(options.cursor) : undefined;
 
-      // PREPARATORY: Verify post exists in correct region first
+      // AUTHORIZATION, before anything attached to the post is read. This is
+      // the same decision the single-post read makes — same tenant predicate,
+      // same audience predicate — so a viewer cannot be refused the post and
+      // handed its thread.
+      const { canReadPost } = await import("./post-read-authorizer.js");
+      const permitted = await canReadPost({
+        postId,
+        viewerUserId: session.userId,
+        tenantId: activeTenantId,
+        region,
+        env: env as any,
+      });
+      if (!permitted) {
+        return commentsDenyResponse();
+      }
+
+      // Cross-region check and the data-access audit entry. Kept AFTER the
+      // authorization gate and refusing with the identical body, so it can
+      // neither leak an existence signal of its own nor be reached by a caller
+      // the gate refused.
       const requestId = generateRequestId();
       const post = await DataRouter.getPost(
         postId,
@@ -688,12 +733,10 @@ export class CommentHandler {
         env,
         undefined,
         requestId,
+        session.userId,
       );
       if (!post) {
-        return new Response(JSON.stringify({ error: "Post not found" }), {
-          status: 404,
-          headers: { "content-type": "application/json" },
-        });
+        return commentsDenyResponse();
       }
 
       // Fetch comments (excluding hidden ones) - with timeout/retry

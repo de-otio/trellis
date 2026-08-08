@@ -108,6 +108,16 @@ vi.mock("../../src/db", () => ({
   createPrisma: (...args: any[]) => mockCreatePrisma(...args),
 }));
 
+// Mock the shared read authorizer (H3), default ALLOW. Whether its predicate is
+// CORRECT is decided against real Postgres in
+// test/integration/post-attachment-read-authz.integration.test.ts — the Prisma
+// mock below resolves canned comments regardless of the `where`, so nothing
+// here can tell a right predicate from a missing one.
+const mockCanReadPost = vi.fn();
+vi.mock("../../src/lib/post-read-authorizer", () => ({
+  canReadPost: (...args: any[]) => mockCanReadPost(...args),
+}));
+
 const TEST_TENANT_ID = "tenant-test-123";
 
 describe("CommentHandler", () => {
@@ -120,6 +130,7 @@ describe("CommentHandler", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     handler = new CommentHandler();
+    mockCanReadPost.mockResolvedValue(true);
 
     mockDb = {
       post: {
@@ -635,6 +646,66 @@ describe("CommentHandler", () => {
       );
 
       expect(response.status).toBe(404);
+    });
+
+    // H3: the gate used to be "does the post row exist", via a DataRouter call
+    // with no tenant and no audience predicate — so any authenticated caller in
+    // any tenant could read a WHISPER post's whole thread by id.
+    it("refuses, identically to not-found, when the viewer may not read the post", async () => {
+      mockCanReadPost.mockResolvedValue(false);
+      mockDb.postComment.findMany.mockResolvedValue([
+        {
+          id: "comment-1",
+          text: "private thread content",
+          authorId: "user-1",
+          createdAt: new Date("2024-01-01T10:00:00Z"),
+          postUri: "at://test/post-123",
+          replyToUri: null,
+        },
+      ]);
+
+      const request = new Request("http://test.com/comments?postId=post-123");
+      const response = await handler.getComments(
+        "post-123",
+        request,
+        mockSession,
+        { limit: 20 },
+        mockEnv,
+        mockRequestContext,
+        TEST_TENANT_ID,
+      );
+
+      expect(response.status).toBe(404);
+      const body = await response.text();
+      expect(body).toBe(JSON.stringify({ error: "Post not found" }));
+      // Neither the text nor the commenter's id escapes, and the thread query
+      // is never run.
+      expect(body).not.toContain("private thread content");
+      expect(mockDb.postComment.findMany).not.toHaveBeenCalled();
+    });
+
+    it("passes the caller's active tenant to the authorizer, never an ambient one", async () => {
+      mockDb.postComment.findMany.mockResolvedValue([]);
+      mockDb.commentSentiment.groupBy.mockResolvedValue([]);
+
+      const request = new Request("http://test.com/comments?postId=post-123");
+      await handler.getComments(
+        "post-123",
+        request,
+        mockSession,
+        { limit: 20 },
+        mockEnv,
+        mockRequestContext,
+        TEST_TENANT_ID,
+      );
+
+      expect(mockCanReadPost).toHaveBeenCalledWith(
+        expect.objectContaining({
+          postId: "post-123",
+          viewerUserId: mockSession.userId,
+          tenantId: TEST_TENANT_ID,
+        }),
+      );
     });
 
     it("should include sentiment counts", async () => {
