@@ -1,15 +1,9 @@
 /**
- * Cognito Identity Provider SDK wrapper.
+ * Cognito adapter for [IdpAdminPort] — tenant-level identity federation.
  *
- * The route handler talks to Cognito only through this surface so the
- * Cognito-shaped commands stay in one place and the rollback paths in
- * the route are easier to reason about.
- *
- * Concurrency: `setSupportedIdentityProviders` performs a
- * Describe → mutate → Update sequence which is racy across concurrent
- * connect/disconnect calls. The route handler must wrap the call in a
- * Postgres advisory lock keyed on the user pool id; the helper
- * `withUserPoolClientLock` here implements that pattern.
+ * Holds the user pool and app client it administers, so no Cognito identifier
+ * appears in the port's signatures. See `../identity/idp-admin-port.ts` for why
+ * the port is shaped the way it is.
  */
 import {
   CognitoIdentityProviderClient,
@@ -22,36 +16,23 @@ import {
 } from "@aws-sdk/client-cognito-identity-provider";
 import type { TenantRole } from "@prisma/client";
 
-export interface OidcProviderDetails {
-  clientId: string;
-  clientSecret: string;
-  issuerUrl: string;
-  scopes?: string;
-}
+import type {
+  AdvisoryLockClient,
+  CreateOidcProviderInput,
+  IdpAdminPort,
+  IdpAttributeMapping,
+  OidcProviderDetails,
+  SetProviderEnabledInput,
+  UpdateOidcProviderInput,
+} from "../identity/idp-admin-port.js";
 
-export interface IdpAttributeMapping {
-  email: string;
-  given_name?: string;
-  family_name?: string;
-  "custom:idpGroups"?: string;
-  [key: string]: string | undefined;
-}
-
-export interface CreateOidcProviderInput {
-  userPoolId: string;
-  providerName: string;
-  details: OidcProviderDetails;
-  attributeMapping: IdpAttributeMapping;
-  idpIdentifiers: string[];
-}
-
-export interface UpdateOidcProviderInput {
-  userPoolId: string;
-  providerName: string;
-  details?: Partial<OidcProviderDetails>;
-  attributeMapping?: IdpAttributeMapping;
-  idpIdentifiers?: string[];
-}
+export type {
+  AdvisoryLockClient,
+  CreateOidcProviderInput,
+  IdpAttributeMapping,
+  OidcProviderDetails,
+  UpdateOidcProviderInput,
+};
 
 /** Default attribute mapping per 04-cognito-federation.md §attribute-mapping. */
 export function defaultOidcAttributeMapping(): IdpAttributeMapping {
@@ -74,13 +55,26 @@ function buildOidcProviderDetails(d: OidcProviderDetails): Record<string, string
   return out;
 }
 
-export class CognitoIdpSdk {
-  constructor(private readonly client: CognitoIdentityProviderClient) {}
+export interface CognitoIdpSdkConfig {
+  userPoolId: string;
+  /** The app client whose `SupportedIdentityProviders` list gates sign-in. */
+  appClientId: string;
+}
+
+export class CognitoIdpSdk implements IdpAdminPort {
+  constructor(
+    private readonly client: CognitoIdentityProviderClient,
+    private readonly config: CognitoIdpSdkConfig,
+  ) {}
+
+  defaultAttributeMapping(): IdpAttributeMapping {
+    return defaultOidcAttributeMapping();
+  }
 
   async createOidcProvider(input: CreateOidcProviderInput): Promise<void> {
     await this.client.send(
       new CreateIdentityProviderCommand({
-        UserPoolId: input.userPoolId,
+        UserPoolId: this.config.userPoolId,
         ProviderName: input.providerName,
         ProviderType: "OIDC",
         ProviderDetails: buildOidcProviderDetails(input.details),
@@ -96,7 +90,7 @@ export class CognitoIdpSdk {
       : undefined;
     await this.client.send(
       new UpdateIdentityProviderCommand({
-        UserPoolId: input.userPoolId,
+        UserPoolId: this.config.userPoolId,
         ProviderName: input.providerName,
         ...(providerDetails ? { ProviderDetails: providerDetails } : {}),
         ...(input.attributeMapping
@@ -107,20 +101,20 @@ export class CognitoIdpSdk {
     );
   }
 
-  async deleteProvider(userPoolId: string, providerName: string): Promise<void> {
+  async deleteProvider(providerName: string): Promise<void> {
     await this.client.send(
       new DeleteIdentityProviderCommand({
-        UserPoolId: userPoolId,
+        UserPoolId: this.config.userPoolId,
         ProviderName: providerName,
       }),
     );
   }
 
-  async describeProvider(userPoolId: string, providerName: string): Promise<boolean> {
+  async providerExists(providerName: string): Promise<boolean> {
     try {
       await this.client.send(
         new DescribeIdentityProviderCommand({
-          UserPoolId: userPoolId,
+          UserPoolId: this.config.userPoolId,
           ProviderName: providerName,
         }),
       );
@@ -133,57 +127,61 @@ export class CognitoIdpSdk {
   }
 
   /**
-   * Read the app client's current `SupportedIdentityProviders`, mutate the
-   * list (add or remove `providerName`), and write it back. UpdateUserPoolClient
-   * is a full replace, so we carry the rest of the existing config through.
+   * Read the app client's current `SupportedIdentityProviders`, mutate the list,
+   * and write it back — under an advisory lock, because this is a
+   * read-modify-write on state shared by every tenant.
    *
-   * NOT race-safe in isolation. The caller must hold an advisory lock
-   * keyed on (userPoolId, clientId).
+   * `UpdateUserPoolClient` is a **full replace**, so two admins connecting an
+   * IdP concurrently would each write a list computed before the other's, and
+   * one tenant's federation would vanish with no error anywhere. The lock is
+   * taken inside this method rather than left to callers precisely so that
+   * cannot be forgotten.
+   *
+   * The rest of the existing client config is carried through explicitly for
+   * the same reason: anything omitted is *cleared*.
    */
-  async setSupportedIdentityProvider(
-    userPoolId: string,
-    clientId: string,
-    providerName: string,
-    op: "add" | "remove",
-  ): Promise<void> {
-    const desc = await this.client.send(
-      new DescribeUserPoolClientCommand({ UserPoolId: userPoolId, ClientId: clientId }),
-    );
-    const existing = desc.UserPoolClient;
-    if (!existing) throw new Error("DescribeUserPoolClient returned no client");
+  async setProviderEnabled(input: SetProviderEnabledInput): Promise<void> {
+    await withUserPoolClientLock(input.tx, this.config.userPoolId, async () => {
+      const desc = await this.client.send(
+        new DescribeUserPoolClientCommand({
+          UserPoolId: this.config.userPoolId,
+          ClientId: this.config.appClientId,
+        }),
+      );
+      const existing = desc.UserPoolClient;
+      if (!existing) throw new Error("DescribeUserPoolClient returned no client");
 
-    const current = existing.SupportedIdentityProviders ?? [];
-    const set = new Set(current);
-    if (op === "add") set.add(providerName);
-    else set.delete(providerName);
-    const next = Array.from(set);
+      const set = new Set(existing.SupportedIdentityProviders ?? []);
+      if (input.enabled) set.add(input.providerName);
+      else set.delete(input.providerName);
 
-    await this.client.send(
-      new UpdateUserPoolClientCommand({
-        UserPoolId: userPoolId,
-        ClientId: clientId,
-        ClientName: existing.ClientName,
-        AccessTokenValidity: existing.AccessTokenValidity,
-        IdTokenValidity: existing.IdTokenValidity,
-        RefreshTokenValidity: existing.RefreshTokenValidity,
-        TokenValidityUnits: existing.TokenValidityUnits,
-        ReadAttributes: existing.ReadAttributes,
-        WriteAttributes: existing.WriteAttributes,
-        ExplicitAuthFlows: existing.ExplicitAuthFlows,
-        AllowedOAuthFlows: existing.AllowedOAuthFlows,
-        AllowedOAuthScopes: existing.AllowedOAuthScopes,
-        AllowedOAuthFlowsUserPoolClient: existing.AllowedOAuthFlowsUserPoolClient,
-        CallbackURLs: existing.CallbackURLs,
-        LogoutURLs: existing.LogoutURLs,
-        DefaultRedirectURI: existing.DefaultRedirectURI,
-        PreventUserExistenceErrors: existing.PreventUserExistenceErrors,
-        EnableTokenRevocation: existing.EnableTokenRevocation,
-        EnablePropagateAdditionalUserContextData:
-          existing.EnablePropagateAdditionalUserContextData,
-        AuthSessionValidity: existing.AuthSessionValidity,
-        SupportedIdentityProviders: next,
-      }),
-    );
+      await this.client.send(
+        new UpdateUserPoolClientCommand({
+          UserPoolId: this.config.userPoolId,
+          ClientId: this.config.appClientId,
+          ClientName: existing.ClientName,
+          AccessTokenValidity: existing.AccessTokenValidity,
+          IdTokenValidity: existing.IdTokenValidity,
+          RefreshTokenValidity: existing.RefreshTokenValidity,
+          TokenValidityUnits: existing.TokenValidityUnits,
+          ReadAttributes: existing.ReadAttributes,
+          WriteAttributes: existing.WriteAttributes,
+          ExplicitAuthFlows: existing.ExplicitAuthFlows,
+          AllowedOAuthFlows: existing.AllowedOAuthFlows,
+          AllowedOAuthScopes: existing.AllowedOAuthScopes,
+          AllowedOAuthFlowsUserPoolClient: existing.AllowedOAuthFlowsUserPoolClient,
+          CallbackURLs: existing.CallbackURLs,
+          LogoutURLs: existing.LogoutURLs,
+          DefaultRedirectURI: existing.DefaultRedirectURI,
+          PreventUserExistenceErrors: existing.PreventUserExistenceErrors,
+          EnableTokenRevocation: existing.EnableTokenRevocation,
+          EnablePropagateAdditionalUserContextData:
+            existing.EnablePropagateAdditionalUserContextData,
+          AuthSessionValidity: existing.AuthSessionValidity,
+          SupportedIdentityProviders: Array.from(set),
+        }),
+      );
+    });
   }
 }
 
@@ -210,6 +208,11 @@ function stripUndefined(map: Record<string, string | undefined>): Record<string,
  * `pg_advisory_xact_lock(bigint)` is used so the lock is auto-released at
  * transaction end. We only need a single number — collisions on different
  * pool ids would just mean false serialization, which is fine.
+ *
+ * **Cognito-specific, and deliberately not part of [IdpAdminPort].** It exists
+ * because Cognito has one shared, wholesale-replaced provider list per app
+ * client. A provider with independently addressable per-tenant resources needs
+ * no equivalent — see the port doc.
  */
 export function userPoolAdvisoryLockKey(userPoolId: string): bigint {
   let h = 0xcbf29ce484222325n;
@@ -221,10 +224,6 @@ export function userPoolAdvisoryLockKey(userPoolId: string): bigint {
   }
   if (h >= 0x8000000000000000n) h = h - 0x10000000000000000n;
   return h;
-}
-
-export interface AdvisoryLockClient {
-  $executeRaw(query: TemplateStringsArray, ...values: unknown[]): Promise<number>;
 }
 
 /**

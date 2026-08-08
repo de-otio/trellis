@@ -30,12 +30,8 @@ import { createClaimsCacheFromEnv } from "../auth/claims-cache.js";
 import { TenantAuditEmitter } from "../audit-composer.js";
 import { AuditEventType } from "../audit-actions.js";
 import { cognitoIdpName } from "./idp-name.js";
-import {
-  CognitoIdpSdk,
-  defaultOidcAttributeMapping,
-  withUserPoolClientLock,
-  type IdpAttributeMapping,
-} from "../cognito/idp-sdk.js";
+import { CognitoIdpSdk } from "../cognito/idp-sdk.js";
+import type { IdpAdminPort, IdpAttributeMapping } from "../identity/idp-admin-port.js";
 import { probeOidcIssuer } from "../cognito/issuer-probe.js";
 import { IdpSecretsClient } from "../secrets/idp-secrets.js";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
@@ -72,8 +68,8 @@ function notFound(): Response {
 const auditEmitter = new TenantAuditEmitter();
 
 export interface IdpHandlerDependencies {
-  /** Override the Cognito SDK wrapper (tests). */
-  idp?: CognitoIdpSdk;
+  /** Override the federation admin adapter (tests). */
+  idp?: IdpAdminPort;
   /** Override the Secrets Manager wrapper (tests). */
   secrets?: IdpSecretsClient;
   /**
@@ -108,12 +104,22 @@ export class IdpHandler {
   constructor(private readonly deps: IdpHandlerDependencies = {}) {}
 
   // ── Helpers ────────────────────────────────────────────────────────────────
-  private getIdp(env: Env): CognitoIdpSdk {
+  /**
+   * Build the federation admin adapter. Returns null when the environment has
+   * not been configured for it, so callers surface a 502 rather than
+   * constructing an adapter that would fail on its first call with an AWS error
+   * naming nothing the operator can act on.
+   */
+  private getIdp(env: Env): IdpAdminPort | null {
     if (this.deps.idp) return this.deps.idp;
+    const userPoolId = env.COGNITO_USER_POOL_ID;
+    const appClientId = env.COGNITO_APP_CLIENT_ID;
+    if (!userPoolId || !appClientId) return null;
     return new CognitoIdpSdk(
       new CognitoIdentityProviderClient({
         region: env.COGNITO_REGION ?? process.env.AWS_REGION,
       }),
+      { userPoolId, appClientId },
     );
   }
 
@@ -244,20 +250,19 @@ export class IdpHandler {
       });
     }
 
-    const userPoolId = env.COGNITO_USER_POOL_ID;
-    const userPoolClientId = env.COGNITO_APP_CLIENT_ID;
-    if (!userPoolId || !userPoolClientId) {
+    const idpOrNull = this.getIdp(env);
+    if (!idpOrNull) {
       return badGateway();
     }
 
     const providerName = cognitoIdpName(tenantId);
     const attributeMapping: IdpAttributeMapping = {
-      ...defaultOidcAttributeMapping(),
+      ...idpOrNull.defaultAttributeMapping(),
       ...(body.attributeMapping ?? {}),
     };
     const idpIdentifiers = verifiedDomains.map((d) => d.domain);
     const secrets = this.getSecrets(env);
-    const idp = this.getIdp(env);
+    const idp = idpOrNull;
 
     let secretArn: string;
     try {
@@ -285,7 +290,6 @@ export class IdpHandler {
 
     try {
       await idp.createOidcProvider({
-        userPoolId,
         providerName,
         details: {
           clientId: body.clientId,
@@ -332,14 +336,9 @@ export class IdpHandler {
       // lock while the Cognito mutation is still in-flight.
       row = await db.$transaction(
         async (tx) => {
-          await withUserPoolClientLock(tx, userPoolId, async () => {
-            await idp.setSupportedIdentityProvider(
-              userPoolId,
-              userPoolClientId,
-              providerName,
-              "add",
-            );
-          });
+          // The adapter serializes this itself — see IdpAdminPort. `tx` is
+          // handed over so its lock lives and dies with this transaction.
+          await idp.setProviderEnabled({ providerName, enabled: true, tx });
           return tx.tenantIdentityProvider.create({
             data: {
               tenantId,
@@ -374,7 +373,7 @@ export class IdpHandler {
         { timeout: 15000 },
       );
     } catch (err) {
-      await idp.deleteProvider(userPoolId, providerName).catch(() => undefined);
+      await idp.deleteProvider(providerName).catch(() => undefined);
       await secrets.delete(tenantId).catch(() => undefined);
       console.warn(
         JSON.stringify({
@@ -522,24 +521,19 @@ export class IdpHandler {
       return jsonResponse(200, { id: row.id, status: row.status, unchanged: true });
     }
 
-    const userPoolId = env.COGNITO_USER_POOL_ID;
-    const userPoolClientId = env.COGNITO_APP_CLIENT_ID;
-    if (!userPoolId || !userPoolClientId) return badGateway();
-
     const idp = this.getIdp(env);
-    const op = body.status === "ACTIVE" ? "add" : "remove";
+    if (!idp) return badGateway();
+
+    const enabled = body.status === "ACTIVE";
     try {
       // 15s — see handleCreate; the Cognito Describe+Update under the
       // advisory lock can exceed Prisma's default 5s.
       await db.$transaction(
         async (tx) => {
-          await withUserPoolClientLock(tx, userPoolId, async () => {
-            await idp.setSupportedIdentityProvider(
-              userPoolId,
-              userPoolClientId,
-              row.cognitoIdpName,
-              op,
-            );
+          await idp.setProviderEnabled({
+            providerName: row.cognitoIdpName,
+            enabled,
+            tx,
           });
           await tx.tenantIdentityProvider.update({
             where: { id: row.id },
@@ -619,14 +613,17 @@ export class IdpHandler {
       });
     }
 
-    const userPoolId = env.COGNITO_USER_POOL_ID;
-    if (!userPoolId) return badGateway();
-
     const idp = this.getIdp(env);
+    if (!idp) return badGateway();
+
     const secrets = this.getSecrets(env);
 
     const newAttributeMapping = body.attributeMapping
-      ? mergeAttributeMapping(row.attributeMapping, body.attributeMapping)
+      ? mergeAttributeMapping(
+          row.attributeMapping,
+          body.attributeMapping,
+          idp.defaultAttributeMapping(),
+        )
       : undefined;
 
     // Cognito UpdateIdentityProvider goes first. If it fails, Secrets Manager
@@ -636,7 +633,6 @@ export class IdpHandler {
     // ordering constraint.
     try {
       await idp.updateOidcProvider({
-        userPoolId,
         providerName: row.cognitoIdpName,
         ...(body.clientSecret !== undefined
           ? { details: { clientSecret: body.clientSecret, ...(body.scopes ? { scopes: body.scopes } : {}) } }
@@ -752,11 +748,9 @@ export class IdpHandler {
     });
     if (!row) return notFound();
 
-    const userPoolId = env.COGNITO_USER_POOL_ID;
-    const userPoolClientId = env.COGNITO_APP_CLIENT_ID;
-    if (!userPoolId || !userPoolClientId) return badGateway();
-
     const idp = this.getIdp(env);
+    if (!idp) return badGateway();
+
     const secrets = this.getSecrets(env);
 
     try {
@@ -764,15 +758,12 @@ export class IdpHandler {
       // lock and can exceed Prisma's default 5s.
       await db.$transaction(
         async (tx) => {
-          await withUserPoolClientLock(tx, userPoolId, async () => {
-            await idp.setSupportedIdentityProvider(
-              userPoolId,
-              userPoolClientId,
-              row.cognitoIdpName,
-              "remove",
-            );
+          await idp.setProviderEnabled({
+            providerName: row.cognitoIdpName,
+            enabled: false,
+            tx,
           });
-          await idp.deleteProvider(userPoolId, row.cognitoIdpName);
+          await idp.deleteProvider(row.cognitoIdpName);
           await tx.tenantIdentityProvider.delete({ where: { id: row.id } });
         },
         { timeout: 15000 },
@@ -817,14 +808,24 @@ export class IdpHandler {
   }
 }
 
+/**
+ * Merge a partial mapping onto the stored one.
+ *
+ * [fallback] is supplied by the adapter rather than imported, because the
+ * default key set is provider-shaped: Cognito writes `custom:idpGroups`, a
+ * Keycloak realm names its own. Hard-coding Cognito's here would have written
+ * Cognito attribute names into a Keycloak tenant's config, silently, and only
+ * on the path where a tenant's stored mapping is absent.
+ */
 function mergeAttributeMapping(
   existing: unknown,
   incoming: IdpAttributeMapping,
+  fallback: IdpAttributeMapping,
 ): IdpAttributeMapping {
   const base: IdpAttributeMapping =
     existing && typeof existing === "object" && !Array.isArray(existing)
       ? (existing as IdpAttributeMapping)
-      : defaultOidcAttributeMapping();
+      : fallback;
   return { ...base, ...incoming };
 }
 
