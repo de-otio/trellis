@@ -439,6 +439,20 @@ export interface Env {
         /** Max collections per user. Source: COLLECTION_MAX_PER_USER. Default 50. */
         maxPerUser: number;
     };
+    commentRateLimit: {
+        /** Max comments per user per minute. Source: COMMENT_RATE_LIMIT_PER_MINUTE. */
+        perMinute: number;
+        /** Cooldown between a user's comments on ONE post, in seconds. Source: COMMENT_RATE_LIMIT_POST_COOLDOWN_SECONDS. */
+        postCooldownSeconds: number;
+        /**
+         * What to do when the rate-limit store THROWS. "closed" denies (the
+         * default: an abuse control that cannot count must not wave traffic
+         * through); "open" restores the previous allow-everything behaviour for
+         * operators who would rather lose the control than the endpoint.
+         * Source: COMMENT_RATE_LIMIT_FAIL_MODE.
+         */
+        failMode: "closed" | "open";
+    };
     event: {
         /** Max non-deleted events per tenant. Source: EVENT_MAX_PER_TENANT. */
         maxPerTenant: number;
@@ -598,6 +612,21 @@ export declare function resolveCollectionEnv(source?: NodeJS.ProcessEnv): {
     collection: {
         maxItems: number;
         maxPerUser: number;
+    };
+};
+/**
+ * Resolve the comment rate-limit config block (threshold-secrecy, rule 8).
+ *
+ * Single-writer: the ONLY place that reads COMMENT_RATE_LIMIT_* env vars. The
+ * defaults reproduce the previous compiled-in behaviour exactly (10/min, 30s
+ * per-post cooldown) so this is a config seam, not a policy change — except
+ * `failMode`, which deliberately flips: see the middleware for why.
+ */
+export declare function resolveCommentRateLimitEnv(source?: NodeJS.ProcessEnv): {
+    commentRateLimit: {
+        perMinute: number;
+        postCooldownSeconds: number;
+        failMode: "closed" | "open";
     };
 };
 /**
