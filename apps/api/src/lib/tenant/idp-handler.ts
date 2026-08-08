@@ -31,6 +31,8 @@ import { TenantAuditEmitter } from "../audit-composer.js";
 import { AuditEventType } from "../audit-actions.js";
 import { cognitoIdpName } from "./idp-name.js";
 import { CognitoIdpSdk } from "../cognito/idp-sdk.js";
+import { KeycloakIdpAdmin } from "../identity/keycloak-idp-admin.js";
+import { splitKeycloakIssuer } from "../identity/identity-provider.js";
 import type { IdpAdminPort, IdpAttributeMapping } from "../identity/idp-admin-port.js";
 import { probeOidcIssuer } from "../cognito/issuer-probe.js";
 import { IdpSecretsClient } from "../secrets/idp-secrets.js";
@@ -107,11 +109,38 @@ export class IdpHandler {
   /**
    * Build the federation admin adapter. Returns null when the environment has
    * not been configured for it, so callers surface a 502 rather than
-   * constructing an adapter that would fail on its first call with an AWS error
-   * naming nothing the operator can act on.
+   * constructing an adapter that would fail on its first call with a provider
+   * error naming nothing the operator can act on.
+   *
+   * Selection follows `IDENTITY_PROVIDER`, the same flag — and the same
+   * env surface — that selects the end-user `IdentityProviderPort`
+   * (identity/identity-provider.ts). The two must not diverge: a deployment
+   * whose users sign in through Keycloak but whose tenant federation writes to
+   * Cognito would configure SSO nobody can use.
    */
   private getIdp(env: Env): IdpAdminPort | null {
     if (this.deps.idp) return this.deps.idp;
+
+    if (env.IDENTITY_PROVIDER === "keycloak") {
+      const issuerUrl = env.OIDC_ISSUER_URL;
+      const adminClientId = env.IDENTITY_ADMIN_CLIENT_ID;
+      const adminClientSecret = env.IDENTITY_ADMIN_CLIENT_SECRET;
+      if (!issuerUrl || !adminClientId || !adminClientSecret) return null;
+      let split: { baseUrl: string; realm: string };
+      try {
+        split = splitKeycloakIssuer(issuerUrl);
+      } catch {
+        // Not a Keycloak-shaped issuer — misconfiguration, same 502 as absent.
+        return null;
+      }
+      return new KeycloakIdpAdmin({
+        baseUrl: split.baseUrl,
+        realm: split.realm,
+        adminClientId,
+        adminClientSecret,
+      });
+    }
+
     const userPoolId = env.COGNITO_USER_POOL_ID;
     const appClientId = env.COGNITO_APP_CLIENT_ID;
     if (!userPoolId || !appClientId) return null;
@@ -296,6 +325,15 @@ export class IdpHandler {
           clientSecret: body.clientSecret,
           issuerUrl: body.issuerUrl,
           ...(body.scopes ? { scopes: body.scopes } : {}),
+        },
+        // The probe's discovered endpoints. Keycloak's generic oidc provider
+        // takes them explicitly (no discovery on create); Cognito ignores them.
+        // Passing them through also keeps probeOidcIssuer the ONLY code path
+        // that ever fetches an admin-supplied URL (T5).
+        endpoints: {
+          authorizationUrl: probe.authorizationEndpoint,
+          tokenUrl: probe.tokenEndpoint,
+          jwksUrl: probe.jwksUri,
         },
         attributeMapping,
         idpIdentifiers,
