@@ -42,6 +42,12 @@ const PHASE0_INTEGRATION = [
   // rows regardless of the `where`, so it can only assert predicate shape —
   // only a real Postgres decides whether a row actually comes back.
   "test/integration/post-read-isolation.integration.test.ts",
+  // H2 — the unauthenticated ActivityPub outbox must not serve activities whose
+  // post has since been narrowed, hidden or deleted. The unit lane mocks
+  // $queryRaw and returns canned rows regardless of the statement, so it can
+  // only assert the predicate's text; only a real Postgres decides whether a
+  // row actually comes back. Also pins the SQL gate against `mayFederatePost`.
+  "test/integration/outbox-audience-gate.integration.test.ts",
 ];
 
 export default defineConfig({
