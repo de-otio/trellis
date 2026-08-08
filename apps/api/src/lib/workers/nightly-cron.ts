@@ -84,11 +84,23 @@ export async function runNightlyCron(
         });
 
         if (mediaToDelete.length > 0) {
-          const keys = mediaToDelete.flatMap((m) =>
-            [m.originalKey, m.thumbnailKey, m.optimizedKey].filter(
-              (k): k is string => !!k,
-            ),
-          );
+          // Key → owning row. The row is hard-deleted only once EVERY key it
+          // owns is gone from the store: the row is the only remaining record
+          // of which objects exist, so deleting it after a failed object
+          // delete strands those bytes permanently — nothing left to derive
+          // the key from, and no way to reclaim them. Deferring instead is
+          // self-healing: the row keeps its `deletedAt`, stays inside the
+          // `lte: cutoff` window, and is retried on the next run.
+          const ownerOf = new Map<string, string>();
+          for (const m of mediaToDelete) {
+            for (const k of [m.originalKey, m.thumbnailKey, m.optimizedKey]) {
+              if (k) ownerOf.set(k, m.id);
+            }
+          }
+          const keys = [...ownerOf.keys()];
+
+          /** Rows with at least one key the store did not confirm deleted. */
+          const deferred = new Set<string>();
 
           if (keys.length > 0) {
             // Batch object deletion supports up to 1000 keys per call.
@@ -97,6 +109,10 @@ export async function runNightlyCron(
               try {
                 await ctx.objectStore.deleteObjects(batch);
               } catch (err) {
+                for (const k of batch) {
+                  const owner = ownerOf.get(k);
+                  if (owner) deferred.add(owner);
+                }
                 ctx.logger.error("S3 batch delete failed", {
                   error: err,
                   batchSize: batch.length,
@@ -105,13 +121,22 @@ export async function runNightlyCron(
             }
           }
 
-          // Hard-delete DB records
-          const result = await db.mediaFile.deleteMany({
-            where: { id: { in: mediaToDelete.map((m) => m.id) } },
-          });
+          const purgeable = mediaToDelete
+            .map((m) => m.id)
+            .filter((id) => !deferred.has(id));
+
+          // Hard-delete only the rows whose objects are confirmed gone.
+          const result =
+            purgeable.length > 0
+              ? await db.mediaFile.deleteMany({ where: { id: { in: purgeable } } })
+              : { count: 0 };
           ctx.logger.info("Soft-deleted media purged", {
             dbDeleted: result.count,
             s3Keys: keys.length,
+            // A number that only ever grows across runs means a key the store
+            // will never accept — the rows are safe, but they are also stuck,
+            // and they occupy the `take: 200` budget of every later run.
+            purgeDeferred: deferred.size,
           });
         }
       } catch (err) {
@@ -181,7 +206,11 @@ export async function runNightlyCron(
             try {
               const staging = await ctx.deleteStagingObjects(result.mediaStagingKeys);
               if (staging.failedBatches > 0 || staging.truncated) {
-                ctx.logger.warn("Staging object cleanup incomplete", {
+                // error, not warn: an Art. 17 erasure that left bytes behind
+                // is a compliance failure, and the staging keys are derived
+                // from MediaFile rows that step 1 hard-deletes once their
+                // window closes — after which the objects are unreachable.
+                ctx.logger.error("Staging object cleanup incomplete", {
                   userId: user.id,
                   ...staging,
                 });

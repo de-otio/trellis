@@ -186,16 +186,29 @@ describe("NightlyCron Lambda", () => {
       });
     });
 
-    it("tolerates an S3 batch failure and still hard-deletes the DB rows", async () => {
+    // REVERSED 2026-08-08. This previously read "tolerates an S3 batch failure
+    // and still hard-deletes the DB rows", and asserted `deleteMany` WAS
+    // called. That made the orphan bug a specified behaviour rather than an
+    // oversight: the row is the only record of which objects exist, so
+    // deleting it after a failed object delete strands the bytes with no key
+    // left to derive them from.
+    //
+    // "Tolerates" was the right instinct aimed at the wrong subject. The cron
+    // must indeed not throw — one bad batch cannot take down the other four
+    // steps — but tolerating the failure means *keeping* the row, not
+    // discarding it. Keeping it is also what makes the next run retry.
+    it("tolerates an S3 batch failure WITHOUT hard-deleting the DB rows", async () => {
       mockDb.mediaFile.findMany.mockResolvedValueOnce([
         { id: "m1", originalKey: CAS_KEY, thumbnailKey: null, optimizedKey: null },
       ]);
-      mockDb.mediaFile.deleteMany.mockResolvedValueOnce({ count: 1 });
       mockS3Send.mockRejectedValueOnce(new Error("S3 down"));
 
       const handler = await loadHandler();
+      // Still resolves: the purge failure must not abort the rest of the cron.
       await expect(handler()).resolves.toBeUndefined();
-      expect(mockDb.mediaFile.deleteMany).toHaveBeenCalled();
+      // But the row survives, soft-deleted, inside the cutoff window — so the
+      // next run picks it up and tries again.
+      expect(mockDb.mediaFile.deleteMany).not.toHaveBeenCalled();
     });
   });
 

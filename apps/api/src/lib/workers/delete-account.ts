@@ -74,8 +74,14 @@ export async function runDeleteAccount(
   //    reported by the erasure — the GC purge does not cover staging keys.
   //    Never touches `cas/*` (the helper refuses cas/ keys defensively).
   const staging = await ctx.deleteStagingObjects(result.mediaStagingKeys);
-  if (staging.failedBatches > 0 || staging.truncated) {
-    ctx.logger.warn("Staging object cleanup incomplete", { userId, ...staging });
+  // An Art. 17 erasure that did not erase is an ERROR, not a warning. The
+  // staging keys are derived, not stored (user-media-erasure.ts builds them
+  // from `tenantId` + `uploadId`/`contentHash`), so they are recoverable only
+  // while the soft-deleted MediaFile rows survive — the nightly purge's
+  // 7-day window. Past that the bytes are unreachable and unattributable.
+  const stagingCleanupIncomplete = staging.failedBatches > 0 || staging.truncated;
+  if (stagingCleanupIncomplete) {
+    ctx.logger.error("Staging object cleanup incomplete", { userId, ...staging });
   }
 
   // 4. Delete the external identity (best-effort — swallowed by design; see
@@ -88,8 +94,13 @@ export async function runDeleteAccount(
     }
   }
 
+  // The completion record must not read as an unqualified success when part of
+  // the erasure did not happen. This line is what an operator (or an Art. 17
+  // response) is read off; "Account deleted" with no qualifier while media
+  // remains in the bucket is the actual defect, not the failed delete itself.
   ctx.logger.info("Account deleted", {
     userId,
+    stagingCleanupIncomplete,
     itemsDeleted: { ...result, mediaStagingKeys: result.mediaStagingKeys.length },
   });
 }
