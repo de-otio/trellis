@@ -201,6 +201,14 @@ describe("IdpHandler.handleCreate", () => {
     expect(body).not.toHaveProperty("clientSecret");
     expect(secrets.create).toHaveBeenCalledWith(TENANT_ID, "shh");
     expect(idp.createOidcProvider).toHaveBeenCalledOnce();
+    // The probe's discovered endpoints must reach the adapter: Keycloak's
+    // generic oidc provider takes them explicitly, and this passthrough is what
+    // keeps probeOidcIssuer the ONLY code path fetching admin-supplied URLs.
+    expect(idp.createOidcProvider).toHaveBeenCalledWith(
+      expect.objectContaining({
+        endpoints: { authorizationUrl: "x", tokenUrl: "y", jwksUrl: "z" },
+      }),
+    );
     expect(idp.setProviderEnabled).toHaveBeenCalledWith(
       expect.objectContaining({
         providerName: PROVIDER_NAME,

@@ -60,10 +60,27 @@ export interface IdpAttributeMapping {
   [key: string]: string | undefined;
 }
 
+/**
+ * The provider's OIDC endpoints, as discovered — and SSRF-hardened — by
+ * `probeOidcIssuer`. Required, not optional: Keycloak's generic `oidc`
+ * provider takes explicit endpoint URLs (it does no discovery on create), and
+ * an optional field that one adapter silently needs is the dropped-field trap
+ * this port exists to avoid. Cognito ignores it (it discovers from
+ * `oidc_issuer` itself); requiring it costs the Cognito caller nothing because
+ * the handler always probes before creating.
+ */
+export interface OidcProviderEndpoints {
+  authorizationUrl: string;
+  tokenUrl: string;
+  jwksUrl: string;
+}
+
 export interface CreateOidcProviderInput {
   /** Our stable name for this tenant's provider. */
   providerName: string;
   details: OidcProviderDetails;
+  /** From the issuer probe — see [OidcProviderEndpoints]. */
+  endpoints: OidcProviderEndpoints;
   attributeMapping: IdpAttributeMapping;
   /**
    * The tenant's verified email domains. These drive home-realm discovery —
@@ -105,8 +122,8 @@ export interface SetProviderEnabledInput {
 /**
  * Administers tenant-level identity federation.
  *
- * Implementations: `CognitoIdpSdk` (`../cognito/idp-sdk.ts`), and a Keycloak
- * adapter to follow (WS-2b step 11).
+ * Implementations: `CognitoIdpSdk` (`../cognito/idp-sdk.ts`) and
+ * `KeycloakIdpAdmin` (`./keycloak-idp-admin.ts`).
  */
 export interface IdpAdminPort {
   /**

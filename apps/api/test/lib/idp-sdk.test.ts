@@ -90,6 +90,7 @@ describe("CognitoIdpSdk.createOidcProvider", () => {
           clientSecret: "shh",
           issuerUrl: "https://idp.example.com/",
         },
+        endpoints: { authorizationUrl: "a", tokenUrl: "t", jwksUrl: "j" },
         attributeMapping: defaultOidcAttributeMapping(),
         idpIdentifiers: [],
       }),

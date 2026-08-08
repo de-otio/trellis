@@ -50,6 +50,12 @@ describe.skipIf(!enabled)("Entra OIDC end-to-end", () => {
     try {
       await sdk.createOidcProvider({
         providerName,
+        // From the real probe above — required by the port; Cognito ignores it.
+        endpoints: {
+          authorizationUrl: probe.ok ? probe.authorizationEndpoint : "",
+          tokenUrl: probe.ok ? probe.tokenEndpoint : "",
+          jwksUrl: probe.ok ? probe.jwksUri : "",
+        },
         details: {
           clientId: process.env.ENTRA_CLIENT_ID!,
           clientSecret: process.env.ENTRA_CLIENT_SECRET!,
