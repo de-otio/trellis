@@ -71,7 +71,16 @@ const {
       createOidcProvider: vi.fn().mockResolvedValue(undefined),
       updateOidcProvider: vi.fn().mockResolvedValue(undefined),
       deleteProvider: vi.fn().mockResolvedValue(undefined),
-      setSupportedIdentityProvider: vi.fn().mockResolvedValue(undefined),
+      providerExists: vi.fn().mockResolvedValue(true),
+      setProviderEnabled: vi.fn().mockResolvedValue(undefined),
+      // The handler asks the ADAPTER for the default mapping now — the key set
+      // is provider-shaped, so it cannot be a module-level constant here.
+      defaultAttributeMapping: vi.fn(() => ({
+        email: "email",
+        given_name: "given_name",
+        family_name: "family_name",
+        "custom:idpGroups": "groups",
+      })),
     },
     mockSecrets: {
       create: vi.fn(),
@@ -205,6 +214,19 @@ function makeHandler(): IdpHandler {
   });
 }
 
+/**
+ * A handler with NO injected federation adapter, so it must build one from the
+ * environment. That is the only way to reach the misconfiguration branch now:
+ * an injected adapter IS a configured adapter, and asking it to also honour the
+ * env would be asserting on a code path production does not have.
+ */
+function makeHandlerWithoutIdp(): IdpHandler {
+  return new IdpHandler({
+    secrets: mockSecrets as never,
+    invalidateClaimsForSubs: mockInvalidateClaimsForSubs,
+  });
+}
+
 // ── Shared setup ───────────────────────────────────────────────────────────────
 
 beforeEach(() => {
@@ -227,7 +249,7 @@ beforeEach(() => {
   mockIdpSdk.createOidcProvider.mockResolvedValue(undefined);
   mockIdpSdk.updateOidcProvider.mockResolvedValue(undefined);
   mockIdpSdk.deleteProvider.mockResolvedValue(undefined);
-  mockIdpSdk.setSupportedIdentityProvider.mockResolvedValue(undefined);
+  mockIdpSdk.setProviderEnabled.mockResolvedValue(undefined);
   // Default: probe passes
   mockProbeOidcIssuer.mockResolvedValue({
     ok: true,
@@ -454,7 +476,7 @@ describe("IdpHandler.handleCreate", () => {
 
   it("missing Cognito pool config → 502 COGNITO_ERROR before any SDK call", async () => {
     const envNoPool = { COGNITO_APP_CLIENT_ID: "client-id" } as unknown as Env;
-    const h = makeHandler();
+    const h = makeHandlerWithoutIdp();
     const req = makeRequest("POST", `https://api.example.com/api/tenants/${TENANT_ID}/identity-provider`, VALID_BODY);
     const res = await h.handleCreate(TENANT_ID, req, makeAuth(), envNoPool);
 
@@ -788,7 +810,7 @@ describe("IdpHandler.handlePatch (status branch)", () => {
     expect(res.status).toBe(200);
     const body = await res.json() as { unchanged: boolean };
     expect(body.unchanged).toBe(true);
-    expect(mockIdpSdk.setSupportedIdentityProvider).not.toHaveBeenCalled();
+    expect(mockIdpSdk.setProviderEnabled).not.toHaveBeenCalled();
   });
 
   it("status already DISABLED when requesting DISABLED → 200 unchanged:true, no SDK call", async () => {
@@ -800,39 +822,43 @@ describe("IdpHandler.handlePatch (status branch)", () => {
     expect(res.status).toBe(200);
     const body = await res.json() as { unchanged: boolean };
     expect(body.unchanged).toBe(true);
-    expect(mockIdpSdk.setSupportedIdentityProvider).not.toHaveBeenCalled();
+    expect(mockIdpSdk.setProviderEnabled).not.toHaveBeenCalled();
   });
 
   // ── HAPPY PATH ───────────────────────────────────────────────────────────────
 
-  it("ACTIVE → DISABLED: returns 200, calls setSupportedIdentityProvider(remove), invalidates claims", async () => {
+  it("ACTIVE → DISABLED: returns 200, calls setProviderEnabled(false), invalidates claims", async () => {
     (mockPrisma.tenantIdentityProvider as { findUnique: ReturnType<typeof vi.fn> }).findUnique.mockResolvedValue({ id: IDP_ID, status: "ACTIVE", cognitoIdpName: SAMPLE_IDP_ROW.cognitoIdpName });
     const h = makeHandler();
     const req = makeRequest("PATCH", `https://api.example.com/api/tenants/${TENANT_ID}/identity-provider`, { status: "DISABLED" });
     const res = await h.handlePatch(TENANT_ID, req, makeAuth(), mockEnv);
 
     expect(res.status).toBe(200);
-    expect(mockIdpSdk.setSupportedIdentityProvider).toHaveBeenCalledWith(
-      mockEnv.COGNITO_USER_POOL_ID,
-      mockEnv.COGNITO_APP_CLIENT_ID,
-      SAMPLE_IDP_ROW.cognitoIdpName,
-      "remove",
+    expect(mockIdpSdk.setProviderEnabled).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerName: SAMPLE_IDP_ROW.cognitoIdpName,
+        enabled: false,
+        // The adapter serializes itself, so the caller must hand over its
+        // transaction — a call without it would silently lose the lock.
+        tx: expect.anything(),
+      }),
     );
     expect(mockInvalidateClaimsForSubs).toHaveBeenCalledWith(expect.any(Array));
   });
 
-  it("DISABLED → ACTIVE: returns 200, calls setSupportedIdentityProvider(add), does NOT invalidate claims", async () => {
+  it("DISABLED → ACTIVE: returns 200, calls setProviderEnabled(true), does NOT invalidate claims", async () => {
     (mockPrisma.tenantIdentityProvider as { findUnique: ReturnType<typeof vi.fn> }).findUnique.mockResolvedValue({ id: IDP_ID, status: "DISABLED", cognitoIdpName: SAMPLE_IDP_ROW.cognitoIdpName });
     const h = makeHandler();
     const req = makeRequest("PATCH", `https://api.example.com/api/tenants/${TENANT_ID}/identity-provider`, { status: "ACTIVE" });
     const res = await h.handlePatch(TENANT_ID, req, makeAuth(), mockEnv);
 
     expect(res.status).toBe(200);
-    expect(mockIdpSdk.setSupportedIdentityProvider).toHaveBeenCalledWith(
-      mockEnv.COGNITO_USER_POOL_ID,
-      mockEnv.COGNITO_APP_CLIENT_ID,
-      SAMPLE_IDP_ROW.cognitoIdpName,
-      "add",
+    expect(mockIdpSdk.setProviderEnabled).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerName: SAMPLE_IDP_ROW.cognitoIdpName,
+        enabled: true,
+        tx: expect.anything(),
+      }),
     );
     expect(mockInvalidateClaimsForSubs).not.toHaveBeenCalled();
   });
@@ -863,9 +889,9 @@ describe("IdpHandler.handlePatch (status branch)", () => {
     );
   });
 
-  it("Cognito setSupportedIdentityProvider error → 502 COGNITO_ERROR", async () => {
+  it("Cognito setProviderEnabled error → 502 COGNITO_ERROR", async () => {
     (mockPrisma.tenantIdentityProvider as { findUnique: ReturnType<typeof vi.fn> }).findUnique.mockResolvedValue({ id: IDP_ID, status: "ACTIVE", cognitoIdpName: SAMPLE_IDP_ROW.cognitoIdpName });
-    mockIdpSdk.setSupportedIdentityProvider.mockRejectedValue(new Error("Cognito down"));
+    mockIdpSdk.setProviderEnabled.mockRejectedValue(new Error("Cognito down"));
     const h = makeHandler();
     const req = makeRequest("PATCH", `https://api.example.com/api/tenants/${TENANT_ID}/identity-provider`, { status: "DISABLED" });
     const res = await h.handlePatch(TENANT_ID, req, makeAuth(), mockEnv);
@@ -958,8 +984,9 @@ describe("IdpHandler.handlePatch (config branch)", () => {
     const res = await h.handlePatch(TENANT_ID, req, makeAuth(), mockEnv);
 
     expect(res.status).toBe(200);
+    // The pool id is the ADAPTER's configuration now, not a per-call argument.
     expect(mockIdpSdk.updateOidcProvider).toHaveBeenCalledWith(
-      expect.objectContaining({ userPoolId: mockEnv.COGNITO_USER_POOL_ID }),
+      expect.objectContaining({ details: { scopes: "openid email" } }),
     );
     expect((mockPrisma.tenantIdentityProvider as { update: ReturnType<typeof vi.fn> }).update).toHaveBeenCalled();
   });
@@ -1031,7 +1058,7 @@ describe("IdpHandler.handlePatch (config branch)", () => {
 
   it("missing Cognito pool id → 502 before any SDK call on config update", async () => {
     const envNoPool = { COGNITO_APP_CLIENT_ID: "client-id" } as unknown as Env;
-    const h = makeHandler();
+    const h = makeHandlerWithoutIdp();
     const req = makeRequest("PATCH", `https://api.example.com/api/tenants/${TENANT_ID}/identity-provider`, { scopes: "openid email" });
     const res = await h.handlePatch(TENANT_ID, req, makeAuth(), envNoPool);
 
@@ -1128,18 +1155,20 @@ describe("IdpHandler.handleDelete", () => {
     expect(body.ok).toBe(true);
   });
 
-  it("happy path: calls setSupportedIdentityProvider(remove), deleteProvider, DB delete", async () => {
+  it("happy path: calls setProviderEnabled(false), deleteProvider, DB delete", async () => {
     const h = makeHandler();
     await h.handleDelete(TENANT_ID, makeUrl("true"), makeAuth(), mockEnv);
 
-    expect(mockIdpSdk.setSupportedIdentityProvider).toHaveBeenCalledWith(
-      mockEnv.COGNITO_USER_POOL_ID,
-      mockEnv.COGNITO_APP_CLIENT_ID,
-      SAMPLE_IDP_ROW.cognitoIdpName,
-      "remove",
+    expect(mockIdpSdk.setProviderEnabled).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerName: SAMPLE_IDP_ROW.cognitoIdpName,
+        enabled: false,
+        // The adapter serializes itself, so the caller must hand over its
+        // transaction — a call without it would silently lose the lock.
+        tx: expect.anything(),
+      }),
     );
     expect(mockIdpSdk.deleteProvider).toHaveBeenCalledWith(
-      mockEnv.COGNITO_USER_POOL_ID,
       SAMPLE_IDP_ROW.cognitoIdpName,
     );
     expect((mockPrisma.tenantIdentityProvider as { delete: ReturnType<typeof vi.fn> }).delete).toHaveBeenCalledWith(
@@ -1195,7 +1224,7 @@ describe("IdpHandler.handleDelete", () => {
 
   it("missing Cognito pool config → 502 before transaction", async () => {
     const envNoPool = { COGNITO_APP_CLIENT_ID: "client-id" } as unknown as Env;
-    const h = makeHandler();
+    const h = makeHandlerWithoutIdp();
     const res = await h.handleDelete(TENANT_ID, makeUrl("true"), makeAuth(), envNoPool);
 
     expect(res.status).toBe(502);

@@ -67,8 +67,9 @@ type IdpStub = {
   createOidcProvider: ReturnType<typeof vi.fn>;
   updateOidcProvider: ReturnType<typeof vi.fn>;
   deleteProvider: ReturnType<typeof vi.fn>;
-  setSupportedIdentityProvider: ReturnType<typeof vi.fn>;
-  describeProvider: ReturnType<typeof vi.fn>;
+  setProviderEnabled: ReturnType<typeof vi.fn>;
+  providerExists: ReturnType<typeof vi.fn>;
+  defaultAttributeMapping: ReturnType<typeof vi.fn>;
 };
 type SecretsStub = {
   create: ReturnType<typeof vi.fn>;
@@ -82,8 +83,14 @@ function makeIdpStub(): IdpStub {
     createOidcProvider: vi.fn().mockResolvedValue(undefined),
     updateOidcProvider: vi.fn().mockResolvedValue(undefined),
     deleteProvider: vi.fn().mockResolvedValue(undefined),
-    setSupportedIdentityProvider: vi.fn().mockResolvedValue(undefined),
-    describeProvider: vi.fn().mockResolvedValue(true),
+    setProviderEnabled: vi.fn().mockResolvedValue(undefined),
+    providerExists: vi.fn().mockResolvedValue(true),
+    defaultAttributeMapping: vi.fn(() => ({
+      email: "email",
+      given_name: "given_name",
+      family_name: "family_name",
+      "custom:idpGroups": "groups",
+    })),
   };
 }
 function makeSecretsStub(arn = "arn:aws:secretsmanager:eu-central-1:111:secret:tenant/abc/idp-client-secret-x"): SecretsStub {
@@ -194,11 +201,13 @@ describe("IdpHandler.handleCreate", () => {
     expect(body).not.toHaveProperty("clientSecret");
     expect(secrets.create).toHaveBeenCalledWith(TENANT_ID, "shh");
     expect(idp.createOidcProvider).toHaveBeenCalledOnce();
-    expect(idp.setSupportedIdentityProvider).toHaveBeenCalledWith(
-      "pool",
-      "client",
-      PROVIDER_NAME,
-      "add",
+    expect(idp.setProviderEnabled).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerName: PROVIDER_NAME,
+        enabled: true,
+        // handed the caller's transaction: the adapter locks on it
+        tx: expect.anything(),
+      }),
     );
     expect(mockAuditEmit).toHaveBeenCalledOnce();
   });
@@ -337,7 +346,7 @@ describe("IdpHandler.handleCreate", () => {
       mockEnv,
     );
     expect(response.status).toBe(502);
-    expect(idp.deleteProvider).toHaveBeenCalledWith("pool", PROVIDER_NAME);
+    expect(idp.deleteProvider).toHaveBeenCalledWith(PROVIDER_NAME);
     expect(secrets.delete).toHaveBeenCalledWith(TENANT_ID);
   });
 
@@ -448,7 +457,9 @@ describe("IdpHandler.handleCreate", () => {
       jwksUri: "z",
     });
     const handler = new IdpHandler({
-      idp: makeIdpStub() as never,
+      // NO idp injected: an injected adapter IS a configured adapter,
+      // so the misconfiguration branch is only reachable when the
+      // handler has to build one from the environment itself.
       secrets: makeSecretsStub() as never,
     });
     const env = { ...mockEnv, COGNITO_USER_POOL_ID: undefined, COGNITO_APP_CLIENT_ID: undefined } as Env;
@@ -804,7 +815,9 @@ describe("IdpHandler.handlePatch (config)", () => {
   it("returns 502 when COGNITO env var is missing for config patch", async () => {
     setOidcRow();
     const handler = new IdpHandler({
-      idp: makeIdpStub() as never,
+      // NO idp injected: an injected adapter IS a configured adapter,
+      // so the misconfiguration branch is only reachable when the
+      // handler has to build one from the environment itself.
       secrets: makeSecretsStub() as never,
     });
     const env = { ...mockEnv, COGNITO_USER_POOL_ID: undefined } as Env;
@@ -867,11 +880,13 @@ describe("IdpHandler.handlePatch (status)", () => {
       mockEnv,
     );
     expect(response.status).toBe(200);
-    expect(idp.setSupportedIdentityProvider).toHaveBeenCalledWith(
-      "pool",
-      "client",
-      PROVIDER_NAME,
-      "remove",
+    expect(idp.setProviderEnabled).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerName: PROVIDER_NAME,
+        enabled: false,
+        // handed the caller's transaction: the adapter locks on it
+        tx: expect.anything(),
+      }),
     );
     expect(invalidate).toHaveBeenCalledWith(["sub-1", "sub-2"]);
   });
@@ -894,11 +909,13 @@ describe("IdpHandler.handlePatch (status)", () => {
       mockEnv,
     );
     expect(response.status).toBe(200);
-    expect(idp.setSupportedIdentityProvider).toHaveBeenCalledWith(
-      "pool",
-      "client",
-      PROVIDER_NAME,
-      "add",
+    expect(idp.setProviderEnabled).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerName: PROVIDER_NAME,
+        enabled: true,
+        // handed the caller's transaction: the adapter locks on it
+        tx: expect.anything(),
+      }),
     );
   });
 
@@ -922,7 +939,7 @@ describe("IdpHandler.handlePatch (status)", () => {
     expect(response.status).toBe(200);
     const body = (await response.json()) as Record<string, unknown>;
     expect(body.unchanged).toBe(true);
-    expect(idp.setSupportedIdentityProvider).not.toHaveBeenCalled();
+    expect(idp.setProviderEnabled).not.toHaveBeenCalled();
   });
 
   it("returns 400 on invalid status", async () => {
@@ -951,7 +968,7 @@ describe("IdpHandler.handlePatch (status)", () => {
       cognitoIdpName: PROVIDER_NAME,
     });
     const idp = makeIdpStub();
-    idp.setSupportedIdentityProvider.mockRejectedValueOnce(
+    idp.setProviderEnabled.mockRejectedValueOnce(
       Object.assign(new Error("denied"), { name: "InvalidParameterException" }),
     );
     const handler = new IdpHandler({
@@ -1003,7 +1020,9 @@ describe("IdpHandler.handlePatch (status)", () => {
       cognitoIdpName: PROVIDER_NAME,
     });
     const handler = new IdpHandler({
-      idp: makeIdpStub() as never,
+      // NO idp injected: an injected adapter IS a configured adapter,
+      // so the misconfiguration branch is only reachable when the
+      // handler has to build one from the environment itself.
       secrets: makeSecretsStub() as never,
     });
     const env = { ...mockEnv, COGNITO_APP_CLIENT_ID: undefined } as Env;
@@ -1065,13 +1084,15 @@ describe("IdpHandler.handleDelete", () => {
       mockEnv,
     );
     expect(response.status).toBe(200);
-    expect(idp.setSupportedIdentityProvider).toHaveBeenCalledWith(
-      "pool",
-      "client",
-      PROVIDER_NAME,
-      "remove",
+    expect(idp.setProviderEnabled).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerName: PROVIDER_NAME,
+        enabled: false,
+        // handed the caller's transaction: the adapter locks on it
+        tx: expect.anything(),
+      }),
     );
-    expect(idp.deleteProvider).toHaveBeenCalledWith("pool", PROVIDER_NAME);
+    expect(idp.deleteProvider).toHaveBeenCalledWith(PROVIDER_NAME);
     expect(secrets.delete).toHaveBeenCalledWith(TENANT_ID);
     expect(invalidate).toHaveBeenCalled();
   });
@@ -1149,7 +1170,9 @@ describe("IdpHandler.handleDelete", () => {
       kind: "OIDC",
     });
     const handler = new IdpHandler({
-      idp: makeIdpStub() as never,
+      // NO idp injected: an injected adapter IS a configured adapter,
+      // so the misconfiguration branch is only reachable when the
+      // handler has to build one from the environment itself.
       secrets: makeSecretsStub() as never,
     });
     const env = { ...mockEnv, COGNITO_USER_POOL_ID: undefined } as Env;
