@@ -47,6 +47,12 @@ const PHASE0_INTEGRATION = [
   // the real handlers, because the unit lane's Prisma mocks resolve canned rows
   // regardless of the `where` and so cannot tell "authorized" from "not asked".
   "test/integration/post-attachment-read-authz.integration.test.ts",
+  // H2 — the unauthenticated ActivityPub outbox must not serve activities whose
+  // post has since been narrowed, hidden or deleted. The unit lane mocks
+  // $queryRaw and returns canned rows regardless of the statement, so it can
+  // only assert the predicate's text; only a real Postgres decides whether a
+  // row actually comes back. Also pins the SQL gate against `mayFederatePost`.
+  "test/integration/outbox-audience-gate.integration.test.ts",
 ];
 
 export default defineConfig({
