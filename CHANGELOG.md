@@ -17,6 +17,46 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ### Changed
 
+- **Six read paths could disclose a post to someone its author had not
+  admitted.** All six are closed. Every one is a *narrowing*: nothing changes
+  shape, and things that used to be served are now withheld. Consumers should
+  expect fewer results, not different ones.
+
+  The common thread is worth stating once, because it explains five of the six:
+  an audience decision was being made somewhere other than where the audience is
+  defined — from the reader's data, from a stale copy, or from a default applied
+  when the answer was unknown.
+
+  - **BREAKING:** circle visibility is decided from the **author's**
+    relationship edge, not the reader's. `tier` derives from
+    `COALESCE(manual_score, computed_score)`, and a reader can set `manualScore`
+    on their own edge via `PATCH /api/relationships/score` — so reading the
+    reader's edge handed the audience boundary to the reader. Access now also
+    requires `reciprocated: true`.
+
+    **The practical effect: a one-way follow no longer grants access.** Where A
+    had classified B as close without B reciprocating, B loses read access that
+    previously worked. That is the definition of the boundary, not a side
+    effect of the fix.
+
+  - **BREAKING:** friends-only access reads the author's edge and requires
+    mutual consent, for the same reason.
+  - **BREAKING:** the unauthenticated ActivityPub outbox collection is
+    audience-gated. Retroactive narrowing, hiding and deletion now take effect
+    there. The item list and `totalItems` come from a single fragment, so
+    pagination cannot disclose a count the page itself withholds.
+  - **BREAKING:** ActivityPub object routes no longer fail open when the
+    audience is unknown, and every deny is byte-identical — a deny cannot be
+    distinguished from a miss.
+  - **BREAKING:** attachments inherit the audience decision of the post they
+    belong to. Previously the post was withheld and its media was not.
+  - **BREAKING:** the public-posting kill switch also covers system posts,
+    which could previously bypass it and cost the operator control silently.
+
+  Note what is **not** fixed: the write paths remain audience-blind, so do not
+  read these entries as "post visibility is now correct". They close read
+  disclosure only.
+
 - **`@de-otio/saas-foundation` floor raised to `^0.4.3`** (was `^0.4.0`), in
   `apps/api` and `apps/worker`.
 
