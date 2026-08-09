@@ -36,7 +36,20 @@ export interface AuthAbuseMetrics {
 
 export interface AbuseMetricsResult {
   timeRange: string;
-  overallStatus: "low" | "moderate" | "high" | "critical";
+  /**
+   * `"unknown"` when a data source failed. The other four values all assert a
+   * *measurement*, so none of them can honestly describe a board built from
+   * missing data — a failed fetch used to read as `"low"`.
+   */
+  overallStatus: "unknown" | "low" | "moderate" | "high" | "critical";
+  /**
+   * Which sources actually answered. `degraded` is true when any did not, in
+   * which case the counts below are floors, not totals.
+   */
+  dataQuality: {
+    degraded: boolean;
+    unavailable: string[];
+  };
   summary: {
     totalAllowed: number;
     totalBlocked: number;
@@ -232,12 +245,16 @@ async function getAuthAbuseFromLogs(
   startTime: Date,
   endTime: Date,
   logger: Logger,
-): Promise<AuthAbuseMetrics> {
+): Promise<{ metrics: AuthAbuseMetrics; available: boolean }> {
   const defaults: AuthAbuseMetrics = {
     rateLimitExceeded: 0,
     magicLinkRequests: 0,
     failedVerifications: 0,
   };
+  // Zeroes are returned on both "genuinely nothing happened" and "the query
+  // failed". Only the caller can tell those apart, and only if we say which
+  // one this was — hence `available` rather than a bare metrics object.
+  const unavailable = { metrics: defaults, available: false };
 
   try {
     const logGroupName = `/trellis/${stage}/api`;
@@ -261,7 +278,7 @@ async function getAuthAbuseFromLogs(
       }),
     );
 
-    if (!startQuery.queryId) return defaults;
+    if (!startQuery.queryId) return unavailable;
 
     // Poll for results with a max of 5 attempts
     for (let attempt = 0; attempt < 5; attempt++) {
@@ -279,25 +296,33 @@ async function getAuthAbuseFromLogs(
             return f?.value ? parseInt(f.value, 10) || 0 : 0;
           };
           return {
-            rateLimitExceeded: getValue("rateLimited"),
-            magicLinkRequests: getValue("magicLinks"),
-            failedVerifications: getValue("failedVerify"),
+            metrics: {
+              rateLimitExceeded: getValue("rateLimited"),
+              magicLinkRequests: getValue("magicLinks"),
+              failedVerifications: getValue("failedVerify"),
+            },
+            available: true,
           };
         }
-        return defaults;
+        // Completed with no rows: the query genuinely found nothing. This is
+        // the one zero that is a real measurement.
+        return { metrics: defaults, available: true };
       }
 
       if (results.status === "Failed" || results.status === "Cancelled") {
-        return defaults;
+        return unavailable;
       }
     }
   } catch (error: any) {
     logger.warn("[AbuseMetrics] Failed to query auth abuse logs", {
       error: error?.message,
     });
+    return unavailable;
   }
 
-  return defaults;
+  // Fell out of the poll loop without ever reaching Complete — the query timed
+  // out. No answer, so not an answer of zero.
+  return unavailable;
 }
 
 export async function evaluateAbuseMetrics(
@@ -327,12 +352,15 @@ export async function evaluateAbuseMetrics(
   const cwClient = new CloudWatchClient({ region });
   const logsClient = new CloudWatchLogsClient({ region });
 
-  const [wafMetrics, authAbuse] = await Promise.all([
+  const unavailableSources: string[] = [];
+
+  const [wafMetrics, authAbuseResult] = await Promise.all([
     getWafMetrics(cwClient, stage, startTime, endTime, period).catch(
       (error) => {
         logger.warn("[AbuseMetrics] Failed to fetch WAF metrics", {
           error: error?.message,
         });
+        unavailableSources.push("waf");
         return {
           rateLimit: { allowed: 0, blocked: 0, trend: [] },
           commonRules: { allowed: 0, blocked: 0, trend: [] },
@@ -342,6 +370,10 @@ export async function evaluateAbuseMetrics(
     ),
     getAuthAbuseFromLogs(logsClient, stage, startTime, endTime, logger),
   ]);
+
+  const authAbuse = authAbuseResult.metrics;
+  if (!authAbuseResult.available) unavailableSources.push("auth-logs");
+  const degraded = unavailableSources.length > 0;
 
   // Build WAF rules array
   const wafRules: AbuseRuleMetrics[] = [
@@ -377,8 +409,14 @@ export async function evaluateAbuseMetrics(
       ? Math.round((totalBlocked / totalRequests) * 10000) / 100
       : 0;
 
-  // Overall status
-  let overallStatus: AbuseMetricsResult["overallStatus"] = "low";
+  // Overall status. A threshold comparison against absent data is not a
+  // measurement, so a degraded board reports "unknown" rather than the "low"
+  // that zeroed counters would otherwise produce. The escalating branches are
+  // still evaluated: partial data can only ever raise the floor, and a real
+  // signal from a surviving source must not be masked by the other's failure.
+  let overallStatus: AbuseMetricsResult["overallStatus"] = degraded
+    ? "unknown"
+    : "low";
   if (blockRate > 20 || authAbuse.rateLimitExceeded > 50) {
     overallStatus = "critical";
   } else if (blockRate > 10 || authAbuse.rateLimitExceeded > 20) {
@@ -408,13 +446,23 @@ export async function evaluateAbuseMetrics(
     );
   }
 
-  if (recommendations.length === 0) {
+  if (degraded) {
+    // Must come before the all-clear below, and must suppress it. "No abuse
+    // concerns detected" is a claim about the data; with a source down there
+    // is no data to make it about.
+    recommendations.push(
+      `Abuse metrics are INCOMPLETE — no data from: ${unavailableSources.join(", ")}. ` +
+        `The counts shown are floors, not totals, and the absence of a signal here ` +
+        `does not mean the absence of abuse.`,
+    );
+  } else if (recommendations.length === 0) {
     recommendations.push("No abuse concerns detected in this time period.");
   }
 
   return {
     timeRange,
     overallStatus,
+    dataQuality: { degraded, unavailable: unavailableSources },
     summary: {
       totalAllowed,
       totalBlocked,
