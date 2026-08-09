@@ -13,7 +13,8 @@
  * apps/worker that reads process.env.
  */
 
-import { S3Client, DeleteObjectsCommand } from "@aws-sdk/client-s3";
+import { DeleteObjectsCommand } from "@aws-sdk/client-s3";
+import { createDefaultS3Client } from "@de-otio/saas-foundation/storage";
 import { getLogger } from "../../api/src/lib/logger.js";
 import {
   getLambdaPrisma,
@@ -85,7 +86,14 @@ async function main(): Promise<void> {
     logger,
   );
 
-  const s3 = new S3Client({ region: process.env.AWS_REGION });
+  // Built through the foundation factory, not `new S3Client(...)` directly.
+  // Region alone is not enough off-AWS: the SDK reads ONE ambient
+  // AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY pair for every service, and on a
+  // non-AWS object store that pair legitimately belongs to the queue service.
+  // The factory resolves the storage-specific S3_* pair (and the endpoint)
+  // instead, so a delete here is authorized rather than silently 403-ing into
+  // the purge's retry path.
+  const s3 = createDefaultS3Client();
   const mediaBucket = process.env.MEDIA_BUCKET_NAME ?? "";
 
   // Federation is fail-closed OFF by default (ACTIVITYPUB_ENABLED). When off,
