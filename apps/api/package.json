@@ -1,6 +1,6 @@
 {
   "name": "@de-otio/trellis",
-  "version": "0.25.0-alpha.4",
+  "version": "0.25.0-alpha.5",
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "main": "./dist/index.js",
