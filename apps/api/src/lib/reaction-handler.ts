@@ -38,6 +38,50 @@ const VALID_SENTIMENTS = [
   "insightful",
 ];
 
+/**
+ * The single refusal for `GET /api/posts/:id/sentiments` (H3).
+ *
+ * "No such post", "another tenant's post" and "not in that post's audience" are
+ * byte-identical — the same rule the ActivityPub object routes adopted, for the
+ * same reason: a refusal that says which one it was is an existence oracle for
+ * private post ids. This is the body the not-found branch already returned.
+ */
+function postSentimentsDenyResponse(): Response {
+  return new Response(JSON.stringify({ error: "Post not found" }), {
+    status: 404,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+/**
+ * The single refusal for `GET /api/v1/posts/:id/sentiments/users` (H3).
+ *
+ * Same rule as above, in this endpoint's problem+json shape. `traceId` varies
+ * per request, but identically on both branches, so it distinguishes nothing.
+ * The wording ("does not exist or has been deleted") is the one the not-found
+ * branch already returned and must stay unchanged: making it accurate for the
+ * refusal case is precisely what would leak.
+ */
+function sentimentUsersDenyResponse(
+  postId: string,
+  requestId: string,
+): Response {
+  return new Response(
+    JSON.stringify({
+      type: "https://api.example.com/errors/not-found",
+      title: "Post Not Found",
+      status: 404,
+      detail: `Post with ID '${postId}' does not exist or has been deleted`,
+      instance: `/api/v1/posts/${postId}/sentiments/users`,
+      traceId: requestId,
+    }),
+    {
+      status: 404,
+      headers: { "content-type": "application/problem+json" },
+    },
+  );
+}
+
 export class ReactionHandler {
   // No need to create FeedHandler instance - use static methods to avoid circular dependency
 
@@ -261,18 +305,39 @@ export class ReactionHandler {
    * Get sentiment counts for a post
    *
    * PREPARATORY: Uses DataRouter for region-aware operations.
+   *
+   * H3: reaction counts are an attachment of the post and must not be more
+   * readable than it. This previously required no session at all and tested only
+   * that the post row existed, so the reaction activity on a WHISPER post was
+   * readable by anyone — including an anonymous caller — who knew the id.
+   * `session` and `activeTenantId` are now required.
    */
   async getPostSentiments(
     postId: string,
-    session: Session | null,
+    session: Session,
     env: Env,
     requestContext: TrellisRequestContext,
+    activeTenantId: string,
   ): Promise<Response> {
     try {
       // PREPARATORY: Use DataRouter to get region-specific database
       const region = requestContext.region;
 
-      // PREPARATORY: Verify post exists in correct region first
+      // AUTHORIZATION first — same decision as the single-post read.
+      const { canReadPost } = await import("./post-read-authorizer.js");
+      const permitted = await canReadPost({
+        postId,
+        viewerUserId: session?.userId ?? "",
+        tenantId: activeTenantId,
+        region,
+        env: env as any,
+      });
+      if (!permitted) {
+        return postSentimentsDenyResponse();
+      }
+
+      // Cross-region check + data-access audit, after the gate and refusing
+      // with the identical body.
       const requestId = generateRequestId();
       const post = await DataRouter.getPost(
         postId,
@@ -283,10 +348,7 @@ export class ReactionHandler {
         session?.userId,
       );
       if (!post) {
-        return new Response(JSON.stringify({ error: "Post not found" }), {
-          status: 404,
-          headers: { "content-type": "application/json" },
-        });
+        return postSentimentsDenyResponse();
       }
 
       // Import database helpers
@@ -402,7 +464,13 @@ export class ReactionHandler {
           status: 200,
           headers: {
             "content-type": "application/json",
-            "cache-control": "public, max-age=30, stale-while-revalidate=60",
+            // MUST NOT be `public`. This body is now audience-gated AND carries
+            // `userSentiment`, which is per-viewer — a shared cache storing it
+            // would hand one viewer's reaction to another and would serve a
+            // private post's reaction counts to callers the gate refused,
+            // defeating the check above for the TTL.
+            "cache-control": "private, no-store",
+            Vary: "Authorization, Cookie",
           },
         },
       );
@@ -821,15 +889,21 @@ export class ReactionHandler {
    * 2. Detailed mode (sentiment provided): Returns paginated list of users for that sentiment
    *
    * Uses window functions for optimal performance (eliminates N+1 queries)
+   *
+   * H3: this discloses WHO reacted — identities, not just counts — and it
+   * previously required no session and applied no tenant or audience predicate,
+   * so the reader list of a WHISPER post was public to anyone with the id.
+   * `session` and `activeTenantId` are now required.
    */
   async getPostSentimentUsers(
     postId: string,
     sentiment: string | null,
     limit: number,
     cursor: string | null,
-    session: Session | null,
+    session: Session,
     env: Env,
     requestContext: TrellisRequestContext,
+    activeTenantId: string,
   ): Promise<Response> {
     const logger = getLogger();
     const startTime = Date.now();
@@ -838,7 +912,21 @@ export class ReactionHandler {
       const region = requestContext.region;
       const requestId = generateRequestId();
 
-      // Verify post exists
+      // AUTHORIZATION first — same decision as the single-post read.
+      const { canReadPost } = await import("./post-read-authorizer.js");
+      const permitted = await canReadPost({
+        postId,
+        viewerUserId: session?.userId ?? "",
+        tenantId: activeTenantId,
+        region,
+        env: env as any,
+      });
+      if (!permitted) {
+        return sentimentUsersDenyResponse(postId, requestId);
+      }
+
+      // Cross-region check + data-access audit, after the gate and refusing
+      // with the identical body.
       const post = await DataRouter.getPost(
         postId,
         region,
@@ -849,20 +937,7 @@ export class ReactionHandler {
       );
 
       if (!post) {
-        return new Response(
-          JSON.stringify({
-            type: "https://api.example.com/errors/not-found",
-            title: "Post Not Found",
-            status: 404,
-            detail: `Post with ID '${postId}' does not exist or has been deleted`,
-            instance: `/api/v1/posts/${postId}/sentiments/users`,
-            traceId: requestId,
-          }),
-          {
-            status: 404,
-            headers: { "content-type": "application/problem+json" },
-          },
-        );
+        return sentimentUsersDenyResponse(postId, requestId);
       }
 
       const { sharedDatabaseConnectionManager } = await import(

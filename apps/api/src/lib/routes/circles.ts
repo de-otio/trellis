@@ -2,8 +2,19 @@
  * Circle Routes
  *
  * Circle views: members, feeds, glance mode, depth mode, read status.
+ *
+ * Every read route resolves the caller's verified `activeTenantId` through
+ * `authMiddleware` and refuses without it (H1). The cookie session is NOT a
+ * source for it — `activeTenantId` is stripped from sealed material precisely so
+ * a stale or client-tampered tenant cannot ride a 90-day cookie
+ * (`session-cookie.ts`, SEAL_FORBIDDEN_FIELDS) — so the extra `authMiddleware`
+ * call is load-bearing, not redundant with `getSession`.
+ *
+ * `/api/circles/read` is the exception: it writes `CircleReadState`, which is
+ * keyed `(userId, tier)` and has no tenant column.
  */
 
+import { authMiddleware } from "../auth/auth-middleware.js";
 import { CircleHandler } from "../circle-handler.js";
 import { corsMiddleware, csrfMiddleware } from "../middleware.js";
 import { SecurityHeaders } from "../security-headers.js";
@@ -25,7 +36,14 @@ export const circleRoutes: Route[] = [
           { status: 401, headers: { "content-type": "application/json" } },
         );
       }
-      const response = await handler.handleGetMembers(request, session, env, requestContext!);
+      const auth = await authMiddleware(request, env);
+      if (!auth || !auth.activeTenantId) {
+        return securityHeaders.createSecureResponse(
+          JSON.stringify({ error: "Unauthorized" }),
+          { status: 401, headers: { "content-type": "application/json" } },
+        );
+      }
+      const response = await handler.handleGetMembers(request, session, env, requestContext!, auth.activeTenantId);
       return securityHeaders.addSecurityHeaders(response);
     },
     middleware: [corsMiddleware()],
@@ -46,7 +64,14 @@ export const circleRoutes: Route[] = [
           { status: 401, headers: { "content-type": "application/json" } },
         );
       }
-      const response = await handler.handleGetFeed(request, session, env, requestContext!);
+      const auth = await authMiddleware(request, env);
+      if (!auth || !auth.activeTenantId) {
+        return securityHeaders.createSecureResponse(
+          JSON.stringify({ error: "Unauthorized" }),
+          { status: 401, headers: { "content-type": "application/json" } },
+        );
+      }
+      const response = await handler.handleGetFeed(request, session, env, requestContext!, auth.activeTenantId);
       return securityHeaders.addSecurityHeaders(response);
     },
     middleware: [corsMiddleware()],
@@ -67,7 +92,14 @@ export const circleRoutes: Route[] = [
           { status: 401, headers: { "content-type": "application/json" } },
         );
       }
-      const response = await handler.handleGetGlance(request, session, env, requestContext!);
+      const auth = await authMiddleware(request, env);
+      if (!auth || !auth.activeTenantId) {
+        return securityHeaders.createSecureResponse(
+          JSON.stringify({ error: "Unauthorized" }),
+          { status: 401, headers: { "content-type": "application/json" } },
+        );
+      }
+      const response = await handler.handleGetGlance(request, session, env, requestContext!, auth.activeTenantId);
       return securityHeaders.addSecurityHeaders(response);
     },
     middleware: [corsMiddleware()],
@@ -88,7 +120,14 @@ export const circleRoutes: Route[] = [
           { status: 401, headers: { "content-type": "application/json" } },
         );
       }
-      const response = await handler.handleGetDepth(request, session, env, requestContext!);
+      const auth = await authMiddleware(request, env);
+      if (!auth || !auth.activeTenantId) {
+        return securityHeaders.createSecureResponse(
+          JSON.stringify({ error: "Unauthorized" }),
+          { status: 401, headers: { "content-type": "application/json" } },
+        );
+      }
+      const response = await handler.handleGetDepth(request, session, env, requestContext!, auth.activeTenantId);
       return securityHeaders.addSecurityHeaders(response);
     },
     middleware: [corsMiddleware()],
@@ -109,7 +148,14 @@ export const circleRoutes: Route[] = [
           { status: 401, headers: { "content-type": "application/json" } },
         );
       }
-      const response = await handler.handleGetStatus(request, session, env, requestContext!);
+      const auth = await authMiddleware(request, env);
+      if (!auth || !auth.activeTenantId) {
+        return securityHeaders.createSecureResponse(
+          JSON.stringify({ error: "Unauthorized" }),
+          { status: 401, headers: { "content-type": "application/json" } },
+        );
+      }
+      const response = await handler.handleGetStatus(request, session, env, requestContext!, auth.activeTenantId);
       return securityHeaders.addSecurityHeaders(response);
     },
     middleware: [corsMiddleware()],
@@ -130,7 +176,14 @@ export const circleRoutes: Route[] = [
           { status: 401, headers: { "content-type": "application/json" } },
         );
       }
-      const response = await handler.handleGetEntityStatus(request, session, env, requestContext!);
+      const auth = await authMiddleware(request, env);
+      if (!auth || !auth.activeTenantId) {
+        return securityHeaders.createSecureResponse(
+          JSON.stringify({ error: "Unauthorized" }),
+          { status: 401, headers: { "content-type": "application/json" } },
+        );
+      }
+      const response = await handler.handleGetEntityStatus(request, session, env, requestContext!, auth.activeTenantId);
       return securityHeaders.addSecurityHeaders(response);
     },
     middleware: [corsMiddleware()],

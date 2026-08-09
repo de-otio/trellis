@@ -104,11 +104,84 @@ describe("ActivityPub Post Routes", () => {
       (r) => r.method === "GET" && r.path === "/posts/:postId",
     );
 
+    // The vulnerability these routes carried: `objectId` is written when a post
+    // first federates and is never cleared, and it was the ONLY audience check
+    // here. So narrowing a post to private, or hiding it, left the current text
+    // fetchable by any anonymous caller — while every authenticated read path
+    // denied it. Editing after narrowing published the new private text.
+    it.each([
+      ["narrowed to private after federating", { radius: "WHISPER", hiddenByAuthor: false }],
+      ["friends-only", { radius: "NORMAL", hiddenByAuthor: false }],
+      ["hidden by its author", { radius: "SHOUT", hiddenByAuthor: true }],
+    ])("refuses a post %s even though objectId is still set", async (_label, overrides) => {
+      mockDb.post.findUnique.mockResolvedValue({
+        id: "post-123",
+        // Still set from when the post was public — the whole point.
+        objectId: "https://example.com/posts/post-123",
+        deletedAt: null,
+        ...overrides,
+        author: {
+          id: "user-123",
+          username: "author",
+          actorUri: "https://example.com/users/author",
+          publicKey: "public-key",
+        },
+      });
+
+      const response = await route!.handler(mockRequest, mockEnv, {
+        params: { postId: "post-123" },
+        url: new URL(mockRequest.url),
+      } as any);
+
+      expect(response.status).toBe(404);
+      // Serialization must not have been attempted at all.
+      expect(mockCreateNote).not.toHaveBeenCalled();
+      expect(mockRespondWithObject).not.toHaveBeenCalled();
+    });
+
+    // D10: an unauthenticated caller must not be able to tell "no such post"
+    // from "that post is not public". The bodies used to differ, which read the
+    // distinction straight off the response.
+    it("denies an absent post and a private post byte-identically", async () => {
+      mockDb.post.findUnique.mockResolvedValue(null);
+      const absent = await route!.handler(mockRequest, mockEnv, {
+        params: { postId: "post-123" },
+        url: new URL(mockRequest.url),
+      } as any);
+
+      mockDb.post.findUnique.mockResolvedValue({
+        id: "post-123",
+        objectId: "https://example.com/posts/post-123",
+        deletedAt: null,
+        radius: "WHISPER",
+        hiddenByAuthor: false,
+        author: {
+          id: "user-123",
+          username: "author",
+          actorUri: "https://example.com/users/author",
+          publicKey: "public-key",
+        },
+      });
+      const private_ = await route!.handler(mockRequest, mockEnv, {
+        params: { postId: "post-123" },
+        url: new URL(mockRequest.url),
+      } as any);
+
+      expect(absent.status).toBe(private_.status);
+      expect(await absent.text()).toBe(await private_.text());
+    });
+
     it("should get post note successfully", async () => {
       const mockPost = {
         id: "post-123",
         objectId: "https://example.com/posts/post-123",
         deletedAt: null,
+        // A federatable post is PUBLIC and not author-hidden. Omitting these is
+        // not a harmless shortcut: a fixture with no radius is not public, so
+        // without them this test asserted the happy path against a post the
+        // route must refuse.
+        radius: "SHOUT",
+        hiddenByAuthor: false,
         author: {
           id: "user-123",
           username: "author",

@@ -7,34 +7,52 @@
  * edge table that the connection-code / invitation redemption paths write via
  * the GraphService.
  *
- * Definition: a *friend* of `userId` is the target of a **mutual** user→user
- * relationship edge whose circle tier is ≤ {@link FRIEND_TIER_MAX} (tier 0 =
- * inner circle, tier 1 = close friends).
+ * Definition: for a viewer `userId`, this resolves the authors who have placed
+ * **that viewer** in a circle of tier ≤ {@link FRIEND_TIER_MAX} (tier 0 = inner
+ * circle, tier 1 = close friends) on a **mutual** user→user edge.
  *
- * **Mutuality is the load-bearing half, and it is why this predicate is not
- * just a tier lookup.** This function decides who may read a NORMAL-radius
- * post, so anything it derives access from must be state the *reader* cannot
- * set for themselves. `tier` is not such a state: it is computed from
- * `COALESCE(manual_score, computed_score)`, both of which the reader controls —
- * `manualScore` directly through `PATCH /api/relationships/score`, and
- * `computedScore` through the connection method recorded when the edge was
- * created. Before mutuality was required, a single unilateral
- * `POST /api/relationships` was enough to enter a stranger's tier 0 and read
- * their close-friends posts, with no action by, and no notification to, that
- * stranger (V1).
+ * **The direction is the load-bearing part.** This function decides who may read
+ * an author's NORMAL-radius post, so every input to it must be state the
+ * *reader* cannot set for themselves — and `tier` is not such a state. It is
+ * derived from `COALESCE(manual_score, computed_score)`, and a reader sets
+ * `manualScore` on their own edge directly via `PATCH /api/relationships/score`
+ * (`manualScore: 1.0` → `scoreToTier` → tier 0), which `recomputeScores`
+ * then preserves.
  *
- * `reciprocated` is not forgeable the same way: it is set by the server only
- * when the reverse edge is found, so it encodes an actual decision by the other
- * party. Requiring it turns "who I say is close to me" into "who we both
- * accepted", which is the difference between an affinity score and an audience.
+ * Requiring `reciprocated` was not sufficient, and the earlier version of this
+ * comment was wrong to claim it was. `reciprocated` is set by the server, but
+ * only on the *existence* of the reverse edge — there is no tier, score or
+ * method condition on it, and it is written to both rows. So the cheapest social
+ * action there is (a follow-back, which lands at tier 2 "community") combined
+ * with a self-set `manualScore` was enough to read a stranger's close-friends
+ * posts. Worse, the victim could not revoke it: lowering their own tier changed
+ * nothing, because the tier being read was the attacker's. Only deleting the
+ * edge worked.
  *
- * The tier bound is retained *on top of* mutuality because dropping it would
- * widen the set (every reciprocated edge, however distant, would become a
- * friend). Mutual-and-close is strictly narrower than the previous
- * one-directional-and-close, which is the direction this change must go.
+ * Hence the query reads the **author's** outgoing edge, not the viewer's. Who is
+ * in an audience is the author's choice — that is the premise of the whole
+ * audience model (scopes are author-owned) — and reading the viewer's own tier to
+ * decide what an author shares was backwards, not merely permissive.
  *
- * Note the asymmetry that remains and is harmless: a reader can still *lower*
- * their own tier and lose access. Self-inflicted narrowing needs no defence.
+ * `reciprocated` is retained on top of the direction flip, so the set is
+ * "authors who placed this viewer close, and where the viewer connected back".
+ * Requiring the viewer's edge to *also* be close would be narrower still, but it
+ * would silently drop people an author deliberately included.
+ *
+ * This flip is not purely a narrowing. Where an author placed the viewer close
+ * but the viewer reciprocated at a distant tier, the viewer now GAINS access —
+ * correct semantics, but a change for existing rows. Before deploying, count the
+ * rows where the two directions disagree on closeness:
+ *
+ *   SELECT count(*) FROM relationships a
+ *     JOIN relationships b ON b.user_id = a.target_id AND b.target_id = a.user_id
+ *   WHERE a.target_type = 'user' AND b.target_type = 'user'
+ *     AND a.reciprocated AND (a.tier <= 1) <> (b.tier <= 1);
+ *
+ * Expected to be 0: `TENANT_SCOPE_MODE` defaults to `off`, the ambient tenant is
+ * established only when it is not `off` (app.ts), and `createRelationship`
+ * refuses without one — so no edge can have been written in the default
+ * configuration.
  *
  * This is deliberately a single-hop Prisma read, not a graph traversal — the
  * circle-tier feed queries proper live in lib/graph/ (AR8 owns those).
@@ -55,34 +73,40 @@ export type RelationshipReader = {
   relationship: {
     findMany(args: {
       where: {
-        userId: string;
+        targetId: string;
         targetType: string;
         tier: { lte: number };
         reciprocated: boolean;
       };
-      select: { targetId: true };
-    }): Promise<Array<{ targetId: string }>>;
+      select: { userId: true };
+    }): Promise<Array<{ userId: string }>>;
   };
 };
 
 /**
- * Resolve the user IDs of `userId`'s friends (see module doc for the
- * definition). Returns an empty array for a user with no qualifying edges.
+ * Resolve the authors whose friends-only posts `viewerUserId` may read (see the
+ * module doc for the definition and the direction argument). Returns an empty
+ * array for a viewer no author has placed close.
  */
 export async function getFriendUserIds(
   db: RelationshipReader,
-  userId: string,
+  viewerUserId: string,
 ): Promise<string[]> {
   const rows = await db.relationship.findMany({
     where: {
-      userId,
+      // The AUTHOR's edge, not the viewer's: `targetId` is the viewer, so `tier`
+      // below is the tier the AUTHOR assigned. Flipping this back to
+      // `userId: viewerUserId` hands the audience boundary to the reader, who
+      // can set their own tier via PATCH /api/relationships/score (V1).
+      targetId: viewerUserId,
       targetType: "user",
       tier: { lte: FRIEND_TIER_MAX },
       // REQUIRED, never optional: the consent half of the definition. Removing
-      // this line restores the unilateral self-grant (V1).
+      // this line lets an author's one-sided classification of a stranger grant
+      // that stranger read access.
       reciprocated: true,
     },
-    select: { targetId: true },
+    select: { userId: true },
   });
-  return rows.map((r) => r.targetId);
+  return rows.map((r) => r.userId);
 }

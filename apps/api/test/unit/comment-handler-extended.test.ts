@@ -119,6 +119,14 @@ vi.mock("../../src/db", () => ({
   createPrisma: (...args: any[]) => mockCreatePrisma(...args),
 }));
 
+// Mock the shared read authorizer (H3), default ALLOW — see
+// test/integration/post-attachment-read-authz.integration.test.ts for the
+// assertions that actually decide whether its predicate is correct.
+const mockCanReadPost = vi.fn();
+vi.mock("../../src/lib/post-read-authorizer", () => ({
+  canReadPost: (...args: any[]) => mockCanReadPost(...args),
+}));
+
 // Mock comment rate limiter
 const mockCommentRateLimit = vi.fn().mockResolvedValue({ allowed: true });
 vi.mock("../../src/lib/middleware/comment-rate-limit", () => ({
@@ -162,6 +170,7 @@ describe("CommentHandler - Extended", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     handler = new CommentHandler();
+    mockCanReadPost.mockResolvedValue(true);
 
     mockDb = {
       post: {

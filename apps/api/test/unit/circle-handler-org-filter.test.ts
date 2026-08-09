@@ -40,6 +40,8 @@ function makeSession(): Session {
 
 const mockEnv = { DATABASE_URL: "postgresql://test:test@localhost/test" } as unknown as Env;
 const mockRequestContext = {} as TrellisRequestContext;
+/** The caller's verified active tenant (H1) — every circle read requires one. */
+const TENANT = "tenant-1";
 
 function feedRequest(params: Record<string, string>): Request {
   const url = new URL("https://api.example.com/api/circles/feed");
@@ -71,10 +73,10 @@ describe("CircleHandler org-category filter parsing", () => {
 
   describe("handleGetFeed", () => {
     it("passes undefined orgFilter when neither param is present", async () => {
-      await handler.handleGetFeed(feedRequest({ tier: "1" }), session, mockEnv, mockRequestContext);
+      await handler.handleGetFeed(feedRequest({ tier: "1" }), session, mockEnv, mockRequestContext, TENANT);
 
       const call = mockGraphService.getVisiblePostIds.mock.calls[0]!;
-      expect(call[4]).toBeUndefined();
+      expect(call[5]).toBeUndefined();
     });
 
     it("parses excludeOrgRootCategories into { exclude: [...] }", async () => {
@@ -83,9 +85,10 @@ describe("CircleHandler org-category filter parsing", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
-      expect(mockGraphService.getVisiblePostIds.mock.calls[0]![4]).toEqual({
+      expect(mockGraphService.getVisiblePostIds.mock.calls[0]![5]).toEqual({
         exclude: ["business", "government"],
       });
     });
@@ -96,9 +99,10 @@ describe("CircleHandler org-category filter parsing", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
-      expect(mockGraphService.getVisiblePostIds.mock.calls[0]![4]).toEqual({
+      expect(mockGraphService.getVisiblePostIds.mock.calls[0]![5]).toEqual({
         include: ["nonprofit"],
       });
     });
@@ -113,9 +117,10 @@ describe("CircleHandler org-category filter parsing", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
-      expect(mockGraphService.getVisiblePostIds.mock.calls[0]![4]).toEqual({
+      expect(mockGraphService.getVisiblePostIds.mock.calls[0]![5]).toEqual({
         exclude: ["business"],
         include: ["nonprofit", "community-group"],
       });
@@ -127,9 +132,10 @@ describe("CircleHandler org-category filter parsing", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
-      expect(mockGraphService.getVisiblePostIds.mock.calls[0]![4]).toEqual({
+      expect(mockGraphService.getVisiblePostIds.mock.calls[0]![5]).toEqual({
         exclude: ["business", "nonprofit"],
       });
     });
@@ -140,10 +146,11 @@ describe("CircleHandler org-category filter parsing", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       // Only the well-formed slug survives; the injection-ish / spaced tokens are rejected.
-      expect(mockGraphService.getVisiblePostIds.mock.calls[0]![4]).toEqual({
+      expect(mockGraphService.getVisiblePostIds.mock.calls[0]![5]).toEqual({
         exclude: ["business"],
       });
     });
@@ -154,9 +161,10 @@ describe("CircleHandler org-category filter parsing", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
-      expect(mockGraphService.getVisiblePostIds.mock.calls[0]![4]).toBeUndefined();
+      expect(mockGraphService.getVisiblePostIds.mock.calls[0]![5]).toBeUndefined();
     });
 
     it("caps the number of codes to the abuse ceiling", async () => {
@@ -166,9 +174,10 @@ describe("CircleHandler org-category filter parsing", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
-      const filter = mockGraphService.getVisiblePostIds.mock.calls[0]![4] as { exclude: string[] };
+      const filter = mockGraphService.getVisiblePostIds.mock.calls[0]![5] as { exclude: string[] };
       expect(filter.exclude.length).toBeLessThanOrEqual(24);
       expect(filter.exclude.length).toBeGreaterThan(0);
     });
@@ -185,12 +194,14 @@ describe("CircleHandler org-category filter parsing", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(mockGraphService.getGlanceItems).toHaveBeenCalledWith(
         "user-123",
         3,
         20,
+        TENANT,
         { exclude: ["business"] },
       );
     });
@@ -201,9 +212,16 @@ describe("CircleHandler org-category filter parsing", () => {
         session,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
-      expect(mockGraphService.getGlanceItems).toHaveBeenCalledWith("user-123", 1, 20, undefined);
+      expect(mockGraphService.getGlanceItems).toHaveBeenCalledWith(
+        "user-123",
+        1,
+        20,
+        TENANT,
+        undefined,
+      );
     });
   });
 });

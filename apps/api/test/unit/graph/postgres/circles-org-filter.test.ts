@@ -16,13 +16,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Prisma } from "@prisma/client";
 
-const { mockGetCurrentTenantId } = vi.hoisted(() => ({
-  mockGetCurrentTenantId: vi.fn<() => string | undefined>(() => undefined),
-}));
-
-vi.mock("@de-otio/saas-foundation/tenant", () => ({
-  getCurrentTenantId: mockGetCurrentTenantId,
-}));
+// H1: the tenant is an explicit argument now, not an ambient lookup — nothing
+// to mock.
 
 import { CircleOps } from "../../../../src/lib/graph/postgres/circles.js";
 
@@ -63,6 +58,7 @@ function sqlValues(call: unknown): unknown[] {
 
 const COL = "author_org_root_category_code";
 const USER = "user-1";
+const TENANT = "tenant-1";
 const since = new Date("2026-01-01T00:00:00.000Z");
 
 describe("CircleOps org-category feed filter", () => {
@@ -71,7 +67,6 @@ describe("CircleOps org-category feed filter", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    mockGetCurrentTenantId.mockReturnValue(undefined);
     prisma = makePrisma();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ops = new CircleOps(prisma as any);
@@ -83,7 +78,7 @@ describe("CircleOps org-category feed filter", () => {
 
   describe("getVisiblePostIds", () => {
     it("emits NO org predicate when orgFilter is omitted (no-filter-param case)", async () => {
-      await ops.getVisiblePostIds(USER, 0, since, { limit: 10 });
+      await ops.getVisiblePostIds(USER, 0, since, { limit: 10 }, TENANT);
 
       expect(prisma.$queryRaw).toHaveBeenCalledTimes(2); // entity + author branch
       for (const call of prisma.$queryRaw.mock.calls) {
@@ -92,7 +87,7 @@ describe("CircleOps org-category feed filter", () => {
     });
 
     it("emits NO org predicate when both lists are empty", async () => {
-      await ops.getVisiblePostIds(USER, 0, since, { limit: 10 }, {
+      await ops.getVisiblePostIds(USER, 0, since, { limit: 10 }, TENANT, {
         exclude: [],
         include: [],
       });
@@ -103,7 +98,7 @@ describe("CircleOps org-category feed filter", () => {
     });
 
     it("emits an exclude predicate that KEEPS null-code posts, with codes bound", async () => {
-      await ops.getVisiblePostIds(USER, 1, since, { limit: 10 }, {
+      await ops.getVisiblePostIds(USER, 1, since, { limit: 10 }, TENANT, {
         exclude: ["business", "government"],
       });
 
@@ -122,7 +117,7 @@ describe("CircleOps org-category feed filter", () => {
     });
 
     it("emits an include whitelist predicate (drops null-code posts) with codes bound", async () => {
-      await ops.getVisiblePostIds(USER, 2, since, { limit: 10 }, {
+      await ops.getVisiblePostIds(USER, 2, since, { limit: 10 }, TENANT, {
         include: ["nonprofit"],
       });
 
@@ -136,7 +131,7 @@ describe("CircleOps org-category feed filter", () => {
     });
 
     it("combines exclude + include predicates alongside the tier filter", async () => {
-      await ops.getVisiblePostIds(USER, 0, since, { limit: 10 }, {
+      await ops.getVisiblePostIds(USER, 0, since, { limit: 10 }, TENANT, {
         exclude: ["business"],
         include: ["nonprofit", "community-group"],
       });
@@ -156,7 +151,7 @@ describe("CircleOps org-category feed filter", () => {
 
     it("returns an empty result set when the filtered query yields no rows", async () => {
       prisma.$queryRaw.mockResolvedValue([]);
-      const res = await ops.getVisiblePostIds(USER, 0, since, { limit: 10 }, {
+      const res = await ops.getVisiblePostIds(USER, 0, since, { limit: 10 }, TENANT, {
         exclude: ["business"],
       });
       expect(res.items).toEqual([]);
@@ -171,22 +166,24 @@ describe("CircleOps org-category feed filter", () => {
 
   describe("getGlanceItems", () => {
     function withMembers() {
-      // call[0] = members query; call[1] = entity subquery; call[2] = user subquery
+      // H1 split the single roster query in two — the ENTITY roster reads the
+      // viewer's own edges, the USER roster reads the authors' edges back — so
+      // the post subqueries are now calls [2] and [3], not [1] and [2].
+      // call[0] = entity roster; call[1] = user roster;
+      // call[2] = entity post subquery; call[3] = user post subquery
       prisma.$queryRaw
-        .mockResolvedValueOnce([
-          { targetId: "e1", targetType: "entity", targetName: "Ent" },
-          { targetId: "u1", targetType: "user", targetName: "Usr" },
-        ])
+        .mockResolvedValueOnce([{ targetId: "e1", targetName: "Ent" }])
+        .mockResolvedValueOnce([{ targetId: "u1", targetName: "Usr" }])
         .mockResolvedValueOnce([])
         .mockResolvedValueOnce([]);
     }
 
     it("emits NO org predicate in the post subqueries when orgFilter is omitted", async () => {
       withMembers();
-      await ops.getGlanceItems(USER, 0, 20);
+      await ops.getGlanceItems(USER, 0, 20, TENANT);
 
-      // The members query (call[0]) never references the post column; the two
-      // post subqueries (calls[1], [2]) must also be free of it.
+      // The roster queries (calls[0], [1]) never reference the post column; the
+      // two post subqueries (calls[2], [3]) must also be free of it.
       for (const call of prisma.$queryRaw.mock.calls) {
         expect(sqlText(call[0])).not.toContain(COL);
       }
@@ -194,22 +191,22 @@ describe("CircleOps org-category feed filter", () => {
 
     it("applies the exclude predicate to BOTH glance post subqueries", async () => {
       withMembers();
-      await ops.getGlanceItems(USER, 0, 20, { exclude: ["business"] });
+      await ops.getGlanceItems(USER, 0, 20, TENANT, { exclude: ["business"] });
 
-      const entitySubquery = sqlText(prisma.$queryRaw.mock.calls[1][0]);
-      const userSubquery = sqlText(prisma.$queryRaw.mock.calls[2][0]);
+      const entitySubquery = sqlText(prisma.$queryRaw.mock.calls[2][0]);
+      const userSubquery = sqlText(prisma.$queryRaw.mock.calls[3][0]);
       expect(entitySubquery).toContain(`${COL} NOT IN`);
       expect(userSubquery).toContain(`${COL} NOT IN`);
-      expect(sqlValues(prisma.$queryRaw.mock.calls[1][0])).toContain("business");
       expect(sqlValues(prisma.$queryRaw.mock.calls[2][0])).toContain("business");
+      expect(sqlValues(prisma.$queryRaw.mock.calls[3][0])).toContain("business");
     });
 
     it("applies the include whitelist to BOTH glance post subqueries", async () => {
       withMembers();
-      await ops.getGlanceItems(USER, 0, 20, { include: ["nonprofit"] });
+      await ops.getGlanceItems(USER, 0, 20, TENANT, { include: ["nonprofit"] });
 
-      expect(sqlText(prisma.$queryRaw.mock.calls[1][0])).toContain(`${COL} IN`);
       expect(sqlText(prisma.$queryRaw.mock.calls[2][0])).toContain(`${COL} IN`);
+      expect(sqlText(prisma.$queryRaw.mock.calls[3][0])).toContain(`${COL} IN`);
     });
   });
 });

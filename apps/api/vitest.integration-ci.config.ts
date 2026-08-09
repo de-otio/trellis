@@ -47,6 +47,24 @@ const PHASE0_INTEGRATION = [
   // is a disclosure (the feed index selects on it), and the write path cannot
   // be trusted to maintain it, so the assertion belongs against the database.
   "test/integration/audience-class-invariant.integration.test.ts",
+  // H3 — post ATTACHMENT read authorization: the comment thread, the sentiment
+  // counts and the who-reacted list must be as hard to read as the post. Drives
+  // the real handlers, because the unit lane's Prisma mocks resolve canned rows
+  // regardless of the `where` and so cannot tell "authorized" from "not asked".
+  "test/integration/post-attachment-read-authz.integration.test.ts",
+  // H2 — the unauthenticated ActivityPub outbox must not serve activities whose
+  // post has since been narrowed, hidden or deleted. The unit lane mocks
+  // $queryRaw and returns canned rows regardless of the statement, so it can
+  // only assert the predicate's text; only a real Postgres decides whether a
+  // row actually comes back. Also pins the SQL gate against `mayFederatePost`.
+  "test/integration/outbox-audience-gate.integration.test.ts",
+  // H1 — circle READ authorization: the circle feed/depth/glance/status queries
+  // decided audience from the READER's own relationship score (settable via
+  // PATCH /api/relationships/score) and carried no tenant predicate. Raw SQL
+  // with no Prisma `where` to inspect, and the unit lane's `$queryRaw` mock
+  // resolves canned rows regardless of the SQL — only real Postgres decides
+  // whether a row comes back.
+  "test/integration/circle-read-authz.integration.test.ts",
 ];
 
 export default defineConfig({

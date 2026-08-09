@@ -132,25 +132,40 @@ export class PostgresGraphService implements GraphService, GraphConnection {
 
   // ---- Circles (B2) --------------------------------------------------------
 
-  getCircleMembers(userId: string, tier: CircleTier) {
-    return this.circles.getCircleMembers(userId, tier);
+  getCircleMembers(userId: string, tier: CircleTier, activeTenantId: string) {
+    return this.circles.getCircleMembers(userId, tier, activeTenantId);
   }
   getVisiblePostIds(
     userId: string,
     tier: CircleTier,
     since: Date,
     pagination: PaginationInput,
+    activeTenantId: string,
     orgFilter?: OrgCategoryFeedFilter,
   ) {
-    return this.circles.getVisiblePostIds(userId, tier, since, pagination, orgFilter);
+    return this.circles.getVisiblePostIds(
+      userId,
+      tier,
+      since,
+      pagination,
+      activeTenantId,
+      orgFilter,
+    );
   }
   getGlanceItems(
     userId: string,
     tier: CircleTier,
     limit: number,
+    activeTenantId: string,
     orgFilter?: OrgCategoryFeedFilter,
   ) {
-    return this.circles.getGlanceItems(userId, tier, limit, orgFilter);
+    return this.circles.getGlanceItems(
+      userId,
+      tier,
+      limit,
+      activeTenantId,
+      orgFilter,
+    );
   }
   getDepthPostIds(
     userId: string,
@@ -158,14 +173,26 @@ export class PostgresGraphService implements GraphService, GraphConnection {
     targetId: string,
     since: Date,
     limit: number,
+    activeTenantId: string,
   ) {
-    return this.circles.getDepthPostIds(userId, targetType, targetId, since, limit);
+    return this.circles.getDepthPostIds(
+      userId,
+      targetType,
+      targetId,
+      since,
+      limit,
+      activeTenantId,
+    );
   }
-  getCircleStatus(userId: string) {
-    return this.circles.getCircleStatus(userId);
+  getCircleStatus(userId: string, activeTenantId: string) {
+    return this.circles.getCircleStatus(userId, activeTenantId);
   }
-  getCircleEntityStatus(userId: string, tier: CircleTier) {
-    return this.circles.getCircleEntityStatus(userId, tier);
+  getCircleEntityStatus(
+    userId: string,
+    tier: CircleTier,
+    activeTenantId: string,
+  ) {
+    return this.circles.getCircleEntityStatus(userId, tier, activeTenantId);
   }
   markCircleRead(userId: string, tier: CircleTier, readAt?: Date) {
     return this.circles.markCircleRead(userId, tier, readAt);
