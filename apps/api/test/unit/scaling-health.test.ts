@@ -205,6 +205,47 @@ describe("evaluateScalingHealth", () => {
         i.name.startsWith("RDS"),
       );
       expect(cwIndicators).toHaveLength(0);
+
+      // The original test stopped here — it asserted the indicators vanish but
+      // never what the board then CLAIMS. Missing indicators are missing
+      // evidence, and "healthy" is derived from their absence, so the omission
+      // is precisely where the defect lived.
+      expect(result.overallStatus).toBe("unknown");
+      expect(result.dataQuality.degraded).toBe(true);
+      expect(result.dataQuality.unavailable).toContain("cloudwatch-rds");
+    });
+
+    it("never claims all indicators are healthy while blind", async () => {
+      mockCloudWatchSend.mockRejectedValue(new Error("Access Denied"));
+
+      const result = await evaluateScalingHealth(
+        { STAGE: "dev", AWS_REGION: "eu-central-1", DATABASE_POOL_MAX: "10" },
+        100,
+        30,
+      );
+
+      expect(result.recommendations).not.toContain(
+        "All scaling indicators are healthy. No action needed.",
+      );
+      expect(
+        result.recommendations.some((r) => r.includes("INCOMPLETE")),
+      ).toBe(true);
+    });
+
+    it("still reports action-needed from a surviving indicator", async () => {
+      // CloudWatch is down, but the per-request pool is independently
+      // detectable and red. A blind RDS view must not downgrade a finding the
+      // board can still make on its own.
+      mockCloudWatchSend.mockRejectedValue(new Error("Access Denied"));
+
+      const result = await evaluateScalingHealth(
+        { STAGE: "dev", AWS_REGION: "eu-central-1" },
+        100,
+        30,
+      );
+
+      expect(result.overallStatus).toBe("action-needed");
+      expect(result.dataQuality.degraded).toBe(true);
     });
   });
 
