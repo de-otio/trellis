@@ -197,6 +197,43 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ### Fixed
 
+- **The nightly media purge builds its S3 client through the foundation
+  factory.** `apps/worker` constructed one from `region` alone. Off AWS the
+  missing half is *credentials*, not the endpoint: `AWS_ENDPOINT_URL_S3` is
+  resolved natively by `@smithy/core`, but the SDK reads a **single** ambient
+  `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` pair for every service, so where
+  that pair belongs to the queue service the S3 client signs as the wrong
+  principal and every delete returns 403.
+
+  The failure was silent by construction. The purge defers the hard-delete of
+  any row whose object delete failed — deliberately, so it self-heals — which
+  makes a 403 loop indistinguishable from a healthy no-op: nothing surfaces,
+  rows never drain, the bucket grows. A source-scan test now forbids direct
+  `S3Client` construction outside `src/lambda/**`, which runs only where the
+  ambient pair is correct.
+
+- **Health and abuse dashboards no longer report missing data as good news.**
+  Two admin surfaces derived a clean bill of health from the *absence* of a
+  reading:
+
+  - `evaluateAbuseMetrics` degraded both data sources to zeros on failure, and
+    zeros produced `blockRate 0` → `overallStatus "low"` → the recommendation
+    *"No abuse concerns detected in this time period."*
+  - `evaluateScalingHealth` derives `"healthy"` from the absence of red/yellow
+    indicators, and a CloudWatch failure *removes* the RDS indicators rather
+    than reddening them — manufacturing exactly that absence.
+
+  Both now distinguish "nothing happened" from "nothing was measured", gaining
+  a `dataQuality: { degraded, unavailable[] }` field and an `"unknown"`
+  `overallStatus`; the all-clear recommendation is suppressed while any source
+  is down. **Degraded is a floor, not a ceiling** — a surviving source that
+  reports a real problem still escalates to `critical`/`action-needed`, so one
+  source failing cannot mask the other's finding.
+
+  Neither type is exported from the package entrypoint or present in the
+  OpenAPI snapshot, so the new field and enum member are additive for consumers
+  of the published surface.
+
 - **`SessionManager.getSession` now resolves the trellis user id on
   non-Cognito issuers, and fails closed when it cannot.** Trellis has two
   independent Bearer-token paths; 0.24.0 wired Keycloak JIT claim
