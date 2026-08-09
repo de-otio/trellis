@@ -32,16 +32,16 @@ export type {
   TaxonomySeedDimension,
   TaxonomySeedCategory,
   TaxonomySeedTaxon,
-} from "./extension";
+} from "./extension.js";
 
-export { EXTENSION_API_VERSION } from "./extension";
+export { EXTENSION_API_VERSION } from "./extension.js";
 
 export type {
   Route,
   RoutePattern,
   Middleware,
   MiddlewareContext,
-} from "./route-types";
+} from "./route-types.js";
 
 // Structural DTOs — the versioned shapes of core data that extensions
 // consume (hook payloads, graph query results). Core asserts it satisfies
@@ -63,4 +63,4 @@ export type {
   ExtensionRecapWindow,
   ExtensionRecapPayload,
   ExtensionRecapSubject,
-} from "./dto";
+} from "./dto.js";

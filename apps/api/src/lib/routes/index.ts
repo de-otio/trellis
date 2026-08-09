@@ -26,6 +26,7 @@ import { entityProfileRoutes } from "./activitypub/entity-profile.js";
 import { webfingerRoutes } from "./activitypub/webfinger.js";
 import { adminRoutes } from "./admin.js";
 import { adminCostRoutes } from "./admin-costs.js";
+import { appMetaRoutes } from "./app-meta.js";
 import { authRoutes } from "./auth.js";
 import { authDiscoverRoutes } from "./auth-discover.js";
 import { badgesRoutes } from "./badges.js";
@@ -128,6 +129,10 @@ const appOnly = (route: Route): boolean =>
 const coreRoutes: Route[] = [
   // Health and configuration (highest priority)
   ...healthRoutes,
+
+  // App metadata: client version policy (unauthenticated, env-only, cacheable).
+  // Already carries `publicSpec: true` in its own module.
+  ...appMetaRoutes,
 
   // Agent discovery surface (T9b-a): /llms.txt, /openapi.json, /security.txt
   ...markPublicSpec(agentSurfaceRoutes),

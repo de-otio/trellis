@@ -41,10 +41,18 @@ taxonomy-seed types, and the `EXTENSION_API_VERSION` constant. An extension
 may read `EXTENSION_API_VERSION` at startup to verify it is running against
 the expected contract version.
 
-> **Current version: `0.6.0`.** The `0.5.0 → 0.6.0` bump added the scoped
-> `ExtensionDb.tenant(tid)` surface (replacing the earlier raw-delegate
-> shape) and the `jobs` / `ExtensionJobDecl` / `ExtensionJobContext` surface
-> described below — both additive, so it is a minor bump.
+> **Current version: `0.8.0`.** The `0.7.0 → 0.8.0` bump added the optional
+> `TrellisExtension.extensionApiVersion` field described below — additive
+> (no existing extension needs a change), but treated as a minor bump
+> because it's a contract addition, not a patch. The `0.5.0 → 0.6.0` bump
+> added the scoped `ExtensionDb.tenant(tid)` surface (replacing the earlier
+> raw-delegate shape) and the `jobs` / `ExtensionJobDecl` /
+> `ExtensionJobContext` surface described below.
+
+Rather than reading `EXTENSION_API_VERSION` yourself and comparing it by
+hand, the sanctioned path is to **declare** the version you built against
+and let core do the comparison at startup — see
+[`extensionApiVersion`](#extensionapiversion) below.
 
 ## Registering an extension
 
@@ -73,6 +81,7 @@ omitted when the vertical has no interest in that surface.
 | Field | Required | Purpose |
 | --- | --- | --- |
 | `id` | yes | Unique extension identifier. Lowercase alphanumeric, 2–32 characters, and not a reserved word. Used as the entity type and as the route mount prefix. |
+| `extensionApiVersion` | no | The `@de-otio/trellis-extension-api` semver this extension was built against. Core checks it at startup — see [`extensionApiVersion`](#extensionapiversion) below. |
 | `terminology` | yes | Display naming: `{ entity, entityPlural }` (for example `{ entity: "dog", entityPlural: "dogs" }`). |
 | `routes` | yes | An array of raw `Route` definitions. May be empty when only `extensionRoutes` are used. Routes cannot use reserved prefixes. |
 | `metadataSchema` | yes | A Zod schema validating `Entity.metadata` when an entity's type matches this extension's `id`. |
@@ -95,6 +104,41 @@ omitted when the vertical has no interest in that surface.
 Must be lowercase alphanumeric, 2–32 characters, and not a reserved word. The
 `id` doubles as the entity type (used to match `metadataSchema`) and as the
 route mount prefix for `extensionRoutes` (`/api/ext/{id}/{path}`).
+
+### `extensionApiVersion`
+
+```ts
+import { EXTENSION_API_VERSION } from "@de-otio/trellis-extension-api";
+
+export const dogExtension: TrellisExtension = {
+  id: "dog",
+  extensionApiVersion: EXTENSION_API_VERSION,
+  // …
+};
+```
+
+Declare the `@de-otio/trellis-extension-api` version this extension was
+**built against** — normally just `EXTENSION_API_VERSION` re-exported from
+this package, so a rebuild keeps the declaration truthful automatically.
+Core checks it against its own `EXTENSION_API_VERSION` at startup, before
+serving:
+
+- **Absent** — one warning logged at boot, never fatal. Declaring it is
+  strongly recommended (an undeclared extension gets no protection against
+  a silently incompatible core), but omitting it never breaks an existing
+  extension.
+- **Declared and incompatible** — core **fails startup**, naming both
+  versions. A differing major is always incompatible; while this package is
+  still `0.x`, a differing minor is incompatible too (0.x minors carry
+  breaking changes).
+- **Declared and merely drifted** (same compatibility window, different
+  patch) — logged only; rebuild at your convenience.
+- **Declared but unparseable** — core fails startup with a validation error
+  naming the offending value, never a deep throw.
+
+Format: `<major>.<minor>.<patch>`, each part 1–4 digits, with an optional
+`-`/`+` suffix ignored for comparison (e.g. `"0.8.0"` or `"0.8.0-alpha.1"`).
+Values over 64 characters are rejected outright.
 
 ### `terminology`
 

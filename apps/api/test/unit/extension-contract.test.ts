@@ -6,8 +6,21 @@
  * — before publish — rather than downstream in a consuming vertical.
  */
 
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it, beforeEach, vi } from "vitest";
+
+// Boot warnings (undeclared extensionApiVersion, missing auth middleware) are
+// assertable rather than stdout noise.
+const { mockLogger } = vi.hoisted(() => ({
+  mockLogger: { warn: vi.fn(), error: vi.fn(), debug: vi.fn(), info: vi.fn(), trace: vi.fn() },
+}));
+vi.mock("../../src/lib/logger", () => ({
+  getLogger: () => mockLogger,
+  Logger: class {},
+}));
+
 import { validateExtensions } from "../../src/lib/extension-validator.js";
+import { EXTENSION_API_VERSION } from "@de-otio/trellis-extension-api";
+import type { TrellisExtension } from "@de-otio/trellis-extension-api";
 import {
   exampleExtension,
   minimalExtension,
@@ -55,6 +68,58 @@ describe("extension contract: validateExtensions", () => {
       ],
     };
     expect(() => validateExtensions([ext as any])).toThrow(/reserved prefix/i);
+  });
+});
+
+/**
+ * `extensionApiVersion` (added in extension-api 0.8.0) is a NEW OPTIONAL field
+ * on TrellisExtension. This block is the deliberate acknowledgement of that
+ * contract change: it pins both halves of the compatibility promise —
+ * omitting the field must stay valid forever (every pre-0.8.0 extension omits
+ * it), and declaring it must gate startup on compatibility.
+ */
+describe("extension contract: extensionApiVersion (extension-api 0.8.0)", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("the reference extensions omit the field and remain valid", () => {
+    // Backward compatibility: the field is additive, never required.
+    expect(exampleExtension.extensionApiVersion).toBeUndefined();
+    expect(minimalExtension.extensionApiVersion).toBeUndefined();
+    expect(() =>
+      validateExtensions([exampleExtension, minimalExtension]),
+    ).not.toThrow();
+  });
+
+  it("omitting the field warns exactly once, naming the extensions", () => {
+    validateExtensions([exampleExtension, minimalExtension]);
+    const versionWarnings = mockLogger.warn.mock.calls
+      .map((c) => String(c[0]))
+      .filter((m) => m.includes("extensionApiVersion"));
+    expect(versionWarnings).toHaveLength(1);
+    expect(versionWarnings[0]).toContain(`"${exampleExtension.id}"`);
+    expect(versionWarnings[0]).toContain(`"${minimalExtension.id}"`);
+  });
+
+  it("declaring the current version is accepted silently", () => {
+    const declared: TrellisExtension = {
+      ...minimalExtension,
+      extensionApiVersion: EXTENSION_API_VERSION,
+    };
+    expect(() => validateExtensions([declared])).not.toThrow();
+    const versionWarnings = mockLogger.warn.mock.calls
+      .map((c) => String(c[0]))
+      .filter((m) => m.includes("extensionApiVersion"));
+    expect(versionWarnings).toHaveLength(0);
+  });
+
+  it("declaring an incompatible version fails startup", () => {
+    const stale: TrellisExtension = {
+      ...minimalExtension,
+      extensionApiVersion: "0.1.0",
+    };
+    expect(() => validateExtensions([stale], "0.8.0")).toThrow(
+      /built against extension-api 0\.1\.0/,
+    );
   });
 });
 

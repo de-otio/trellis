@@ -6,7 +6,10 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "../../src/env.js";
-import { CorsHandler } from "../../src/lib/cors-handler.js";
+import {
+  CorsHandler,
+  CORS_ALLOWED_REQUEST_HEADERS,
+} from "../../src/lib/cors-handler.js";
 
 describe("CorsHandler", () => {
   let mockEnv: Env;
@@ -211,7 +214,7 @@ describe("CorsHandler", () => {
         "GET, POST, PUT, DELETE, PATCH, OPTIONS",
       );
       expect(response.headers.get("Access-Control-Allow-Headers")).toBe(
-        "Content-Type, Authorization, X-CSRF-Token, X-Retry-Count",
+        CORS_ALLOWED_REQUEST_HEADERS,
       );
       expect(response.headers.get("Access-Control-Allow-Credentials")).toBe(
         "true",
@@ -714,7 +717,7 @@ describe("CorsHandler", () => {
         "GET, POST, PUT, DELETE, PATCH, OPTIONS",
       );
       expect(headers["Access-Control-Allow-Headers"]).toBe(
-        "Content-Type, Authorization, X-CSRF-Token",
+        CORS_ALLOWED_REQUEST_HEADERS,
       );
       expect(headers["Access-Control-Allow-Credentials"]).toBe("true");
     });

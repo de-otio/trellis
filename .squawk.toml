@@ -1,0 +1,17 @@
+# squawk (https://squawkhq.com) configuration for Prisma migration SQL.
+#
+# Only in-scope migrations are linted — see
+# apps/api/scripts/migration-lint-scope.mjs for the scoping logic (new/changed
+# prisma/migrations/**/*.sql only; the pre-existing migration history is
+# exempt) and .github/workflows/migration-lint.yml for the CI gate.
+
+# Target: PostgreSQL 16, matching the postgis/postgis:16-3.4 image used in CI
+# (.github/workflows/ci.yml) and the deployed database.
+pg_version = "16.0"
+
+# No rules are excluded today. If a future migration needs a documented
+# exception, add the rule name here with an inline reason comment directly
+# above it — never a bare/unexplained exclusion. This mirrors the
+# ALLOW-DROP-INDEX convention in scripts/check-migration-sql.mjs: exceptions
+# are explicit, not silent.
+excluded_rules = []

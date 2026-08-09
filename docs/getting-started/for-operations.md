@@ -143,6 +143,24 @@ are set through the environment (parameter/secret store) like every other
 Trellis setting. As with all Trellis thresholds, they are runtime config — none
 is compiled into the published package.
 
+## Client-version policy (forced-upgrade backstop)
+
+`GET /api/app/version-policy` and a 426 backstop middleware let an operator
+signal a minimum supported client version and recommended store links,
+without a deploy. Configuration is four optional environment variables, all
+read once at boot and validated then — **unset means the mechanism is
+dormant** (the endpoint returns `null` for that field; an unset
+`CLIENT_MIN_SUPPORTED_VERSION` makes the 426 backstop a permanent no-op). See
+the [Client Compatibility guide](../guides/client-compatibility.md) for the
+full contract.
+
+| Variable | Meaning | Contract |
+|---|---|---|
+| `CLIENT_MIN_SUPPORTED_VERSION` | Oldest client version the server still accepts. Below it, the policy endpoint's `minimumVersion` and the 426 backstop treat the client as unsupported. Unset = dormant (no version is ever rejected). | Bounded semver `x.y.z[+-suffix]`, ≤ 64 characters. Malformed value fails boot. |
+| `CLIENT_RECOMMENDED_VERSION` | Version the client should nudge the user toward. Display-only, never enforced server-side. Unset = dormant (`recommendedVersion` is `null`). | Same bounded semver rule as above. |
+| `CLIENT_STORE_URL_ANDROID` | Android store URL surfaced in `storeUrls.android`. Unset = dormant (`null`). | Must be `https:` and resolve to the `play.google.com` host — any other scheme or host fails boot validation. |
+| `CLIENT_STORE_URL_IOS` | iOS store URL surfaced in `storeUrls.ios`. Unset = dormant (`null`). | Must be `https:` and resolve to the `apps.apple.com` host — any other scheme or host fails boot validation. |
+
 ## Monitoring conventions
 
 Because the consuming application owns the runtime, it also owns dashboards and

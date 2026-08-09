@@ -352,6 +352,9 @@ describe("S1.7 — JWT exp claim for session expiration", () => {
 
     mockVerifyCognitoJwt.mockResolvedValue({
       sub: "user-123",
+      // The trellis cuid must be present: this suite asserts exp handling, and
+      // a token carrying no resolvable user id is now rejected outright.
+      "custom:userId": "cmqurmq7x000002i80nqmgfa1",
       email: "test@example.com",
       username: "test@example.com",
       "custom:role": "END_USER",
@@ -379,6 +382,7 @@ describe("S1.7 — JWT exp claim for session expiration", () => {
 
     mockVerifyCognitoJwt.mockResolvedValue({
       sub: "user-123",
+      "custom:userId": "cmqurmq7x000002i80nqmgfa1",
       email: "test@example.com",
       username: "test@example.com",
     });

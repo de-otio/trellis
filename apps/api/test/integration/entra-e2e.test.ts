@@ -41,12 +41,21 @@ describe.skipIf(!enabled)("Entra OIDC end-to-end", () => {
       new CognitoIdentityProviderClient({
         region: process.env.AWS_REGION ?? "eu-central-1",
       }),
+      {
+        userPoolId: process.env.COGNITO_USER_POOL_ID!,
+        appClientId: process.env.COGNITO_APP_CLIENT_ID ?? "unused-here",
+      },
     );
     const providerName = `tenant-e2e-${Date.now().toString(36).slice(-6)}`;
     try {
       await sdk.createOidcProvider({
-        userPoolId: process.env.COGNITO_USER_POOL_ID!,
         providerName,
+        // From the real probe above — required by the port; Cognito ignores it.
+        endpoints: {
+          authorizationUrl: probe.ok ? probe.authorizationEndpoint : "",
+          tokenUrl: probe.ok ? probe.tokenEndpoint : "",
+          jwksUrl: probe.ok ? probe.jwksUri : "",
+        },
         details: {
           clientId: process.env.ENTRA_CLIENT_ID!,
           clientSecret: process.env.ENTRA_CLIENT_SECRET!,
@@ -55,15 +64,10 @@ describe.skipIf(!enabled)("Entra OIDC end-to-end", () => {
         attributeMapping: defaultOidcAttributeMapping(),
         idpIdentifiers: [],
       });
-      const exists = await sdk.describeProvider(
-        process.env.COGNITO_USER_POOL_ID!,
-        providerName,
-      );
+      const exists = await sdk.providerExists(providerName);
       expect(exists).toBe(true);
     } finally {
-      await sdk
-        .deleteProvider(process.env.COGNITO_USER_POOL_ID!, providerName)
-        .catch(() => undefined);
+      await sdk.deleteProvider(providerName).catch(() => undefined);
     }
   }, 30_000);
 });

@@ -1,0 +1,74 @@
+name: Migration Lint
+
+# Lints new/changed Prisma migration SQL with squawk. Pre-existing migrations
+# are exempt (see apps/api/scripts/migration-lint-scope.mjs). Diff scoping is
+# computed in Node — never through a shell string built from filenames — so a
+# migration filename containing a space or shell metacharacter can't split
+# into extra argv words or break out of a quoted argument.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: migration-lint-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SQUAWK_VERSION: "v2.62.0"
+  SQUAWK_ASSET: "squawk-linux-x64"
+  SQUAWK_SHA256: "54bd3e7bf2101502317c3400d1043202c51414a646a10f92f56f7b3032630758"
+
+jobs:
+  migration-lint:
+    name: squawk migration lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+
+      - name: Compute migration lint scope
+        id: scope
+        timeout-minutes: 2
+        run: |
+          node apps/api/scripts/migration-lint-scope.mjs > "${RUNNER_TEMP}/migration-lint-scope.bin"
+          if [ -s "${RUNNER_TEMP}/migration-lint-scope.bin" ]; then
+            echo "has_scope=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_scope=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download and verify squawk (pinned, checksummed — never `latest`)
+        if: steps.scope.outputs.has_scope == 'true'
+        timeout-minutes: 3
+        run: |
+          curl -fsSL -o "${RUNNER_TEMP}/${SQUAWK_ASSET}" \
+            "https://github.com/sbdchd/squawk/releases/download/${SQUAWK_VERSION}/${SQUAWK_ASSET}"
+          echo "${SQUAWK_SHA256}  ${RUNNER_TEMP}/${SQUAWK_ASSET}" | shasum -a 256 -c -
+          chmod +x "${RUNNER_TEMP}/${SQUAWK_ASSET}"
+
+      - name: Run squawk on in-scope migration SQL
+        if: steps.scope.outputs.has_scope == 'true'
+        timeout-minutes: 3
+        run: |
+          # NUL-delimited argv, never re-interpolated through a shell string.
+          # `xargs -0 -a <file> <cmd>` appends each NUL-terminated entry as its
+          # own argv element directly to squawk's exec — no `sh -c`, so a
+          # filename with a space or shell metacharacter cannot split into
+          # extra words or escape a quoted argument.
+          xargs -0 -a "${RUNNER_TEMP}/migration-lint-scope.bin" \
+            "${RUNNER_TEMP}/${SQUAWK_ASSET}" --config .squawk.toml
+
+      - name: No in-scope migrations
+        if: steps.scope.outputs.has_scope == 'false'
+        run: echo "No new/changed migration SQL in this PR; nothing to lint."

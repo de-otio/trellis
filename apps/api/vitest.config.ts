@@ -46,6 +46,16 @@ export default defineConfig({
       // the real handlers against a real Postgres, which this config's
       // test/setup.ts cannot provide. Runs in the Phase0 integration lane.
       "test/integration/post-attachment-read-authz.integration.test.ts",
+      // P1.1a audience_class DB invariant — trigger behaviour, so it needs the
+      // real database. Runs in the Phase0 integration lane.
+      "test/integration/audience-class-invariant.integration.test.ts",
+      // H2 outbox audience gate and H1 circle read authorization — both assert
+      // what a real Postgres returns for a raw-SQL predicate, so both belong in
+      // the Phase0 lane only. Their hyperdrive guard falls back to the
+      // docker-compose URL rather than skipping, so without these two lines the
+      // default lane passes locally (Postgres is up) and fails in CI (it is not).
+      "test/integration/outbox-audience-gate.integration.test.ts",
+      "test/integration/circle-read-authz.integration.test.ts",
       // Events primitive integration tests — live Postgres only.
       // Run separately: npm run test:integration:ci (registered in PHASE0_INTEGRATION).
       "test/integration/events.integration.test.ts",

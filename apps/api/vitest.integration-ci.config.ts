@@ -42,6 +42,11 @@ const PHASE0_INTEGRATION = [
   // rows regardless of the `where`, so it can only assert predicate shape —
   // only a real Postgres decides whether a row actually comes back.
   "test/integration/post-read-isolation.integration.test.ts",
+  // P1.1a — the audience_class DB invariant: the denormalised class is a
+  // faithful function of audience_scopes, enforced by trigger. A stale class
+  // is a disclosure (the feed index selects on it), and the write path cannot
+  // be trusted to maintain it, so the assertion belongs against the database.
+  "test/integration/audience-class-invariant.integration.test.ts",
   // H3 — post ATTACHMENT read authorization: the comment thread, the sentiment
   // counts and the who-reacted list must be as hard to read as the post. Drives
   // the real handlers, because the unit lane's Prisma mocks resolve canned rows

@@ -1,0 +1,43 @@
+name: OpenAPI additivity gate
+
+# Fails a PR if the OpenAPI document generated from the live route registry
+# has removed a path, method, or parameter (or, on future generator output,
+# a response field / field type / enum value / newly-required request
+# field) relative to the committed `apps/api/openapi.snapshot.json`.
+# See apps/api/scripts/openapi-additivity-core.mjs for the full rule set
+# and its documented KNOWN LIMITATION.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openapi-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  openapi-additivity:
+    name: OpenAPI additivity check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npm run prisma:generate
+
+      - name: Check OpenAPI additivity
+        working-directory: apps/api
+        run: npx tsx scripts/check-openapi-additivity.mjs check

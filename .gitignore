@@ -11,6 +11,7 @@ extensions/*/lib/
 .env.test.local
 coverage/
 .nyc_output/
+.cache/
 *.log
 .DS_Store
 .wrangler/

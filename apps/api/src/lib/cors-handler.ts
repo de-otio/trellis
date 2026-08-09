@@ -8,6 +8,22 @@
 import type { Env } from "../env.js";
 import { getLogger, Logger } from "./logger.js";
 
+/**
+ * The single source of truth for `Access-Control-Allow-Headers`.
+ *
+ * Browsers preflight any non-simple request header, so a header the client
+ * sends but this list omits makes the *whole* request fail — for the web
+ * build only, which is exactly the kind of gap that ships unnoticed from a
+ * mobile-first test pass. `X-Client-Version` / `X-Client-Platform` are sent by
+ * the app on every call (see `lib/client-version.ts`), so they belong here.
+ *
+ * NEVER widen this to `*`: these responses are served with
+ * `Access-Control-Allow-Credentials: true`, and the wildcard is invalid (and
+ * silently ignored) in credentialed mode.
+ */
+export const CORS_ALLOWED_REQUEST_HEADERS =
+  "Content-Type, Authorization, X-CSRF-Token, X-Retry-Count, X-Client-Version, X-Client-Platform";
+
 export class CorsHandler {
   /**
    * Get allowed CORS origin based on request origin and configured allowed origins
@@ -133,8 +149,7 @@ export class CorsHandler {
       const corsHeaders: Record<string, string> = {
         "Access-Control-Allow-Methods":
           "GET, POST, PUT, DELETE, PATCH, OPTIONS",
-        "Access-Control-Allow-Headers":
-          "Content-Type, Authorization, X-CSRF-Token, X-Retry-Count",
+        "Access-Control-Allow-Headers": CORS_ALLOWED_REQUEST_HEADERS,
         "Access-Control-Allow-Credentials": "true",
       };
       if (allowedOrigin) {
@@ -239,8 +254,7 @@ export class CorsHandler {
       const corsHeaders: Record<string, string> = {
         "Access-Control-Allow-Methods":
           "GET, POST, PUT, DELETE, PATCH, OPTIONS",
-        "Access-Control-Allow-Headers":
-          "Content-Type, Authorization, X-CSRF-Token",
+        "Access-Control-Allow-Headers": CORS_ALLOWED_REQUEST_HEADERS,
         "Access-Control-Allow-Credentials": "true",
       };
       if (allowedOrigin) {
@@ -271,8 +285,7 @@ export class CorsHandler {
     const allowedOrigin = CorsHandler.getAllowedOrigin(request, env);
     const corsHeaders: Record<string, string> = {
       "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, PATCH, OPTIONS",
-      "Access-Control-Allow-Headers":
-        "Content-Type, Authorization, X-CSRF-Token",
+      "Access-Control-Allow-Headers": CORS_ALLOWED_REQUEST_HEADERS,
       "Access-Control-Allow-Credentials": "true",
     };
     if (allowedOrigin) {

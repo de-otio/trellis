@@ -166,22 +166,37 @@ describe("UserExportHandler", () => {
       expect(job.region).toBe("EU"); // DEFAULT_REGION
     });
 
-    it("should work without EXPORT_JOBS_KV (graceful degradation)", async () => {
+    // BOTH REVERSED. "Graceful degradation" and "development mode" were the
+    // stated intent; the actual behaviour was that a GDPR Art. 15 data-access
+    // request returned a `pending` job that was never stored and never queued.
+    // getJobStatus then reported it as not-found, so the user saw an export
+    // accepted, then vanished. Nothing degraded gracefully — the request was
+    // dropped and success reported.
+    it("refuses rather than reporting an export it cannot track (no EXPORT_JOBS_KV)", async () => {
       delete mockEnv.EXPORT_JOBS_KV;
 
-      const job = await handler.createExportJob(mockSession, mockEnv, "json");
-
-      expect(job).toBeDefined();
-      expect(job.status).toBe("pending");
+      await expect(
+        handler.createExportJob(mockSession, mockEnv, "json"),
+      ).rejects.toThrow(/unavailable/i);
     });
 
-    it("should work without EXPORT_QUEUE (development mode)", async () => {
+    it("refuses rather than reporting an export that will never run (no EXPORT_QUEUE)", async () => {
       delete mockEnv.EXPORT_QUEUE;
 
-      const job = await handler.createExportJob(mockSession, mockEnv, "json");
+      await expect(
+        handler.createExportJob(mockSession, mockEnv, "json"),
+      ).rejects.toThrow(/unavailable/i);
+    });
 
-      expect(job).toBeDefined();
-      // Should still succeed, just logs a warning
+    it("does not queue a job whose status row could not be written", async () => {
+      // Ordering matters: a queued export with no status row looks to the user
+      // like one that was never requested.
+      delete mockEnv.EXPORT_JOBS_KV;
+
+      await expect(
+        handler.createExportJob(mockSession, mockEnv, "json"),
+      ).rejects.toThrow();
+      expect(mockExportQueue.send).not.toHaveBeenCalled();
     });
   });
 

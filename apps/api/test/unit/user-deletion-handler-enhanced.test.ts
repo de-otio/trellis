@@ -155,6 +155,101 @@ describe("UserDeletionHandlerEnhanced", () => {
     });
   });
 
+  // The confirmation-code check used to live inside `if (env.DELETE_JOBS_KV)`,
+  // so with no binding the whole block was skipped and any code confirmed the
+  // deletion. Nothing here covered that: every existing test wired the binding.
+  // The email step exists to prove mailbox control before an irreversible
+  // action, so skipping it removed the second factor rather than degrading it.
+  describe("confirmDeletion — the store is not optional", () => {
+    const requestedUser = {
+      id: "test-user-id",
+      email: "test@example.com",
+      deletionRequestedAt: new Date(),
+      deletionScheduledAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+      deletionConfirmedAt: null,
+    };
+
+    it("refuses to confirm when DELETE_JOBS_KV is missing", async () => {
+      mockDb.user.findUnique.mockResolvedValue(requestedUser);
+      delete (mockEnv as any).DELETE_JOBS_KV;
+
+      await expect(
+        handler.confirmDeletion("test-user-id", "123456", mockEnv),
+      ).rejects.toThrow(/unavailable/i);
+    });
+
+    it("does not mark the account confirmed when it cannot validate the code", async () => {
+      // The assertion that actually matters — a thrown error is worth nothing
+      // if the row was already updated.
+      mockDb.user.findUnique.mockResolvedValue(requestedUser);
+      delete (mockEnv as any).DELETE_JOBS_KV;
+
+      await expect(
+        handler.confirmDeletion("test-user-id", "123456", mockEnv),
+      ).rejects.toThrow();
+      expect(mockDb.user.update).not.toHaveBeenCalled();
+    });
+
+    it("propagates a store read failure rather than confirming", async () => {
+      mockDb.user.findUnique.mockResolvedValue(requestedUser);
+      mockDeleteJobsKV.get.mockRejectedValue(new Error("KV unreachable"));
+
+      await expect(
+        handler.confirmDeletion("test-user-id", "123456", mockEnv),
+      ).rejects.toThrow();
+      expect(mockDb.user.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("requestDeletion — the store is not optional", () => {
+    const freshUser = {
+      id: "test-user-id",
+      email: "test@example.com",
+      suspended: false,
+      deletionRequestedAt: null,
+      deletionScheduledAt: null,
+      deletionConfirmedAt: null,
+    };
+
+    it("refuses before touching the row when DELETE_JOBS_KV is missing", async () => {
+      // Order is the point. Suspending the account and THEN failing would set
+      // deletionRequestedAt, which makes every retry take the "already
+      // requested, please confirm" branch — with no code ever issued. That is
+      // a lockout, and it is why the check runs first.
+      mockDb.user.findUnique.mockResolvedValue(freshUser);
+      delete (mockEnv as any).DELETE_JOBS_KV;
+
+      await expect(
+        handler.requestDeletion(mockSession, mockEnv),
+      ).rejects.toThrow(/unavailable/i);
+      expect(mockDb.user.update).not.toHaveBeenCalled();
+    });
+
+    it("reverts the suspension when the code cannot be stored", async () => {
+      mockDb.user.findUnique.mockResolvedValue(freshUser);
+      mockDb.user.update.mockResolvedValue({});
+      mockDeleteJobsKV.put.mockRejectedValue(new Error("KV unreachable"));
+
+      await expect(
+        handler.requestDeletion(mockSession, mockEnv),
+      ).rejects.toThrow(/unavailable/i);
+
+      // Two updates: the mark, then the undo. There is no transaction across
+      // Postgres and the KV store, so the undo is hand-rolled.
+      expect(mockDb.user.update).toHaveBeenCalledTimes(2);
+      expect(mockDb.user.update).toHaveBeenLastCalledWith({
+        where: { id: "test-user-id" },
+        data: {
+          deletionRequestedAt: null,
+          deletionScheduledAt: null,
+          suspended: false,
+          suspendedAt: null,
+          suspendedReason: null,
+        },
+      });
+    });
+  });
+
   describe("confirmDeletion", () => {
     it("should accept valid confirmation code", async () => {
       const scheduledAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);

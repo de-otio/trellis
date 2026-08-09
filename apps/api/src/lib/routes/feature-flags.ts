@@ -6,6 +6,7 @@
 
 import { createPrisma } from "../../db.js";
 import { addCorsHeaders } from "../../worker.js";
+import { getPlatformFlags } from "../feature-flags.js";
 import { getLogger, Logger } from "../logger.js";
 import { corsMiddleware } from "../middleware.js";
 import { getFeatureFlagsAsync, getRegionConfig } from "../region-config.js";
@@ -41,8 +42,9 @@ export const featureFlagsRoutes: Route[] = [
         // Get feature flags with database toggle checks
         // Wrap in try-catch to handle database connection errors gracefully
         let features;
+        let db: ReturnType<typeof createPrisma> | undefined;
         try {
-          const db = createPrisma(env);
+          db = createPrisma(env);
           features = await getFeatureFlagsAsync(region, env as any, db);
         } catch (dbError) {
           logger.error(
@@ -52,6 +54,14 @@ export const featureFlagsRoutes: Route[] = [
           // Fall back to default config if database fails
           features = config.features;
         }
+
+        // `platform` block (evolvability plan §2.2/T9): additive-only,
+        // resolved from FeatureToggleService GLOBAL values (this endpoint
+        // is unauthenticated — no tenant context, so per-tenant overrides
+        // are not reflected here; see getPlatformFlags doc comment).
+        // getPlatformFlags never throws: a missing/failed db falls back to
+        // all-false defaults, same tolerance as the block above.
+        const platform = await getPlatformFlags(db);
 
         // Format response
         const response = securityHeaders.createSecureResponse(
@@ -65,6 +75,7 @@ export const featureFlagsRoutes: Route[] = [
             },
             endpoints: config.endpoints,
             timeouts: config.timeouts,
+            platform,
           }),
           { status: 200, headers: { "content-type": "application/json" } },
         );

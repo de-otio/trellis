@@ -143,3 +143,97 @@ export async function getFeatureFlags(
 export function getFeatureFlagsSync(tenantId?: string): FeatureFlags {
   return DEFAULT_FEATURES;
 }
+
+/**
+ * The `platform` block served by `GET /api/feature-flags` (plan
+ * evolvability §2.2 / T9). One boolean per platform-enforcement toggle
+ * key, resolved from `FeatureToggleService` GLOBAL values only — this
+ * endpoint is unauthenticated and carries no tenant context, so
+ * per-tenant overrides are NOT reflected here (they continue to act
+ * server-side at the point of enforcement). A toggle that does not
+ * exist in the database defaults to `false` (safe default, matching the
+ * existing FeatureFlagsManager convention).
+ *
+ * Kept as a standalone function rather than added to `FeatureFlagsManager`
+ * above: that class's `FeatureFlags` shape uses a different, incompatible
+ * key name (`entities`, not `entity_profiles`) for a subset of these
+ * toggles, is missing four of the eleven keys this contract requires, and
+ * is exercised by `feature-flags-async.test.ts` pinned to its exact
+ * 7-field shape. Extending it would either break that test or force a
+ * rename with no caller. `FeatureFlagsManager` remains dead code (no
+ * route imports it); this function is the "bypass" per plan §4/T9.
+ */
+export interface PlatformFlags {
+  posts: boolean;
+  comments: boolean;
+  friends: boolean;
+  sentiments: boolean;
+  feeds: boolean;
+  map: boolean;
+  events: boolean;
+  collections: boolean;
+  email_subscriptions: boolean;
+  year_in_review: boolean;
+  entity_profiles: boolean;
+}
+
+const PLATFORM_TOGGLE_KEYS: ReadonlyArray<[key: keyof PlatformFlags, toggle: string]> = [
+  ["posts", "posts_enabled"],
+  ["comments", "comments_enabled"],
+  ["friends", "friends_enabled"],
+  ["sentiments", "sentiments_enabled"],
+  ["feeds", "feeds_enabled"],
+  ["map", "map_enabled"],
+  ["events", "events_enabled"],
+  ["collections", "collections_enabled"],
+  ["email_subscriptions", "email_subscriptions_enabled"],
+  ["year_in_review", "year_in_review_enabled"],
+  ["entity_profiles", "entity_profiles_enabled"],
+];
+
+const DEFAULT_PLATFORM_FLAGS: PlatformFlags = {
+  posts: false,
+  comments: false,
+  friends: false,
+  sentiments: false,
+  feeds: false,
+  map: false,
+  events: false,
+  collections: false,
+  email_subscriptions: false,
+  year_in_review: false,
+  entity_profiles: false,
+};
+
+/**
+ * Resolve the `platform` block. Never throws — any error (including a
+ * database connection failure) falls back to all-false defaults, mirroring
+ * the route's existing tolerant-of-DB-failure behavior.
+ *
+ * @param db - Prisma client. When omitted, returns defaults without any
+ *             toggle lookups (mirrors `FeatureFlagsManager`'s no-db path).
+ */
+export async function getPlatformFlags(db?: unknown): Promise<PlatformFlags> {
+  if (!db) {
+    return DEFAULT_PLATFORM_FLAGS;
+  }
+
+  const logger = getLogger();
+  try {
+    const { FeatureToggleService } = await import("./feature-toggle-service.js");
+    const toggleService = new FeatureToggleService(db as any);
+
+    const entries = await Promise.all(
+      PLATFORM_TOGGLE_KEYS.map(async ([key, toggleKey]) => {
+        const toggle = await toggleService.getToggle(toggleKey, undefined);
+        const value = toggle === null ? DEFAULT_PLATFORM_FLAGS[key] : toggle.enabled;
+        return [key, value] as const;
+      }),
+    );
+
+    return Object.fromEntries(entries) as unknown as PlatformFlags;
+  } catch (error) {
+    logger.error("[FeatureFlags] Error checking platform toggles:", error);
+    return DEFAULT_PLATFORM_FLAGS;
+  }
+}

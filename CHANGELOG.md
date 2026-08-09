@@ -15,6 +15,253 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ## [Unreleased]
 
+### Changed
+
+- **`@de-otio/saas-foundation` floor raised to `^0.4.3`** (was `^0.4.0`), in
+  `apps/api` and `apps/worker`.
+
+  0.4.3 is what teaches `createDefaultS3Client` to read an optional,
+  S3-specific `S3_ACCESS_KEY_ID`/`S3_SECRET_ACCESS_KEY` pair. That matters
+  wherever object storage and message queues issue **separate** credentials: the
+  AWS SDK reads one credential pair from the environment for all services, so
+  the S3 client would otherwise sign as whichever principal owns the ambient
+  `AWS_*` pair and get a 403 — indistinguishable from a permissions problem.
+
+  The floor is load-bearing rather than incidental. The old `^0.4.0` caret
+  already *accepted* 0.4.3, but it also accepts 0.4.0, and an install that
+  resolved the older version would leave object-storage uploads failing with no
+  signal beyond a 403. Deployments on AWS are unaffected either way: with no
+  `S3_*` variable set the factory behaves exactly as before.
+
+### Added
+
+- **`POST /auth/register` — invitation-gated registration on a brokered IdP.**
+  On the Cognito path registration is client-side (`Amplify.Auth.signUp`, with
+  the PreSignUp trigger running the invitation gate server-side and the signup
+  attributes riding the trigger event). A brokered IdP has no hook the client
+  can reach, and the client must never hold the realm admin credential — so
+  **a Keycloak deployment could sign existing users in but could not register
+  new ones at all.** Worse than an outright failure: `POST /auth/magic-link`
+  never passes `forceCreate`, so an unknown email returned the deliberate
+  anti-enumeration `200 {"status":"sent"}` while creating no user and sending
+  no mail.
+
+  The endpoint validates the invitation code **before** creating the user
+  (fail-closed; a rejected attempt leaves nothing behind that could later be
+  sent a sign-in link), then creates it carrying the attributes the app
+  provisions from on first sign-in — `invitationCode`, `dateOfBirth`,
+  `guardianEmail`, `handle`, `signupMethod`. Those attributes are the point:
+  dropping them does not fail, it produces an un-gated adult account.
+
+  The address is **not** created pre-verified — the magic link that follows is
+  what proves it. Registration deliberately does not send that link, mirroring
+  the Cognito contract so one client flow drives both providers. An
+  already-registered email is indistinguishable from a fresh one (C-13/F10) and
+  is never rewritten, so a replayed registration cannot overwrite a date of
+  birth or re-consume an invitation. Its own 3/900s per-email bucket, separate
+  from the sign-in budget, failing closed. Returns 501 on a provider without
+  `registerUser` rather than quietly doing nothing.
+
+  Requires `@de-otio/saas-foundation` with the optional `registerUser` port
+  method.
+
+- **`GET /api/users/me` — the caller's resolved identity.** Returns
+  `{ userId, activeTenantId, email, globalRole, tenantSlug, tenantRole,
+  handle }`, authenticated, `private, no-store`, and included in the
+  curated OpenAPI document. It exists so clients stop decoding
+  `custom:userId` / `custom:activeTenantId` out of the ID token: those
+  claim names are written by a Cognito pre-token-generation Lambda and are
+  a per-deployment choice on any other OIDC issuer (a Keycloak realm maps
+  whatever its `claim_mappers` say — possibly nothing), so a
+  token-decoding client silently receives `null` and degrades. The server
+  resolves the identity from the token `sub` instead, so the endpoint
+  behaves identically across providers. It is also fresher than a claim:
+  `activeTenantId` is correct on the request after a tenant switch rather
+  than after the next token refresh. All fields but `email` come from the
+  identity `authMiddleware` already resolved; `email` costs one
+  primary-key read. Fails closed with `401` if the user row disappears
+  mid-request.
+
+- **Client-version policy endpoint + forced-upgrade backstop.**
+  `GET /api/app/version-policy` (new, unauthenticated, session-free, no
+  DB/KV read — the whole response comes from four optional env vars,
+  `Cache-Control: public, max-age=300`, `Access-Control-Allow-Origin: *`
+  without credentials) serves `minimumVersion`, `recommendedVersion`, and
+  `storeUrls.{android,ios}` — all nullable; unset means the mechanism is
+  dormant. Configured via four new optional env vars, boot-validated and
+  fail-closed on a malformed value: `CLIENT_MIN_SUPPORTED_VERSION`,
+  `CLIENT_RECOMMENDED_VERSION` (bounded semver `x.y.z[+-suffix]`, ≤64
+  chars), `CLIENT_STORE_URL_ANDROID`, `CLIENT_STORE_URL_IOS` (must be
+  `https:` on `play.google.com` / `apps.apple.com` respectively). Clients
+  send `X-Client-Version` / `X-Client-Platform` on every call; a new 426
+  backstop middleware returns a `StructuredError` body
+  (`UPGRADE_REQUIRED`, no URL in the body) when a configured minimum is
+  set and a parsed client version is strictly below it — equal versions
+  are allowed, `OPTIONS` is never intercepted, and absent/unparseable
+  headers pass through untouched (federation peers, health probes,
+  curl). Both new headers are added to `Access-Control-Allow-Headers` at
+  every CORS site the request/preflight path uses (`middleware.ts`,
+  `cors-handler.ts`), now sourced from one shared
+  `CORS_ALLOWED_REQUEST_HEADERS` constant. Version telemetry is emitted
+  only for a strictly parsed header, re-serialized from the parsed
+  triple (never the raw string), platform coerced to a closed vocabulary,
+  and capped at 100 distinct version dimensions per process. See the new
+  [Client Compatibility guide](docs/guides/client-compatibility.md).
+- **`platform` block on `GET /api/feature-flags`.** Additive: one boolean
+  per platform-level feature toggle (`posts`, `comments`, `friends`,
+  `sentiments`, `feeds`, `map`, `events`, `collections`,
+  `email_subscriptions`, `year_in_review`, `entity_profiles`), resolved
+  from `FeatureToggleService` **global** values only — this route is
+  unauthenticated and carries no tenant context, so per-tenant overrides
+  are not reflected here (they continue to act server-side at
+  enforcement). Existing response fields are unchanged. See
+  [Feature Flags](docs/guides/feature-flags.md).
+- **`extensionApiVersion` startup compatibility check.** `TrellisExtension`
+  gains an optional `extensionApiVersion` field — the
+  `@de-otio/trellis-extension-api` semver an extension was built against
+  (normally just `EXTENSION_API_VERSION` re-exported from the package).
+  Core validates it before serving: absent → one warning, never fatal;
+  a differing major (or, while the extension API is still `0.x`, a
+  differing minor) → **fails startup**, naming both versions; patch
+  drift → logged only; an unparseable declared value → a clean
+  validation failure, never a deep throw. See
+  [Extension API: `extensionApiVersion`](docs/reference/extension-api.md#extensionapiversion).
+- **squawk migration lint gate** (`migration-lint.yml`, new, `pull_request`
+  only): lints added/changed Prisma migration SQL (pre-existing migrations
+  exempt) against `.squawk.toml` (PG 16) using a pinned, checksum-verified
+  squawk `v2.62.0` binary — never `npx`/`latest`. Local reproduction via
+  `apps/api/scripts/lint-migrations.sh`.
+- **Migrations guide expansion**: safe-vs-unsafe Postgres DDL reference
+  table, the `lock_timeout` prologue convention for hand-edited
+  migrations, an expanded expand-contract sequence (dual-write →
+  backfill → shadow-read → toggle-flip → soak → contract, with an RDS
+  snapshot before the contract step), and a documented, time-boxed
+  pre-launch exemption from staged expand-contract. See
+  [Migrations](docs/guides/migrations.md).
+- **`migration-rehearsal.sh` + `migration-rehearsal.yml`** (new,
+  `workflow_dispatch` only): times `prisma migrate deploy` against a
+  configurable time budget so a migration touching a large/hot table can
+  be rehearsed before it ships.
+- **OpenAPI additivity gate** (`openapi-gate.yml`, new, `pull_request`
+  only): a committed snapshot (`apps/api/openapi.snapshot.json`) and a
+  pure, unit-tested classifier
+  (`apps/api/scripts/openapi-additivity-core.mjs`) fail a PR that removes
+  a path, method, or parameter from the currently-generated
+  `publicSpec: true` surface (field/type/enum/required-addition rules
+  are built and unit-tested against synthetic documents; they become
+  live once the OpenAPI generator emits richer schema detail — see that
+  script's own documented limitation). `npm run openapi:snapshot` /
+  `openapi:check`.
+- **Public API type snapshots + version lockstep gate**
+  (`api-snapshot-gate.yml`, new, `pull_request` only): committed `.d.ts`
+  snapshots for both publishable packages
+  (`packages/extension-api/etc/public-api.snapshot.d.ts`,
+  `apps/api/etc/public-api.snapshot.d.ts`), diff-gated in CI
+  (`npm run api-snapshot:update` / `:check`), plus
+  `check-extension-api-version.mjs` failing the build if
+  `EXTENSION_API_VERSION` and `packages/extension-api/package.json`'s
+  `version` drift apart.
+- **Backfill and rebuild script conventions**
+  (`apps/api/scripts/backfills/`, `apps/api/scripts/rebuilds/`): READMEs
+  documenting the batched/idempotent/throttled/resumable/observable
+  rules for one-time backfills versus repeatable denormalized-counter
+  rebuilds, a backfill `_template.ts`, and a worked rebuild example,
+  `rebuild-collection-item-count.ts` (batched, idempotent, `--dry-run`
+  by default). All seven denormalized counters in the current schema are
+  enumerated in the rebuilds README, with two documented as **not**
+  mechanically rebuildable from current rows (recorded, not
+  implemented — see the README for why).
+- New [Client Compatibility guide](docs/guides/client-compatibility.md):
+  the additive-only API evolution rules, the version-policy contract,
+  the `platform` flags block, and the alias-for-one-release standing
+  rule for cross-repo renames at either the HTTP or the npm boundary.
+
+### Changed
+
+- **`@de-otio/trellis-extension-api` 0.8.0.** Additive minor bump (from
+  0.7.0): adds the optional `TrellisExtension.extensionApiVersion` field
+  (see the startup check above and the
+  [Extension API reference](docs/reference/extension-api.md#extensionapiversion)).
+  No existing extension needs a change to keep working; declaring the
+  field is recommended, not required. **`apps/api`'s own dependency
+  constraint moves from `^0.7.0` to `^0.8.0`** — a caret range on a `0.x`
+  version does not accept a minor bump, so this was required for
+  `npm install` to resolve; consuming applications that pin
+  `@de-otio/trellis-extension-api` themselves (rather than accepting
+  trellis's own dependency resolution) should move to `^0.8.0` too.
+- **`npm publish --provenance` enabled** in `publish.yml` now that
+  `de-otio/trellis` is a public repository: npm can verify the sigstore
+  provenance bundle against the GitHub Actions source repository, so
+  published tarballs carry a verifiable build attestation. Requires no
+  new secrets — Node 24 + OIDC trusted publishing were already wired.
+
+### Fixed
+
+- **The nightly media purge builds its S3 client through the foundation
+  factory.** `apps/worker` constructed one from `region` alone. Off AWS the
+  missing half is *credentials*, not the endpoint: `AWS_ENDPOINT_URL_S3` is
+  resolved natively by `@smithy/core`, but the SDK reads a **single** ambient
+  `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` pair for every service, so where
+  that pair belongs to the queue service the S3 client signs as the wrong
+  principal and every delete returns 403.
+
+  The failure was silent by construction. The purge defers the hard-delete of
+  any row whose object delete failed — deliberately, so it self-heals — which
+  makes a 403 loop indistinguishable from a healthy no-op: nothing surfaces,
+  rows never drain, the bucket grows. A source-scan test now forbids direct
+  `S3Client` construction outside `src/lambda/**`, which runs only where the
+  ambient pair is correct.
+
+- **Health and abuse dashboards no longer report missing data as good news.**
+  Two admin surfaces derived a clean bill of health from the *absence* of a
+  reading:
+
+  - `evaluateAbuseMetrics` degraded both data sources to zeros on failure, and
+    zeros produced `blockRate 0` → `overallStatus "low"` → the recommendation
+    *"No abuse concerns detected in this time period."*
+  - `evaluateScalingHealth` derives `"healthy"` from the absence of red/yellow
+    indicators, and a CloudWatch failure *removes* the RDS indicators rather
+    than reddening them — manufacturing exactly that absence.
+
+  Both now distinguish "nothing happened" from "nothing was measured", gaining
+  a `dataQuality: { degraded, unavailable[] }` field and an `"unknown"`
+  `overallStatus`; the all-clear recommendation is suppressed while any source
+  is down. **Degraded is a floor, not a ceiling** — a surviving source that
+  reports a real problem still escalates to `critical`/`action-needed`, so one
+  source failing cannot mask the other's finding.
+
+  Neither type is exported from the package entrypoint or present in the
+  OpenAPI snapshot, so the new field and enum member are additive for consumers
+  of the published surface.
+
+- **`SessionManager.getSession` now resolves the trellis user id on
+  non-Cognito issuers, and fails closed when it cannot.** Trellis has two
+  independent Bearer-token paths; 0.24.0 wired Keycloak JIT claim
+  resolution into `auth-middleware.ts` only. The other —
+  `SessionManager.getSession` Strategy 1a, used by ~46 call sites
+  including every media route — still read
+  `claims["custom:userId"] || claims.sub`. Keycloak issues no
+  `custom:userId` (its realm protocol mappers emit deployer-chosen claim
+  names), so `session.userId` silently became the IdP `sub`: a UUID,
+  matching no `User.id` (a cuid). Every affected route answered
+  *"User not found"* (404) — the same failure mode as the 0.12.1/0.12.2
+  Cognito-era bug, reopened by the provider swap. Strategy 1a now
+  (a) validates the claim against `CUID_RE` instead of trusting it,
+  (b) falls back to the same server-side resolution auth-middleware uses
+  (claims cache → DB by `sub` → first-contact provisioning), which also
+  supplies `activeTenantId` and the global role, and (c) **returns `null`
+  rather than seating a non-cuid id**.
+
+  **Behaviour change:** a verified token that resolves to no trellis user
+  now yields **401** instead of a session that 404s deeper in the stack.
+  On Cognito this is reachable only via the known intermittent
+  pre-token-generation race (a first token missing `custom:userId`); such
+  requests previously produced a confusing 404 and now fail cleanly,
+  prompting the client to re-authenticate. Deployments whose tokens always
+  carry `custom:userId` are unaffected, and the JIT resolver remains a
+  no-op unless `IDENTITY_PROVIDER=keycloak`, so the Cognito hot path skips
+  it entirely.
+
 ## [0.24.0] — 2026-08-06
 
 Closes out the `0.24.0-alpha.0`–`alpha.3` series; entries below cover

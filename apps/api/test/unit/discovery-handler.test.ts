@@ -437,6 +437,16 @@ describe("DiscoveryHandler", () => {
     });
 
     it("returns 503 with jitter delay on pool-acquire-timeout (E3)", async () => {
+      // Asserts the delay that was SCHEDULED, not wall-clock elapsed time.
+      //
+      // The previous version timed the call and required >= 50ms. setTimeout is
+      // allowed to fire a hair early (timer rounding/coalescing), so a 50ms
+      // sleep can measure 49 — which is exactly how this failed in CI. Timing
+      // the clock also made the suite genuinely wait out the 50-150ms jitter.
+      //
+      // Reading the requested delay tests the actual contract (a randomised
+      // back-off in the documented band) with no dependence on the clock, and
+      // the stub resolves immediately so the test no longer sleeps at all.
       mockGraphService.discoverByGraph.mockRejectedValue(
         new GraphConnectionError("connection acquisition timed out"),
       );
@@ -444,14 +454,36 @@ describe("DiscoveryHandler", () => {
       const session = makeSession("err-user-e3");
       const request = makeRequest("/api/discover/graph");
 
-      const start = Date.now();
-      const response = await handler.handleDiscoverByGraph(request, session, mockEnv, {} as any);
-      const elapsed = Date.now() - start;
+      const scheduledDelays: number[] = [];
+      const realSetTimeout = globalThis.setTimeout;
+      const setTimeoutSpy = vi
+        .spyOn(globalThis, "setTimeout")
+        .mockImplementation(((callback: any, ms?: number) => {
+          scheduledDelays.push(ms ?? 0);
+          return realSetTimeout(callback, 0);
+        }) as unknown as typeof globalThis.setTimeout);
 
-      expect(response.status).toBe(503);
-      const body = await response.json();
-      expect(body.error).toBe("service_unavailable");
-      expect(elapsed).toBeGreaterThanOrEqual(50);
+      try {
+        const response = await handler.handleDiscoverByGraph(
+          request,
+          session,
+          mockEnv,
+          {} as any,
+        );
+
+        expect(response.status).toBe(503);
+        const body = await response.json();
+        expect(body.error).toBe("service_unavailable");
+
+        // 50 + random()*100 → [50, 150). Asserting the band rather than one
+        // value keeps the production jitter free to stay random.
+        expect(
+          scheduledDelays.some((ms) => ms >= 50 && ms < 150),
+          `expected a back-off in [50,150); scheduled: ${JSON.stringify(scheduledDelays)}`,
+        ).toBe(true);
+      } finally {
+        setTimeoutSpy.mockRestore();
+      }
     });
 
     it("returns 500 on generic errors from discoverByGraph", async () => {

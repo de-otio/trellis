@@ -25,3 +25,8 @@ npm install @de-otio/trellis-extension-api
 import type { TrellisExtension } from "@de-otio/trellis-extension-api";
 import { EXTENSION_API_VERSION } from "@de-otio/trellis-extension-api";
 ```
+
+Declare `extensionApiVersion: EXTENSION_API_VERSION` on your `TrellisExtension`
+so Trellis core checks compatibility for you at startup, instead of comparing
+`EXTENSION_API_VERSION` by hand — see the
+[`extensionApiVersion` reference](../../docs/reference/extension-api.md#extensionapiversion).

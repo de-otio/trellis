@@ -377,6 +377,17 @@ export class FeedHandler {
       // every tenant's posts with no error anywhere.
       const tenantId = activeTenantId;
 
+      // Fail loudly rather than silently widening. Prisma DROPS a `where` key
+      // whose value is `undefined`, so a falsy tenant here would remove the
+      // tenant predicate from the post query below and return every tenant's
+      // posts — with no error anywhere. Throwing keeps that failure mode
+      // impossible to reach silently.
+      if (!tenantId) {
+        throw new Error(
+          "getHomeFeed: activeTenantId is required for tenant isolation",
+        );
+      }
+
       // Build taxonomy filter
       let taxonomyFilter: any = undefined;
       let userEntityTaxonIds: string[] = [];

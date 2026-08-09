@@ -21,7 +21,10 @@
  *      local work but never the intent of a prod deploy).
  *   3. Optional keys validated for FORMAT when set (any stage): the numeric
  *      MEDIA_* caps/limits, the MEDIA_*_JSON allowlists/presets,
- *      `MEDIA_CANONICAL_FORMAT`/`_QUALITY`, and `ACTIVITYPUB_ENABLED`.
+ *      `MEDIA_CANONICAL_FORMAT`/`_QUALITY`, `ACTIVITYPUB_ENABLED`, and the four
+ *      client-version-policy keys (`CLIENT_MIN_SUPPORTED_VERSION`,
+ *      `CLIENT_RECOMMENDED_VERSION`, `CLIENT_STORE_URL_ANDROID`,
+ *      `CLIENT_STORE_URL_IOS`).
  *      Previously an unparsable value was silently replaced by a dev default
  *      (or fail-closed) at runtime; at boot we treat it as operator misconfig
  *      and refuse to start. The runtime resolvers in env.ts keep their
@@ -36,6 +39,13 @@
  */
 
 import { z } from "zod";
+
+import {
+  ALLOWED_STORE_URL_HOSTS,
+  MAX_CLIENT_VERSION_LENGTH,
+  isAllowedStoreUrl,
+  parseClientVersion,
+} from "./lib/client-version.js";
 
 /** Boot-validation stage mode. Only "prod" enables the strict tier. */
 export type BootStage = "prod" | "dev";
@@ -92,6 +102,27 @@ const jsonStringArray = z.string().refine(
   },
   { message: "must be a JSON array of strings" },
 );
+
+/**
+ * A client version string (`CLIENT_MIN_SUPPORTED_VERSION`,
+ * `CLIENT_RECOMMENDED_VERSION`). Uses the SAME bounded parser the request path
+ * uses (`lib/client-version.ts`), so a value that boots is a value the 426
+ * backstop and the policy endpoint will both honour — a version that parses
+ * here but not there would silently disable the mechanism.
+ */
+const clientVersionString = z.string().refine((raw) => parseClientVersion(raw) !== null, {
+  message: `must be a version of the form x.y.z (optionally with a -pre or +build suffix), at most ${MAX_CLIENT_VERSION_LENGTH} characters`,
+});
+
+/**
+ * A store URL (`CLIENT_STORE_URL_ANDROID`, `CLIENT_STORE_URL_IOS`). Must be
+ * https on an official store host: this URL is handed to a client that has
+ * been told it cannot proceed, so a typo'd or attacker-suggested origin here
+ * would be maximally effective. Boot-fail rather than serve it.
+ */
+const storeUrlString = z.string().refine(isAllowedStoreUrl, {
+  message: `must be an https:// URL whose host is one of: ${ALLOWED_STORE_URL_HOSTS.join(", ")}`,
+});
 
 /**
  * MEDIA_THRESHOLDS_JSON: a JSON object mapping category → { review, quarantine }
@@ -237,6 +268,15 @@ export function buildBootEnvSchema(stage: BootStage) {
       // Feature flags: fail-closed at runtime, but "TRUE"/"yes"/"1" is operator
       // misconfig (they meant to enable it) — reject at boot.
       ACTIVITYPUB_ENABLED: z.enum(["true", "false"]).optional(),
+
+      // Tier 3 — client version policy (all optional; unset = dormant). A
+      // malformed value here is the difference between "the forced-upgrade
+      // mechanism is armed" and "it silently does nothing", so it is operator
+      // misconfig and refuses the boot rather than degrading at runtime.
+      CLIENT_MIN_SUPPORTED_VERSION: clientVersionString.optional(),
+      CLIENT_RECOMMENDED_VERSION: clientVersionString.optional(),
+      CLIENT_STORE_URL_ANDROID: storeUrlString.optional(),
+      CLIENT_STORE_URL_IOS: storeUrlString.optional(),
     })
     .superRefine((env, ctx) => {
       // ── Database: one of the three accepted forms ─────────────────────────

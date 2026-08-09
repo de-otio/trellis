@@ -6,7 +6,13 @@
  */
 
 import { DynamoKv, createDefaultDynamoClient } from "@de-otio/saas-foundation/kv";
-import { resolveKvProvider, setKvSqlExecutor, makeKvSqlExecutor } from "./lib/kv/kv-provider.js";
+import {
+  resolveKvProvider,
+  setKvSqlExecutor,
+  getKvSqlExecutor,
+  makeKvSqlExecutor,
+} from "./lib/kv/kv-provider.js";
+import { PostgresKv } from "./lib/kv/postgres-kv-namespace.js";
 import { S3Storage, createDefaultS3Client } from "@de-otio/saas-foundation/storage";
 import { SqsQueue, createDefaultSqsClient } from "@de-otio/saas-foundation/queue";
 import {
@@ -162,6 +168,22 @@ export interface Env {
    * infrastructure layer from `config.features.activityPub`.
    */
   ACTIVITYPUB_ENABLED: boolean;
+
+  // ── Client version policy (served by GET /api/app/version-policy) ─────────
+  // All four are OPTIONAL and all four are DORMANT by default: unset means the
+  // endpoint returns nulls and the 426 backstop is a no-op. Values are
+  // operational configuration, never compiled constants — the npm tarball is
+  // public, so a hard-coded minimum version would be a published one.
+  // Formats are enforced at boot in env-schema.ts (bounded semver; store URLs
+  // must be https on an allow-listed store host).
+  /** Oldest client version the server still accepts; older ones get 426. */
+  CLIENT_MIN_SUPPORTED_VERSION?: string;
+  /** Version the client should nudge users toward (never enforced). */
+  CLIENT_RECOMMENDED_VERSION?: string;
+  /** Android store URL (https, play.google.com). */
+  CLIENT_STORE_URL_ANDROID?: string;
+  /** iOS store URL (https, apps.apple.com). */
+  CLIENT_STORE_URL_IOS?: string;
 
   /**
    * Trusted-proxy mode for client-IP derivation. See
@@ -558,6 +580,29 @@ export interface Env {
     maxPerUser: number;
   };
   // --- end Collections config seam ---------------------------------------------
+
+  // --- Comment rate-limit config seam ------------------------------------------
+  // Threshold-secrecy seam (CLAUDE.md rule 8): these were compiled-in constants
+  // (`const maxPerMinute = 10`, `const waitTime = 30000`) sitting in a public
+  // npm tarball — i.e. published limits, telling anyone who reads them exactly
+  // how to pace an abuse campaign to stay under the ceiling. Resolved by
+  // resolveCommentRateLimitEnv(); the middleware reads env.commentRateLimit.*
+  // and never hardcodes.
+  commentRateLimit: {
+    /** Max comments per user per minute. Source: COMMENT_RATE_LIMIT_PER_MINUTE. */
+    perMinute: number;
+    /** Cooldown between a user's comments on ONE post, in seconds. Source: COMMENT_RATE_LIMIT_POST_COOLDOWN_SECONDS. */
+    postCooldownSeconds: number;
+    /**
+     * What to do when the rate-limit store THROWS. "closed" denies (the
+     * default: an abuse control that cannot count must not wave traffic
+     * through); "open" restores the previous allow-everything behaviour for
+     * operators who would rather lose the control than the endpoint.
+     * Source: COMMENT_RATE_LIMIT_FAIL_MODE.
+     */
+    failMode: "closed" | "open";
+  };
+  // --- end Comment rate-limit config seam --------------------------------------
 
   // --- Events primitive config seam (events-primitive/README.md §4.8) ---------
   // Threshold-secrecy seam (CLAUDE.md rule 8): every operational cap/threshold
@@ -1019,6 +1064,38 @@ export function resolveCollectionEnv(
 }
 
 /**
+ * Resolve the comment rate-limit config block (threshold-secrecy, rule 8).
+ *
+ * Single-writer: the ONLY place that reads COMMENT_RATE_LIMIT_* env vars. The
+ * defaults reproduce the previous compiled-in behaviour exactly (10/min, 30s
+ * per-post cooldown) so this is a config seam, not a policy change — except
+ * `failMode`, which deliberately flips: see the middleware for why.
+ */
+export function resolveCommentRateLimitEnv(
+  source: NodeJS.ProcessEnv = process.env,
+): {
+  commentRateLimit: {
+    perMinute: number;
+    postCooldownSeconds: number;
+    failMode: "closed" | "open";
+  };
+} {
+  return {
+    commentRateLimit: {
+      perMinute: parsePositiveInt(source.COMMENT_RATE_LIMIT_PER_MINUTE, 10),
+      postCooldownSeconds: parsePositiveInt(
+        source.COMMENT_RATE_LIMIT_POST_COOLDOWN_SECONDS,
+        30,
+      ),
+      // Anything other than an explicit "open" is closed. An unset, misspelt
+      // or empty value must not silently disable the control — that is the
+      // failure mode this whole change exists to remove.
+      failMode: source.COMMENT_RATE_LIMIT_FAIL_MODE === "open" ? "open" : "closed",
+    },
+  };
+}
+
+/**
  * Resolve the synthetic-content provenance config block (AI Act Art. 50, D15).
  *
  * Single-writer: the ONLY place that reads PROVENANCE_* env vars. An
@@ -1361,14 +1438,6 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     );
   }
 
-  const kvCursorSecret = sessionSecret || process.env.CURSOR_SECRET;
-  const kv = (namespace: string) =>
-    new DynamoKv(dynamoClient, {
-      tableName: kvTableName,
-      namespace,
-      ...(kvCursorSecret ? { cursorSecret: kvCursorSecret } : {}),
-    });
-
   // Resolve DB URL: local DATABASE_URL wins; else fetch from Secrets Manager at
   // runtime. The resulting string stays on the returned Env object only — we do
   // NOT write it to process.env so it can't leak through env-var exposure.
@@ -1378,11 +1447,40 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
   // KvStore hot-spot namespaces resolve to DynamoKvStore over their byte-compat
   // layouts — existing AWS deployments see ZERO change. "postgres" builds a
   // small dedicated KV pool (bypassing the tenant-scoped Prisma pool) and
-  // registers it so the same namespaces resolve to PostgresKvStore. The 13
-  // Cloudflare-compat string-KV bindings above are untouched (they stay DynamoKv).
-  if (resolveKvProvider() === "postgres") {
+  // registers it so the same namespaces resolve to PostgresKvStore.
+  //
+  // MUST stay above the `kv()` helper below: the string-KV bindings now read
+  // the same executor, and a `kv()` call that ran first would fail closed.
+  const kvProvider = resolveKvProvider();
+  if (kvProvider === "postgres") {
     setKvSqlExecutor(await makeKvSqlExecutor(databaseUrl));
   }
+
+  const kvCursorSecret = sessionSecret || process.env.CURSOR_SECRET;
+  // The 13 Cloudflare-compat string-KV bindings. These used to construct a
+  // DynamoKv UNCONDITIONALLY while the typed `getKvStore()` honoured
+  // KV_PROVIDER — a split-brain in which, on a Postgres deployment, the
+  // invitation pre-signup record went to `kv_entries` and the invitation
+  // session token went to a DynamoDB endpoint that does not resolve. Both
+  // ports now follow the same switch. See lib/kv/postgres-kv-namespace.ts.
+  const kv = (namespace: string): KVNamespace => {
+    if (kvProvider === "postgres") {
+      const executor = getKvSqlExecutor();
+      if (executor === undefined) {
+        // Fail closed, loudly. Serving with a silently-absent KV would disable
+        // the invitation gate, CSRF-token validation and the session blocklist.
+        throw new Error(
+          `KV_PROVIDER=postgres but the KV SQL executor is not wired (buildEnv) for namespace=${namespace}`,
+        );
+      }
+      return new PostgresKv(executor, { namespace });
+    }
+    return new DynamoKv(dynamoClient, {
+      tableName: kvTableName,
+      namespace,
+      ...(kvCursorSecret ? { cursorSecret: kvCursorSecret } : {}),
+    });
+  };
 
   return {
     // Realtime transport seam: resolveRealtimeEnv() reads the REALTIME_* vars
@@ -1406,6 +1504,8 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     ...resolveEmailSubscriptionEnv(),
     // Collections config seam (§3): resolveCollectionEnv() reads COLLECTION_* vars.
     ...resolveCollectionEnv(),
+    // Comment rate-limit seam (rule 8): reads COMMENT_RATE_LIMIT_* vars.
+    ...resolveCommentRateLimitEnv(),
     // Events-primitive config seam (§4.8): resolveEventEnv() reads EVENT_* vars.
     ...resolveEventEnv(),
     // Provenance config seam (D15): reads PROVENANCE_* vars.
@@ -1478,6 +1578,14 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     // Federation master switch — fail closed: anything other than the exact
     // string "true" leaves federation disabled.
     ACTIVITYPUB_ENABLED: process.env.ACTIVITYPUB_ENABLED === "true",
+
+    // Client version policy — raw passthrough; boot validation (env-schema.ts)
+    // has already rejected malformed values, and resolveVersionPolicy() treats
+    // anything unparseable as "unset" (dormant) as defense in depth.
+    CLIENT_MIN_SUPPORTED_VERSION: process.env.CLIENT_MIN_SUPPORTED_VERSION,
+    CLIENT_RECOMMENDED_VERSION: process.env.CLIENT_RECOMMENDED_VERSION,
+    CLIENT_STORE_URL_ANDROID: process.env.CLIENT_STORE_URL_ANDROID,
+    CLIENT_STORE_URL_IOS: process.env.CLIENT_STORE_URL_IOS,
 
     // Trusted-proxy hint for client-IP derivation; defaults to "none".
     TRUSTED_PROXY: process.env.TRUSTED_PROXY,

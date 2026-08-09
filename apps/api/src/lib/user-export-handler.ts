@@ -204,31 +204,45 @@ export class UserExportHandler {
       expiresAt: expiresAt.toISOString(),
     };
 
-    // Store job in KV
-    if (env.EXPORT_JOBS_KV) {
-      await env.EXPORT_JOBS_KV.put(
-        `job:${jobId}`,
-        JSON.stringify(job),
-        { expirationTtl: 7 * 24 * 60 * 60 }, // 7 days TTL
+    // Both writes below used to be wrapped in `if (env.X)`, so a deployment
+    // missing either binding returned a `pending` job that was never stored
+    // and never queued. The caller sees success; `getJobStatus` then reports
+    // "not found"; the export never happens. This is the GDPR Art. 15 access
+    // right, so reporting an accepted request that does not exist is the one
+    // outcome that must not be possible.
+    //
+    // (The old `else` branch here claimed a "process immediately" fallback for
+    // development. There was no fallback — it logged a warning and returned.)
+    if (!env.EXPORT_JOBS_KV) {
+      getLogger().error(
+        "[UserExportHandler] EXPORT_JOBS_KV binding is missing — refusing rather than reporting an export that cannot be tracked.",
       );
+      throw new Error("Data export is unavailable. Please try again later.");
+    }
+    if (!env.EXPORT_QUEUE) {
+      getLogger().error(
+        "[UserExportHandler] EXPORT_QUEUE binding is missing — refusing rather than reporting an export that will never run.",
+      );
+      throw new Error("Data export is unavailable. Please try again later.");
     }
 
-    // Queue the job for processing
-    if (env.EXPORT_QUEUE) {
-      await env.EXPORT_QUEUE.send({
-        jobId,
-        userId: session.userId,
-        email: session.email,
-        format,
-        region, // PREPARATORY: Include region in queue message
-      });
-    } else {
-      // Fallback: process immediately if queue not available (for development)
-      getLogger().warn(
-        "[UserExportHandler] EXPORT_QUEUE not configured, processing immediately",
-      );
-      // Note: In production, this should not happen
-    }
+    // Store job in KV
+    await env.EXPORT_JOBS_KV.put(
+      `job:${jobId}`,
+      JSON.stringify(job),
+      { expirationTtl: 7 * 24 * 60 * 60 }, // 7 days TTL
+    );
+
+    // Queue the job for processing. Ordered after the KV write on purpose: a
+    // queued job whose status row is missing looks to the user like an export
+    // that was never requested.
+    await env.EXPORT_QUEUE.send({
+      jobId,
+      userId: session.userId,
+      email: session.email,
+      format,
+      region, // PREPARATORY: Include region in queue message
+    });
 
     return job;
   }

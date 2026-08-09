@@ -64,6 +64,15 @@ const PHASE0_NEW_FILES = [
   "src/lib/provenance/metrics.ts",
   "src/lib/metadata/provenance-reader.ts",
   "src/lib/activitypub/provenance-jsonld.ts",
+  // Evolvability mechanisms — forced-upgrade version policy (T7). T9's
+  // feature-flags `platform` block and T5's extensionApiVersion startup
+  // check are existing-file edits (routes/feature-flags.ts,
+  // feature-flags.ts, extension-validator.ts, extension.ts) — the whole-file
+  // `include` mechanism here isn't diff-aware, so whitelisting an
+  // already-large existing file would gate on code this plan didn't touch;
+  // those edits are covered by their own suites but not added to this list.
+  "src/lib/client-version.ts",
+  "src/lib/routes/app-meta.ts",
 ];
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
