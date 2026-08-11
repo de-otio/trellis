@@ -91,16 +91,32 @@ async function raceDeadline<T>(
   const controller = new AbortController();
   // Honour a signal the caller already owns: an outer abort must abort inward
   // too, or a cancelled request keeps a provider call alive behind it.
+  const forwardAbort = (): void => controller.abort();
+  let listening = false;
   if (caller?.signal !== undefined) {
-    if (caller.signal.aborted) controller.abort();
-    else
-      caller.signal.addEventListener("abort", () => controller.abort(), {
-        once: true,
-      });
+    if (caller.signal.aborted) {
+      controller.abort();
+    } else {
+      caller.signal.addEventListener("abort", forwardAbort, { once: true });
+      listening = true;
+    }
   }
 
   let settled = false;
   let timer: unknown;
+
+  /**
+   * Detach from the caller's signal once this call is over. Without this a
+   * long-lived signal reused across many calls accumulates one listener per
+   * call — a slow leak that eventually announces itself as a max-listeners
+   * warning and, before that, as memory nobody attributes to moderation.
+   */
+  const release = (): void => {
+    if (listening && caller?.signal !== undefined) {
+      caller.signal.removeEventListener("abort", forwardAbort);
+      listening = false;
+    }
+  };
 
   const work = run({ ...caller, signal: controller.signal });
 
@@ -108,6 +124,7 @@ async function raceDeadline<T>(
     timer = timers.setTimeout(() => {
       if (settled) return;
       settled = true;
+      release();
       controller.abort();
       reject(deadlineExceeded(operation));
     }, timeoutMs);
@@ -117,12 +134,14 @@ async function raceDeadline<T>(
         if (settled) return; // Late success: discarded, by design.
         settled = true;
         timers.clearTimeout(timer);
+        release();
         resolve(value);
       },
       (err) => {
         if (settled) return; // Late failure: swallowed, never unhandled.
         settled = true;
         timers.clearTimeout(timer);
+        release();
         reject(err);
       },
     );

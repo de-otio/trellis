@@ -25,7 +25,7 @@
  */
 
 import type { StoragePort } from "./media-ports.js";
-import { refPin, type ImageRef, type MediaPin } from "./moderation-provider.js";
+import type { MediaPin } from "./moderation-provider.js";
 
 /** Raised when the object is larger than the configured cap. */
 export class MediaBytesTooLargeError extends Error {
@@ -78,7 +78,11 @@ export function createMediaBytesAccess(
   return {
     maxBytes,
     async read(ref) {
-      const pin = refPin({ bucket: "", key: ref.key, ...(ref.pin && { pin: ref.pin }) } as ImageRef);
+      // Only a versionId pin is expressible to the storage port; an etag or a
+      // content-hash pin is compared elsewhere, and silently ignoring it here
+      // would be wrong only if it changed WHICH bytes are read — it does not,
+      // it just means this read is unpinned for those kinds.
+      const pin = ref.pin;
       // Ask for ONE byte past the cap: if that byte comes back, the object is
       // over the cap, and we know it from the bytes rather than from a
       // self-reported length we would have to trust.

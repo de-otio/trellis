@@ -9,5 +9,6 @@ order: 2
 
 Step-by-step instructions for specific tasks: running migrations, using
 feature flags, keeping shipped clients compatible across API changes,
-configuring an identity provider, classifying and listing your organization,
-and operating the service.
+configuring an identity provider,
+[implementing a media-moderation provider](./implementing-a-media-moderation-provider.md),
+classifying and listing your organization, and operating the service.
