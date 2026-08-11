@@ -26,10 +26,35 @@
 import type { ModerationDecision } from "./media-lifecycle.js";
 export type { ModerationDecision };
 
+/**
+ * How a stored object is pinned to the EXACT bytes a moderation job scanned.
+ *
+ * Stores differ in what they can offer: object versioning (`versionId`), an
+ * entity tag (`etag`), or a caller-computed digest (`contentHash`). The union
+ * lets an adapter carry whichever its store supports without core knowing which.
+ *
+ * OPAQUE CAPTURE-AND-COMPARE. A pin is captured once, at job start, and later
+ * compared for equality against the value recorded then — it is NEVER
+ * recomputed from bytes and never interpreted. In particular an `etag` is not a
+ * content digest on every store (a multipart upload's ETag is a digest of
+ * digests plus a part count), so treating one as a hash would silently compare
+ * unequal for identical bytes. Equality is `kind` AND `value`; a differing or
+ * absent pin is drift, and drift fails closed.
+ */
+export interface MediaPin {
+  readonly kind: "versionId" | "etag" | "contentHash";
+  readonly value: string;
+}
+
 /** An opaque reference to an already-stored image object (key + bucket handle). */
 export interface ImageRef {
   readonly bucket: string;
   readonly key: string;
+  /**
+   * Pin the reference to the EXACT stored bytes (AR-SEC F3), so a later
+   * overwrite of the same key can never change what a started job scanned.
+   */
+  readonly pin?: MediaPin;
 }
 
 /** An opaque reference to an already-stored object in S3-compatible storage. */
@@ -37,12 +62,41 @@ export interface S3Ref {
   readonly bucket: string;
   readonly key: string;
   /**
-   * Pin the reference to an EXACT stored object version (AR-SEC F3). When set,
-   * the provider adapter must moderate that specific version (Rekognition:
-   * `Video.S3Object.Version`), so a later overwrite of the same key can never
-   * change what a started job actually scanned.
+   * Pin the reference to the EXACT stored bytes (AR-SEC F3), so a later
+   * overwrite of the same key can never change what a started job scanned.
+   */
+  readonly pin?: MediaPin;
+  /**
+   * @deprecated Alias for `pin: { kind: "versionId", value }`. Kept so existing
+   * consumers keep compiling and their refs keep pinning; new code sets `pin`.
+   * When both are present `pin` wins.
    */
   readonly versionId?: string;
+}
+
+/**
+ * The pin a ref carries, normalised across the `pin` field and the deprecated
+ * `versionId` alias. Returns `null` when the ref is unpinned — which callers
+ * must treat as "cannot certify these bytes", never as "any bytes will do".
+ */
+export function refPin(ref: ImageRef | S3Ref): MediaPin | null {
+  if (ref.pin !== undefined) {
+    return ref.pin.value.length > 0 ? ref.pin : null;
+  }
+  const legacy = (ref as S3Ref).versionId;
+  return typeof legacy === "string" && legacy.length > 0
+    ? { kind: "versionId", value: legacy }
+    : null;
+}
+
+/**
+ * Opaque pin equality. Two pins match iff both are present, of the same kind,
+ * and byte-identical. A missing pin on either side is NOT a match — absence of
+ * evidence is not evidence of sameness.
+ */
+export function pinsEqual(a: MediaPin | null, b: MediaPin | null): boolean {
+  if (a === null || b === null) return false;
+  return a.kind === b.kind && a.value === b.value;
 }
 
 /** A single classifier label. `category` is an OPAQUE token, never a real-category string. */
@@ -60,6 +114,32 @@ export interface ModerationVerdict {
   readonly decision: ModerationDecision;
   readonly labels: ReadonlyArray<ModerationLabel>;
   readonly provider: string;
+  /**
+   * The classifier/taxonomy build that produced this verdict, as an OPAQUE
+   * string the provider chooses (a model id, a taxonomy version, a build tag).
+   * Core never parses it — it only compares it for equality against the version
+   * the operator pinned, so a silent taxonomy change cannot keep approving
+   * against a category map that no longer means what it did.
+   *
+   * OPTIONAL, because this is a published seam and a required field would break
+   * every existing adapter. The consequence is stated rather than hidden: under
+   * a pin mode that demands a version, ABSENCE is unverifiable and therefore
+   * `review` — a provider that reports nothing gets no approvals.
+   */
+  readonly modelVersion?: string;
+}
+
+/**
+ * Per-call options every seam method accepts.
+ *
+ * `signal` lets the caller abort in-flight provider work when its deadline
+ * expires. Aborting is only half the contract: the DECISION is committed at the
+ * deadline, so a provider that resolves afterwards must not be able to overturn
+ * the fail-closed verdict already recorded. The deadline wrapper enforces both
+ * halves; an adapter only needs to honour the signal.
+ */
+export interface ModerationCallOptions {
+  readonly signal?: AbortSignal;
 }
 
 /**
@@ -67,14 +147,88 @@ export interface ModerationVerdict {
  * verdict directly); video moderation is async (start → poll), mirroring the
  * cloud provider's job model. Audio reuses the text-moderation path and adds no
  * method here.
+ *
+ * A provider that can only classify STILL IMAGES satisfies this seam: core's
+ * frame-sampling video adapter turns `moderateImage` into video moderation by
+ * sampling frames and aggregating their verdicts. Implementing
+ * `startVideoModeration`/`getVideoModeration` natively is for backends that
+ * have their own video job model.
  */
 export interface MediaModerationProvider {
   /** Synchronous-style image moderation: resolves a verdict directly. */
-  moderateImage(input: ImageRef): Promise<ModerationVerdict>;
+  moderateImage(
+    input: ImageRef,
+    options?: ModerationCallOptions,
+  ): Promise<ModerationVerdict>;
   /** Kicks off async video moderation; returns a handle to poll. */
-  startVideoModeration(input: S3Ref): Promise<{ jobId: string }>;
+  startVideoModeration(
+    input: S3Ref,
+    options?: ModerationCallOptions,
+  ): Promise<{ jobId: string }>;
   /** Polls a previously-started video moderation job for its verdict. */
-  getVideoModeration(jobId: string): Promise<ModerationVerdict>;
+  getVideoModeration(
+    jobId: string,
+    options?: ModerationCallOptions,
+  ): Promise<ModerationVerdict>;
+}
+
+// ---------------------------------------------------------------------------
+// Provider error contract.
+// ---------------------------------------------------------------------------
+
+/**
+ * The typed error a provider adapter throws so core can classify the failure
+ * without pattern-matching on vendor error names.
+ *
+ * `retryable` is the adapter's own judgement about whether the SAME call could
+ * succeed later:
+ *   - `true`  — transient (throttle, 5xx, socket). Core retries; the existing
+ *               3-strike/DLQ path remains the upper bound.
+ *   - `false` — permanent for these bytes (rejected input, unsupported media).
+ *               Core stops retrying and fails the track closed to `review`.
+ *
+ * A typed error whose cause the adapter cannot attribute is thrown with
+ * `retryable: false` AND `unknownCause: true`: core then fails closed to
+ * `review` *and* emits an infra-fault signal, because a fail-closed verdict
+ * that silently absorbs an infrastructure outage is indistinguishable from
+ * healthy caution — exactly the blindness that lets an outage run for days.
+ */
+export class ModerationProviderError extends Error {
+  readonly retryable: boolean;
+  /** The adapter could not attribute the cause — core alerts as well as fails closed. */
+  readonly unknownCause: boolean;
+
+  constructor(
+    message: string,
+    options: { retryable: boolean; unknownCause?: boolean; cause?: unknown } = {
+      retryable: false,
+    },
+  ) {
+    super(message);
+    this.name = "ModerationProviderError";
+    this.retryable = options.retryable;
+    this.unknownCause = options.unknownCause ?? false;
+    if (options.cause !== undefined) {
+      (this as { cause?: unknown }).cause = options.cause;
+    }
+  }
+}
+
+/**
+ * Structural type guard for {@link ModerationProviderError}. Structural rather
+ * than `instanceof` on purpose: an adapter bundled with its own copy of this
+ * package (npm nesting, a linked workspace) produces an error whose prototype
+ * chain is a DIFFERENT class object, and an `instanceof` check would silently
+ * demote it to the untyped fallback.
+ */
+export function isModerationProviderError(
+  err: unknown,
+): err is ModerationProviderError {
+  if (err === null || typeof err !== "object") return false;
+  const o = err as Record<string, unknown>;
+  return (
+    o.name === "ModerationProviderError" && typeof o.retryable === "boolean"
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -112,17 +266,26 @@ export class NullModerationProvider implements MediaModerationProvider {
     return { decision: "review", labels: [], provider: NULL_PROVIDER_NAME };
   }
 
-  async moderateImage(_input: ImageRef): Promise<ModerationVerdict> {
+  async moderateImage(
+    _input: ImageRef,
+    _options?: ModerationCallOptions,
+  ): Promise<ModerationVerdict> {
     return this.failClosed();
   }
 
-  async startVideoModeration(_input: S3Ref): Promise<{ jobId: string }> {
+  async startVideoModeration(
+    _input: S3Ref,
+    _options?: ModerationCallOptions,
+  ): Promise<{ jobId: string }> {
     // Even starting a job warns: there is no backend to do the work.
     this.warn(NULL_PROVIDER_WARNING);
     return { jobId: `${NULL_PROVIDER_NAME}-noop` };
   }
 
-  async getVideoModeration(_jobId: string): Promise<ModerationVerdict> {
+  async getVideoModeration(
+    _jobId: string,
+    _options?: ModerationCallOptions,
+  ): Promise<ModerationVerdict> {
     return this.failClosed();
   }
 }
@@ -153,7 +316,16 @@ const MOCK_DEFAULT_VERDICT: ModerationVerdict = {
 export class MockModerationProvider implements MediaModerationProvider {
   private imageVerdict: ModerationVerdict;
   private videoVerdict: ModerationVerdict;
+  private imageResponder?: (
+    input: ImageRef,
+    options?: ModerationCallOptions,
+  ) => Promise<ModerationVerdict>;
   private jobIdSeq = 0;
+
+  /** Every `moderateImage` ref, in call order — for asserting frame fan-out. */
+  readonly imageCalls: ImageRef[] = [];
+  /** Every `startVideoModeration` ref, in call order. */
+  readonly startVideoCalls: S3Ref[] = [];
 
   constructor(
     canned: {
@@ -165,9 +337,29 @@ export class MockModerationProvider implements MediaModerationProvider {
     this.videoVerdict = canned.video ?? MOCK_DEFAULT_VERDICT;
   }
 
-  /** Program the verdict returned by `moderateImage`. */
+  /**
+   * Program the verdict returned by `moderateImage`. Set `modelVersion` here to
+   * exercise the taxonomy-pin modes; leave it unset to exercise the
+   * unverifiable-pin path (which must fail closed to `review`).
+   */
   setImageVerdict(verdict: ModerationVerdict): void {
     this.imageVerdict = verdict;
+    this.imageResponder = undefined;
+  }
+
+  /**
+   * Program a per-call responder for `moderateImage` — the seam for tests that
+   * need a verdict to depend on WHICH ref was asked about (per-frame verdicts),
+   * or that need the call to reject or to never settle. The responder owns its
+   * own timing, so the mock stays free of clocks.
+   */
+  setImageResponder(
+    responder: (
+      input: ImageRef,
+      options?: ModerationCallOptions,
+    ) => Promise<ModerationVerdict>,
+  ): void {
+    this.imageResponder = responder;
   }
 
   /** Program the verdict returned by `getVideoModeration`. */
@@ -175,16 +367,28 @@ export class MockModerationProvider implements MediaModerationProvider {
     this.videoVerdict = verdict;
   }
 
-  async moderateImage(_input: ImageRef): Promise<ModerationVerdict> {
+  async moderateImage(
+    input: ImageRef,
+    options?: ModerationCallOptions,
+  ): Promise<ModerationVerdict> {
+    this.imageCalls.push(input);
+    if (this.imageResponder) return this.imageResponder(input, options);
     return this.imageVerdict;
   }
 
-  async startVideoModeration(_input: S3Ref): Promise<{ jobId: string }> {
+  async startVideoModeration(
+    input: S3Ref,
+    _options?: ModerationCallOptions,
+  ): Promise<{ jobId: string }> {
+    this.startVideoCalls.push(input);
     this.jobIdSeq += 1;
     return { jobId: `${MOCK_PROVIDER_NAME}-job-${this.jobIdSeq}` };
   }
 
-  async getVideoModeration(_jobId: string): Promise<ModerationVerdict> {
+  async getVideoModeration(
+    _jobId: string,
+    _options?: ModerationCallOptions,
+  ): Promise<ModerationVerdict> {
     return this.videoVerdict;
   }
 }

@@ -55,6 +55,10 @@
 // transcriptToModerationDecision, deriveDedupeKey, moderationResolvedPayload).
 
 import { decidePromotion } from "../media/promote-decision.js";
+import {
+  resolvePromoteSource,
+  promotePinned,
+} from "../media/promote-staging.js";
 import { casKey, pendingKey, isCasKeyError } from "../media/cas-keys.js";
 import type { TrackOutcome, Track } from "../media/track-verdict.js";
 import { deriveDedupeKey } from "../media/dedupe-key.js";
@@ -464,32 +468,16 @@ export async function processCompletion(
   //    and promote must not ride the approval into cas/). A cas/ object from
   //    a prior promote also satisfies presence: those bytes were themselves
   //    pin-copied.
-  type PromoteSource =
-    | { readonly kind: "staging"; readonly versionId: string }
-    | { readonly kind: "cas" }
-    | { readonly kind: "none" };
-  let promoteSource: PromoteSource = { kind: "none" };
   // Normalize fail-closed: only a non-empty string is a usable pin. An
   // undefined/empty value (legacy row, adapter gap) must NOT degrade into an
-  // unpinned head/copy of the current staging bytes.
-  const pinnedVersion =
-    typeof media.stagingVersionId === "string" &&
-    media.stagingVersionId.length > 0
-      ? media.stagingVersionId
-      : null;
-  if (pinnedVersion !== null) {
-    const pinnedHead = await deps.storage.headObject(stagingK, {
-      versionId: pinnedVersion,
-    });
-    if (pinnedHead.exists) {
-      promoteSource = { kind: "staging", versionId: pinnedVersion };
-    }
-  }
-  if (promoteSource.kind === "none") {
-    if ((await deps.storage.headObject(casK)).exists) {
-      promoteSource = { kind: "cas" };
-    }
-  }
+  // unpinned head/copy of the current staging bytes. (resolvePromoteSource owns
+  // that rule, shared with the human-approval path.)
+  const promoteSource = await resolvePromoteSource({
+    storage: deps.storage,
+    stagingKey: stagingK,
+    casKey: casK,
+    stagingVersionId: media.stagingVersionId,
+  });
   const casPresent = promoteSource.kind !== "none";
   const action = decidePromotion({
     visual,
@@ -537,30 +525,18 @@ export async function processCompletion(
   //     bytes. Then best-effort remove BOTH the raw original (pending/) and
   //     the staging copy. cas/ thus only ever holds APPROVED cleaned bytes.
   if (action.shouldPromote) {
-    if (promoteSource.kind === "staging") {
-      await deps.storage.copyObject(stagingK, casK, {
-        fromVersionId: promoteSource.versionId,
-      });
-    }
-    // Best-effort raw-original cleanup. Tolerate already-deleted (a prior
-    // delivery or lifecycle expiry) — the cas/ copy is what matters.
-    try {
-      await deps.storage.deleteObject(pendingK);
-    } catch (err) {
-      deps.log?.warn?.("completion: pending delete tolerated", {
-        mediaId: job.mediaId,
-        error: String(err),
-      });
-    }
-    // Best-effort staging cleanup. Same tolerance.
-    try {
-      await deps.storage.deleteObject(stagingK);
-    } catch (err) {
-      deps.log?.warn?.("completion: staging delete tolerated", {
-        mediaId: job.mediaId,
-        error: String(err),
-      });
-    }
+    await promotePinned({
+      storage: deps.storage,
+      source: promoteSource,
+      stagingKey: stagingK,
+      casKey: casK,
+      // Raw original + cleaned staging copy: both transient, neither may
+      // outlive the promotion. Tolerate already-deleted on both (a prior
+      // delivery or lifecycle expiry) — the cas/ copy is what matters.
+      cleanupKeys: [pendingK, stagingK],
+      log: deps.log,
+      logContext: { mediaId: job.mediaId },
+    });
   }
 
   // 5b. PERSIST the new status.
