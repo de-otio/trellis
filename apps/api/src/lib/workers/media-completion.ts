@@ -7,11 +7,12 @@
 // One queue drains the completion notifications of BOTH async moderation
 // tracks of a media object:
 //
-//   - VISUAL: the image/video moderation provider finishes a job and publishes
-//     a completion to SNS, which is fanned into this SQS queue. The SNS envelope
-//     carries `{ Message: "<json>" }` whose inner JSON has a `JobId`.
-//   - AUDIO: speech-to-text (Transcribe) finishes and emits an EventBridge event
-//     fanned into this SQS queue, whose `detail` carries `TranscriptionJobName`.
+//   - VISUAL: the image/video moderation provider finishes a job.
+//   - AUDIO: speech-to-text finishes.
+//
+// Both arrive as the canonical `{ track, jobId }` envelope (see
+// lib/media/completion-envelope.ts), which also keeps the historical
+// notification wire shapes parsing so an existing backend needs no change.
 //
 // THREAT MODEL: the SQS message body is an UNTRUSTED POINTER. A replay, a forged
 // body, or a spoofed verdict must not move a media object toward "approved". So
@@ -62,6 +63,7 @@ import {
 import { casKey, pendingKey, isCasKeyError } from "../media/cas-keys.js";
 import type { TrackOutcome, Track } from "../media/track-verdict.js";
 import { deriveDedupeKey } from "../media/dedupe-key.js";
+import { parseCompletionEnvelope } from "../media/completion-envelope.js";
 import { moderationResolvedPayload } from "../media/moderation-resolved-payload.js";
 import { transcriptToModerationDecision } from "../media/transcript-moderation.js";
 import type { TextModerationProvider } from "../media/text-moderation.js";
@@ -227,74 +229,23 @@ export type RecordOutcome =
 // ---------------------------------------------------------------------------
 
 /**
- * Extract the provider job id from an untrusted completion message body.
+ * Extract the provider job pointer from an untrusted completion message body.
  *
- * Two shapes are accepted; everything else (and any embedded verdict/status) is
- * ignored:
- *   - Rekognition via SNS:  { "Message": "{...\"JobId\":\"...\"}" }  OR a body
- *     that itself directly carries { "JobId": "..." }.
- *   - Transcribe via EventBridge: { "detail": { "TranscriptionJobName": "..." } }
- *     OR a body that directly carries { "TranscriptionJobName": "..." }.
+ * The parsing itself lives in ./media/completion-envelope.ts, which accepts the
+ * canonical `{ track, jobId }` shape any adapter can emit and keeps the
+ * historical notification shapes parsing as a fallback. This re-export is the
+ * stable name the worker (and existing deep importers) bind to.
  *
- * Returns the job id and which track it belongs to, or `null` when no job id can
- * be recovered (fail-closed: the caller ack-drops an unroutable message rather
- * than DLQ-looping a permanently-malformed pointer).
+ * Returns the job id and the CLAIMED track, or `null` when nothing routable can
+ * be recovered. The claimed track is a hint: {@link processCompletion} checks it
+ * against the job row before acting on it.
  *
  * Pure & total: never throws.
  */
 export function extractJobPointer(
   body: string,
 ): { readonly jobId: string; readonly track: Track } | null {
-  let root: unknown;
-  try {
-    root = JSON.parse(body);
-  } catch {
-    return null;
-  }
-  if (root === null || typeof root !== "object") return null;
-
-  const obj = root as Record<string, unknown>;
-
-  // Transcribe (AUDIO): EventBridge `detail.TranscriptionJobName`, or direct.
-  const detail =
-    typeof obj.detail === "object" && obj.detail !== null
-      ? (obj.detail as Record<string, unknown>)
-      : undefined;
-  const transcriptionName =
-    pickString(detail?.TranscriptionJobName) ??
-    pickString(obj.TranscriptionJobName);
-  if (transcriptionName !== null) {
-    return { jobId: transcriptionName, track: "AUDIO" };
-  }
-
-  // Rekognition (VISUAL): SNS `Message` is a JSON string carrying `JobId`, or
-  // the body carries `JobId` directly.
-  const directJobId = pickString(obj.JobId);
-  if (directJobId !== null) {
-    return { jobId: directJobId, track: "VISUAL" };
-  }
-  const snsMessage = pickString(obj.Message);
-  if (snsMessage !== null) {
-    let inner: unknown;
-    try {
-      inner = JSON.parse(snsMessage);
-    } catch {
-      return null;
-    }
-    if (inner !== null && typeof inner === "object") {
-      const innerJobId = pickString((inner as Record<string, unknown>).JobId);
-      if (innerJobId !== null) {
-        return { jobId: innerJobId, track: "VISUAL" };
-      }
-    }
-  }
-
-  return null;
-}
-
-/** Return a non-empty string value, or null for anything else. */
-function pickString(v: unknown): string | null {
-  return typeof v === "string" && v.length > 0 ? v : null;
+  return parseCompletionEnvelope(body);
 }
 
 // ---------------------------------------------------------------------------
@@ -396,6 +347,19 @@ export async function processCompletion(
   if (job === null) {
     deps.log?.warn?.("completion: unknown jobId — dropping", {
       jobId: pointer.jobId,
+    });
+    return { kind: "unroutable" };
+  }
+
+  // 1b. The body's `track` is a routing HINT chosen by whatever wrote the
+  //     message; the job row's track is the authority. A mismatch is dropped
+  //     here — before the dedupe claim — because claiming the key first would
+  //     let a message with a forged track burn the slot the genuine completion
+  //     needs, turning a parse-level lie into a permanently silenced verdict.
+  if (pointer.track !== job.track) {
+    deps.log?.warn?.("completion: track does not match the job row — dropping", {
+      jobId: pointer.jobId,
+      claimedTrack: pointer.track,
     });
     return { kind: "unroutable" };
   }
