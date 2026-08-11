@@ -5,6 +5,72 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "//exports": [
+    "ADDITIVE, and deliberately non-enforcing for now. Declaring `exports` at all",
+    "means `main`/`types` above are IGNORED by exports-aware resolvers, which is why",
+    "the root entry is restated here rather than left implicit.",
+    "The named subpaths are the moderation seam an adapter should bind to; the",
+    "trailing ./* wildcard literal-substitutes, so every deep specifier a consumer",
+    "uses today keeps resolving unchanged. That wildcard is what makes this map",
+    "currently unenforced: it is here to DECLARE the supported surface ahead of",
+    "narrowing it, so consumers can migrate before the wildcard is dropped rather",
+    "than after their build breaks."
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./media/moderation-provider": {
+      "types": "./dist/lib/media/moderation-provider.d.ts",
+      "default": "./dist/lib/media/moderation-provider.js"
+    },
+    "./media/media-ports": {
+      "types": "./dist/lib/media/media-ports.d.ts",
+      "default": "./dist/lib/media/media-ports.js"
+    },
+    "./media/label-policy": {
+      "types": "./dist/lib/media/label-policy.d.ts",
+      "default": "./dist/lib/media/label-policy.js"
+    },
+    "./media/frame-sampling-adapter": {
+      "types": "./dist/lib/media/frame-sampling-adapter.d.ts",
+      "default": "./dist/lib/media/frame-sampling-adapter.js"
+    },
+    "./media/frame-aggregation": {
+      "types": "./dist/lib/media/frame-aggregation.d.ts",
+      "default": "./dist/lib/media/frame-aggregation.js"
+    },
+    "./media/moderation-deadline": {
+      "types": "./dist/lib/media/moderation-deadline.d.ts",
+      "default": "./dist/lib/media/moderation-deadline.js"
+    },
+    "./media/moderation-metrics": {
+      "types": "./dist/lib/media/moderation-metrics.d.ts",
+      "default": "./dist/lib/media/moderation-metrics.js"
+    },
+    "./media/media-bytes-access": {
+      "types": "./dist/lib/media/media-bytes-access.d.ts",
+      "default": "./dist/lib/media/media-bytes-access.js"
+    },
+    "./media/completion-envelope": {
+      "types": "./dist/lib/media/completion-envelope.d.ts",
+      "default": "./dist/lib/media/completion-envelope.js"
+    },
+    "./media/promote-staging": {
+      "types": "./dist/lib/media/promote-staging.d.ts",
+      "default": "./dist/lib/media/promote-staging.js"
+    },
+    "./workers/media-processing": {
+      "types": "./dist/lib/workers/media-processing.d.ts",
+      "default": "./dist/lib/workers/media-processing.js"
+    },
+    "./workers/media-completion": {
+      "types": "./dist/lib/workers/media-completion.d.ts",
+      "default": "./dist/lib/workers/media-completion.js"
+    },
+    "./*": "./*"
+  },
   "files": [
     "dist",
     "prisma",

@@ -83,6 +83,9 @@ const moderateImageMock = vi.hoisted(() =>
 );
 vi.mock("../../../src/lib/media/request-moderation", () => ({
   getMediaModerationProvider: () => ({ moderateImage: moderateImageMock }),
+  // With no operator label policy configured, the provider's own decision
+  // stands — which is what these fixtures exercise.
+  interpretVerdict: (verdict: { decision: string }) => verdict.decision,
 }));
 
 // Metadata extractor (dynamic import): no-op.

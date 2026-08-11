@@ -34,10 +34,15 @@ import {
   type FrameVerdict,
 } from "./frame-aggregation.js";
 import type { TranscodePort } from "./media-ports.js";
+import { createHash } from "node:crypto";
+
 import type {
   ImageRef,
   MediaModerationProvider,
   ModerationCallOptions,
+  ModerationFrameDetail,
+  ModerationJobDetail,
+  ModerationLabel,
   ModerationVerdict,
   S3Ref,
   VideoModerationStart,
@@ -65,6 +70,33 @@ export interface FrameSamplingConfig {
    * and says nothing about policy — so it has a conservative code default.
    */
   readonly frameConcurrency?: number;
+  /**
+   * An operator-chosen name for this sampling policy, recorded on every job.
+   *
+   * When absent, a FINGERPRINT of the effective parameters is used instead: a
+   * short digest that changes if and only if the policy changed, without
+   * disclosing the parameters themselves. That is the property an audit needs
+   * ("was this scanned under the policy we think?") and it is available with no
+   * operator action, so the audit trail is never simply empty.
+   */
+  readonly policyVersion?: string;
+}
+
+/**
+ * A short digest of the effective sampling parameters.
+ *
+ * Deliberately one-way: the point is to tell two policies apart, not to publish
+ * either. The rate and the ceiling are threshold-secrecy material, so the
+ * recorded identifier must not carry them even into a server-side log that may
+ * later be widened.
+ */
+function policyFingerprint(config: FrameSamplingConfig): string {
+  const canonical = JSON.stringify({
+    fps: config.framesPerSecond ?? null,
+    max: config.maxFramesPerJob ?? null,
+    dur: config.maxDurationSeconds ?? null,
+  });
+  return `fs-${createHash("sha256").update(canonical).digest("hex").slice(0, 16)}`;
 }
 
 /** Conservative default fan-out: enough to be useful, low enough to be polite. */
@@ -99,6 +131,27 @@ export interface FrameSamplingDeps {
 /** The fail-closed verdict this adapter returns whenever anything is unclear. */
 function reviewVerdict(provider: string): ModerationVerdict {
   return { decision: "review", labels: [], provider };
+}
+
+/**
+ * A frame's verdict plus the evidence behind it. Extends the aggregation law's
+ * input rather than replacing it: the law still sees only `decision`, so
+ * carrying evidence cannot change what the evidence decides.
+ */
+interface ScoredFrame extends FrameVerdict {
+  readonly labels?: ReadonlyArray<ModerationLabel>;
+  readonly modelVersion?: string;
+}
+
+/** The fail-closed result, with whatever audit detail was known at the refusal. */
+function refused(detail: ModerationJobDetail = {}): {
+  verdict: ModerationVerdict;
+  detail: ModerationJobDetail;
+} {
+  return {
+    verdict: reviewVerdict(PROVIDER_NAME),
+    detail: { framesScored: 0, ...detail },
+  };
 }
 
 const PROVIDER_NAME = "frame-sampling";
@@ -138,9 +191,16 @@ export class FrameSamplingVideoModerationAdapter
     options?: ModerationCallOptions,
   ): Promise<VideoModerationStart> {
     const jobId = this.deps.newJobId();
-    const verdict = await this.resolveVideo(jobId, input, options);
+    const { verdict, detail } = await this.resolveVideo(jobId, input, options);
     this.remember(jobId, verdict);
-    return { jobId, initialDecision: verdict.decision };
+    return {
+      jobId,
+      initialDecision: verdict.decision,
+      policyVersion:
+        this.deps.config.policyVersion ?? policyFingerprint(this.deps.config),
+      labels: verdict.labels,
+      detail,
+    };
   }
 
   /**
@@ -174,14 +234,14 @@ export class FrameSamplingVideoModerationAdapter
     jobId: string,
     input: S3Ref,
     options?: ModerationCallOptions,
-  ): Promise<ModerationVerdict> {
+  ): Promise<{ verdict: ModerationVerdict; detail: ModerationJobDetail }> {
     const { transcode, config, log } = this.deps;
 
     if (typeof transcode.sampleFrames !== "function") {
       log?.error?.(
         "frame-sampling: the transcode adapter cannot extract frames — failing the visual track closed to review",
       );
-      return reviewVerdict(PROVIDER_NAME);
+      return refused();
     }
 
     let durationSeconds: number;
@@ -191,7 +251,7 @@ export class FrameSamplingVideoModerationAdapter
       log?.warn?.("frame-sampling: duration probe failed — review", {
         error: String(err),
       });
-      return reviewVerdict(PROVIDER_NAME);
+      return refused();
     }
 
     const plan =
@@ -213,7 +273,7 @@ export class FrameSamplingVideoModerationAdapter
       log?.warn?.("frame-sampling: refusing to sample — review", {
         reason: plan.reason,
       });
-      return reviewVerdict(PROVIDER_NAME);
+      return refused();
     }
 
     const outputDir = this.deps.frameDirFor(jobId);
@@ -231,7 +291,7 @@ export class FrameSamplingVideoModerationAdapter
       log?.warn?.("frame-sampling: extraction failed — review", {
         error: String(err),
       });
-      return reviewVerdict(PROVIDER_NAME);
+      return refused({ expectedFrames: plan.expectedFrames });
     }
 
     try {
@@ -242,7 +302,7 @@ export class FrameSamplingVideoModerationAdapter
           "frame-sampling: extraction exceeded the per-job ceiling — review",
           { extracted: framePaths.length },
         );
-        return reviewVerdict(PROVIDER_NAME);
+        return refused({ expectedFrames: plan.expectedFrames });
       }
 
       const frames = await this.classifyFrames(input, framePaths, options);
@@ -254,7 +314,33 @@ export class FrameSamplingVideoModerationAdapter
         decision,
       });
 
-      return { decision, labels: [], provider: PROVIDER_NAME };
+      // Carry the evidence, not just the enum. A collapsed 3-value verdict is
+      // all the pipeline needs to act, but it is not enough for anything to
+      // later observe WHY — and the labels and frame timings cannot be
+      // reconstructed once the frames are deleted, which happens below.
+      const interval = 1 / (config.framesPerSecond as number);
+      return {
+        verdict: {
+          decision,
+          labels: frames.flatMap((f) => f.labels ?? []),
+          provider: PROVIDER_NAME,
+        },
+        detail: {
+          expectedFrames: plan.expectedFrames,
+          framesScored: frames.filter((f) => f.decision !== null).length,
+          framesSkipped: Math.max(
+            0,
+            plan.expectedFrames - frames.filter((f) => f.decision !== null).length,
+          ),
+          frames: frames.map<ModerationFrameDetail>((f, index) => ({
+            index,
+            offsetSeconds: index * interval,
+            decision: f.decision,
+            ...(f.labels !== undefined && { labels: f.labels }),
+            ...(f.modelVersion !== undefined && { modelVersion: f.modelVersion }),
+          })),
+        },
+      };
     } finally {
       // EVERY path: success, ceiling breach, classifier error, abort. A sampled
       // still is a copy of user media and must not outlive the decision it
@@ -272,12 +358,12 @@ export class FrameSamplingVideoModerationAdapter
     input: S3Ref,
     framePaths: ReadonlyArray<string>,
     options?: ModerationCallOptions,
-  ): Promise<FrameVerdict[]> {
+  ): Promise<ScoredFrame[]> {
     const limit = Math.max(
       1,
       Math.floor(this.deps.config.frameConcurrency ?? DEFAULT_FRAME_CONCURRENCY),
     );
-    const results: FrameVerdict[] = new Array(framePaths.length);
+    const results: ScoredFrame[] = new Array(framePaths.length);
     let next = 0;
 
     const worker = async (): Promise<void> => {
@@ -302,6 +388,10 @@ export class FrameSamplingVideoModerationAdapter
               verdict?.decision === "quarantine"
                 ? verdict.decision
                 : null,
+            ...(Array.isArray(verdict?.labels) && { labels: verdict.labels }),
+            ...(verdict?.modelVersion !== undefined && {
+              modelVersion: verdict.modelVersion,
+            }),
           };
         } catch (err) {
           this.deps.log?.warn?.(

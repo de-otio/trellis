@@ -161,6 +161,53 @@ export interface VideoModerationStart {
   readonly initialDecision?: ModerationDecision;
   /** The taxonomy version the job started under, for drift detection at completion. */
   readonly modelVersion?: string;
+  /**
+   * Which sampling/scoring policy produced this result. Together with the
+   * content hash, the provider, and {@link modelVersion} it identifies the
+   * inputs a verdict depended on — the four things you need to answer "how do
+   * you know you caught it?" months later, and none of them can be
+   * reconstructed after the fact.
+   */
+  readonly policyVersion?: string;
+  /** The raw labels behind the collapsed decision. SERVER-SIDE ONLY (see below). */
+  readonly labels?: ReadonlyArray<ModerationLabel>;
+  /** The per-frame audit record. SERVER-SIDE ONLY (see below). */
+  readonly detail?: ModerationJobDetail;
+}
+
+/**
+ * The evidence behind a video verdict, for the audit trail.
+ *
+ * NEVER SEND ANY OF THIS TO A CLIENT. Confidences, frame timings, sampling
+ * parameters, and skip counts are a tuning oracle: with them an adversary
+ * learns which frames were looked at and how close a piece of content came to
+ * a bar, which is precisely enough to iterate against the classifier. It exists
+ * so operators can audit their own pipeline, and it stops at the server.
+ */
+export interface ModerationJobDetail {
+  /** How many frames the plan expected, given the clip and the policy. */
+  readonly expectedFrames?: number;
+  /** How many frames were actually classified. */
+  readonly framesScored?: number;
+  /**
+   * How many expected frames never produced a verdict — undecodable, or lost
+   * to an error. A rising number here means the pipeline is seeing less of
+   * each video than its policy claims.
+   */
+  readonly framesSkipped?: number;
+  /** Per-frame evidence, in temporal order. */
+  readonly frames?: ReadonlyArray<ModerationFrameDetail>;
+}
+
+export interface ModerationFrameDetail {
+  /** Position in the sampled sequence. */
+  readonly index: number;
+  /** Offset into the clip, in seconds, at the policy's sampling rate. */
+  readonly offsetSeconds: number;
+  /** `null` when the frame could not be classified. */
+  readonly decision: ModerationDecision | null;
+  readonly labels?: ReadonlyArray<ModerationLabel>;
+  readonly modelVersion?: string;
 }
 
 /**

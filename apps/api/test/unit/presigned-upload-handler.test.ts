@@ -749,16 +749,24 @@ describe("AR-SEC F2 — combined video+audio track budgets on the byte rail", ()
     expect(state.media).toHaveLength(0);
   });
 
-  it("audio uploads stay railed at the audio budget (single track)", async () => {
+  it("audio-only uploads are refused as a type, at any size", async () => {
+    // The byte rail no longer gets a say here: an audio-only object has no
+    // visual track for the pipeline to resolve, so it is refused at the
+    // type-routing boundary — before a session, a key, or a budget exists.
     const env = makeEnv();
     const handler = new PresignedUploadHandler(env, makePort().port);
-    const res = await handler.createSession(USER, "US", env, {
-      mimeType: "audio/mpeg",
-      sizeBytes: 100_000_001, // > maxBytes.audio — no second track to budget
-    });
-    expect(res.ok).toBe(false);
-    if (res.ok) return;
-    expect(res.status).toBe(413);
+
+    for (const sizeBytes of [1_000, 100_000_001]) {
+      const res = await handler.createSession(USER, "US", env, {
+        mimeType: "audio/mpeg",
+        sizeBytes,
+      });
+      expect(res.ok).toBe(false);
+      if (res.ok) return;
+      expect(res.status).toBe(415);
+    }
+    expect(state.sessions).toHaveLength(0);
+    expect(state.media).toHaveLength(0);
   });
 
   it("completeSession defense-in-depth accepts a staged object within the combined budgets", async () => {

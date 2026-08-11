@@ -344,3 +344,114 @@ describe("FrameSamplingVideoModerationAdapter — abort and polling", () => {
     expect(images.imageCalls).toHaveLength(1);
   });
 });
+
+describe("FrameSamplingVideoModerationAdapter — the audit trail", () => {
+  it("records a policy version even when the operator named none", async () => {
+    const { adapter, images } = makeAdapter({ duration: 4 });
+    images.setImageVerdict(verdict("approved"));
+
+    const started = await adapter.startVideoModeration(REF);
+
+    expect(started.policyVersion).toMatch(/^fs-[0-9a-f]{16}$/);
+  });
+
+  it("changes the policy version when, and only when, the policy changes", async () => {
+    const a = makeAdapter({ duration: 4, framesPerSecond: 1 });
+    const sameAgain = makeAdapter({ duration: 4, framesPerSecond: 1 });
+    const different = makeAdapter({ duration: 4, framesPerSecond: 2 });
+    for (const h of [a, sameAgain, different]) {
+      h.images.setImageVerdict(verdict("approved"));
+    }
+
+    const first = (await a.adapter.startVideoModeration(REF)).policyVersion;
+    const second = (await sameAgain.adapter.startVideoModeration(REF)).policyVersion;
+    const third = (await different.adapter.startVideoModeration(REF)).policyVersion;
+
+    expect(second).toBe(first);
+    expect(third).not.toBe(first);
+  });
+
+  it("does not disclose the sampling parameters inside the version", () => {
+    // The fingerprint distinguishes policies; it must not publish them.
+    const { adapter } = makeAdapter({ framesPerSecond: 7, maxFramesPerJob: 13 });
+    return adapter.startVideoModeration(REF).then((started) => {
+      expect(started.policyVersion).not.toContain("7");
+      expect(started.policyVersion).not.toContain("13");
+    });
+  });
+
+  it("uses the operator's policy name when one was given", async () => {
+    const images = new MockModerationProvider();
+    images.setImageVerdict(verdict("approved"));
+    const adapter = new FrameSamplingVideoModerationAdapter({
+      images,
+      transcode: new MockTranscodePort({ duration: 2 }),
+      config: {
+        framesPerSecond: 1,
+        maxFramesPerJob: 10,
+        maxDurationSeconds: 60,
+        policyVersion: "house-policy-2026-08",
+      },
+      frameDirFor: (jobId) => `processing/frames/${jobId}`,
+      newJobId: () => "core-job-1",
+    });
+
+    expect((await adapter.startVideoModeration(REF)).policyVersion).toBe(
+      "house-policy-2026-08",
+    );
+  });
+
+  it("carries per-frame evidence, not just the collapsed decision", async () => {
+    const { adapter, images } = makeAdapter({ duration: 4, framesPerSecond: 1 });
+    images.setImageResponder(async () => ({
+      decision: "approved",
+      labels: [{ category: "category_a", confidence: 0.1 }],
+      provider: "mock",
+      modelVersion: "mock-taxonomy-1",
+    }));
+
+    const started = await adapter.startVideoModeration(REF);
+
+    expect(started.detail?.expectedFrames).toBe(4);
+    expect(started.detail?.framesScored).toBe(4);
+    expect(started.detail?.framesSkipped).toBe(0);
+    expect(started.detail?.frames).toHaveLength(4);
+    expect(started.detail?.frames?.[2]).toMatchObject({
+      index: 2,
+      offsetSeconds: 2,
+      decision: "approved",
+      modelVersion: "mock-taxonomy-1",
+    });
+    // The labels survive the collapse to a single enum.
+    expect(started.labels).toHaveLength(4);
+  });
+
+  it("counts the frames it never got a verdict for", async () => {
+    const { adapter, images } = makeAdapter({
+      duration: 8,
+      framesPerSecond: 1,
+      extractable: 3,
+    });
+    images.setImageVerdict(verdict("approved"));
+
+    const started = await adapter.startVideoModeration(REF);
+
+    expect(started.detail?.expectedFrames).toBe(8);
+    expect(started.detail?.framesScored).toBe(3);
+    expect(started.detail?.framesSkipped).toBe(5);
+    expect(started.initialDecision).toBe("review");
+  });
+
+  it("still reports what it knew when it refused to sample", async () => {
+    const { adapter } = makeAdapter({
+      duration: 600,
+      framesPerSecond: 1,
+      maxFramesPerJob: 10,
+    });
+
+    const started = await adapter.startVideoModeration(REF);
+
+    expect(started.initialDecision).toBe("review");
+    expect(started.detail?.framesScored).toBe(0);
+  });
+});

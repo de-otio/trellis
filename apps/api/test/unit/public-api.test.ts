@@ -21,6 +21,23 @@ const EXPECTED_EXPORTS = [
   "setRealtimeProvider",
   "setTextModerationProvider",
   "startServer",
+  // Media-moderation seam: everything a provider implementor needs from the
+  // package root, so an adapter is written against published names rather than
+  // deep paths into dist/.
+  "assertModerationProviderAllowed",
+  "completionEnvelopeBody",
+  "createLabelPolicy",
+  "createMediaBytesAccess",
+  "FrameSamplingVideoModerationAdapter",
+  "isModerationProviderError",
+  "LabelPolicyConfigError",
+  "MediaBytesTooLargeError",
+  "ModerationDeadlineConfigError",
+  "ModerationProviderError",
+  "NullModerationProvider",
+  "parseCompletionEnvelope",
+  "setMediaLabelPolicy",
+  "withModerationDeadline",
 ].sort();
 
 describe("public API surface (@de-otio/trellis)", () => {
@@ -42,5 +59,40 @@ describe("public API surface (@de-otio/trellis)", () => {
 
   it("exposes the push-transport injection hook as a callable (T8)", () => {
     expect(typeof publicApi.setPushTransportProvider).toBe("function");
+  });
+});
+
+describe("public API surface — the media-moderation seam", () => {
+  it("exposes the provider contract a backend implements against", () => {
+    expect(typeof publicApi.ModerationProviderError).toBe("function");
+    expect(typeof publicApi.isModerationProviderError).toBe("function");
+    expect(typeof publicApi.NullModerationProvider).toBe("function");
+    expect(typeof publicApi.assertModerationProviderAllowed).toBe("function");
+  });
+
+  it("exposes the pieces that let an image-only classifier moderate video", () => {
+    expect(typeof publicApi.FrameSamplingVideoModerationAdapter).toBe("function");
+  });
+
+  it("exposes the operator-owned policy and its refusal", () => {
+    expect(typeof publicApi.createLabelPolicy).toBe("function");
+    expect(typeof publicApi.setMediaLabelPolicy).toBe("function");
+    expect(typeof publicApi.LabelPolicyConfigError).toBe("function");
+  });
+
+  it("exposes the deadline wrapper and the bytes capability", () => {
+    expect(typeof publicApi.withModerationDeadline).toBe("function");
+    expect(typeof publicApi.createMediaBytesAccess).toBe("function");
+  });
+
+  it("exposes the completion envelope in both directions", () => {
+    const body = publicApi.completionEnvelopeBody({
+      track: "VISUAL",
+      jobId: "job-1",
+    });
+    expect(publicApi.parseCompletionEnvelope(body)).toEqual({
+      track: "VISUAL",
+      jobId: "job-1",
+    });
   });
 });

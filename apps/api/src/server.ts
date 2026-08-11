@@ -22,6 +22,8 @@ import { getLogger, Logger } from "./lib/logger.js";
 import { TrellisRequestContextManager } from "./lib/request-context.js";
 import { SessionManager } from "./lib/session-cookie.js";
 import { getExtensions } from "./extensions.js";
+import { assertModerationProviderAllowed } from "./lib/media/moderation-provider.js";
+import { getMediaModerationProvider } from "./lib/media/request-moderation.js";
 import { validateExtensions } from "./lib/extension-validator.js";
 import {
   setExtensionModelRegistry,
@@ -112,6 +114,35 @@ export async function startServer(
     console.error("Keycloak user-profile lockdown check failed at boot:");
     console.error(`  - ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
+  }
+
+  // Media-moderation seam guard. The seam's runtime fallback is a fail-closed
+  // Null provider, which is correct for a request that has already started —
+  // it sends media to review rather than 500-ing — but it is NOT an acceptable
+  // steady state outside dev: every upload would pile into the review queue
+  // with no path to approval, and the failure looks like a moderation backlog
+  // rather than an unwired deployment. So boot refuses instead.
+  //
+  // Gated on the environment, and skippable by an operator who genuinely means
+  // it (MEDIA_MODERATION_ALLOW_NULL=true), which logs loudly rather than
+  // failing silently.
+  const moderationEnvironment = process.env.STAGE ?? "dev";
+  if (process.env.MEDIA_MODERATION_ALLOW_NULL === "true") {
+    logger.warn(
+      "MEDIA_MODERATION_ALLOW_NULL=true — the fail-closed Null moderation provider is permitted in this environment. Every upload will land in review with no path to approval.",
+      { environment: moderationEnvironment },
+    );
+  } else {
+    try {
+      assertModerationProviderAllowed(
+        getMediaModerationProvider(),
+        moderationEnvironment,
+      );
+    } catch (err) {
+      console.error("Media moderation provider check failed at boot:");
+      console.error(`  - ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
   }
 
   // Validate extensions
