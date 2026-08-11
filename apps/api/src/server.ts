@@ -41,6 +41,23 @@ export interface StartServerOptions {
   readonly extensionModelRegistry?: readonly ExtensionModelRegistryEntry[];
 }
 
+/**
+ * Stages where running without a real moderation provider is expected rather
+ * than alarming: local development and the automated test lanes, which boot the
+ * server with no consuming application to inject one.
+ *
+ * Deliberately an ALLOW-list of three known names, not "anything that is not
+ * prod". A stage nobody thought about — `staging`, `preprod`, a typo — must
+ * land on the guarded side, because the failure this guard prevents is silent:
+ * every upload piling into review with no path to approval looks like a
+ * moderation backlog, not like an unwired deployment.
+ */
+const NON_PRODUCTION_STAGES: ReadonlySet<string> = new Set([
+  "dev",
+  "test",
+  "local",
+]);
+
 const MAX_BODY_SIZE = 10 * 1024 * 1024; // 10 MB
 const REQUEST_TIMEOUT_MS = 25_000; // 25 seconds
 
@@ -132,7 +149,7 @@ export async function startServer(
       "MEDIA_MODERATION_ALLOW_NULL=true — the fail-closed Null moderation provider is permitted in this environment. Every upload will land in review with no path to approval.",
       { environment: moderationEnvironment },
     );
-  } else {
+  } else if (!NON_PRODUCTION_STAGES.has(moderationEnvironment)) {
     try {
       assertModerationProviderAllowed(
         getMediaModerationProvider(),

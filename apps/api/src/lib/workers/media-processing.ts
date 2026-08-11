@@ -698,9 +698,14 @@ export async function processObjectKey(
     // bytes we hashed. (Transcription cannot pin a version — Transcribe's
     // MediaFileUri is unversioned — but the promote copy still pins, so the
     // bytes that can ever serve remain exactly the hashed/pinned version.)
+    // BOTH pin fields are set on purpose: `pin` is the shape core and new
+    // adapters read, `versionId` is the deprecated alias an already-shipped
+    // adapter reads. Sending only the new one would silently un-pin every
+    // existing consumer — the opposite of what widening a seam should do.
     const stagingRef: S3Ref = {
       bucket: deps.bucket,
       key: cleanedStagingKeyOut,
+      pin: { kind: "versionId", value: stagingVersionId },
       versionId: stagingVersionId,
     };
 

@@ -324,10 +324,15 @@ describe("processObjectKey — tenant-from-row + key mismatch", () => {
     expect(stagingVersion).toBeDefined();
     // Moderation started on the STAGING key, PINNED to the exact version that
     // was hashed (AR-SEC F3 — the exact bytes that will serve).
+    //
+    // BOTH pin fields are asserted: `pin` is what core and new adapters read,
+    // `versionId` is the deprecated alias an already-shipped adapter reads.
+    // Dropping either would silently un-pin one side of that split.
     expect(startSpy).toHaveBeenCalledTimes(1);
     expect(startSpy.mock.calls[0][0]).toEqual({
       bucket: BUCKET,
       key: stagingKey,
+      pin: { kind: "versionId", value: stagingVersion },
       versionId: stagingVersion,
     });
     // The real cas key (derived from rowTenant + the cleaned hash) was
