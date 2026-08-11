@@ -3,8 +3,9 @@
  *
  * Obligations covered:
  * 1. All REENCODABLE_IMAGE_TYPES → sync-image.
- * 2. video/* and audio/* → async-pending.
- * 3. Unknown / empty / garbage → reject (fail-closed).
+ * 2. video/* → async-pending.
+ * 3. Unknown / empty / garbage → reject (fail-closed), and audio/* → reject
+ *    with the specific `audio-not-supported` reason.
  * 4. Case-insensitive matching.
  * 5. Parameters after ";" are stripped.
  * 6. Total (never throws) for arbitrary strings including empty, null-ish,
@@ -66,9 +67,9 @@ describe("routeUpload — case-insensitive", () => {
     ["IMAGE/GIF", "sync-image"],
     ["IMAGE/JPG", "sync-image"],
     ["VIDEO/MP4", "async-pending"],
-    ["AUDIO/MPEG", "async-pending"],
+    ["AUDIO/MPEG", "reject"],
     ["Video/WebM", "async-pending"],
-    ["AUDIO/MP4", "async-pending"],
+    ["AUDIO/MP4", "reject"],
   ];
 
   for (const [ct, expected] of cases) {
@@ -87,7 +88,7 @@ describe("routeUpload — parameter stripping", () => {
     ["image/jpeg; charset=utf-8", "sync-image"],
     ["image/png;q=0.9", "sync-image"],
     ["video/mp4; codecs=avc1", "async-pending"],
-    ["audio/mpeg;bitrate=128", "async-pending"],
+    ["audio/mpeg;bitrate=128", "reject"],
     ["image/gif; boundary=something", "sync-image"],
     ["application/octet-stream; charset=binary", "reject"],
   ];
@@ -149,6 +150,21 @@ describe("routeUpload — async-pending examples", () => {
     "video/ogg",
     "video/mpeg",
     "video/x-msvideo",
+  ];
+
+  for (const ct of asyncCases) {
+    it(`routes '${ct}' to async-pending`, () => {
+      expect(routeUpload(ct).kind).toBe("async-pending");
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Audio-only uploads: refused at intake, with a reason
+// ---------------------------------------------------------------------------
+
+describe("routeUpload — audio-only is refused deterministically", () => {
+  const audioCases = [
     "audio/mpeg",
     "audio/mp4",
     "audio/ogg",
@@ -157,13 +173,30 @@ describe("routeUpload — async-pending examples", () => {
     "audio/flac",
     "audio/webm",
     "audio/x-m4a",
+    "Audio/MPEG",
+    "audio/mpeg; bitrate=128",
   ];
 
-  for (const ct of asyncCases) {
-    it(`routes '${ct}' to async-pending`, () => {
-      expect(routeUpload(ct).kind).toBe("async-pending");
+  for (const ct of audioCases) {
+    it(`refuses '${ct}' with a specific reason`, () => {
+      // The alternative is worse than a refusal: the pipeline resolves a
+      // VISUAL track an audio-only object does not have, so the row would sit
+      // un-servable and un-rejected forever, with the client believing the
+      // upload succeeded.
+      expect(routeUpload(ct)).toEqual({
+        kind: "reject",
+        reason: "audio-not-supported",
+      });
     });
   }
+
+  it("does not use the audio reason for other refusals", () => {
+    for (const ct of ["application/pdf", "image/svg+xml", "video/", ""]) {
+      const route = routeUpload(ct);
+      expect(route.kind).toBe("reject");
+      expect(route).toEqual({ kind: "reject", reason: "unsupported-type" });
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -208,16 +241,29 @@ describe("property — image/* re-encodable set → sync-image", () => {
 // Property: video/* and audio/* with non-empty sub-type → async-pending
 // ---------------------------------------------------------------------------
 
-describe("property — video/* and audio/* → async-pending", () => {
-  it("holds for all non-empty sub-types", () => {
-    // Non-empty sub-type string (no "/" so it stays a single token)
-    const subTypeArb = fc.stringMatching(/^[a-zA-Z0-9][a-zA-Z0-9\-+.]*$/).filter(s => s.length > 0);
-    const familyArb = fc.constantFrom("video", "audio", "VIDEO", "AUDIO", "Video", "Audio");
+describe("property — video/* → async-pending, audio/* → reject", () => {
+  const subTypeArb = fc
+    .stringMatching(/^[a-zA-Z0-9][a-zA-Z0-9\-+.]*$/)
+    .filter((s) => s.length > 0);
+
+  it("holds for all non-empty video sub-types", () => {
+    const familyArb = fc.constantFrom("video", "VIDEO", "Video");
 
     fc.assert(
       fc.property(familyArb, subTypeArb, (family, sub) => {
-        const ct = `${family}/${sub}`;
-        return routeUpload(ct).kind === "async-pending";
+        return routeUpload(`${family}/${sub}`).kind === "async-pending";
+      }),
+      FC,
+    );
+  });
+
+  it("refuses every audio sub-type, whatever it is called", () => {
+    const familyArb = fc.constantFrom("audio", "AUDIO", "Audio");
+
+    fc.assert(
+      fc.property(familyArb, subTypeArb, (family, sub) => {
+        const route = routeUpload(`${family}/${sub}`);
+        return route.kind === "reject" && route.reason === "audio-not-supported";
       }),
       FC,
     );

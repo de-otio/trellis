@@ -30,6 +30,12 @@ import {
   nextLifecycle,
   type MediaLifecycle,
 } from "./media-lifecycle.js";
+import type { StoragePort } from "./media-ports.js";
+import {
+  promotePinned,
+  resolvePromoteSource,
+  type PromoteLog,
+} from "./promote-staging.js";
 import { isModeratorServable } from "./moderator-serve-gate.js";
 import {
   MEDIA_MODERATION_APPROVED,
@@ -120,11 +126,51 @@ export interface ReviewPrismaLike {
 const MAX_LIMIT = 100;
 const DEFAULT_LIMIT = 50;
 
+/** A never-silent log seam: absent hooks simply drop, they never throw. */
+function promotionLog(promotion?: ReviewPromotionPort): PromoteLog {
+  return promotion?.log ?? {};
+}
+
 /** Outcome discriminant for decide()/escalateCsam(), mapped to HTTP by the route. */
 export type DecisionResult =
   | { ok: true; status: MediaLifecycle; promoted: boolean }
   | { ok: false; code: "NOT_FOUND" }
   | { ok: false; code: "ILLEGAL_STATE"; from: MediaLifecycle };
+
+/**
+ * The coordinates a promotion needs, resolved through a port rather than read
+ * off the row here.
+ *
+ * `stagingVersionId` is the pin captured when the classifier ran. Where a
+ * consuming application keeps it is its own business (today, inside an existing
+ * JSON column), which is exactly why this is a port: the handler must not know.
+ */
+export interface ReviewPromoteCoords {
+  readonly tenantId: string;
+  readonly uploadId: string;
+  readonly contentHash: string;
+  readonly stagingVersionId: string | null;
+}
+
+/**
+ * The capability that lets a human approval actually make bytes servable.
+ *
+ * Without it, `decide()` can flip a row to APPROVED but nothing copies the
+ * reviewed bytes to the serve prefix. With it, approval performs the SAME
+ * version-pinned promotion the automatic path performs — the moderator's
+ * approval applies to the bytes the moderator saw, and to nothing else.
+ *
+ * OPTIONAL on `decide()`, because this is a published package and a required
+ * argument would break every existing caller. The consequence is stated rather
+ * than hidden: when it is absent, `decide()` behaves as before and says so in a
+ * log line, and no promotion happens.
+ */
+export interface ReviewPromotionPort {
+  readonly storage: StoragePort;
+  /** Resolve the promote coordinates for a media object, or null when unknown. */
+  coordsFor(mediaId: string): Promise<ReviewPromoteCoords | null>;
+  readonly log?: PromoteLog;
+}
 
 export class MediaReviewHandler {
   /**
@@ -214,10 +260,20 @@ export class MediaReviewHandler {
   /**
    * Apply a human approve/reject to a review item. The transition is decided by
    * the pure `nextLifecycle` machine (`human` event); this shell only persists
-   * the resulting lifecycle and writes the audit row. Approve promotes to
-   * APPROVED (servable) — but FAIL-CLOSED: if the CAS object is not present
-   * (originalKey null), the object is NOT made servable; it stays in review so a
-   * moderator can never publish bytes that do not exist.
+   * the resulting lifecycle, performs the promotion the machine implies, and
+   * writes the audit row.
+   *
+   * APPROVE IS A CLAIM ABOUT SPECIFIC BYTES. A moderator looked at one version
+   * of an object and said yes to that version. So when the promotion port is
+   * wired, approval copies the VERSION-PINNED bytes the classifier ran on — the
+   * same routine the automatic path uses — and refuses outright when that
+   * version can no longer be resolved. It never resolves "whatever is at the
+   * staging key now": between the review and the click, that key may hold
+   * something else entirely, and copying it would launder unreviewed bytes
+   * through a human decision.
+   *
+   * FAIL-CLOSED throughout: a missing object, an unresolvable pin, or a failed
+   * copy all leave the item in REVIEW rather than marking it servable.
    *
    * Returns a DecisionResult; the route maps it to HTTP. Audit is written for
    * every APPLIED decision (success), before returning.
@@ -234,6 +290,7 @@ export class MediaReviewHandler {
       ipAddress?: string;
       userAgent?: string;
     },
+    promotion?: ReviewPromotionPort,
   ): Promise<DecisionResult> {
     const media = await db.mediaFile.findUnique({
       where: { id: input.mediaId },
@@ -257,12 +314,31 @@ export class MediaReviewHandler {
       return { ok: false, code: "ILLEGAL_STATE", from };
     }
 
-    // FAIL-CLOSED promote gate: an approve only becomes APPROVED when the CAS
-    // object exists. Otherwise degrade the target to REVIEW (never serve absent
-    // bytes) — mirrors the async worker's `casObjectPresent` promote gate.
+    // FAIL-CLOSED promote gate. The row's `originalKey` says where the bytes
+    // WOULD live; on its own it is a claim, not evidence, so when the promotion
+    // port is wired we go and check — and promote.
     const casObjectPresent = Boolean(media.originalKey);
+    let bytesCertified = casObjectPresent;
+
+    if (transition.status === "APPROVED" && casObjectPresent) {
+      if (promotion === undefined) {
+        // No promotion capability wired: behave as before, but do not pretend
+        // this approval made anything servable.
+        promotionLog(promotion).warn?.(
+          "review: approving without a promotion capability — the reviewed bytes are not being copied to the serve prefix",
+          { mediaId: input.mediaId },
+        );
+      } else {
+        bytesCertified = await this.promoteReviewed(
+          promotion,
+          input.mediaId,
+          media.originalKey as string,
+        );
+      }
+    }
+
     const targetStatus: MediaLifecycle =
-      transition.status === "APPROVED" && !casObjectPresent
+      transition.status === "APPROVED" && !bytesCertified
         ? "REVIEW"
         : transition.status;
     const promoted = targetStatus === "APPROVED";
@@ -298,6 +374,77 @@ export class MediaReviewHandler {
     );
 
     return { ok: true, status: targetStatus, promoted };
+  }
+
+  /**
+   * Copy the version-pinned reviewed bytes to the serve prefix.
+   *
+   * Returns true only when the serve object is genuinely there afterwards.
+   * Every failure — unknown coordinates, an unresolvable pin, a copy that
+   * throws — returns false, and the caller holds the item in REVIEW. Nothing
+   * here is best-effort: this is the step that decides whether bytes become
+   * publicly reachable.
+   */
+  private async promoteReviewed(
+    promotion: ReviewPromotionPort,
+    mediaId: string,
+    casObjectKey: string,
+  ): Promise<boolean> {
+    const log = promotionLog(promotion);
+    let coords: ReviewPromoteCoords | null;
+    try {
+      coords = await promotion.coordsFor(mediaId);
+    } catch (err) {
+      log.error?.("review: could not resolve promote coordinates — holding REVIEW", {
+        mediaId,
+        error: String(err),
+      });
+      return false;
+    }
+    if (coords === null) {
+      log.error?.("review: no promote coordinates for this item — holding REVIEW", {
+        mediaId,
+      });
+      return false;
+    }
+
+    const stagingKey = `processing/${coords.tenantId}/${coords.uploadId}`;
+    try {
+      const source = await resolvePromoteSource({
+        storage: promotion.storage,
+        stagingKey,
+        casKey: casObjectKey,
+        stagingVersionId: coords.stagingVersionId,
+      });
+      if (source.kind === "none") {
+        // Either the pin is gone or there never was one. An approval cannot be
+        // applied to bytes we cannot identify.
+        log.error?.(
+          "review: the reviewed version can no longer be resolved — refusing to promote, holding REVIEW",
+          { mediaId },
+        );
+        return false;
+      }
+      await promotePinned({
+        storage: promotion.storage,
+        source,
+        stagingKey,
+        casKey: casObjectKey,
+        cleanupKeys: [
+          `pending/${coords.tenantId}/${coords.uploadId}`,
+          stagingKey,
+        ],
+        log,
+        logContext: { mediaId },
+      });
+      return true;
+    } catch (err) {
+      log.error?.("review: promotion failed — holding REVIEW", {
+        mediaId,
+        error: String(err),
+      });
+      return false;
+    }
   }
 
   /**

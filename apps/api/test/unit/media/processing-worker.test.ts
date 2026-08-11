@@ -978,3 +978,91 @@ describe("processObjectKey — AR-SEC F3 staging version pinning", () => {
     expect(fake.cleaned[0].contentHash).toBe(createHashHex(cleaned));
   });
 });
+
+describe("processObjectKey — the poster still does not outlive the job", () => {
+  const posterKey = (tenant: string, upload: string) =>
+    `processing/${tenant}/${upload}.poster`;
+
+  it("removes the poster after a successful run", async () => {
+    // The poster is a derivative of user media that nothing downstream
+    // consumes; left behind it is an un-moderated still of an object that may
+    // yet be quarantined.
+    const cleaned = Buffer.from("cleaned-bytes");
+    const storage = happyStorage(TENANT_A, UPLOAD_1, cleaned);
+    await storage.putObject(
+      posterKey(TENANT_A, UPLOAD_1),
+      Buffer.from("poster-bytes"),
+      "image/jpeg",
+    );
+    const { deps } = makeDeps({
+      storage,
+      rows: [{ id: "media1", tenantId: TENANT_A, uploadId: UPLOAD_1 }],
+    });
+
+    const out = await processObjectKey(key(TENANT_A, UPLOAD_1), deps);
+
+    expect(out.disposition).toBe("ack");
+    expect(
+      (await storage.headObject(posterKey(TENANT_A, UPLOAD_1))).exists,
+    ).toBe(false);
+  });
+
+  it("removes the poster when the run fails after the transcode", async () => {
+    const cleaned = Buffer.from("cleaned-bytes");
+    const storage = happyStorage(TENANT_A, UPLOAD_1, cleaned);
+    await storage.putObject(
+      posterKey(TENANT_A, UPLOAD_1),
+      Buffer.from("poster-bytes"),
+      "image/jpeg",
+    );
+    const { deps } = makeDeps({
+      storage,
+      rows: [{ id: "media1", tenantId: TENANT_A, uploadId: UPLOAD_1 }],
+      failPersistence: true, // throws a retryable fault after the transcode
+    });
+
+    const out = await processObjectKey(key(TENANT_A, UPLOAD_1), deps);
+
+    expect(out.disposition).toBe("fail");
+    expect(
+      (await storage.headObject(posterKey(TENANT_A, UPLOAD_1))).exists,
+    ).toBe(false);
+  });
+
+  it("does not let a poster-delete failure change the outcome", async () => {
+    const cleaned = Buffer.from("cleaned-bytes");
+    const storage = happyStorage(TENANT_A, UPLOAD_1, cleaned);
+    const realDelete = storage.deleteObject.bind(storage);
+    vi.spyOn(storage, "deleteObject").mockImplementation(async (k: string) => {
+      if (k.endsWith(".poster")) throw new Error("storage unavailable");
+      return realDelete(k);
+    });
+    const { deps } = makeDeps({
+      storage,
+      rows: [{ id: "media1", tenantId: TENANT_A, uploadId: UPLOAD_1 }],
+    });
+
+    const out = await processObjectKey(key(TENANT_A, UPLOAD_1), deps);
+
+    expect(out.disposition).toBe("ack");
+    expect(out.reason).toBe("started-moderation");
+  });
+
+  it("does not aim a delete at a prefix the row does not own", async () => {
+    // A triggering key whose tenant disagrees with the row is rejected before
+    // the poster key is ever derived, so nothing under the forged prefix is
+    // touched.
+    const storage = new MockStoragePort();
+    const deleteSpy = vi.spyOn(storage, "deleteObject");
+    const { deps } = makeDeps({
+      storage,
+      rows: [{ id: "media1", tenantId: TENANT_A, uploadId: UPLOAD_1 }],
+    });
+
+    await processObjectKey(key(TENANT_B, UPLOAD_1), deps);
+
+    for (const call of deleteSpy.mock.calls) {
+      expect(String(call[0])).not.toContain(TENANT_B);
+    }
+  });
+});

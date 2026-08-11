@@ -437,6 +437,18 @@ export async function processObjectKey(
   triggeringKey: string,
   deps: MediaProcessingDeps,
 ): Promise<RecordOutcome> {
+  // The poster frame the transcode emits is a DERIVATIVE of user media that
+  // nothing downstream consumes: it is not hashed, not moderated, and never
+  // promoted. Left behind it is an un-moderated still of an object that may
+  // well have been quarantined, sitting in the bucket until a lifecycle rule
+  // happens to notice. So its key is tracked from the moment it exists and the
+  // object is removed on EVERY exit — success, poison, and retry alike.
+  //
+  // Declared out here (rather than beside the transcode) precisely so the
+  // failure paths can reach it, and assigned only AFTER the tenant is
+  // re-derived from the row, so a forged triggering key can never aim this
+  // delete at someone else's prefix.
+  let posterStagingKey: string | null = null;
   try {
     // --- 1. Pending-key form gate (re-trigger-loop guard). ---
     const parsed = parsePendingKey(triggeringKey);
@@ -568,7 +580,7 @@ export async function processObjectKey(
     // The cleaned output is written to a transient staging key OUTSIDE pending/
     // (so re-uploading the cleaned bytes can never re-trigger this worker).
     const cleanedStagingKey = `processing/${rowTenant}/${uploadId}`;
-    const posterStagingKey = `processing/${rowTenant}/${uploadId}.poster`;
+    posterStagingKey = `processing/${rowTenant}/${uploadId}.poster`;
     const transcodeResult = await deps.transcode.transcodeVideo({
       inputPath: triggeringKey,
       outputPath: cleanedStagingKey,
@@ -718,6 +730,29 @@ export async function processObjectKey(
       error: err,
     });
     return { disposition: "fail", reason: "retryable" };
+  } finally {
+    // Runs on every exit, including the returns above.
+    await deletePosterStaging(deps, posterStagingKey);
+  }
+}
+
+/**
+ * Remove the transient poster still. Best-effort and totally non-fatal: a
+ * leftover poster is storage noise, while a delete failure that escaped here
+ * would turn a completed record into a retry (and re-run paid AI jobs).
+ */
+async function deletePosterStaging(
+  deps: MediaProcessingDeps,
+  posterStagingKey: string | null,
+): Promise<void> {
+  if (posterStagingKey === null) return;
+  try {
+    await deps.storage.deleteObject(posterStagingKey);
+  } catch (err) {
+    deps.logger.warn("Poster staging delete tolerated", {
+      key: posterStagingKey,
+      error: err,
+    });
   }
 }
 
