@@ -1,7 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   MediaReviewHandler,
+  setMediaReviewPromotion,
+  __resetMediaReviewPromotionForTests,
   type ReviewPrismaLike,
   type ReviewPromotionPort,
 } from "../../../src/lib/media/media-review-handler.js";
@@ -336,5 +338,117 @@ describe("MediaReviewHandler.decide — without a promotion capability", () => {
     const result = await handler.decide(db, auditLogger, auditEnv, APPROVE_INPUT);
 
     expect(result).toEqual({ ok: true, status: "APPROVED", promoted: true });
+  });
+});
+
+describe("the promotion capability is reachable from a real deployment", () => {
+  afterEach(() => {
+    __resetMediaReviewPromotionForTests();
+  });
+
+  it("decide() uses the INJECTED capability when the caller passes none", async () => {
+    // Without an injection seam the capability was unreachable: the review route
+    // constructs the handler itself, so every approval took the "no capability"
+    // branch and promoted nothing. A fix nothing can reach is not a fix.
+    const handler = new MediaReviewHandler();
+    const storage = await seededStorage();
+    setMediaReviewPromotion(promotionPort(storage));
+    const { db } = makeDb({
+      id: MEDIA_ID,
+      tenantId: TENANT,
+      lifecycle: "REVIEW",
+      originalKey: CAS_KEY,
+      deletedAt: null,
+    });
+
+    const result = await handler.decide(db, auditLogger, auditEnv, APPROVE_INPUT);
+
+    expect(result).toEqual({ ok: true, status: "APPROVED", promoted: true });
+    await expect(storage.getObject(CAS_KEY)).resolves.toEqual(REVIEWED_BYTES);
+  });
+
+  it("an explicitly-passed capability still wins over the injected one", async () => {
+    const handler = new MediaReviewHandler();
+    const injected = await seededStorage();
+    const explicit = await seededStorage();
+    setMediaReviewPromotion(promotionPort(injected));
+    const { db } = makeDb({
+      id: MEDIA_ID,
+      tenantId: TENANT,
+      lifecycle: "REVIEW",
+      originalKey: CAS_KEY,
+      deletedAt: null,
+    });
+
+    await handler.decide(
+      db,
+      auditLogger,
+      auditEnv,
+      APPROVE_INPUT,
+      promotionPort(explicit),
+    );
+
+    expect((await explicit.headObject(CAS_KEY)).exists).toBe(true);
+    expect((await injected.headObject(CAS_KEY)).exists).toBe(false);
+  });
+
+  it("says so out loud when no capability is wired at all", async () => {
+    // The earlier fallback returned an empty log object, making the one warning
+    // that tells an operator "approvals are not making bytes servable" a
+    // guaranteed no-op.
+    const handler = new MediaReviewHandler();
+    const warn = vi.fn();
+    const { db } = makeDb({
+      id: MEDIA_ID,
+      tenantId: TENANT,
+      lifecycle: "REVIEW",
+      originalKey: CAS_KEY,
+      deletedAt: null,
+    });
+    const logger = await import("../../../src/lib/logger.js");
+    const spy = vi.spyOn(logger, "getLogger").mockReturnValue({
+      info: vi.fn(),
+      warn,
+      error: vi.fn(),
+    } as never);
+
+    await handler.decide(db, auditLogger, auditEnv, APPROVE_INPUT);
+
+    expect(warn).toHaveBeenCalled();
+    expect(String(warn.mock.calls[0][0])).toContain("promotion capability");
+    spy.mockRestore();
+  });
+});
+
+describe("MediaReviewHandler.decide — the coordinates must address THIS item", () => {
+  it("refuses when the promote coordinates point at another object", async () => {
+    // A coordsFor that returned another item's coordinates would promote that
+    // item's staging bytes to this item's serve key — an approval applied to
+    // media the moderator never saw.
+    const handler = new MediaReviewHandler();
+    const storage = await seededStorage();
+    const { db } = makeDb({
+      id: MEDIA_ID,
+      tenantId: TENANT,
+      lifecycle: "REVIEW",
+      originalKey: CAS_KEY,
+      deletedAt: null,
+    });
+
+    const result = await handler.decide(db, auditLogger, auditEnv, APPROVE_INPUT, {
+      storage,
+      async coordsFor() {
+        return {
+          tenantId: TENANT,
+          uploadId: UPLOAD,
+          // A different content hash — so a different serve key.
+          contentHash: "b".repeat(64),
+          stagingVersionId: "mock-version-1",
+        };
+      },
+    });
+
+    expect(result.status).toBe("REVIEW");
+    expect((await storage.headObject(CAS_KEY)).exists).toBe(false);
   });
 });

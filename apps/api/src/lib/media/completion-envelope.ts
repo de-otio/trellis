@@ -162,9 +162,11 @@ export function parseCompletionEnvelope(
     return { track: "VISUAL", jobId: directJobId };
   }
 
-  // A notification service wraps the real payload in a JSON *string*. The size
-  // cap applies to that inner string too: without it, a small outer body could
-  // carry a huge inner one and move the cost past the outer gate.
+  // A notification service wraps the real payload in a JSON *string*, and the
+  // size cap applies to that inner string too. The outer cap already binds (the
+  // inner string is a substring of the outer body), so this is defence in depth
+  // rather than a distinct gate: it keeps the bound in force if the outer check
+  // is ever relaxed or an inner payload arrives by another route.
   const wrapped = pickStringUnsanitized(obj.Message);
   if (wrapped !== null) {
     const inner = parseObject(wrapped);

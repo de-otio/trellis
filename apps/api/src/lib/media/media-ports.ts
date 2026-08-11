@@ -110,6 +110,12 @@ export interface TranscodePort {
    * The consequence is stated rather than hidden: frame-sampled moderation
    * REFUSES to run without it and fails the visual track closed to `review`.
    * It never degrades to "moderate nothing and approve".
+   *
+   * IF THIS THROWS, the adapter owns whatever it already wrote. Core deletes
+   * the frames it is TOLD about, and a rejected call reports none — so an
+   * extractor that fails partway must clean its own `outputDir` before
+   * throwing. These are stills of media that may be about to be quarantined,
+   * and core cannot delete files it never learned the names of.
    */
   sampleFrames?(input: SampleFramesInput): Promise<SampleFramesResult>;
   /**

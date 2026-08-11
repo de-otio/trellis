@@ -34,9 +34,11 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
     `completionEnvelopeBody()` and `parseCompletionEnvelope()` are exported.
   - **An operator-owned label policy.** `createLabelPolicy()` maps opaque
     category tokens to confidence bars, quarantines anything unmapped, and
-    requires a verifiable taxonomy version before it will approve. It can only
-    degrade a verdict, never loosen one. Install it with
-    `setMediaLabelPolicy()`.
+    requires a verifiable taxonomy version before it will approve. It is
+    floored at the provider's own decision, so it can only degrade a verdict
+    and never loosen one — a provider's fail-closed `review` stays `review`.
+    Install it with `setMediaLabelPolicy()`; pass it to the frame-sampling
+    adapter as `policy` to govern video frames too.
   - **A deadline wrapper** that binds the *decision*, not merely the wait: a
     provider resolving `approved` after the deadline is discarded.
   - **A bytes capability** so a classifier that takes an image in its request
@@ -75,9 +77,10 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   resolves "whatever is at the staging key now": between the review and the
   click, that key may hold something else, and copying it would launder
   unreviewed bytes through a human decision. A missing object, an unresolvable
-  pin, or a failed copy all hold the item in review. Wire the promotion
-  capability through `MediaReviewHandler.decide()`'s new optional argument;
-  without it the previous behaviour stands and says so in a log line.
+  pin, or a failed copy all hold the item in review. **Wire it with
+  `setMediaReviewPromotion()`** (or pass it to `MediaReviewHandler.decide()`
+  directly); without it the previous behaviour stands and every approval logs
+  that nothing was copied to the serve prefix.
 - **The poster still emitted during video processing is now deleted** on every
   exit from the worker. Nothing downstream consumed it, so it was left behind
   as an un-moderated frame of a possibly-quarantined object.
@@ -97,6 +100,16 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   like a busy moderation week.
 - **Boot refuses to serve with the fail-closed Null moderation provider outside
   dev**, unless `MEDIA_MODERATION_ALLOW_NULL=true` says otherwise explicitly.
+
+- **Inline video verdicts need two more things from a consumer's persistence
+  adapter**, and say so rather than guessing: `MediaFileRow.lifecycle` (so a
+  redelivered message cannot compute a transition from a state the object left
+  long ago — including reversing a moderator's rejection) and
+  `persistMediaStatus`, which must be a conditional write. Without either, an
+  object whose tracks all resolve during processing is held for human review
+  instead of being settled from an assumption. `MediaProcessingDeps.emitResolved`
+  is likewise optional, and without it a client waiting on the upload
+  notification for such an object is not told it settled.
 
 ### Changed
 

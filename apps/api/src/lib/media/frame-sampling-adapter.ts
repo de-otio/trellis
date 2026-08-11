@@ -22,6 +22,12 @@
  *     it is crypto-random, because an id that encodes what it points at is an
  *     id that leaks what it points at wherever ids are logged.
  *
+ * CLEANUP covers every frame this adapter is TOLD about: success, ceiling
+ * breach, classifier error, abort. The one gap is an extractor that writes
+ * frames and then throws without reporting their paths — core cannot delete
+ * files it never learned of, so the port makes that the adapter's
+ * responsibility and core logs the prefix.
+ *
  * FAIL-CLOSED AT EVERY EDGE. No sampling config, no `sampleFrames` capability,
  * a ceiling breach, an extraction shortfall, an aborted deadline, a classifier
  * that throws — every one of them resolves `review`. Nothing in this file can
@@ -33,6 +39,7 @@ import {
   planFrameSampling,
   type FrameVerdict,
 } from "./frame-aggregation.js";
+import type { LabelPolicy } from "./label-policy.js";
 import type { TranscodePort } from "./media-ports.js";
 import { createHash } from "node:crypto";
 
@@ -74,10 +81,11 @@ export interface FrameSamplingConfig {
    * An operator-chosen name for this sampling policy, recorded on every job.
    *
    * When absent, a FINGERPRINT of the effective parameters is used instead: a
-   * short digest that changes if and only if the policy changed, without
-   * disclosing the parameters themselves. That is the property an audit needs
-   * ("was this scanned under the policy we think?") and it is available with no
-   * operator action, so the audit trail is never simply empty.
+   * short digest that changes if and only if the policy changed. That is the
+   * property an audit needs ("was this scanned under the policy we think?"),
+   * and it is available with no operator action, so the audit trail is never
+   * simply empty. It does NOT conceal the parameters — see
+   * {@link policyFingerprint} — so it is server-side-only material either way.
    */
   readonly policyVersion?: string;
 }
@@ -85,10 +93,14 @@ export interface FrameSamplingConfig {
 /**
  * A short digest of the effective sampling parameters.
  *
- * Deliberately one-way: the point is to tell two policies apart, not to publish
- * either. The rate and the ceiling are threshold-secrecy material, so the
- * recorded identifier must not carry them even into a server-side log that may
- * later be widened.
+ * Its job is to tell two policies APART, and that is all it should be trusted
+ * to do. It is NOT a concealment control: an unsalted digest over a handful of
+ * plausible rates and small integer ceilings has a preimage space small enough
+ * to exhaust in under a second, so anyone holding this string can recover the
+ * parameters. Treat `policyVersion` as server-side-only material with the same
+ * "never send to a client" rule as the per-frame audit detail — an operator who
+ * needs a genuinely opaque identifier should supply their own
+ * {@link FrameSamplingConfig.policyVersion}.
  */
 function policyFingerprint(config: FrameSamplingConfig): string {
   const canonical = JSON.stringify({
@@ -112,6 +124,19 @@ export interface FrameSamplingLog {
 export interface FrameSamplingDeps {
   /** The image-only classifier this adapter turns into a video classifier. */
   readonly images: MediaModerationProvider;
+  /**
+   * The operator's label policy, applied to EVERY frame.
+   *
+   * Without it the video path would honour the provider's own per-frame
+   * decision while the image path honoured the operator's policy — so the
+   * policy's strongest rule ("a category you have not mapped quarantines")
+   * would hold for a still and not for the same content inside a clip. An
+   * operator who configures a policy reasonably believes it governs both.
+   *
+   * The policy can only degrade a frame's verdict, so wiring it can never make
+   * the video path more permissive than the provider already was.
+   */
+  readonly policy?: LabelPolicy;
   /** Frame extraction + per-frame cleanup. */
   readonly transcode: TranscodePort;
   readonly config: FrameSamplingConfig;
@@ -288,9 +313,15 @@ export class FrameSamplingVideoModerationAdapter
       });
       framePaths = Array.isArray(sampled?.framePaths) ? sampled.framePaths : [];
     } catch (err) {
-      log?.warn?.("frame-sampling: extraction failed — review", {
-        error: String(err),
-      });
+      // An extractor that wrote some frames and THEN threw leaves them behind:
+      // it never returned their paths, so there is nothing here to delete. The
+      // prefix is logged so an operator can reap it, and the port documents
+      // that a throwing adapter owns whatever it already wrote — core cannot
+      // clean up files it was never told about.
+      log?.warn?.(
+        "frame-sampling: extraction failed — review (any frames already written under outputDir are the adapter's to remove)",
+        { error: String(err), outputDir },
+      );
       return refused({ expectedFrames: plan.expectedFrames });
     }
 
@@ -377,10 +408,17 @@ export class FrameSamplingVideoModerationAdapter
           continue;
         }
         try {
-          const verdict = await this.deps.images.moderateImage(
+          const raw = await this.deps.images.moderateImage(
             { bucket: input.bucket, key: framePaths[index] },
             options,
           );
+          // The operator's policy is authoritative over the provider's own
+          // decision here exactly as it is on the image path. It only ever
+          // degrades, so this cannot loosen a frame.
+          const verdict =
+            this.deps.policy === undefined
+              ? raw
+              : { ...raw, decision: this.deps.policy.decide(raw) };
           results[index] = {
             decision:
               verdict?.decision === "approved" ||
@@ -388,9 +426,9 @@ export class FrameSamplingVideoModerationAdapter
               verdict?.decision === "quarantine"
                 ? verdict.decision
                 : null,
-            ...(Array.isArray(verdict?.labels) && { labels: verdict.labels }),
-            ...(verdict?.modelVersion !== undefined && {
-              modelVersion: verdict.modelVersion,
+            ...(Array.isArray(raw?.labels) && { labels: raw.labels }),
+            ...(raw?.modelVersion !== undefined && {
+              modelVersion: raw.modelVersion,
             }),
           };
         } catch (err) {

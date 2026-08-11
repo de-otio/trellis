@@ -31,7 +31,11 @@ import { SecurityHeaders } from "../security-headers.js";
 import { SessionManager } from "../session-cookie.js";
 import { validateRequest } from "../validate-request.js";
 import { canonicalContentType } from "../media/serve-gate.js";
-import { MediaReviewHandler, type MediaKind } from "../media/media-review-handler.js";
+import {
+  MediaReviewHandler,
+  getMediaReviewPromotion,
+  type MediaKind,
+} from "../media/media-review-handler.js";
 import type { Region } from "../region-detection.js";
 import type { Route } from "./types.js";
 
@@ -176,14 +180,24 @@ export const mediaReviewRoutes: Route[] = [
       try {
         const handler = new MediaReviewHandler();
         const auditLogger = createAuditLogger(env);
-        const result = await handler.decide(gate.db, auditLogger, env, {
-          mediaId,
-          decision: validation.data.decision,
-          moderatorUserId: gate.userId,
-          region: gate.region,
-          ipAddress: clientIp(request),
-          userAgent: request.headers.get("user-agent") || undefined,
-        });
+        // The promotion capability, when a consuming application injected one,
+        // is what makes this approval actually copy the reviewed bytes to the
+        // serve prefix. `decide` reads it from the injection seam by default;
+        // passing it explicitly keeps the dependency visible at the call site.
+        const result = await handler.decide(
+          gate.db,
+          auditLogger,
+          env,
+          {
+            mediaId,
+            decision: validation.data.decision,
+            moderatorUserId: gate.userId,
+            region: gate.region,
+            ipAddress: clientIp(request),
+            userAgent: request.headers.get("user-agent") || undefined,
+          },
+          getMediaReviewPromotion(),
+        );
 
         if (!result.ok) {
           if (result.code === "NOT_FOUND") {

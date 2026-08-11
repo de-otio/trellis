@@ -30,6 +30,7 @@ import {
   nextLifecycle,
   type MediaLifecycle,
 } from "./media-lifecycle.js";
+import { casKey, isCasKeyError } from "./cas-keys.js";
 import type { StoragePort } from "./media-ports.js";
 import {
   promotePinned,
@@ -44,6 +45,7 @@ import {
   MEDIA_MODERATION_VIEWED,
 } from "../audit-actions.js";
 import type { Region } from "../region-detection.js";
+import { getLogger } from "../logger.js";
 import type { TrellisAuditLogger, TrellisAuditLoggerEnv } from "../audit-composer.js";
 
 /**
@@ -126,9 +128,56 @@ export interface ReviewPrismaLike {
 const MAX_LIMIT = 100;
 const DEFAULT_LIMIT = 50;
 
-/** A never-silent log seam: absent hooks simply drop, they never throw. */
+/**
+ * The log seam for promotion work.
+ *
+ * When the caller supplied no log, fall back to the platform logger rather than
+ * to an empty object. An earlier version returned `{}` here, which made the
+ * "no promotion capability wired" warning — the one thing telling an operator
+ * that approvals are not making bytes servable — a guaranteed no-op. A
+ * fallback that silently drops the message it exists to deliver is worse than
+ * no fallback at all.
+ */
 function promotionLog(promotion?: ReviewPromotionPort): PromoteLog {
-  return promotion?.log ?? {};
+  if (promotion?.log !== undefined) return promotion.log;
+  const logger = getLogger();
+  return {
+    info: (msg, data) => logger.info(msg, data as Record<string, unknown>),
+    warn: (msg, data) => logger.warn(msg, data as Record<string, unknown>),
+    error: (msg, data) => logger.error(msg, data as Record<string, unknown>),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Promotion-capability injection.
+//
+// Without this seam the capability was unreachable: the route constructs the
+// handler itself, so there was nowhere for a consuming application to hand one
+// in, and every approval took the "no capability" branch. A fix nothing can
+// reach is not a fix.
+// ---------------------------------------------------------------------------
+
+let injectedPromotion: ReviewPromotionPort | undefined;
+
+/**
+ * Consuming app calls this at startup so a human approval actually promotes the
+ * reviewed bytes. Re-exported from `@de-otio/trellis`.
+ *
+ * Without it, `decide()` still applies the lifecycle transition but copies
+ * nothing to the serve prefix — and says so, loudly, on every approval.
+ */
+export function setMediaReviewPromotion(port: ReviewPromotionPort): void {
+  injectedPromotion = port;
+}
+
+/** The injected promotion capability, or undefined. Read by the review route. */
+export function getMediaReviewPromotion(): ReviewPromotionPort | undefined {
+  return injectedPromotion;
+}
+
+/** Test-only: clear the injected capability between cases. */
+export function __resetMediaReviewPromotionForTests(): void {
+  injectedPromotion = undefined;
 }
 
 /** Outcome discriminant for decide()/escalateCsam(), mapped to HTTP by the route. */
@@ -290,7 +339,7 @@ export class MediaReviewHandler {
       ipAddress?: string;
       userAgent?: string;
     },
-    promotion?: ReviewPromotionPort,
+    promotion: ReviewPromotionPort | undefined = getMediaReviewPromotion(),
   ): Promise<DecisionResult> {
     const media = await db.mediaFile.findUnique({
       where: { id: input.mediaId },
@@ -405,6 +454,21 @@ export class MediaReviewHandler {
       log.error?.("review: no promote coordinates for this item — holding REVIEW", {
         mediaId,
       });
+      return false;
+    }
+
+    // The serve key comes from the ROW and the staging key from the port. They
+    // must describe the same object: a `coordsFor` that returns another item's
+    // coordinates would otherwise promote that item's staging bytes to THIS
+    // item's serve key, and the moderator's approval would apply to media they
+    // never saw. Derive the expected serve key from the coordinates and refuse
+    // on any disagreement.
+    const expectedCasKey = casKey(coords.tenantId, coords.contentHash);
+    if (isCasKeyError(expectedCasKey) || expectedCasKey !== casObjectKey) {
+      log.error?.(
+        "review: promote coordinates do not address this item's serve key — refusing to promote, holding REVIEW",
+        { mediaId },
+      );
       return false;
     }
 

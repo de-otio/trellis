@@ -127,6 +127,7 @@ setMediaModerationProvider(
       framesPerSecond: Number(process.env.MEDIA_SAMPLE_FPS),
       maxFramesPerJob: Number(process.env.MEDIA_MAX_FRAMES_PER_JOB),
       maxDurationSeconds: Number(process.env.MEDIA_MAX_DURATION_SECONDS),
+      policy: myLabelPolicy,             // optional; governs every frame
       policyVersion: process.env.MEDIA_SAMPLING_POLICY_VERSION,
     },
     frameDirFor: (jobId) => `processing/frames/${jobId}`,
@@ -147,8 +148,11 @@ What the adapter does, and what you should know about it:
   the decision in `initialDecision`. There is no remote job, so no completion
   notification will arrive, and core settles the object itself. Sampling time
   is spent inside the processing worker's budget, bounded by `maxFramesPerJob`.
-- It deletes every extracted frame on every path — success, error, deadline,
-  ceiling breach.
+- It deletes every frame it is TOLD about, on every path — success, error,
+  deadline, ceiling breach. If your `sampleFrames` writes frames and then
+  throws, it never reported their paths, so **cleaning those up is yours**:
+  core cannot delete files it never learned the names of. It logs the
+  `outputDir` so an operator can reap them.
 - Frames are extracted with the container metadata dictionary stripped, so a
   sampled still cannot resurrect location tags the transcode removed.
 
@@ -291,9 +295,15 @@ setMediaLabelPolicy(
 
 This shifts authorship of the policy from you to them, which is the point: the
 operator can audit and change it without asking you. It can only ever *degrade*
-a verdict — an unmapped category quarantines, an unverifiable taxonomy floors
-at `review` — so enabling it cannot make anything more permissive than you
-already were.
+a verdict: the result is floored at your own `decision`, so a policy can turn
+your `approved` into a `review` and never the reverse. Your fail-closed
+`review` stays a `review` even when your label array is empty.
+
+**Where it applies:** the synchronous image path, and — when the operator passes
+it to `FrameSamplingVideoModerationAdapter` as `policy` — every sampled video
+frame. For a backend with its own async video job, the operator applies it
+through the completion worker's `reinterpretVisual` hook; core does not reach
+inside your job model.
 
 What that means for you: **report every category you detected**, including ones
 you scored low. A category the operator has not mapped is treated as

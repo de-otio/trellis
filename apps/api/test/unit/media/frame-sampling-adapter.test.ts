@@ -11,6 +11,7 @@ import {
   type S3Ref,
 } from "../../../src/lib/media/moderation-provider.js";
 import type { ModerationDecision } from "../../../src/lib/media/media-lifecycle.js";
+import { createLabelPolicy } from "../../../src/lib/media/label-policy.js";
 
 const BUCKET = "example-media-bucket";
 const REF: S3Ref = {
@@ -453,5 +454,104 @@ describe("FrameSamplingVideoModerationAdapter — the audit trail", () => {
 
     expect(started.initialDecision).toBe("review");
     expect(started.detail?.framesScored).toBe(0);
+  });
+});
+
+describe("FrameSamplingVideoModerationAdapter — the operator's policy governs frames too", () => {
+  function withPolicy(policy: ReturnType<typeof createLabelPolicy>) {
+    const images = new MockModerationProvider();
+    const transcode = new MockTranscodePort({ duration: 4 });
+    const adapter = new FrameSamplingVideoModerationAdapter({
+      images,
+      transcode,
+      policy,
+      config: {
+        framesPerSecond: 1,
+        maxFramesPerJob: 10,
+        maxDurationSeconds: 60,
+      },
+      frameDirFor: (jobId) => `processing/frames/${jobId}`,
+      newJobId: () => "core-job-1",
+    });
+    return { adapter, images };
+  }
+
+  const CATEGORIES = { category_a: { review: 0.5, quarantine: 0.9 } };
+
+  it("quarantines a video whose frames carry a category the operator never mapped", async () => {
+    // Without this, the policy's strongest rule would hold for a still and not
+    // for the same content inside a clip.
+    const { adapter, images } = withPolicy(
+      createLabelPolicy({
+        categories: CATEGORIES,
+        pinMode: "none",
+        acceptUnpinnedTaxonomy: true,
+      }),
+    );
+    images.setImageVerdict({
+      decision: "approved",
+      labels: [{ category: "category_unmapped", confidence: 0.01 }],
+      provider: "mock",
+    });
+
+    expect((await adapter.startVideoModeration(REF)).initialDecision).toBe(
+      "quarantine",
+    );
+  });
+
+  it("reviews a video whose frames come from a drifted taxonomy", async () => {
+    const { adapter, images } = withPolicy(
+      createLabelPolicy({
+        categories: CATEGORIES,
+        pinMode: "config",
+        expectedModelVersion: "mock-taxonomy-1",
+      }),
+    );
+    images.setImageVerdict({
+      decision: "approved",
+      labels: [],
+      provider: "mock",
+      modelVersion: "mock-taxonomy-2",
+    });
+
+    expect((await adapter.startVideoModeration(REF)).initialDecision).toBe("review");
+  });
+
+  it("keeps the provider's raw labels in the audit detail, not the policy's view", async () => {
+    const { adapter, images } = withPolicy(
+      createLabelPolicy({
+        categories: CATEGORIES,
+        pinMode: "none",
+        acceptUnpinnedTaxonomy: true,
+      }),
+    );
+    images.setImageVerdict({
+      decision: "approved",
+      labels: [{ category: "category_a", confidence: 0.1 }],
+      provider: "mock",
+      modelVersion: "mock-taxonomy-1",
+    });
+
+    const started = await adapter.startVideoModeration(REF);
+
+    expect(started.initialDecision).toBe("approved");
+    expect(started.detail?.frames?.[0]?.labels).toEqual([
+      { category: "category_a", confidence: 0.1 },
+    ]);
+    expect(started.detail?.frames?.[0]?.modelVersion).toBe("mock-taxonomy-1");
+  });
+
+  it("cannot make the video path MORE permissive than the provider was", async () => {
+    const { adapter, images } = withPolicy(
+      createLabelPolicy({
+        categories: CATEGORIES,
+        pinMode: "none",
+        acceptUnpinnedTaxonomy: true,
+      }),
+    );
+    // A provider failing closed, with nothing in its labels to object to.
+    images.setImageVerdict({ decision: "review", labels: [], provider: "mock" });
+
+    expect((await adapter.startVideoModeration(REF)).initialDecision).toBe("review");
   });
 });

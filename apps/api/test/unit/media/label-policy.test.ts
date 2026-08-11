@@ -11,6 +11,7 @@ import {
   MOCK_CATEGORY_B,
   type ModerationVerdict,
 } from "../../../src/lib/media/moderation-provider.js";
+import type { ModerationDecision } from "../../../src/lib/media/media-lifecycle.js";
 
 // Obviously-mock category tokens and obviously-mock bars. Nothing here is, or
 // resembles, an operative threshold.
@@ -31,12 +32,20 @@ function config(over: Partial<LabelPolicyConfig> = {}): LabelPolicyConfig {
   };
 }
 
+/**
+ * A verdict whose own decision is `approved`, so a test expecting `approved`
+ * is testing the POLICY rather than the policy's ability to overrule the
+ * provider. The earlier fixture hard-coded `decision: "review"` here, which is
+ * precisely why the fail-open below went unnoticed: every "approves" assertion
+ * was silently asserting that the policy could upgrade a provider's verdict.
+ */
 function verdictOf(
   labels: Array<{ category: string; confidence: number }>,
   modelVersion?: string,
+  decision: ModerationDecision = "approved",
 ): ModerationVerdict {
   return {
-    decision: "review",
+    decision,
     labels,
     provider: "mock",
     ...(modelVersion !== undefined && { modelVersion }),
@@ -311,5 +320,104 @@ describe("decideFromLabels — taxonomy pin modes", () => {
     ]) {
       expect(decideFromLabels(verdictOf([]), cfg)).toBe("review");
     }
+  });
+});
+
+describe("decideFromLabels — the policy can only ever DEGRADE a verdict", () => {
+  const DECISIONS: ModerationDecision[] = ["approved", "review", "quarantine"];
+  const SEVERITY: Record<ModerationDecision, number> = {
+    approved: 0,
+    review: 1,
+    quarantine: 2,
+  };
+
+  it("never turns a provider's fail-closed review into an approval", () => {
+    // The seam CONTRACT requires a provider that faults to return
+    // `{ decision: "review", labels: [] }`. Interpreting that from labels alone
+    // reads as "no labels, pin fine, therefore approved" — which would make the
+    // fail-closed path the fail-open one.
+    for (const cfg of [
+      config(),
+      config({ pinMode: "response" }),
+      config({ pinMode: "config", expectedModelVersion: MOCK_VERSION }),
+    ]) {
+      expect(
+        decideFromLabels(verdictOf([], MOCK_VERSION, "review"), cfg),
+      ).toBe("review");
+    }
+  });
+
+  it("never discards a quarantine that carries no labels", () => {
+    // A hash match or a policy refusal is not expressible as a label, and must
+    // survive interpretation untouched.
+    expect(
+      decideFromLabels(verdictOf([], MOCK_VERSION, "quarantine"), config()),
+    ).toBe("quarantine");
+  });
+
+  it("does not let the fail-closed Null provider approve anything", async () => {
+    const { NullModerationProvider } = await import(
+      "../../../src/lib/media/moderation-provider.js"
+    );
+    const verdict = await new NullModerationProvider(() => {}).moderateImage({
+      bucket: "b",
+      key: "k",
+    });
+
+    expect(decideFromLabels(verdict, config())).toBe("review");
+  });
+
+  it("treats an unrecognised provider decision as review, not as approval", () => {
+    const malformed = {
+      decision: "definitely-fine" as ModerationDecision,
+      labels: [],
+      provider: "mock",
+      modelVersion: MOCK_VERSION,
+    };
+    expect(decideFromLabels(malformed, config())).toBe("review");
+  });
+
+  it("property: the result is never LESS severe than the provider's own decision", () => {
+    for (const providerDecision of DECISIONS) {
+      for (const cfg of [
+        config(),
+        config({ pinMode: "response" }),
+        config({ pinMode: "config", expectedModelVersion: MOCK_VERSION }),
+      ]) {
+        for (const labels of [
+          [],
+          [{ category: MOCK_CATEGORY_A, confidence: 0 }],
+          [{ category: MOCK_CATEGORY_A, confidence: 0.6 }],
+          [{ category: MOCK_CATEGORY_B, confidence: 0.95 }],
+          [{ category: "mock_category_unmapped", confidence: 0 }],
+        ]) {
+          for (const version of [MOCK_VERSION, OTHER_VERSION, undefined]) {
+            const out = decideFromLabels(
+              verdictOf(labels, version, providerDecision),
+              cfg,
+            );
+            expect(SEVERITY[out]).toBeGreaterThanOrEqual(
+              SEVERITY[providerDecision],
+            );
+          }
+        }
+      }
+    }
+  });
+
+  it("still degrades an approving provider when the policy says so", () => {
+    // The floor must not make the policy toothless in the direction that matters.
+    expect(
+      decideFromLabels(
+        verdictOf([{ category: "mock_category_unmapped", confidence: 0 }], MOCK_VERSION),
+        config(),
+      ),
+    ).toBe("quarantine");
+    expect(
+      decideFromLabels(
+        verdictOf([], undefined),
+        config({ pinMode: "config", expectedModelVersion: MOCK_VERSION }),
+      ),
+    ).toBe("review");
   });
 });

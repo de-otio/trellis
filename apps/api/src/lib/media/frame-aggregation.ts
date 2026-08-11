@@ -73,7 +73,10 @@ export function expectedFrameCount(
 /** The outcome of planning a sampling run before any frame is extracted. */
 export type FrameSamplingPlan =
   | { readonly ok: true; readonly expectedFrames: number }
-  | { readonly ok: false; readonly reason: "ceiling-exceeded" | "config-absent" };
+  | {
+      readonly ok: false;
+      readonly reason: "ceiling-exceeded" | "config-absent" | "duration-unknown";
+    };
 
 /**
  * Decide whether this video may be frame-sampled at all, and how many frames to
@@ -104,9 +107,20 @@ export function planFrameSampling(config: {
   ) {
     return { ok: false, reason: "config-absent" };
   }
-  const duration = Number.isFinite(config.durationSeconds)
-    ? Math.max(0, config.durationSeconds)
-    : 0;
+  // An unknown or zero duration is doubt, and doubt reviews. Coercing it to a
+  // one-frame expectation would quietly switch OFF both the shortfall rule and
+  // the ceiling rule — any single decoded frame would satisfy the expectation,
+  // and no clip could ever breach the ceiling — which is the opposite of what
+  // those rules are for. A probe that returns 0 or NaN on failure must not be
+  // able to disable the law by failing.
+  if (
+    typeof config.durationSeconds !== "number" ||
+    !Number.isFinite(config.durationSeconds) ||
+    config.durationSeconds <= 0
+  ) {
+    return { ok: false, reason: "duration-unknown" };
+  }
+  const duration = config.durationSeconds;
   const planned = Math.max(1, Math.floor(duration * framesPerSecond));
   if (planned > Math.floor(maxFrames)) {
     return { ok: false, reason: "ceiling-exceeded" };

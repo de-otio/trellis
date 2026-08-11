@@ -27,6 +27,20 @@
  *     when the pin verified. A provider that returns an empty label array
  *     because it errored internally, or because its taxonomy moved, must not
  *     be able to approve by saying nothing.
+ *  5. **The policy can only ever DEGRADE the provider's verdict.** The result
+ *     is floored at what the provider itself said, so a policy can turn an
+ *     `approved` into a `review` and never the reverse.
+ *
+ *     This one is load-bearing and easy to get wrong, because the natural
+ *     implementation — derive a decision from the labels and return it — is
+ *     wrong in a way that inverts the whole pipeline. A provider that hits an
+ *     internal fault does what the seam contract REQUIRES: it returns
+ *     `{ decision: "review", labels: [] }`. Interpreting that from labels alone
+ *     yields "no labels, pin fine, therefore approved" — the fail-closed
+ *     verdict becomes an approval, and the fail-closed Null provider approves
+ *     everything. Some verdicts are also not expressible as labels at all (a
+ *     hash match, a rate-limit refusal), and those must survive interpretation
+ *     untouched.
  *
  * PURITY: no I/O, no clock, no randomness, and no numbers of its own.
  */
@@ -198,10 +212,21 @@ export function decideFromLabels(
   const floor: ModerationDecision = pinOk ? "approved" : "review";
 
   if (verdict === null || typeof verdict !== "object") return "review";
+
+  // Rule 5: the provider's own decision is a FLOOR, never a starting point to
+  // be overwritten. An unrecognised decision reads as `review` — this function
+  // must not be a way to launder a malformed verdict into an approval.
+  const providerFloor: ModerationDecision =
+    verdict.decision === "approved" ||
+    verdict.decision === "review" ||
+    verdict.decision === "quarantine"
+      ? verdict.decision
+      : "review";
+
   const labels = Array.isArray(verdict.labels) ? verdict.labels : null;
   if (labels === null) {
     // A verdict that does not even carry a label array tells us nothing.
-    return "review";
+    return worse("review", providerFloor);
   }
 
   let decision: ModerationDecision = "approved";
@@ -238,7 +263,7 @@ export function decideFromLabels(
     if (confidence >= policy.review) decision = worse(decision, "review");
   }
 
-  return worse(decision, floor);
+  return worse(worse(decision, floor), providerFloor);
 }
 
 /**

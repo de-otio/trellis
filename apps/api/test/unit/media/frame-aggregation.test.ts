@@ -221,3 +221,25 @@ describe("aggregateFrameVerdicts — the law", () => {
     );
   });
 });
+
+describe("planFrameSampling — an unknown duration is doubt", () => {
+  it("refuses rather than collapsing to a one-frame expectation", () => {
+    // Coercing an unknown duration to "expect 1 frame" would switch OFF both
+    // the shortfall rule and the ceiling rule: any single decoded frame would
+    // satisfy the expectation, and no clip could ever breach the ceiling. A
+    // probe that returns 0 or NaN on failure must not be able to disable the
+    // law by failing.
+    for (const durationSeconds of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(
+        planFrameSampling({ durationSeconds, framesPerSecond: 1, maxFrames: 10 }),
+      ).toEqual({ ok: false, reason: "duration-unknown" });
+    }
+  });
+
+  it("still refuses on missing config before it looks at duration", () => {
+    expect(planFrameSampling({ durationSeconds: 0 })).toEqual({
+      ok: false,
+      reason: "config-absent",
+    });
+  });
+});

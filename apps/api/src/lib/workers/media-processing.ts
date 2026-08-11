@@ -46,6 +46,7 @@ import {
 import { exceedsDurationCap } from "../media/duration-cap.js";
 import { classifyWorkerErrorDetailed } from "../media/classify-worker-error.js";
 import { decidePromotion } from "../media/promote-decision.js";
+import { moderationResolvedPayload } from "../media/moderation-resolved-payload.js";
 import {
   promotePinned,
   resolvePromoteSource,
@@ -122,6 +123,21 @@ export interface MediaFileRow {
   readonly id: string;
   readonly tenantId: string;
   readonly uploadId: string | null;
+  /**
+   * The row's CURRENT lifecycle, when the adapter can supply it.
+   *
+   * Needed because this worker's queue is at-least-once and it has no dedupe
+   * of its own: a redelivered message re-runs the whole pipeline, and without
+   * knowing where the object actually stands, a second pass would compute a
+   * transition from a state the object left long ago. If a moderator has since
+   * REJECTED it, that is a rejection being silently reversed.
+   *
+   * OPTIONAL, as a published seam requires. The consequence is stated rather
+   * than hidden: without it, an object whose tracks all resolve during
+   * processing is NOT settled here — it is held for human review instead,
+   * because settling would mean writing a lifecycle computed from a guess.
+   */
+  readonly lifecycle?: MediaLifecycle;
 }
 
 /**
@@ -260,7 +276,23 @@ export interface MediaPersistencePort {
    * alternative, which would be a row stuck before any verdict, invisible to
    * everyone.
    */
-  persistMediaStatus?(mediaId: string, status: MediaLifecycle): Promise<void>;
+  persistMediaStatus?(
+    mediaId: string,
+    status: MediaLifecycle,
+    options?: {
+      /**
+       * Apply the write ONLY if the row still holds this lifecycle.
+       *
+       * MUST be implemented as a conditional update (`where: { id, lifecycle:
+       * expectedFrom }`), for the same reason `markMediaUploaded` must: a human
+       * decision can land between this worker reading the row and writing it
+       * back, and an unconditional write would clobber it. Together with the
+       * lifecycle read this is belt and braces — the read catches a stale
+       * replay, the condition catches a race.
+       */
+      readonly expectedFrom: MediaLifecycle;
+    },
+  ): Promise<void>;
   /**
    * Drive the `bytes-arrived` transition: AWAITING_UPLOAD -> UPLOADED (T14).
    * MUST be a conditional write (update ... where lifecycle=AWAITING_UPLOAD)
@@ -330,6 +362,21 @@ export interface MediaProcessingDeps {
    */
   readonly spendGuard?: MediaSpendGuardPort;
   /**
+   * Emit the anti-oracle `moderation.resolved` event (ready|not-ready ONLY).
+   *
+   * Needed only on the inline-settlement path, where this worker performs the
+   * transition the completion worker normally performs — and therefore owes the
+   * same notification. Without it a client waiting on the event after uploading
+   * a frame-sampled silent video waits forever, which is the exact
+   * silent-forever failure the inline path exists to prevent.
+   *
+   * OPTIONAL, and best-effort: a failure to notify must never undo a decision.
+   */
+  readonly emitResolved?: (payload: {
+    readonly mediaId: string;
+    readonly status: "ready" | "not-ready";
+  }) => Promise<void>;
+  /**
    * Provider-neutral metric emission (WS-2 §5.2). OPTIONAL: this worker predates
    * the port and consumers wire it at their own pace. Absent means the Art. 50
    * provenance counters are not emitted and the log lines are the only signal —
@@ -340,9 +387,17 @@ export interface MediaProcessingDeps {
   /** The object-storage bucket handle moderation/transcription refs carry. */
   readonly bucket: string;
   /**
-   * Deterministic job-name factory for transcription/idempotency. Injected so
-   * the shell stays free of Date.now/Math.random in tests; production passes a
-   * uuid/time-based generator. `seed` is a stable per-call input (the cas key).
+   * Job-name factory for transcription/idempotency. Injected so the shell stays
+   * free of Date.now/Math.random in tests; production passes a uuid/time-based
+   * generator. `seed` is a stable per-call input (the cas key).
+   *
+   * MUST BE UNPREDICTABLE — never a pure function of the seed. The job name
+   * becomes a completion pointer, and the completion queue dedupes on it: a
+   * name derivable from the tenant and upload ids lets anyone who knows those
+   * send a completion first, claim the dedupe key, and have the genuine
+   * completion later ack-dropped as a duplicate. The object never serves, but
+   * it never resolves either. Include real entropy (a uuid) and treat the seed
+   * as correlation, not identity.
    */
   readonly newJobName: (seed: string) => string;
   readonly logger: MediaWorkerLogger;
@@ -653,6 +708,14 @@ export async function processObjectKey(
       maxDurationSeconds: deps.config.maxDurationSeconds,
     });
     const cleanedStagingKeyOut = transcodeResult.cleanedPath;
+    // Track the poster the adapter REPORTS rather than the one we requested.
+    // The same function already trusts `cleanedPath` over the requested output
+    // path, for the same reason: an adapter may write elsewhere (an image muxer
+    // that appends an extension, say), and deleting the key we asked for would
+    // then silently miss the still that actually exists.
+    if (typeof transcodeResult.posterPath === "string" && transcodeResult.posterPath.length > 0) {
+      posterStagingKey = transcodeResult.posterPath;
+    }
 
     // --- 4b. AR-SEC F3 (TOCTOU): pin the EXACT staging object version we ---
     // are about to hash and moderate. Everything downstream — the content
@@ -787,6 +850,7 @@ export async function processObjectKey(
     ) {
       await settleInlineResolvedTracks(deps, {
         mediaId: row.id,
+        currentStatus: row.lifecycle,
         visual: visual.initialDecision,
         audio: audioInitialDecision,
         stagingKey: cleanedStagingKeyOut,
@@ -1019,6 +1083,8 @@ async function settleInlineResolvedTracks(
   deps: MediaProcessingDeps,
   args: {
     readonly mediaId: string;
+    /** The row's ACTUAL lifecycle; `undefined` when the adapter cannot say. */
+    readonly currentStatus: MediaLifecycle | undefined;
     readonly visual: ModerationDecision;
     readonly audio: ModerationDecision;
     readonly stagingKey: string;
@@ -1027,6 +1093,26 @@ async function settleInlineResolvedTracks(
     readonly stagingVersionId: string;
   },
 ): Promise<void> {
+  // Without the row's real lifecycle we cannot tell a first delivery from a
+  // redelivery of an object a moderator has since decided. Writing a status
+  // computed from an assumed "UPLOADED" would silently reverse that decision,
+  // so refuse: hold for review instead, and say why.
+  if (args.currentStatus === undefined) {
+    deps.logger.warn(
+      "Inline resolution: the persistence adapter does not report the row's lifecycle, so this object is being held for human review rather than settled from an assumed state (surface MediaFileRow.lifecycle to enable inline video verdicts)",
+      { mediaId: args.mediaId },
+    );
+    try {
+      await deps.persistence.markMediaForReview(args.mediaId);
+    } catch (err) {
+      deps.logger.error("Inline resolution: could not hold for review", {
+        mediaId: args.mediaId,
+        error: err,
+      });
+    }
+    return;
+  }
+
   try {
     const source = await resolvePromoteSource({
       storage: deps.storage,
@@ -1037,13 +1123,17 @@ async function settleInlineResolvedTracks(
     const action = decidePromotion({
       visual: { state: "decided", decision: args.visual },
       audio: { state: "decided", decision: args.audio },
-      currentStatus: "UPLOADED",
+      currentStatus: args.currentStatus,
       casObjectPresent: source.kind !== "none",
     });
     if (action.transition.ok === false) {
-      deps.logger.warn("Inline resolution: illegal transition — leaving as is", {
-        mediaId: args.mediaId,
-      });
+      // A replay on an object that has already moved on — including one a
+      // moderator has decided. Ack-drop it exactly as the completion worker
+      // does; never coerce it into a legal-looking transition.
+      deps.logger.info(
+        "Inline resolution: illegal/absorbing transition — leaving the object as it stands",
+        { mediaId: args.mediaId, from: args.currentStatus },
+      );
       return;
     }
 
@@ -1070,13 +1160,35 @@ async function settleInlineResolvedTracks(
     }
 
     if (typeof deps.persistence.persistMediaStatus === "function") {
-      await deps.persistence.persistMediaStatus(args.mediaId, status);
+      // Conditional on the state this decision was computed FROM, so a human
+      // decision landing in between is not clobbered.
+      await deps.persistence.persistMediaStatus(args.mediaId, status, {
+        expectedFrom: args.currentStatus,
+      });
     } else {
       deps.logger.warn(
         "Inline resolution: the persistence adapter cannot record a resolved status, so this object is being held for human review regardless of its verdict (implement persistMediaStatus to enable inline video verdicts)",
         { mediaId: args.mediaId, wouldHaveBeen: status },
       );
       await deps.persistence.markMediaForReview(args.mediaId);
+    }
+
+    // The notification the completion worker would have sent. Best-effort: the
+    // decision is already persisted, and a failed notify must not undo it.
+    if (typeof deps.emitResolved === "function") {
+      try {
+        await deps.emitResolved(moderationResolvedPayload(args.mediaId, status));
+      } catch (err) {
+        deps.logger.warn(
+          "Inline resolution: resolved-event emission failed (decision already persisted)",
+          { mediaId: args.mediaId, error: err },
+        );
+      }
+    } else {
+      deps.logger.warn(
+        "Inline resolution: no resolved-event emitter is wired, so a client waiting on the upload notification will not be told this object settled (wire deps.emitResolved)",
+        { mediaId: args.mediaId, status },
+      );
     }
 
     deps.logger.info("Inline resolution: settled without a completion message", {

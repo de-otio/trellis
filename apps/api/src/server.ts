@@ -143,7 +143,11 @@ export async function startServer(
   // Gated on the environment, and skippable by an operator who genuinely means
   // it (MEDIA_MODERATION_ALLOW_NULL=true), which logs loudly rather than
   // failing silently.
-  const moderationEnvironment = process.env.STAGE ?? "dev";
+  // An ABSENT stage is guarded, not waved through. Defaulting it to "dev" would
+  // have made the commonest deployment mistake — a task definition that forgets
+  // STAGE — the one case that skips the check, which is exactly backwards from
+  // the allow-list's stated reasoning three lines up.
+  const moderationEnvironment = process.env.STAGE ?? "";
   if (process.env.MEDIA_MODERATION_ALLOW_NULL === "true") {
     logger.warn(
       "MEDIA_MODERATION_ALLOW_NULL=true — the fail-closed Null moderation provider is permitted in this environment. Every upload will land in review with no path to approval.",
@@ -158,6 +162,11 @@ export async function startServer(
     } catch (err) {
       console.error("Media moderation provider check failed at boot:");
       console.error(`  - ${err instanceof Error ? err.message : String(err)}`);
+      if (moderationEnvironment === "") {
+        console.error(
+          "  - STAGE is not set. Set STAGE=dev for local development, or inject a moderation provider.",
+        );
+      }
       process.exit(1);
     }
   }

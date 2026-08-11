@@ -39,6 +39,22 @@ export type {
   CategoryPolicy,
   TaxonomyPinMode,
 } from "./lib/media/label-policy.js";
+// Human-review promotion: wiring this is what makes a moderator's approval
+// actually copy the reviewed bytes to the serve prefix. Without it, approval
+// applies the lifecycle transition and promotes nothing — and says so.
+export { setMediaReviewPromotion } from "./lib/media/media-review-handler.js";
+export type {
+  ReviewPromotionPort,
+  ReviewPromoteCoords,
+} from "./lib/media/media-review-handler.js";
+// Moderation observability: aggregate, closed-window counters for an
+// AUTHENTICATED operations surface. Never expose these to a client.
+export { ModerationMetrics } from "./lib/media/moderation-metrics.js";
+export type {
+  ModerationMetricsConfig,
+  ModerationMetricsSnapshot,
+  ModerationPublicHealth,
+} from "./lib/media/moderation-metrics.js";
 // Frame-sampled video moderation: lets an IMAGE-ONLY classifier satisfy the
 // video half of the moderation seam. Core samples, classifies and aggregates.
 export { FrameSamplingVideoModerationAdapter } from "./lib/media/frame-sampling-adapter.js";

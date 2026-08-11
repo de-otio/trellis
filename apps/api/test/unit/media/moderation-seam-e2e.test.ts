@@ -60,6 +60,8 @@ function pipeline(
     extractableFrames?: number;
     framesPerSecond?: number;
     maxFramesPerJob?: number;
+    /** The row's persisted lifecycle; `null` models an adapter that cannot say. */
+    lifecycle?: MediaLifecycle | null;
   } = {},
 ) {
   const storage = new MockStoragePort({
@@ -104,7 +106,14 @@ function pipeline(
   const statuses: MediaLifecycle[] = [];
   const reviewed: string[] = [];
 
-  const row: MediaFileRow = { id: MEDIA_ID, tenantId: TENANT, uploadId: UPLOAD };
+  const row: MediaFileRow = {
+    id: MEDIA_ID,
+    tenantId: TENANT,
+    uploadId: UPLOAD,
+    ...(opts.lifecycle !== null && {
+      lifecycle: opts.lifecycle ?? "UPLOADED",
+    }),
+  };
 
   const deps: MediaProcessingDeps = {
     storage,
@@ -131,7 +140,12 @@ function pipeline(
       async markMediaRejected() {
         statuses.push("REJECTED");
       },
-      async persistMediaStatus(_id, status) {
+      async persistMediaStatus(_id, status, options) {
+        // Model the required conditional write: the adapter applies it only if
+        // the row still holds the state the decision was computed from.
+        if (options !== undefined && options.expectedFrom !== row.lifecycle) {
+          return;
+        }
         statuses.push(status);
       },
     },
@@ -345,5 +359,69 @@ describe("moderation seam end-to-end — an operator policy overrides the provid
     });
 
     expect(policy.decide(verdict("approved", "mock-taxonomy-2"))).toBe("review");
+  });
+});
+
+describe("moderation seam end-to-end — a redelivery cannot reverse a decision", () => {
+  it("leaves a REJECTED object alone when the same message is delivered again", async () => {
+    // At-least-once delivery is normal, and this worker has no dedupe of its
+    // own. A second pass that assumed the object was still awaiting a verdict
+    // would compute a legal-looking transition and overwrite a moderator's
+    // rejection — with promotion, if the frames happen to aggregate approved.
+    const { deps, storage, images, statuses } = pipeline({ lifecycle: "REJECTED" });
+    images.setImageVerdict(verdict("approved"));
+
+    const out = await processObjectKey(PENDING_KEY, deps);
+
+    expect(out.disposition).toBe("ack");
+    expect(statuses).toEqual([]);
+    expect(await casKeyOf(storage)).toBeNull();
+  });
+
+  it("leaves an APPROVED object alone rather than re-deciding it", async () => {
+    const { deps, statuses, images } = pipeline({ lifecycle: "APPROVED" });
+    images.setImageVerdict(verdict("quarantine"));
+
+    await processObjectKey(PENDING_KEY, deps);
+
+    expect(statuses).toEqual([]);
+  });
+
+  it("does not settle at all when the adapter cannot report the lifecycle", async () => {
+    // Refusing is the fail-closed choice: settling would mean writing a status
+    // computed from an assumed state. The object is held for review instead.
+    const { deps, storage, images, statuses, reviewed } = pipeline({
+      lifecycle: null,
+    });
+    images.setImageVerdict(verdict("approved"));
+
+    await processObjectKey(PENDING_KEY, deps);
+
+    expect(reviewed).toEqual([MEDIA_ID]);
+    expect(statuses).toEqual(["REVIEW"]);
+    expect(await casKeyOf(storage)).toBeNull();
+  });
+
+  it("writes conditionally, so a decision landing mid-flight is not clobbered", async () => {
+    const { deps, statuses, images } = pipeline({ lifecycle: "UPLOADED" });
+    images.setImageVerdict(verdict("approved"));
+    // The fixture's persistMediaStatus honours `expectedFrom`; move the row
+    // out from under the decision after it was computed.
+    const original = deps.persistence.findMediaByUploadId;
+    let firstRead = true;
+    deps.persistence.findMediaByUploadId = async (uploadId: string) => {
+      const row = await original.call(deps.persistence, uploadId);
+      if (row !== null && firstRead) {
+        firstRead = false;
+        // The row the worker decides from...
+        return { ...row, lifecycle: "UPLOADED" as const };
+      }
+      return row;
+    };
+
+    await processObjectKey(PENDING_KEY, deps);
+
+    // ...and the write only lands because the row still matched.
+    expect(statuses).toEqual(["APPROVED"]);
   });
 });

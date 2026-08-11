@@ -37,6 +37,8 @@ const EXPECTED_EXPORTS = [
   "NullModerationProvider",
   "parseCompletionEnvelope",
   "setMediaLabelPolicy",
+  "setMediaReviewPromotion",
+  "ModerationMetrics",
   "withModerationDeadline",
 ].sort();
 

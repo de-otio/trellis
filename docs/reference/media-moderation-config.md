@@ -61,12 +61,19 @@ Passed to `FrameSamplingVideoModerationAdapter`.
 | `framesPerSecond` | number > 0 | The adapter refuses to sample; the visual track is `review`. |
 | `maxFramesPerJob` | integer ≥ 1 | Same. An absolute per-job ceiling, independent of rate × duration. |
 | `maxDurationSeconds` | number > 0 | Same. Passed through to the extractor so one clip cannot run it unbounded. |
-| `policyVersion` | string | Optional. A one-way fingerprint of the effective parameters is recorded instead, so the audit trail is never empty. |
+| `policyVersion` | string | Optional. When absent, a digest of the effective parameters is recorded so the audit trail is never empty. That digest tells two policies APART; it does **not** conceal them (a small preimage space is trivially exhausted), so treat `policyVersion` as server-side-only either way. |
+| `policy` | `LabelPolicy` | Optional. Applies the operator's label policy to every sampled frame, so the video path is governed by the same rules as the image path. |
 | `frameConcurrency` | integer ≥ 1 | Optional; defaults to a conservative value. A *resource* bound (wall-clock vs. provider rate limits), not a moderation parameter, which is why it may have a default at all. |
 
 `maxFramesPerJob` is a cost and disk bound as much as a sampling one: without
 it, a long clip at a high rate turns one upload into an unbounded number of
 paid classifier calls and an unbounded number of temp files.
+
+An unknown, zero, or non-finite duration is a **refusal**, not a plan
+(`duration-unknown`). Treating it as "expect one frame" would switch off both
+the shortfall rule and the ceiling rule at once — any single decoded frame
+would satisfy the expectation — so a probe that returns `0` on failure must not
+be able to disable the law by failing.
 
 When `framesPerSecond × duration` exceeds `maxFramesPerJob`, the job **fails
 closed to `review`** rather than silently sampling fewer frames. Quietly
@@ -119,7 +126,7 @@ Passed to `createMediaBytesAccess`.
 
 | Key | Values | Effect |
 |---|---|---|
-| `STAGE` | `dev` / anything else | Outside `dev`, boot refuses to serve with the fail-closed Null moderation provider. |
+| `STAGE` | `dev`, `test`, `local` | The only stages where boot tolerates the fail-closed Null moderation provider. Anything else — **including an unset `STAGE`** — refuses to serve without a real provider. An absent stage is guarded rather than waved through: forgetting it is exactly the deployment mistake the check exists for. |
 | `MEDIA_MODERATION_ALLOW_NULL` | `"true"` | Permits the Null provider anyway, with a loud warning. Every upload will land in review with no path to approval. |
 
 ## What is deliberately not configurable
