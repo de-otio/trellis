@@ -24,10 +24,18 @@
  *   fail-CLOSED for approval — REVIEW is never returned from this module; the
  *   caller owns the status mapping.
  *
+ * PRECEDENCE: a provider that throws the typed `ModerationProviderError` has
+ * ALREADY answered the question, and its answer wins. The name/message matching
+ * below is the fallback for errors that carry no type — it exists because it
+ * has to guess, and a guess must never overrule a statement. See
+ * `classifyWorkerErrorDetailed`.
+ *
  * PURITY GUARANTEE: this module has no I/O, no AWS SDK dependency, no
  * Date.now/Math.random. node:crypto is NOT used. All inputs produce
  * deterministic outputs.
  */
+
+import { isModerationProviderError } from "./moderation-provider.js";
 
 // ---------------------------------------------------------------------------
 // Public type
@@ -216,6 +224,58 @@ const RETRYABLE_MESSAGE_FRAGMENTS: readonly string[] = [
 // ---------------------------------------------------------------------------
 
 /**
+ * The full classification, including whether an infrastructure alert is owed.
+ *
+ * `infraFault` exists because fail-closed has a blind spot: an unavailable
+ * provider and a cautious provider both produce review items, so an outage
+ * routed silently to REVIEW looks exactly like a busy moderation week. When an
+ * adapter reports a typed error it could not attribute, the media is held AND
+ * the fault is announced.
+ */
+export interface WorkerErrorClassification {
+  readonly klass: ErrorClass;
+  /** `"typed"` when the adapter told us; `"heuristic"` when we guessed. */
+  readonly source: "typed" | "heuristic";
+  /** True when operators must be told the infrastructure, not the media, failed. */
+  readonly infraFault: boolean;
+}
+
+/**
+ * Classify with full detail. Precedence is fixed and deliberate:
+ *
+ *  1. **A typed provider error wins.** An adapter that says "this is
+ *     permanent" or "this is transient" knows more than any name-matching
+ *     heuristic can, and the heuristic must never be able to overrule it. This
+ *     matters most in the direction that used to go wrong: a permanent
+ *     rejection whose message happens to contain "timeout" would otherwise be
+ *     retried until it dead-lettered.
+ *  2. **Otherwise the legacy heuristic**, unchanged — including its
+ *     retryable-on-unknown default, which stays because an unrecognised error
+ *     is more often transient than not and the delivery limit bounds the cost.
+ */
+export function classifyWorkerErrorDetailed(
+  err: unknown,
+): WorkerErrorClassification {
+  if (isModerationProviderError(err)) {
+    if (err.retryable) {
+      return { klass: "retryable", source: "typed", infraFault: false };
+    }
+    // Permanent for these bytes: stop retrying, hold the media. An
+    // unattributed cause additionally owes operators an alert.
+    return {
+      klass: "poison",
+      source: "typed",
+      infraFault: err.unknownCause === true,
+    };
+  }
+  return {
+    klass: classifyByHeuristic(err),
+    source: "heuristic",
+    infraFault: false,
+  };
+}
+
+/**
  * Classifies `err` as `"poison"` or `"retryable"`.
  *
  * - TOTAL: never throws for any input (including null, undefined, non-Error objects).
@@ -223,8 +283,16 @@ const RETRYABLE_MESSAGE_FRAGMENTS: readonly string[] = [
  *   classified with confidence (DLQ + alert is the bounded backstop).
  * - Poison wins over retryable when signals conflict (conservative for serving
  *   safety: a bad payload that also triggers throttle is still bad).
+ * - A typed provider error is honoured first; see
+ *   {@link classifyWorkerErrorDetailed}, which additionally reports whether an
+ *   infrastructure alert is owed.
  */
 export function classifyWorkerError(err: unknown): ErrorClass {
+  return classifyWorkerErrorDetailed(err).klass;
+}
+
+/** The legacy name/message/status heuristic, for errors that carry no type. */
+function classifyByHeuristic(err: unknown): ErrorClass {
   // --- 1. Pull every signal we can out of the value, safely. ---
 
   const name = safeString(extractName(err));

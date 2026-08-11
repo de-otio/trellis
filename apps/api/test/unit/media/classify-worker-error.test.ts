@@ -16,8 +16,10 @@ import * as fc from "fast-check";
 
 import {
   classifyWorkerError,
+  classifyWorkerErrorDetailed,
   type ErrorClass,
 } from "../../../src/lib/media/classify-worker-error";
+import { ModerationProviderError } from "../../../src/lib/media/moderation-provider.js";
 
 // Seed for determinism (CLAUDE.md: pin nondeterminism).
 const FC = { seed: 0xc1a5, numRuns: 2000 } as const;
@@ -470,4 +472,91 @@ describe("classifyWorkerError — HTTP status boundaries", () => {
       expect(result).toBe("retryable"); // default rule
     });
   }
+});
+
+describe("classifyWorkerErrorDetailed — a typed provider error wins", () => {
+  it("retries a typed retryable error", () => {
+    const err = new ModerationProviderError("provider throttled", {
+      retryable: true,
+    });
+    expect(classifyWorkerErrorDetailed(err)).toEqual({
+      klass: "retryable",
+      source: "typed",
+      infraFault: false,
+    });
+  });
+
+  it("holds a typed permanent error without retrying it", () => {
+    const err = new ModerationProviderError("provider rejected these bytes", {
+      retryable: false,
+    });
+    expect(classifyWorkerErrorDetailed(err)).toEqual({
+      klass: "poison",
+      source: "typed",
+      infraFault: false,
+    });
+  });
+
+  it("holds AND alerts when the adapter could not attribute the cause", () => {
+    // Otherwise an outage is indistinguishable from a busy moderation week.
+    const err = new ModerationProviderError("something went wrong", {
+      retryable: false,
+      unknownCause: true,
+    });
+    expect(classifyWorkerErrorDetailed(err)).toEqual({
+      klass: "poison",
+      source: "typed",
+      infraFault: true,
+    });
+  });
+
+  it("does not let the heuristic overrule the type", () => {
+    // The message says "timeout", which the heuristic reads as retryable; the
+    // adapter says permanent. The adapter knows, the heuristic guesses.
+    const err = new ModerationProviderError(
+      "request timeout while rejecting an unsupported format",
+      { retryable: false },
+    );
+    expect(classifyWorkerError(err)).toBe("poison");
+
+    // ...and the reverse direction: a permanent-sounding message the adapter
+    // declared transient.
+    const transient = new ModerationProviderError(
+      "corrupt response from an upstream shard",
+      { retryable: true },
+    );
+    expect(classifyWorkerError(transient)).toBe("retryable");
+  });
+
+  it("recognises a typed error from a differently-bundled copy of the package", () => {
+    // Structural, not instanceof: a duplicate package copy produces a different
+    // class object, and an instanceof check would silently demote it.
+    const foreign = Object.assign(new Error("permanent"), {
+      name: "ModerationProviderError",
+      retryable: false,
+      unknownCause: true,
+    });
+    expect(classifyWorkerErrorDetailed(foreign)).toEqual({
+      klass: "poison",
+      source: "typed",
+      infraFault: true,
+    });
+  });
+
+  it("falls back to the heuristic for untyped errors, default preserved", () => {
+    expect(classifyWorkerErrorDetailed(new Error("who knows"))).toEqual({
+      klass: "retryable",
+      source: "heuristic",
+      infraFault: false,
+    });
+    expect(
+      classifyWorkerErrorDetailed(new Error("failed to decode the frame")),
+    ).toEqual({ klass: "poison", source: "heuristic", infraFault: false });
+  });
+
+  it("never claims an infra fault from an untyped error", () => {
+    for (const err of [null, undefined, "string", 42, new Error("boom"), {}]) {
+      expect(classifyWorkerErrorDetailed(err).infraFault).toBe(false);
+    }
+  });
 });
