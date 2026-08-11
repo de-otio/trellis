@@ -24,6 +24,7 @@ import * as fc from "fast-check";
 
 import {
   buildFfmpegArgs,
+  buildFrameSamplingArgs,
   buildPosterArgs,
   type FfmpegJobSpec,
 } from "../../../src/lib/media/ffmpeg-args";
@@ -618,5 +619,78 @@ describe("buildFfmpegArgs vs buildPosterArgs independence", () => {
       expect(args).toContain("-dn");
       expect(args).toContain("-sn");
     }
+  });
+});
+
+describe("buildFrameSamplingArgs", () => {
+  const spec = {
+    inputPath: "/tmp/in.mp4",
+    outputPattern: "/tmp/frames/frame-%04d.jpg",
+    framesPerSecond: 1,
+    maxFrames: 10,
+    maxDurationSeconds: 60,
+  };
+
+  it("inherits every hardening flag the transcode uses", () => {
+    const args = buildFrameSamplingArgs(spec);
+    expect(args).toContain("-protocol_whitelist");
+    expect(args[args.indexOf("-protocol_whitelist") + 1]).toBe("file,pipe");
+    expect(args).toContain("-dn");
+    expect(args).toContain("-sn");
+    expect(args).toContain("-map_metadata");
+    expect(args[args.indexOf("-map_metadata") + 1]).toBe("-1");
+  });
+
+  it("strips the container metadata dictionary so frames carry no GPS", () => {
+    // A sampled still is a derivative of user media; without this the source's
+    // location tags would be copied onto every extracted frame.
+    const args = buildFrameSamplingArgs(spec);
+    expect(args).toContain("-map_metadata");
+  });
+
+  it("bounds duration, rate, and frame count from the spec — never a literal", () => {
+    const args = buildFrameSamplingArgs({
+      ...spec,
+      framesPerSecond: 2,
+      maxFrames: 7,
+      maxDurationSeconds: 30,
+    });
+    expect(args[args.indexOf("-t") + 1]).toBe("30");
+    expect(args[args.indexOf("-vf") + 1]).toBe("fps=2");
+    expect(args[args.indexOf("-frames:v") + 1]).toBe("7");
+  });
+
+  it("emits no audio stream", () => {
+    expect(buildFrameSamplingArgs(spec)).toContain("-an");
+  });
+
+  it("passes paths as argv entries, never interpolated into a shell string", () => {
+    const hostile = "/tmp/$(touch pwned); rm -rf ~/'.mp4";
+    const args = buildFrameSamplingArgs({ ...spec, inputPath: hostile });
+    // The path is exactly one argv entry, adjacent to -i, unmodified.
+    expect(args[args.indexOf("-i") + 1]).toBe(hostile);
+    expect(args.filter((a) => a === hostile)).toHaveLength(1);
+  });
+
+  it("matches the recorded argv shape", () => {
+    expect(buildFrameSamplingArgs(spec)).toEqual([
+      "-protocol_whitelist",
+      "file,pipe",
+      "-t",
+      "60",
+      "-i",
+      "/tmp/in.mp4",
+      "-dn",
+      "-sn",
+      "-map_metadata",
+      "-1",
+      "-an",
+      "-vf",
+      "fps=1",
+      "-frames:v",
+      "10",
+      "-y",
+      "/tmp/frames/frame-%04d.jpg",
+    ]);
   });
 });

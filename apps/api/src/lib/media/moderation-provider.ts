@@ -143,6 +143,27 @@ export interface ModerationCallOptions {
 }
 
 /**
+ * The handle returned when a video moderation job is started.
+ *
+ * `jobId` is the poll handle. `initialDecision` is present only when the
+ * backend ALREADY resolved the whole track during the start call — which is
+ * what core's frame-sampling adapter does: it samples, classifies and
+ * aggregates inline, so there is no remote job to poll and no completion
+ * notification will ever arrive for this id. The caller persists that decision
+ * immediately instead of waiting for a message that is not coming.
+ *
+ * Both extra fields are OPTIONAL, so an existing adapter that returns `{ jobId }`
+ * still satisfies the seam.
+ */
+export interface VideoModerationStart {
+  readonly jobId: string;
+  /** Set when the track resolved during `start`; no poll or completion follows. */
+  readonly initialDecision?: ModerationDecision;
+  /** The taxonomy version the job started under, for drift detection at completion. */
+  readonly modelVersion?: string;
+}
+
+/**
  * The one canonical moderation seam. Image moderation is sync-ish (resolves a
  * verdict directly); video moderation is async (start → poll), mirroring the
  * cloud provider's job model. Audio reuses the text-moderation path and adds no
@@ -164,7 +185,7 @@ export interface MediaModerationProvider {
   startVideoModeration(
     input: S3Ref,
     options?: ModerationCallOptions,
-  ): Promise<{ jobId: string }>;
+  ): Promise<VideoModerationStart>;
   /** Polls a previously-started video moderation job for its verdict. */
   getVideoModeration(
     jobId: string,
@@ -276,7 +297,7 @@ export class NullModerationProvider implements MediaModerationProvider {
   async startVideoModeration(
     _input: S3Ref,
     _options?: ModerationCallOptions,
-  ): Promise<{ jobId: string }> {
+  ): Promise<VideoModerationStart> {
     // Even starting a job warns: there is no backend to do the work.
     this.warn(NULL_PROVIDER_WARNING);
     return { jobId: `${NULL_PROVIDER_NAME}-noop` };
@@ -379,7 +400,7 @@ export class MockModerationProvider implements MediaModerationProvider {
   async startVideoModeration(
     input: S3Ref,
     _options?: ModerationCallOptions,
-  ): Promise<{ jobId: string }> {
+  ): Promise<VideoModerationStart> {
     this.startVideoCalls.push(input);
     this.jobIdSeq += 1;
     return { jobId: `${MOCK_PROVIDER_NAME}-job-${this.jobIdSeq}` };
