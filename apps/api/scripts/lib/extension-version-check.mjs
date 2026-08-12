@@ -47,6 +47,41 @@ export function extractVersionConst(source) {
 }
 
 /**
+ * Extract the version the reference doc claims, from its
+ * `> **Current version: \`x.y.z\`.**` line.
+ *
+ * WHY: the doc is what an extension author — increasingly, an author's coding
+ * agent — reads as ground truth, and it had drifted a full version behind the
+ * code (claiming 0.8.0 against a 0.8.1 package) with nothing to catch it. A
+ * stale reference doc is worse than no doc: generated code is written against
+ * it.
+ *
+ * Anchored on the exact callout shape, and requires exactly one match, so a
+ * restructured doc fails loudly rather than silently passing.
+ *
+ * @param {string} source - full contents of docs/reference/extension-api.md
+ * @returns {string} the version string the doc claims
+ */
+export function extractDocVersion(source) {
+  const pattern = /^>\s*\*\*Current version:\s*`([^`]+)`\.\*\*/gm;
+  const matches = [...source.matchAll(pattern)];
+  if (matches.length === 0) {
+    throw new Error(
+      "check-extension-api-version: no `> **Current version: `x.y.z`.**` line found in " +
+        "docs/reference/extension-api.md (anchored pattern did not match — did the " +
+        "callout shape change?)",
+    );
+  }
+  if (matches.length > 1) {
+    throw new Error(
+      `check-extension-api-version: found ${matches.length} "Current version" callouts ` +
+        "in docs/reference/extension-api.md; expected exactly one.",
+    );
+  }
+  return matches[0][1];
+}
+
+/**
  * Extract the `version` field from a package.json's already-parsed object.
  *
  * @param {unknown} packageJson - result of JSON.parse on package.json
@@ -85,5 +120,40 @@ export function compareVersions(constVersion, packageVersion) {
       `Version lockstep broken: EXTENSION_API_VERSION = "${constVersion}" in ` +
       `packages/extension-api/src/extension.ts, but package.json version = ` +
       `"${packageVersion}". Bump both together.`,
+  };
+}
+
+/**
+ * Compare all three sources of the contract version: the runtime const, the
+ * published package.json, and the reference doc's stated version. Pure.
+ *
+ * All three must agree. Any disagreement is reported with every value, so the
+ * fix is obvious from the failure alone.
+ *
+ * @param {string} constVersion
+ * @param {string} packageVersion
+ * @param {string} docVersion
+ * @returns {{ ok: boolean, message: string }}
+ */
+export function compareAllVersions(constVersion, packageVersion, docVersion) {
+  const pair = compareVersions(constVersion, packageVersion);
+  if (!pair.ok) return pair;
+
+  if (constVersion === docVersion) {
+    return {
+      ok: true,
+      message:
+        `EXTENSION_API_VERSION, package.json and the reference doc all agree ` +
+        `("${constVersion}").`,
+    };
+  }
+  return {
+    ok: false,
+    message:
+      `Reference doc is stale: docs/reference/extension-api.md states ` +
+      `"${docVersion}", but the contract is at "${constVersion}" ` +
+      `(package.json "${packageVersion}"). Update the "Current version" ` +
+      `callout — an extension author, or their agent, reads that doc as ground ` +
+      `truth and will generate code against it.`,
   };
 }
