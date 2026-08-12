@@ -59,9 +59,9 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
     rather than from vendor error names.
 
   The seam is re-exported from the package root, so an adapter can be written
-  against published names. `apps/api/package.json` now declares an `exports`
-  map; it is additive and carries a wildcard, so every specifier consumers use
-  today keeps resolving unchanged.
+  against published names rather than deep paths into `dist/`. Package
+  resolution is unchanged — no `exports` map is declared, so every specifier
+  that resolves today keeps resolving.
 
   See [Implementing a media-moderation
   provider](docs/guides/implementing-a-media-moderation-provider.md) and
