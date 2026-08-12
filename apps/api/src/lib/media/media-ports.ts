@@ -13,6 +13,8 @@
 // (e.g. maxDurationSeconds) are *arguments*, never literals baked into these
 // interfaces — this file ships in the PUBLIC npm tarball.
 
+import { expectedFrameCount } from "./frame-aggregation.js";
+
 // ---------------------------------------------------------------------------
 // TranscodePort — re-encode/normalize video & audio to a known-clean form,
 // strip active content, generate a poster frame. The shell drives this from a
@@ -55,6 +57,43 @@ export interface TranscodeAudioResult {
   readonly durationSeconds: number;
 }
 
+// ---------------------------------------------------------------------------
+// Frame sampling — the input to core's frame-sampling video moderation, which
+// lets an IMAGE-ONLY classifier moderate video.
+// ---------------------------------------------------------------------------
+
+/**
+ * A request to extract still frames from a video.
+ *
+ * Both numbers are OPERATOR-SUPPLIED and arrive as arguments (never literals in
+ * this public tarball):
+ *
+ * - `framesPerSecond` — how densely to sample.
+ * - `maxFrames` — an ABSOLUTE ceiling on frames for this one job, independent
+ *   of `framesPerSecond × duration`. It is a cost and disk bound, not a
+ *   sampling preference: without it a long clip at a high rate turns one upload
+ *   into an unbounded number of paid classifier calls and an unbounded number
+ *   of temp files. The adapter must never emit more than `maxFrames`.
+ *
+ * The adapter writes frames to `outputDir` and returns their paths. Emitted
+ * frames must carry NO inherited metadata (the container dictionary strip that
+ * the transcode argv applies) — a sampled frame is a derivative of user media
+ * and must not resurrect the GPS coordinates the transcode removed.
+ */
+export interface SampleFramesInput {
+  readonly inputPath: string;
+  readonly outputDir: string;
+  readonly framesPerSecond: number;
+  readonly maxFrames: number;
+  /** Hard cap on accepted duration; injected from Env.media (never a literal). */
+  readonly maxDurationSeconds: number;
+}
+
+export interface SampleFramesResult {
+  /** Paths of the extracted frames, in temporal order. Never longer than `maxFrames`. */
+  readonly framePaths: ReadonlyArray<string>;
+}
+
 export interface TranscodePort {
   /** Probe the duration of an input without transcoding it. */
   probeDurationSeconds(inputPath: string): Promise<number>;
@@ -62,6 +101,33 @@ export interface TranscodePort {
   transcodeVideo(input: TranscodeVideoInput): Promise<TranscodeVideoResult>;
   /** Re-encode audio to a clean form. */
   transcodeAudio(input: TranscodeAudioInput): Promise<TranscodeAudioResult>;
+  /**
+   * Extract still frames for frame-sampled video moderation.
+   *
+   * OPTIONAL, so an existing consumer adapter still satisfies this interface —
+   * this is a published package and a required method would be a breaking
+   * change (same reasoning as `MediaPersistencePort.recordEmbeddedProvenance`).
+   * The consequence is stated rather than hidden: frame-sampled moderation
+   * REFUSES to run without it and fails the visual track closed to `review`.
+   * It never degrades to "moderate nothing and approve".
+   *
+   * IF THIS THROWS, the adapter owns whatever it already wrote. Core deletes
+   * the frames it is TOLD about, and a rejected call reports none — so an
+   * extractor that fails partway must clean its own `outputDir` before
+   * throwing. These are stills of media that may be about to be quarantined,
+   * and core cannot delete files it never learned the names of.
+   */
+  sampleFrames?(input: SampleFramesInput): Promise<SampleFramesResult>;
+  /**
+   * Delete a previously-extracted frame. Called on EVERY path — success,
+   * classifier error, deadline, ceiling breach — so sampled stills never
+   * outlive the decision they informed. Must tolerate an already-absent file.
+   *
+   * OPTIONAL for the same published-package reason; when absent the adapter is
+   * responsible for its own `outputDir` lifecycle, and core says so in a log
+   * line rather than assuming cleanup happened.
+   */
+  deleteFrame?(framePath: string): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -135,6 +201,26 @@ export interface TranscribePort {
     key: string;
     jobName: string;
   }): Promise<{ jobId: string }>;
+  /**
+   * Poll a transcription job.
+   *
+   * **No model echo, deliberately absent rather than forgotten.** Transcription
+   * APIs commonly return only the text and a usage figure — one checked backend
+   * returns exactly `{ text, usage }` — with no identifier for the model that
+   * produced it. So there is nothing here to pin a model version *against*.
+   *
+   * The consequence for whoever designs the audio lane: the audio leg's version
+   * pin can only ever be REQUEST-side — you record what you asked for, not what
+   * answered. That is strictly weaker than the visual path, where a provider
+   * reports `modelVersion` on its verdict and a pinned label policy floors an
+   * unverifiable version at `review`. A request-side pin cannot detect a silent
+   * vendor-side model swap, which is the exact failure a response-side pin
+   * exists to catch.
+   *
+   * Do not add a `modelVersion` field here expecting a backend to fill it, and
+   * do not treat a request-side record as equivalent to the visual pin when
+   * reasoning about taxonomy drift on this track.
+   */
   getTranscription(jobId: string): Promise<{
     status: TranscriptionStatus;
     transcript?: string;
@@ -159,17 +245,31 @@ export interface TranscribePort {
 export class MockTranscodePort implements TranscodePort {
   private duration: number;
   private hasAudio: boolean;
+  /**
+   * How many frames extraction ACTUALLY yields, when that differs from what
+   * (rate × duration, capped) asks for — the shortfall case a real decoder hits
+   * on a partly-undecodable clip. `undefined` means "yield what was asked for".
+   */
+  private extractableFrames?: number;
 
   /** Records of each call, for assertions. */
   readonly probeCalls: string[] = [];
   readonly videoCalls: TranscodeVideoInput[] = [];
   readonly audioCalls: TranscodeAudioInput[] = [];
+  readonly sampleCalls: SampleFramesInput[] = [];
+  /** Frame paths passed to `deleteFrame`, in call order — cleanup assertions. */
+  readonly deletedFrames: string[] = [];
 
   constructor(opts: { duration?: number; hasAudio?: boolean } = {}) {
     this.duration = opts.duration ?? 0;
     // Default to true: the common case is a video WITH audio, and existing
     // tests assert the AUDIO-track-started path.
     this.hasAudio = opts.hasAudio ?? true;
+  }
+
+  /** Program a partial extraction: only this many frames actually decode. */
+  setExtractableFrames(count: number | undefined): void {
+    this.extractableFrames = count;
   }
 
   /** Program the duration returned by subsequent calls. */
@@ -203,6 +303,34 @@ export class MockTranscodePort implements TranscodePort {
       cleanedPath: input.outputPath,
       durationSeconds: this.duration,
     };
+  }
+
+  /**
+   * Deterministic frame extraction: yields `expectedFrameCount(duration, rate,
+   * maxFrames)` paths under `outputDir`, or fewer when `setExtractableFrames`
+   * programmed a partial decode. Never exceeds `maxFrames` — a mock that could
+   * would let a ceiling bug pass its own test.
+   */
+  async sampleFrames(input: SampleFramesInput): Promise<SampleFramesResult> {
+    this.sampleCalls.push(input);
+    const wanted = expectedFrameCount(
+      this.duration,
+      input.framesPerSecond,
+      input.maxFrames,
+    );
+    const yielded =
+      this.extractableFrames === undefined
+        ? wanted
+        : Math.min(wanted, Math.max(0, this.extractableFrames));
+    const framePaths: string[] = [];
+    for (let i = 0; i < yielded; i += 1) {
+      framePaths.push(`${input.outputDir}/frame-${i}.jpg`);
+    }
+    return { framePaths };
+  }
+
+  async deleteFrame(framePath: string): Promise<void> {
+    this.deletedFrames.push(framePath);
   }
 }
 

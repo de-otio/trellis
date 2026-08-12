@@ -22,6 +22,8 @@ import { getLogger, Logger } from "./lib/logger.js";
 import { TrellisRequestContextManager } from "./lib/request-context.js";
 import { SessionManager } from "./lib/session-cookie.js";
 import { getExtensions } from "./extensions.js";
+import { assertModerationProviderAllowed } from "./lib/media/moderation-provider.js";
+import { getMediaModerationProvider } from "./lib/media/request-moderation.js";
 import { validateExtensions } from "./lib/extension-validator.js";
 import {
   setExtensionModelRegistry,
@@ -38,6 +40,23 @@ export interface StartServerOptions {
    */
   readonly extensionModelRegistry?: readonly ExtensionModelRegistryEntry[];
 }
+
+/**
+ * Stages where running without a real moderation provider is expected rather
+ * than alarming: local development and the automated test lanes, which boot the
+ * server with no consuming application to inject one.
+ *
+ * Deliberately an ALLOW-list of three known names, not "anything that is not
+ * prod". A stage nobody thought about — `staging`, `preprod`, a typo — must
+ * land on the guarded side, because the failure this guard prevents is silent:
+ * every upload piling into review with no path to approval looks like a
+ * moderation backlog, not like an unwired deployment.
+ */
+const NON_PRODUCTION_STAGES: ReadonlySet<string> = new Set([
+  "dev",
+  "test",
+  "local",
+]);
 
 const MAX_BODY_SIZE = 10 * 1024 * 1024; // 10 MB
 const REQUEST_TIMEOUT_MS = 25_000; // 25 seconds
@@ -112,6 +131,44 @@ export async function startServer(
     console.error("Keycloak user-profile lockdown check failed at boot:");
     console.error(`  - ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
+  }
+
+  // Media-moderation seam guard. The seam's runtime fallback is a fail-closed
+  // Null provider, which is correct for a request that has already started —
+  // it sends media to review rather than 500-ing — but it is NOT an acceptable
+  // steady state outside dev: every upload would pile into the review queue
+  // with no path to approval, and the failure looks like a moderation backlog
+  // rather than an unwired deployment. So boot refuses instead.
+  //
+  // Gated on the environment, and skippable by an operator who genuinely means
+  // it (MEDIA_MODERATION_ALLOW_NULL=true), which logs loudly rather than
+  // failing silently.
+  // An ABSENT stage is guarded, not waved through. Defaulting it to "dev" would
+  // have made the commonest deployment mistake — a task definition that forgets
+  // STAGE — the one case that skips the check, which is exactly backwards from
+  // the allow-list's stated reasoning three lines up.
+  const moderationEnvironment = process.env.STAGE ?? "";
+  if (process.env.MEDIA_MODERATION_ALLOW_NULL === "true") {
+    logger.warn(
+      "MEDIA_MODERATION_ALLOW_NULL=true — the fail-closed Null moderation provider is permitted in this environment. Every upload will land in review with no path to approval.",
+      { environment: moderationEnvironment },
+    );
+  } else if (!NON_PRODUCTION_STAGES.has(moderationEnvironment)) {
+    try {
+      assertModerationProviderAllowed(
+        getMediaModerationProvider(),
+        moderationEnvironment,
+      );
+    } catch (err) {
+      console.error("Media moderation provider check failed at boot:");
+      console.error(`  - ${err instanceof Error ? err.message : String(err)}`);
+      if (moderationEnvironment === "") {
+        console.error(
+          "  - STAGE is not set. Set STAGE=dev for local development, or inject a moderation provider.",
+        );
+      }
+      process.exit(1);
+    }
   }
 
   // Validate extensions

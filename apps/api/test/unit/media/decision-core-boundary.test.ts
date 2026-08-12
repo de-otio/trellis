@@ -35,6 +35,12 @@ const DECISION_CORE = [
   "moderation-provider.ts",
   "text-moderation.ts",
   "media-ports.ts",
+  // The verdict-derivation modules: how frames become a video's decision, how
+  // labels become a decision, and how an untrusted completion body becomes a
+  // pointer. All three decide, so all three obey the same dependency rule.
+  "frame-aggregation.ts",
+  "label-policy.ts",
+  "completion-envelope.ts",
   "cas-keys.ts",
   "dedupe-key.ts",
   "processing-types.ts",

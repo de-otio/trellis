@@ -15,6 +15,110 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ## [Unreleased]
 
+### Added
+
+- **A media-moderation backend no longer has to be shaped like one particular
+  cloud's video-moderation service.** An image classifier is now sufficient to
+  moderate video, a completion is signalled with a small documented envelope,
+  and the operator — rather than the vendor — can own the policy that turns
+  labels into decisions.
+
+  - **Frame-sampled video.** `FrameSamplingVideoModerationAdapter` samples
+    stills at the operator's rate, classifies each through the existing image
+    seam, and aggregates: quarantine dominates, the worst frame wins, and zero
+    frames, a decode shortfall, or a plan that exceeds the per-job ceiling all
+    resolve to `review`. Only a complete set of approving frames approves. It
+    resolves inline, so there is no completion notification to wire up.
+  - **A canonical completion envelope**: `{ track, jobId }`. The historical
+    wire shapes still parse, so an existing backend needs no change.
+    `completionEnvelopeBody()` and `parseCompletionEnvelope()` are exported.
+  - **An operator-owned label policy.** `createLabelPolicy()` maps opaque
+    category tokens to confidence bars, quarantines anything unmapped, and
+    requires a verifiable taxonomy version before it will approve. It is
+    floored at the provider's own decision, so it can only degrade a verdict
+    and never loosen one — a provider's fail-closed `review` stays `review`.
+    Install it with `setMediaLabelPolicy()`; pass it to the frame-sampling
+    adapter as `policy` to govern video frames too.
+  - **A deadline wrapper** that binds the *decision*, not merely the wait: a
+    provider resolving `approved` after the deadline is discarded.
+  - **A bytes capability** so a classifier that takes an image in its request
+    body needs no storage credentials of its own — the read is size-capped and
+    pinned to the recorded version.
+  - **A self-identifying provider.** `MediaModerationProvider.name` — optional,
+    so no existing adapter breaks — lets core attribute work on the paths where
+    there is no verdict to read a provider off: a throw, a deadline breach, or a
+    cache lookup that precedes the call. Read it with
+    `moderationProviderName()`, which treats an empty or non-string name as
+    `unknown` rather than as an identity. Core's own wrappers pass the inner
+    name through unchanged, so putting a classifier behind a deadline and a
+    frame-sampling adapter does not split its counters across three identities.
+  - **Pins, model versions, and abort signals** on the seam itself:
+    `MediaPin` (version id / entity tag / content hash) on `ImageRef` and
+    `S3Ref`, `modelVersion` on a verdict, `AbortSignal` on every method, and a
+    typed `ModerationProviderError` so core classifies failures from a contract
+    rather than from vendor error names.
+
+  The seam is re-exported from the package root, so an adapter can be written
+  against published names rather than deep paths into `dist/`. Package
+  resolution is unchanged — no `exports` map is declared, so every specifier
+  that resolves today keeps resolving.
+
+  See [Implementing a media-moderation
+  provider](docs/guides/implementing-a-media-moderation-provider.md) and
+  [Media moderation
+  configuration](docs/reference/media-moderation-config.md).
+
+- **A verdict now carries its own identity and its evidence.** Moderation jobs
+  record the provider, the taxonomy version, and the sampling-policy version
+  alongside the content hash, plus the per-frame decisions, labels, offsets,
+  and the count of frames that never produced a verdict. A policy version is
+  recorded even when the operator names none, as a one-way fingerprint that
+  changes if and only if the policy changed. All of it is **server-side only** —
+  confidences and frame timings are a tuning oracle — and it is captured at
+  scoring time because the frames it describes are deleted moments later.
+
+### Fixed
+
+- **A human approval now promotes the bytes that were reviewed.** Approving a
+  review-queue item performs the same version-pinned copy the automatic path
+  performs, and refuses when that version can no longer be resolved. It never
+  resolves "whatever is at the staging key now": between the review and the
+  click, that key may hold something else, and copying it would launder
+  unreviewed bytes through a human decision. A missing object, an unresolvable
+  pin, or a failed copy all hold the item in review. **Wire it with
+  `setMediaReviewPromotion()`** (or pass it to `MediaReviewHandler.decide()`
+  directly); without it the previous behaviour stands and every approval logs
+  that nothing was copied to the serve prefix.
+- **The poster still emitted during video processing is now deleted** on every
+  exit from the worker. Nothing downstream consumed it, so it was left behind
+  as an un-moderated frame of a possibly-quarantined object.
+- **Audio-only uploads are refused at intake** with a specific error
+  (**BREAKING** for any consumer that accepted them). The pipeline resolves a
+  visual track an audio-only object does not have, so accepting one stored
+  bytes that no verdict could settle — a row neither servable nor rejected,
+  invisible to the uploader and to the review queue alike.
+- **A completion message can no longer silence a verdict.** The `track` in a
+  completion body is a routing hint checked against the job row; a mismatch is
+  dropped *before* the dedupe claim, so a forged track cannot burn the slot the
+  genuine completion needs. Bodies over 256 KiB are refused before parsing (the
+  same bound applies to a wrapped inner payload), and provider-supplied ids are
+  control-character stripped and length-capped before reaching a log line.
+- **An unattributable provider failure now raises an infrastructure signal** as
+  well as holding the media. Fail-closed otherwise makes an outage look exactly
+  like a busy moderation week.
+- **Boot refuses to serve with the fail-closed Null moderation provider outside
+  dev**, unless `MEDIA_MODERATION_ALLOW_NULL=true` says otherwise explicitly.
+
+- **Inline video verdicts need two more things from a consumer's persistence
+  adapter**, and say so rather than guessing: `MediaFileRow.lifecycle` (so a
+  redelivered message cannot compute a transition from a state the object left
+  long ago — including reversing a moderator's rejection) and
+  `persistMediaStatus`, which must be a conditional write. Without either, an
+  object whose tracks all resolve during processing is held for human review
+  instead of being settled from an assumption. `MediaProcessingDeps.emitResolved`
+  is likewise optional, and without it a client waiting on the upload
+  notification for such an object is not told it settled.
+
 ### Changed
 
 - **Six read paths could disclose a post to someone its author had not

@@ -943,3 +943,58 @@ describe("processCompletion — AR-SEC F3 version-pinned promotion", () => {
     expect((out as { status: MediaLifecycle }).status).toBe("REVIEW");
   });
 });
+
+describe("processCompletion — the envelope's track is a hint, the row decides", () => {
+  it("drops a completion whose claimed track disagrees with the job row", async () => {
+    // The job row says this is the AUDIO job; the message claims VISUAL.
+    const h = harness({ jobId: "j-mismatch", track: "AUDIO" });
+    const body = JSON.stringify({ track: "VISUAL", jobId: "j-mismatch" });
+
+    const out = await processCompletion(body, h.deps);
+
+    expect(out).toEqual({ kind: "unroutable" });
+  });
+
+  it("does not claim the dedupe key for a mismatched track", async () => {
+    // A forged track that burned the dedupe slot would permanently silence the
+    // genuine completion for that job.
+    const h = harness({ jobId: "j-mismatch", track: "AUDIO" });
+    const body = JSON.stringify({ track: "VISUAL", jobId: "j-mismatch" });
+
+    await processCompletion(body, h.deps);
+
+    expect(h.state.claimed.size).toBe(0);
+    expect(h.state.calls).toEqual([]);
+    expect(h.storageCalls).toEqual([]);
+    expect(h.emitted).toEqual([]);
+
+    // ...and the genuine AUDIO completion still processes afterwards.
+    const genuine = await processCompletion(
+      JSON.stringify({ track: "AUDIO", jobId: "j-mismatch" }),
+      h.deps,
+    );
+    expect(genuine.kind).not.toBe("duplicate");
+    expect(genuine.kind).not.toBe("unroutable");
+  });
+
+  it("accepts a canonical envelope whose track matches the row", async () => {
+    const h = harness({ jobId: "j-ok", track: "VISUAL", videoVerdict: "review" });
+    const out = await processCompletion(
+      JSON.stringify({ track: "VISUAL", jobId: "j-ok" }),
+      h.deps,
+    );
+    expect(out.kind).toBe("applied");
+  });
+
+  it("still routes the historical wire shapes to the right track", async () => {
+    const visual = harness({ jobId: "j-visual", track: "VISUAL" });
+    expect((await processCompletion(snsBody("j-visual"), visual.deps)).kind).toBe(
+      "applied",
+    );
+
+    const audio = harness({ jobId: "j-audio", track: "AUDIO" });
+    expect((await processCompletion(ebBody("j-audio"), audio.deps)).kind).toBe(
+      "applied",
+    );
+  });
+});

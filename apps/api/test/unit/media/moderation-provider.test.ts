@@ -245,3 +245,35 @@ describe("assertModerationProviderAllowed (startup guard)", () => {
     );
   });
 });
+
+describe("the boot guard's stage allowlist", () => {
+  // The allowlist lives in server.ts; this pins the RULE it encodes, because
+  // the rule is the part that is easy to get wrong later.
+  const NON_PRODUCTION = ["dev", "test", "local"];
+  const PRODUCTION_LIKE = [
+    "prod",
+    "production",
+    "staging",
+    "preprod",
+    "dveelopment", // a typo must land on the guarded side
+    "",
+  ];
+
+  it("refuses the Null provider in every stage that is not explicitly non-production", () => {
+    for (const stage of PRODUCTION_LIKE) {
+      if (stage === "dev") continue;
+      expect(() =>
+        assertModerationProviderAllowed(new NullModerationProvider(() => {}), stage),
+      ).toThrow(NullProviderInProductionError);
+    }
+  });
+
+  it("never treats an unrecognised stage as safe", () => {
+    // The failure this guard prevents is silent — uploads piling into review
+    // look like a backlog, not like an unwired deployment — so an unknown
+    // stage must not be able to opt itself out.
+    for (const stage of PRODUCTION_LIKE) {
+      expect(NON_PRODUCTION).not.toContain(stage);
+    }
+  });
+});

@@ -163,6 +163,82 @@ export function buildFfmpegArgs(spec: FfmpegJobSpec): string[] {
  * @param spec - must have `posterPath` set; calling without it is a caller
  *               contract violation (outputPath would be undefined).
  */
+// ---------------------------------------------------------------------------
+// buildFrameSamplingArgs
+// ---------------------------------------------------------------------------
+
+/**
+ * Specification for a frame-sampling job — the extraction that lets an
+ * image-only classifier moderate video.
+ *
+ * `framesPerSecond` and `maxFrames` are OPERATOR-SUPPLIED and arrive as
+ * arguments, never as literals: a sampling rate compiled into a public tarball
+ * is a published sampling rate, and someone who knows the rate knows how long a
+ * frame may survive unseen. `maxFrames` is additionally a hard resource bound —
+ * it caps paid classifier calls and temp files per job independently of what
+ * rate × duration would ask for.
+ */
+export interface FrameSamplingSpec {
+  readonly inputPath: string;
+  /**
+   * Output PATTERN, not a directory: ffmpeg's image muxer writes a numbered
+   * sequence, so this must contain a printf-style index (e.g. `.../frame-%04d.jpg`).
+   */
+  readonly outputPattern: string;
+  readonly framesPerSecond: number;
+  readonly maxFrames: number;
+  readonly maxDurationSeconds: number;
+}
+
+/**
+ * Build the argv for extracting still frames from a video.
+ *
+ * Inherits every hardening flag the transcode uses, for the same reasons, plus:
+ *   - "-an"                    no audio in an image output
+ *   - "-vf","fps=<rate>"       sample at the operator's rate
+ *   - "-frames:v","<max>"      HARD ceiling, enforced by ffmpeg itself as well
+ *                              as by the caller — belt and braces, because the
+ *                              consequence of an unbounded frame count is a
+ *                              filled disk and an unbounded provider bill.
+ *
+ * `-map_metadata -1` matters twice over here: a sampled frame is a derivative
+ * of user media, and without the strip ffmpeg would copy the source container's
+ * dictionary (GPS included) onto every extracted still — re-creating on dozens
+ * of thumbnails exactly the leak the transcode path removes from the video.
+ */
+export function buildFrameSamplingArgs(spec: FrameSamplingSpec): string[] {
+  return [
+    "-protocol_whitelist",
+    "file,pipe",
+
+    "-t",
+    String(spec.maxDurationSeconds),
+
+    "-i",
+    spec.inputPath,
+
+    "-dn",
+    "-sn",
+
+    "-map_metadata",
+    "-1",
+
+    // No audio stream in an image output.
+    "-an",
+
+    // Sample at the operator-supplied rate.
+    "-vf",
+    `fps=${spec.framesPerSecond}`,
+
+    // Absolute ceiling on emitted frames.
+    "-frames:v",
+    String(spec.maxFrames),
+
+    "-y",
+    spec.outputPattern,
+  ];
+}
+
 export function buildPosterArgs(
   spec: FfmpegJobSpec & { readonly posterPath: string },
 ): string[] {

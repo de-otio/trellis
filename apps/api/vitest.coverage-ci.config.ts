@@ -73,7 +73,83 @@ const PHASE0_NEW_FILES = [
   // those edits are covered by their own suites but not added to this list.
   "src/lib/client-version.ts",
   "src/lib/routes/app-meta.ts",
+  // Media-moderation seam flexibility — the NEW modules only. Each carries its
+  // own per-file bar below rather than hiding inside the aggregate, because
+  // these are the modules that decide whether media is served: an aggregate
+  // that stays green while one of them rots is not a gate.
+  //
+  // The CHANGED existing files (media-completion.ts, media-ports.ts,
+  // media-review-handler.ts, classify-worker-error.ts, routes/media.ts,
+  // workers/media-processing.ts) are deliberately NOT listed: this mechanism
+  // is whole-file, not diff-aware, so adding them would gate on a great deal of
+  // code this change never touched.
+  "src/lib/media/label-policy.ts",
+  "src/lib/media/frame-aggregation.ts",
+  "src/lib/media/frame-sampling-adapter.ts",
+  "src/lib/media/completion-envelope.ts",
+  "src/lib/media/moderation-deadline.ts",
+  "src/lib/media/moderation-metrics.ts",
+  "src/lib/media/media-bytes-access.ts",
+  "src/lib/media/promote-staging.ts",
 ];
+
+/**
+ * Per-file bars for the modules above, stricter than the repo-wide aggregate
+ * (which sits at 80/80/80/78). The three PURE decision modules — how labels
+ * become a verdict, how frames become a video's verdict, how an untrusted body
+ * becomes a pointer — are held higher still: they have no I/O to excuse a gap,
+ * and an untested branch in one of them is an untested way to approve media.
+ */
+const DECISION_MODULE_THRESHOLDS = {
+  "src/lib/media/label-policy.ts": {
+    lines: 90,
+    functions: 90,
+    branches: 90,
+    statements: 90,
+  },
+  "src/lib/media/frame-aggregation.ts": {
+    lines: 90,
+    functions: 90,
+    branches: 90,
+    statements: 90,
+  },
+  "src/lib/media/completion-envelope.ts": {
+    lines: 90,
+    functions: 90,
+    branches: 90,
+    statements: 90,
+  },
+  "src/lib/media/frame-sampling-adapter.ts": {
+    lines: 80,
+    functions: 80,
+    branches: 80,
+    statements: 80,
+  },
+  "src/lib/media/moderation-deadline.ts": {
+    lines: 80,
+    functions: 80,
+    branches: 80,
+    statements: 80,
+  },
+  "src/lib/media/moderation-metrics.ts": {
+    lines: 80,
+    functions: 80,
+    branches: 80,
+    statements: 80,
+  },
+  "src/lib/media/media-bytes-access.ts": {
+    lines: 80,
+    functions: 80,
+    branches: 80,
+    statements: 80,
+  },
+  "src/lib/media/promote-staging.ts": {
+    lines: 80,
+    functions: 80,
+    branches: 80,
+    statements: 80,
+  },
+};
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const baseTest = (base as any).test ?? {};
@@ -91,6 +167,7 @@ export default defineConfig({
         branches: 80,
         statements: 80,
         autoUpdate: false,
+        ...DECISION_MODULE_THRESHOLDS,
       },
     },
   },

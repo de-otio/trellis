@@ -24,7 +24,10 @@ import {
 import { quotaUsageWhere } from "../media/storage-accounting.js";
 import { decisionToStatus } from "../media/media-lifecycle.js";
 import type { MediaLifecycle } from "../media/media-lifecycle.js";
-import { getMediaModerationProvider } from "../media/request-moderation.js";
+import {
+  getMediaModerationProvider,
+  interpretVerdict,
+} from "../media/request-moderation.js";
 import {
   canonicalContentType,
   isServable,
@@ -981,8 +984,21 @@ export const mediaRoutes: Route[] = [
         if (ingestRoute.kind === "reject") {
           // Should not normally reach here (type check above is stricter), but
           // routeUpload is the authoritative gate — honor it fail-closed.
+          //
+          // Audio-only gets its own message rather than the generic one: the
+          // client is asking for something the pipeline genuinely does not do,
+          // and "unsupported media type" would read as a bug in their encoding.
+          const isAudio = ingestRoute.reason === "audio-not-supported";
           const errorResponse = securityHeaders.createSecureResponse(
-            JSON.stringify({ error: "Unsupported media type" }),
+            JSON.stringify(
+              isAudio
+                ? {
+                    error: "Unsupported media type",
+                    message:
+                      "Audio-only uploads are not accepted. Upload a video, or attach the audio to one.",
+                  }
+                : { error: "Unsupported media type" },
+            ),
             { status: 400, headers: { "content-type": "application/json" } },
           );
           return CorsHandler.addCorsHeaders(errorResponse, request, env);
@@ -1198,7 +1214,11 @@ export const mediaRoutes: Route[] = [
             bucket: moderationBucketName,
             key: stagingKey,
           });
-          decision = decisionToStatus(verdict.decision);
+          // The operator's label policy is authoritative when one is
+          // configured; otherwise the provider's own decision stands, as
+          // before. The policy can only ever degrade a verdict, so enabling it
+          // can never make this path more permissive than it already was.
+          decision = decisionToStatus(interpretVerdict(verdict));
         } catch (moderationError: any) {
           logger.warn(
             "[Media Upload] Image moderation failed — failing closed to REVIEW",
