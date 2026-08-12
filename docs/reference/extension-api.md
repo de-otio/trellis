@@ -57,7 +57,7 @@ exposes the root only, so deep specifiers into `lib/` do not resolve.
 >
 > Earlier: `0.7.0 → 0.8.0` added the optional
 > `TrellisExtension.extensionApiVersion` field described below; `0.5.0 →
-> 0.6.0` added the scoped `ExtensionDb.tenant(tid)` surface and the `jobs` /
+0.6.0` added the scoped `ExtensionDb.tenant(tid)` surface and the `jobs` /
 > `ExtensionJobDecl` / `ExtensionJobContext` surface.
 
 Rather than reading `EXTENSION_API_VERSION` yourself and comparing it by
@@ -89,21 +89,21 @@ register each extension exactly once.
 A `TrellisExtension` has four required fields; everything else is optional and
 omitted when the vertical has no interest in that surface.
 
-| Field | Required | Purpose |
-| --- | --- | --- |
-| `id` | yes | Unique extension identifier. Lowercase alphanumeric, 2–32 characters, and not a reserved word. Used as the entity type and as the route mount prefix. |
-| `extensionApiVersion` | no | The `@de-otio/trellis-extension-api` semver this extension was built against. Core checks it at startup — see [`extensionApiVersion`](#extensionapiversion) below. |
-| `terminology` | yes | Display naming: `{ entity, entityPlural }` (for example `{ entity: "dog", entityPlural: "dogs" }`). |
-| `routes` | yes | An array of raw `Route` definitions. May be empty when only `extensionRoutes` are used. Routes cannot use reserved prefixes. |
-| `metadataSchema` | yes | A Zod schema validating `Entity.metadata` when an entity's type matches this extension's `id`. |
-| `crossTenantRead` | no | Models this extension may read cross-tenant via `ctx.db.discover(reason)`. Validated at registration; an undeclarable model fails startup. |
-| `jobs` | no | Scheduled work the extension declares, run in-process in the API container (see [Scheduled jobs](#scheduled-jobs)). |
-| `extensionRoutes` | no | Core-wrapped route definitions — **preferred over raw `routes`**. |
-| `configSchema` | no | A Zod schema declaring the env-var keys this extension requires. Validated against the extension's scoped config values only. |
-| `activityPub` | no | Display-only ActivityPub Actor enrichment (`enrichActor`). |
-| `computeLifeStage` | no | Compute a life-stage (or equivalent) value from entity metadata; the result is persisted as `Entity.lifeStage`. |
-| `extendRecap` | no | Attach own-table aggregates to a year-in-review recap; merged under `payload.extension`. |
-| `shutdown` | no | Called on server shutdown (SIGTERM/SIGINT). |
+| Field                 | Required | Purpose                                                                                                                                                            |
+| --------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `id`                  | yes      | Unique extension identifier. Lowercase alphanumeric, 2–32 characters, and not a reserved word. Used as the entity type and as the route mount prefix.              |
+| `extensionApiVersion` | no       | The `@de-otio/trellis-extension-api` semver this extension was built against. Core checks it at startup — see [`extensionApiVersion`](#extensionapiversion) below. |
+| `terminology`         | yes      | Display naming: `{ entity, entityPlural }` (for example `{ entity: "dog", entityPlural: "dogs" }`).                                                                |
+| `routes`              | yes      | An array of raw `Route` definitions. May be empty when only `extensionRoutes` are used. Routes cannot use reserved prefixes.                                       |
+| `metadataSchema`      | yes      | A Zod schema validating `Entity.metadata` when an entity's type matches this extension's `id`.                                                                     |
+| `crossTenantRead`     | no       | Models this extension may read cross-tenant via `ctx.db.discover(reason)`. Validated at registration; an undeclarable model fails startup.                         |
+| `jobs`                | no       | Scheduled work the extension declares, run in-process in the API container (see [Scheduled jobs](#scheduled-jobs)).                                                |
+| `extensionRoutes`     | no       | Core-wrapped route definitions — **preferred over raw `routes`**.                                                                                                  |
+| `configSchema`        | no       | A Zod schema declaring the env-var keys this extension requires. Validated against the extension's scoped config values only.                                      |
+| `activityPub`         | no       | Display-only ActivityPub Actor enrichment (`enrichActor`).                                                                                                         |
+| `computeLifeStage`    | no       | Compute a life-stage (or equivalent) value from entity metadata; the result is persisted as `Entity.lifeStage`.                                                    |
+| `extendRecap`         | no       | Attach own-table aggregates to a year-in-review recap; merged under `payload.extension`.                                                                           |
+| `shutdown`            | no       | Called on server shutdown (SIGTERM/SIGINT).                                                                                                                        |
 
 **This table is the whole contract.** Every field listed is invoked by core.
 If you are looking for a lifecycle hook, an entity-relationship-type
@@ -157,8 +157,8 @@ Values over 64 characters are rejected outright.
 
 ```ts
 terminology: {
-  entity: string;        // "dog"
-  entityPlural: string;  // "dogs"
+  entity: string; // "dog"
+  entityPlural: string; // "dogs"
 }
 ```
 
@@ -270,12 +270,12 @@ deliberately restricted runtime environment. Core secrets are never exposed.
 
 ```ts
 interface ExtensionContext {
-  db: ExtensionDb;                       // scoped Prisma access
-  graphService?: ExtensionGraphService;  // read-only graph access
-  appDomain: string;                     // e.g. "example.com"
-  appUrl: string;                        // e.g. "https://api.example.com"
-  stage: string;                         // "dev", "prod"
-  config: Record<string, string>;        // this extension's validated config
+  db: ExtensionDb; // scoped Prisma access
+  graphService?: ExtensionGraphService; // read-only graph access
+  appDomain: string; // e.g. "example.com"
+  appUrl: string; // e.g. "https://api.example.com"
+  stage: string; // "dev", "prod"
+  config: Record<string, string>; // this extension's validated config
 }
 ```
 
@@ -434,8 +434,8 @@ operationally in
 
 ## Enrichment interfaces
 
-These optional fields let a vertical contribute domain-specific *display and
-derived data*. All three are invoked by core.
+These optional fields let a vertical contribute domain-specific _display and
+derived data_. All three are invoked by core.
 
 - **`activityPub.enrichActor(entity)`** — returns display-only `ActorEnrichment`
   (`summary`, `icon`, `attachment`, custom `properties`). The core owns and
@@ -521,7 +521,7 @@ Three things worth knowing about how that guard behaves:
 
 - **It rejects on presence, not on value.** `{ textSourceType: undefined }` is
   refused even though Prisma would treat it as "omit". The guard exists to make
-  the *intent* fail loudly.
+  the _intent_ fail loudly.
 - **It is a total ban, not a monotonicity check.** The scoped planner is a pure
   function with no database access, so it cannot compare your value against the
   stored one. A raise is refused along with a downgrade — set provenance by
