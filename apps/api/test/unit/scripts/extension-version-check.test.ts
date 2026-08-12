@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  caretRangeAdmits,
+  checkConsumerRanges,
   compareAllVersions,
   compareVersions,
   extractDocVersion,
@@ -100,10 +102,7 @@ describe("extractDocVersion", () => {
   });
 
   it("throws when there is more than one callout (ambiguity)", () => {
-    const doc = [
-      "> **Current version: `0.9.0`.**",
-      "> **Current version: `0.8.0`.**",
-    ].join("\n");
+    const doc = ["> **Current version: `0.9.0`.**", "> **Current version: `0.8.0`.**"].join("\n");
     expect(() => extractDocVersion(doc)).toThrow(/found 2/i);
   });
 });
@@ -127,5 +126,75 @@ describe("compareAllVersions", () => {
     expect(result.message).toMatch(/stale/i);
     expect(result.message).toContain("0.8.0");
     expect(result.message).toContain("0.9.0");
+  });
+});
+
+describe("caretRangeAdmits", () => {
+  it("pins the minor below 1.0.0", () => {
+    // The case that broke CI: a 0.8 range does not admit a 0.9 release.
+    expect(caretRangeAdmits("^0.8.0", "0.9.0")).toBe(false);
+    expect(caretRangeAdmits("^0.9.0", "0.9.0")).toBe(true);
+    expect(caretRangeAdmits("^0.9.0", "0.9.3")).toBe(true);
+    expect(caretRangeAdmits("^0.9.0", "0.10.0")).toBe(false);
+  });
+
+  it("does not admit a version below the range floor", () => {
+    expect(caretRangeAdmits("^0.9.2", "0.9.1")).toBe(false);
+    expect(caretRangeAdmits("^1.2.0", "1.1.9")).toBe(false);
+  });
+
+  it("pins only the major at or above 1.0.0", () => {
+    expect(caretRangeAdmits("^1.2.0", "1.3.0")).toBe(true);
+    expect(caretRangeAdmits("^1.2.0", "2.0.0")).toBe(false);
+    expect(caretRangeAdmits("^1.0.0", "0.9.0")).toBe(false);
+  });
+
+  it("throws on a range shape it does not understand rather than guessing", () => {
+    // A wrong "yes" here would re-open the hole the gate closes, so anything
+    // outside the plain caret form must fail loudly.
+    for (const range of ["~0.9.0", ">=0.9.0", "0.9.0", "*", "^0.9", "workspace:*"]) {
+      expect(() => caretRangeAdmits(range, "0.9.0")).toThrow(/unsupported/i);
+    }
+  });
+
+  it("throws on a pre-release target version", () => {
+    expect(() => caretRangeAdmits("^0.9.0", "0.9.0-alpha.1")).toThrow(/pre-release/i);
+  });
+});
+
+describe("checkConsumerRanges", () => {
+  it("passes when every consumer range admits the version", () => {
+    const result = checkConsumerRanges("0.9.0", [
+      { path: "apps/api/package.json", range: "^0.9.0" },
+      { path: "apps/worker/package.json", range: "^0.9.0" },
+    ]);
+    expect(result.ok).toBe(true);
+    expect(result.message).toContain("2");
+  });
+
+  it("fails and names every stale consumer, not just the first", () => {
+    const result = checkConsumerRanges("0.9.0", [
+      { path: "apps/api/package.json", range: "^0.8.0" },
+      { path: "apps/worker/package.json", range: "^0.8.0" },
+    ]);
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("apps/api/package.json");
+    expect(result.message).toContain("apps/worker/package.json");
+  });
+
+  it("fails when only one consumer was forgotten", () => {
+    const result = checkConsumerRanges("0.9.0", [
+      { path: "apps/api/package.json", range: "^0.9.0" },
+      { path: "apps/worker/package.json", range: "^0.8.0" },
+    ]);
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("apps/worker/package.json");
+    expect(result.message).not.toContain("apps/api/package.json");
+  });
+
+  it("throws when no consumer was found at all", () => {
+    // An empty list means the manifest paths or the dependency name went stale;
+    // vacuously passing would make the gate useless exactly when it broke.
+    expect(() => checkConsumerRanges("0.9.0", [])).toThrow(/no in-repo consumer/i);
   });
 });
