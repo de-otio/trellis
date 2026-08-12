@@ -168,16 +168,6 @@ describe("extension contract: optional surfaces", () => {
     expect(exampleExtension.computeLifeStage?.({ size: "m" }, false, null)).toBeNull();
   });
 
-  it("relationshipSignalProvider returns a blendable signal", async () => {
-    const signal = await exampleExtension.relationshipSignalProvider?.computeSignal(
-      "u1",
-      "u2",
-      "user",
-      { currentScore: 0.1, tier: 1 },
-    );
-    expect(signal).toBe(0.5);
-  });
-
   it("activityPub.enrichActor returns display-only fields", () => {
     const a = exampleExtension.activityPub?.enrichActor?.({
       name: "Spinny",
@@ -187,35 +177,18 @@ describe("extension contract: optional surfaces", () => {
     expect(a?.attachment?.[0]).toMatchObject({ name: "Color", value: "red" });
   });
 
-  it("declares entity relationship types and discovery facets", () => {
-    expect(exampleExtension.entityRelationshipTypes).toContain("LINKED_TO");
-    expect(exampleExtension.discoveryFacets?.[0]).toMatchObject({
-      field: "color",
-      type: "exact",
-    });
-  });
 });
 
-describe("extension contract: hooks & lifecycle", () => {
-  const ctx: any = { appDomain: "localhost", appUrl: "http://localhost", stage: "test", config: {}, db: {} };
-
+describe("extension contract: lifecycle", () => {
   beforeEach(() => resetHookCalls());
 
-  it("init and shutdown fire and record in order", async () => {
-    await exampleExtension.init?.(ctx);
+  // `shutdown` is the one lifecycle callback core actually invokes
+  // (server.ts, on SIGTERM/SIGINT). Everything this block used to cover —
+  // `init` and the five `hooks` — was declared by the contract but never
+  // dispatched by core, so these assertions passed against the fixture's own
+  // functions while proving nothing about core. Removed with that surface.
+  it("shutdown fires and records", async () => {
     await exampleExtension.shutdown?.();
-    const order = hookCalls.map((c) => c.hook);
-    expect(order.indexOf("init")).toBeGreaterThanOrEqual(0);
-    expect(order.indexOf("shutdown")).toBeGreaterThan(order.indexOf("init"));
-  });
-
-  it("onEntityCreated / onPostCreated record their payloads", async () => {
-    await exampleExtension.hooks?.onEntityCreated?.({ id: "e1" }, ctx);
-    await exampleExtension.hooks?.onPostCreated?.({ id: "p1" }, ctx);
-    expect(hookCalls.map((c) => c.hook)).toEqual([
-      "onEntityCreated",
-      "onPostCreated",
-    ]);
-    expect(hookCalls[0].args[0]).toMatchObject({ id: "e1" });
+    expect(hookCalls.map((c) => c.hook)).toContain("shutdown");
   });
 });

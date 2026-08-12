@@ -15,6 +15,42 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ## [Unreleased]
 
+### Removed
+
+- **`@de-otio/trellis-extension-api` 0.9.0 — BREAKING: seven declared
+  extension points that core never invoked are gone.** `hooks` (all five
+  lifecycle callbacks, plus the `ExtensionHooks` type and core's hook
+  dispatcher), `init`, `taxonomySeed`, `relationshipSignalProvider`,
+  `entityRelationshipTypes`, `discoveryFacets`, and `recommendationStrategy`,
+  together with the types that existed only to serve them
+  (`TaxonomySeedData`/`Dimension`/`Category`/`Taxon`,
+  `RelationshipSignalProvider`, `RelationshipSignalContext`, `DiscoveryFacet`,
+  `RecommendationStrategy`, `Recommendation`).
+
+  These type-checked, registered without complaint, and then did nothing. Two
+  of them were worse than silent: `entityRelationshipTypes` and
+  `discoveryFacets` were read at registration **only to log themselves**, so
+  an author saw `[extensions] "x" registered discoveryFacets: breed(exact)` at
+  boot and reasonably concluded the facets were live. Nothing consumed them.
+
+  This is a **removal, not a deprecation**, and it lands before 1.0
+  deliberately: from 1.0 the published contract accretes external dependents,
+  and dead surface removed later is a breaking change, whereas dead surface
+  removed now is a correction. Reintroducing any of these when a real consumer
+  exists is an additive, non-breaking change.
+
+  **If you declare any of them:** delete the declaration and the code behind
+  it. Nothing observable changes — it was never running. The removals are
+  visible in
+  `packages/extension-api/etc/public-api.snapshot.d.ts`.
+
+  Documentation that promised behaviour for these fields has been corrected
+  rather than deleted: the graph concept doc no longer shows an
+  `extension_signals(...)` term in the scoring formula (the scoring engine has
+  no extension input and never had one), and the standalone-testing doc no
+  longer claims the fixture verifies that "hooks fire after the operation
+  commits".
+
 ### Added
 
 - **A media-moderation backend no longer has to be shaped like one particular
@@ -39,7 +75,7 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
     and never loosen one — a provider's fail-closed `review` stays `review`.
     Install it with `setMediaLabelPolicy()`; pass it to the frame-sampling
     adapter as `policy` to govern video frames too.
-  - **A deadline wrapper** that binds the *decision*, not merely the wait: a
+  - **A deadline wrapper** that binds the _decision_, not merely the wait: a
     provider resolving `approved` after the deadline is discarded.
   - **A bytes capability** so a classifier that takes an image in its request
     body needs no storage credentials of its own — the read is size-capped and
@@ -99,7 +135,7 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   invisible to the uploader and to the review queue alike.
 - **A completion message can no longer silence a verdict.** The `track` in a
   completion body is a routing hint checked against the job row; a mismatch is
-  dropped *before* the dedupe claim, so a forged track cannot burn the slot the
+  dropped _before_ the dedupe claim, so a forged track cannot burn the slot the
   genuine completion needs. Bodies over 256 KiB are refused before parsing (the
   same bound applies to a wrapped inner payload), and provider-supplied ids are
   control-character stripped and length-capped before reaching a log line.
@@ -121,8 +157,57 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ### Changed
 
+- **`@de-otio/trellis-extension-api` 0.9.0 — package hygiene for extension
+  authors.**
+
+  - **`ExtensionJobContext.signal` is now part of the public type.** Core
+    always supplied it; the type did not declare it, so a job that wanted to
+    observe its own timeout had to cast. Cooperative cancellation is now
+    expressible without one.
+  - **The package compiles under `NodeNext`** instead of `node` resolution.
+    This package is `"type": "module"`, and NodeNext is what makes TypeScript
+    _enforce_ the mandatory `.js` specifier on relative imports — under the
+    old setting a missing extension compiled clean here and failed only at
+    runtime in a consumer. Verified by removing one and watching `TS2835`
+    fire.
+  - **BREAKING (resolution): an `exports` map is declared, exposing the
+    package root and `./package.json` only.** Deep specifiers such as
+    `@de-otio/trellis-extension-api/lib/index.js` now raise
+    `ERR_PACKAGE_PATH_NOT_EXPORTED`. No known consumer used one — a repo-wide
+    search across core and the reference vertical found zero. `main`/`types`
+    remain for older resolvers.
+
+    Declaring `exports` **disables Node's extension probing**, which is how an
+    identical map on `@de-otio/trellis` broke twenty of twenty-one consumer
+    entry points earlier this month. So this map was verified the way that
+    incident said to verify one — by packing a tarball, installing it into a
+    fresh project, and loading it — and the consumer-install smoke test now
+    loads `@de-otio/trellis-extension-api` from the packed tarball under both
+    ESM and CJS, and cross-checks the packed version against
+    `EXTENSION_API_VERSION`. That coverage did not exist before; the script
+    packed this package and never loaded it, which is precisely why the
+    sibling package's breakage reached a merge.
+
+  - **The published tarball now ships `src/`.** Declaration maps were already
+    published and pointed at sources that were not, so go-to-definition
+    dangled. Compiled `.d.ts`/`.d.ts.map` artifacts that accumulate under
+    `src/` in a working tree are explicitly excluded, so a dirty tree cannot
+    leak them into a release.
+  - **The version-lockstep gate now also checks what each consuming workspace
+    says it accepts.** The version is stated in five places, not three, and the
+    0.9.0 bump initially moved only three: `apps/api` and `apps/worker` were
+    left declaring `^0.8.0`, a range that _excludes_ 0.9.0, because below 1.0.0
+    a caret pins the minor. Nothing local caught it — a `node_modules` tree
+    installed before the bump keeps its workspace symlink regardless of the
+    range, so the typecheck, the full unit suite, and even the packed-tarball
+    smoke test all passed against a dependency graph that could not be
+    reinstalled from scratch. Only `npm ci` on a clean checkout objected. The
+    gate now reproduces that failure in under a second, and understands only
+    the plain caret form, throwing on any other range shape rather than
+    guessing at it.
+
 - **Six read paths could disclose a post to someone its author had not
-  admitted.** All six are closed. Every one is a *narrowing*: nothing changes
+  admitted.** All six are closed. Every one is a _narrowing_: nothing changes
   shape, and things that used to be served are now withheld. Consumers should
   expect fewer results, not different ones.
 
@@ -172,7 +257,7 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   `AWS_*` pair and get a 403 — indistinguishable from a permissions problem.
 
   The floor is load-bearing rather than incidental. The old `^0.4.0` caret
-  already *accepted* 0.4.3, but it also accepts 0.4.0, and an install that
+  already _accepted_ 0.4.3, but it also accepts 0.4.0, and an install that
   resolved the older version would leave object-storage uploads failing with no
   signal beyond a 403. Deployments on AWS are unaffected either way: with no
   `S3_*` variable set the factory behaves exactly as before.
@@ -211,7 +296,7 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 - **`GET /api/users/me` — the caller's resolved identity.** Returns
   `{ userId, activeTenantId, email, globalRole, tenantSlug, tenantRole,
-  handle }`, authenticated, `private, no-store`, and included in the
+handle }`, authenticated, `private, no-store`, and included in the
   curated OpenAPI document. It exists so clients stop decoding
   `custom:userId` / `custom:activeTenantId` out of the ID token: those
   claim names are written by a Cognito pre-token-generation Lambda and are
@@ -343,7 +428,7 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 - **The nightly media purge builds its S3 client through the foundation
   factory.** `apps/worker` constructed one from `region` alone. Off AWS the
-  missing half is *credentials*, not the endpoint: `AWS_ENDPOINT_URL_S3` is
+  missing half is _credentials_, not the endpoint: `AWS_ENDPOINT_URL_S3` is
   resolved natively by `@smithy/core`, but the SDK reads a **single** ambient
   `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` pair for every service, so where
   that pair belongs to the queue service the S3 client signs as the wrong
@@ -357,14 +442,14 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   ambient pair is correct.
 
 - **Health and abuse dashboards no longer report missing data as good news.**
-  Two admin surfaces derived a clean bill of health from the *absence* of a
+  Two admin surfaces derived a clean bill of health from the _absence_ of a
   reading:
 
   - `evaluateAbuseMetrics` degraded both data sources to zeros on failure, and
     zeros produced `blockRate 0` → `overallStatus "low"` → the recommendation
-    *"No abuse concerns detected in this time period."*
+    _"No abuse concerns detected in this time period."_
   - `evaluateScalingHealth` derives `"healthy"` from the absence of red/yellow
-    indicators, and a CloudWatch failure *removes* the RDS indicators rather
+    indicators, and a CloudWatch failure _removes_ the RDS indicators rather
     than reddening them — manufacturing exactly that absence.
 
   Both now distinguish "nothing happened" from "nothing was measured", gaining
@@ -388,7 +473,7 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   `custom:userId` (its realm protocol mappers emit deployer-chosen claim
   names), so `session.userId` silently became the IdP `sub`: a UUID,
   matching no `User.id` (a cuid). Every affected route answered
-  *"User not found"* (404) — the same failure mode as the 0.12.1/0.12.2
+  _"User not found"_ (404) — the same failure mode as the 0.12.1/0.12.2
   Cognito-era bug, reopened by the provider swap. Strategy 1a now
   (a) validates the claim against `CUID_RE` instead of trusting it,
   (b) falls back to the same server-side resolution auth-middleware uses
@@ -620,8 +705,8 @@ everything since 0.23.0.
   (`lib/routes/media-review.ts`, `lib/media/media-review-handler.ts`):
   `GET /api/admin/media-review` (paginated REVIEW/QUARANTINED list with
   per-track visual/audio verdicts for video), `POST
-  /api/admin/media-review/{id}/decision` (approve | reject), `POST
-  /api/admin/media-review/{id}/escalate-csam` (locks the item and writes a
+/api/admin/media-review/{id}/decision` (approve | reject), `POST
+/api/admin/media-review/{id}/escalate-csam` (locks the item and writes a
   CRITICAL audit row; statutory reporting remains a human/runbook process),
   and `GET /api/admin/media-review/{id}/content` (audited moderator
   byte-view via a new pure `moderator-serve-gate` that serves only
@@ -638,7 +723,7 @@ everything since 0.23.0.
   `lib/app.ts`; five sets added after the router consolidation were never
   mounted and returned 404 in deployments despite green unit tests. Now
   mounted: device registration (`POST /api/devices/register`, `DELETE
-  /api/devices/{id}`), tenant classification, tenant directory profile,
+/api/devices/{id}`), tenant classification, tenant directory profile,
   tenant directory search, and platform category admin. **Consumer note:
   these endpoints become live on upgrade — anything previously relying on
   them 404ing should be reviewed before deploying.** A new route-mount
@@ -734,10 +819,10 @@ everything since 0.23.0.
   (string) column pair is replaced by a single `lifecycle` column driven by
   ONE machine-checked state machine (`lib/media/media-lifecycle.ts`, enum
   `MediaLifecycle`): `AWAITING_UPLOAD → UPLOADED → APPROVED | REVIEW |
-  QUARANTINED | REJECTED`, with `UPLOAD_FAILED` for expiry/abandon/reap
+QUARANTINED | REJECTED`, with `UPLOAD_FAILED` for expiry/abandon/reap
   (T14/AR4). Every new row is born `AWAITING_UPLOAD` (fail-closed); the only
   state that can serve bytes is `APPROVED` (and only with `!hidden &&
-  deletedAt == null` — `lib/media/serve-gate.ts`).
+deletedAt == null` — `lib/media/serve-gate.ts`).
   `lib/media/moderation-status.ts` is removed; the serve gate and promote
   decision are consolidated on the new machine. Migration:
   `20260705083217_t14_presigned_upload_lifecycle_consolidation`.
@@ -787,7 +872,7 @@ everything since 0.23.0.
   `lib/routes/friends.ts` (every `/api/friends*` endpoint), and both KV
   bindings are removed; the Prisma-backed `/api/connection-codes` flow is the
   one connection mechanism. The friend definition is now the convergence
-  contract in the new `lib/friend-ids.ts`: a *friend* of a user is the target
+  contract in the new `lib/friend-ids.ts`: a _friend_ of a user is the target
   of an outgoing user→user `relationships` edge with circle **tier ≤ 1**
   (explicit `code`/`import` connections; passive tier-2
   `suggestion`/`discovery` edges do not count). Feed visibility filtering and
@@ -840,7 +925,7 @@ everything since 0.23.0.
   `MediaSpendConfig`), never literals in the public tarball. Fail-closed
   posture: an unreadable counter or a non-finite value blocks jobs
   (retry/DLQ), invalid estimation inputs throw rather than under-estimate, and
-  a cap of 0 is an operator emergency stop; only *absent* config disables the
+  a cap of 0 is an operator emergency stop; only _absent_ config disables the
   guard.
 
 ### Fixed
@@ -877,7 +962,7 @@ everything since 0.23.0.
   (`lambda/diagnostics-proxy`), since `dist` and `src/lambda` ship in the
   tarball and consumers bundle those Lambda entrypoints from
   `node_modules`. `@prisma/client` remains an intentionally undeclared
-  *runtime* dependency — it is a `peerDependency` by design (AR14). No API
+  _runtime_ dependency — it is a `peerDependency` by design (AR14). No API
   changes; the public export surface is untouched.
 
   (A local scan had also flagged `neo4j-driver`/`@smithy/*`/`@aws-crypto/*`
@@ -895,7 +980,7 @@ everything since 0.23.0.
   moderation gate on post/comment create+edit was only invoked inside
   `if (moderationEnabled)`, where `moderationEnabled` came from
   `FeatureToggleService.isEnabled("content_moderation_enabled")`. That read is
-  fail-*soft*: a missing/unseeded toggle row **and** any `feature_toggles`
+  fail-_soft_: a missing/unseeded toggle row **and** any `feature_toggles`
   read error both resolve to `false`, so an unseeded environment — or a brief
   toggle-DB outage — silently skipped moderation per request while posts still
   wrote. Combined with the seed defaulting the flag to `false`, the whole
@@ -978,6 +1063,7 @@ everything since 0.23.0.
   schema). The consumer-install smoke test (`apps/api/scripts/smoke-pack.sh`)
   now asserts the installed `@prisma/client` version satisfies this peer
   range as part of its tarball verification.
+
 ### Fixed
 
 - **GDPR account deletion now actually erases the user's media** (AR7). Both
@@ -1000,6 +1086,7 @@ everything since 0.23.0.
   does not track, are deleted directly by the calling worker via a new chunked
   batch-delete helper that structurally refuses `cas/*` keys. `DeletionResult`
   gains `mediaFilesErased`, `mediaFilesRetainedShared`, and `mediaStagingKeys`.
+
 ### Security
 
 - **Invitation gate now fails closed when the `INVITATIONS_KV` binding is
@@ -1036,6 +1123,7 @@ everything since 0.23.0.
   as of this fix). The broader consolidation of
   `moderationStatus`/`uploadStatus`/orphan flags into one lifecycle state
   machine is intentionally deferred to the presigned-upload rework.
+
 ### Security
 
 - **Posting-flow text moderation is now fail-closed (T4).** Post and comment

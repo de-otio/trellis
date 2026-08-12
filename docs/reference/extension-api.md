@@ -9,8 +9,8 @@ order: 40
 
 Trellis is a generic multi-tenant social-network platform core. A **vertical**
 application builds on it by registering a `TrellisExtension` at startup to add
-domain-specific routes, metadata schemas, terminology, lifecycle hooks, and
-discovery behaviour. The extension contract is published as the
+domain-specific routes, metadata schemas, terminology, scheduled jobs, and
+display enrichment. The extension contract is published as the
 `@de-otio/trellis-extension-api` package, which ships only types and a version
 constant — no runtime behaviour.
 
@@ -36,18 +36,29 @@ import { EXTENSION_API_VERSION } from "@de-otio/trellis-extension-api";
 The package re-exports the `TrellisExtension` contract, the `ExtensionContext`
 and its scoped `ExtensionDb` / `ExtensionGraphService`, the job types
 (`ExtensionJobDecl`, `ExtensionJobContext`, `ExtensionJobSchedule`), the
-opaque `TenantId` brand, the route and hook types, the strategy interfaces,
-taxonomy-seed types, and the `EXTENSION_API_VERSION` constant. An extension
-may read `EXTENSION_API_VERSION` at startup to verify it is running against
-the expected contract version.
+opaque `TenantId` brand, the route types, the structural DTOs, and the
+`EXTENSION_API_VERSION` constant. An extension may read
+`EXTENSION_API_VERSION` at startup to verify it is running against the
+expected contract version.
 
-> **Current version: `0.8.0`.** The `0.7.0 → 0.8.0` bump added the optional
-> `TrellisExtension.extensionApiVersion` field described below — additive
-> (no existing extension needs a change), but treated as a minor bump
-> because it's a contract addition, not a patch. The `0.5.0 → 0.6.0` bump
-> added the scoped `ExtensionDb.tenant(tid)` surface (replacing the earlier
-> raw-delegate shape) and the `jobs` / `ExtensionJobDecl` /
-> `ExtensionJobContext` surface described below.
+Import from the **package root**. The package declares an `exports` map that
+exposes the root only, so deep specifiers into `lib/` do not resolve.
+
+> **Current version: `0.9.0`.** This line is checked against the
+> `EXTENSION_API_VERSION` constant in CI, so it cannot drift.
+>
+> `0.8.1 → 0.9.0` is **breaking**. It removed seven declared extension points
+> that core never invoked — `hooks` (all five), `init`, `taxonomySeed`,
+> `relationshipSignalProvider`, `entityRelationshipTypes`, `discoveryFacets`,
+> `recommendationStrategy` — along with the types serving them. If your
+> extension declares any of them, delete the declaration: it was never
+> running. The same bump made `ExtensionJobContext.signal` public, moved the
+> package to `NodeNext` resolution, and added the root-only `exports` map.
+>
+> Earlier: `0.7.0 → 0.8.0` added the optional
+> `TrellisExtension.extensionApiVersion` field described below; `0.5.0 →
+0.6.0` added the scoped `ExtensionDb.tenant(tid)` surface and the `jobs` /
+> `ExtensionJobDecl` / `ExtensionJobContext` surface.
 
 Rather than reading `EXTENSION_API_VERSION` yourself and comparing it by
 hand, the sanctioned path is to **declare** the version you built against
@@ -78,26 +89,28 @@ register each extension exactly once.
 A `TrellisExtension` has four required fields; everything else is optional and
 omitted when the vertical has no interest in that surface.
 
-| Field | Required | Purpose |
-| --- | --- | --- |
-| `id` | yes | Unique extension identifier. Lowercase alphanumeric, 2–32 characters, and not a reserved word. Used as the entity type and as the route mount prefix. |
-| `extensionApiVersion` | no | The `@de-otio/trellis-extension-api` semver this extension was built against. Core checks it at startup — see [`extensionApiVersion`](#extensionapiversion) below. |
-| `terminology` | yes | Display naming: `{ entity, entityPlural }` (for example `{ entity: "dog", entityPlural: "dogs" }`). |
-| `routes` | yes | An array of raw `Route` definitions. May be empty when only `extensionRoutes` are used. Routes cannot use reserved prefixes. |
-| `metadataSchema` | yes | A Zod schema validating `Entity.metadata` when an entity's type matches this extension's `id`. |
-| `taxonomySeed` | no | Taxonomy dimensions, categories, and taxons to seed for this extension. |
-| `hooks` | no | Lifecycle hooks the core calls after operations complete (see below). |
-| `relationshipSignalProvider` | no | Domain-specific relationship-scoring signals. |
-| `entityRelationshipTypes` | no | Entity-to-entity relationship type names declared globally for this entity type, e.g. `["PACK_MATE", "WALK_BUDDY"]`. |
-| `discoveryFacets` | no | Metadata fields that are filterable in discovery. |
-| `recommendationStrategy` | no | Domain-specific recommendation generation. |
-| `jobs` | no | Scheduled work the extension declares, run in-process in the API container (see [Scheduled jobs](#scheduled-jobs)). |
-| `extensionRoutes` | no | Core-wrapped route definitions — **preferred over raw `routes`**. |
-| `configSchema` | no | A Zod schema declaring the env-var keys this extension requires. Validated against the extension's scoped config values only. |
-| `activityPub` | no | Display-only ActivityPub Actor enrichment (`enrichActor`). |
-| `computeLifeStage` | no | Compute a life-stage (or equivalent) value from entity metadata; the result is persisted as `Entity.lifeStage`. |
-| `init` | no | Called once at startup with the extension's scoped context. |
-| `shutdown` | no | Called on server shutdown (SIGTERM/SIGINT). |
+| Field                 | Required | Purpose                                                                                                                                                            |
+| --------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `id`                  | yes      | Unique extension identifier. Lowercase alphanumeric, 2–32 characters, and not a reserved word. Used as the entity type and as the route mount prefix.              |
+| `extensionApiVersion` | no       | The `@de-otio/trellis-extension-api` semver this extension was built against. Core checks it at startup — see [`extensionApiVersion`](#extensionapiversion) below. |
+| `terminology`         | yes      | Display naming: `{ entity, entityPlural }` (for example `{ entity: "dog", entityPlural: "dogs" }`).                                                                |
+| `routes`              | yes      | An array of raw `Route` definitions. May be empty when only `extensionRoutes` are used. Routes cannot use reserved prefixes.                                       |
+| `metadataSchema`      | yes      | A Zod schema validating `Entity.metadata` when an entity's type matches this extension's `id`.                                                                     |
+| `crossTenantRead`     | no       | Models this extension may read cross-tenant via `ctx.db.discover(reason)`. Validated at registration; an undeclarable model fails startup.                         |
+| `jobs`                | no       | Scheduled work the extension declares, run in-process in the API container (see [Scheduled jobs](#scheduled-jobs)).                                                |
+| `extensionRoutes`     | no       | Core-wrapped route definitions — **preferred over raw `routes`**.                                                                                                  |
+| `configSchema`        | no       | A Zod schema declaring the env-var keys this extension requires. Validated against the extension's scoped config values only.                                      |
+| `activityPub`         | no       | Display-only ActivityPub Actor enrichment (`enrichActor`).                                                                                                         |
+| `computeLifeStage`    | no       | Compute a life-stage (or equivalent) value from entity metadata; the result is persisted as `Entity.lifeStage`.                                                    |
+| `extendRecap`         | no       | Attach own-table aggregates to a year-in-review recap; merged under `payload.extension`.                                                                           |
+| `shutdown`            | no       | Called on server shutdown (SIGTERM/SIGINT).                                                                                                                        |
+
+**This table is the whole contract.** Every field listed is invoked by core.
+If you are looking for a lifecycle hook, an entity-relationship-type
+registration, a discovery facet, a scoring signal, a taxonomy seed, a
+recommendation strategy or an `init` callback, they were removed in `0.9.0`:
+they were declared but never called, so code written against them ran only in
+its author's imagination. See the [`0.9.0` note](#the-package) above.
 
 ### `id`
 
@@ -144,8 +157,8 @@ Values over 64 characters are rejected outright.
 
 ```ts
 terminology: {
-  entity: string;        // "dog"
-  entityPlural: string;  // "dogs"
+  entity: string; // "dog"
+  entityPlural: string; // "dogs"
 }
 ```
 
@@ -250,29 +263,38 @@ unless raw control is required.
 
 ## The extension context
 
-Every hook, handler, and lifecycle callback receives an `ExtensionContext` — a
+Every handler and enrichment callback receives an `ExtensionContext` — a
 deliberately restricted runtime environment. Core secrets are never exposed.
+(Scheduled jobs receive the narrower `ExtensionJobContext` instead — see
+[Scheduled jobs](#scheduled-jobs).)
 
 ```ts
 interface ExtensionContext {
-  db: ExtensionDb;                       // scoped Prisma access
-  graphService?: ExtensionGraphService;  // read-only graph access
-  appDomain: string;                     // e.g. "example.com"
-  appUrl: string;                        // e.g. "https://api.example.com"
-  stage: string;                         // "dev", "prod"
-  config: Record<string, string>;        // this extension's validated config
+  db: ExtensionDb; // scoped Prisma access
+  graphService?: ExtensionGraphService; // read-only graph access
+  appDomain: string; // e.g. "example.com"
+  appUrl: string; // e.g. "https://api.example.com"
+  stage: string; // "dev", "prod"
+  config: Record<string, string>; // this extension's validated config
 }
 ```
 
 ### `db` — scoped database access
 
-`ExtensionDb` has exactly one member — there is no raw delegate bag:
+`ExtensionDb` has two members, and there is no raw delegate bag:
 
 ```ts
 interface ExtensionDb {
   tenant(tenantId: TenantId): ScopedDb;
+  discover(reason: string): DiscoverDb;
 }
 ```
+
+`tenant()` is the tenant-bound write-and-read surface. `discover()` is the
+audited, read-only, cross-tenant surface described under
+[`crossTenantRead`](#the-trellisextension-contract) — it is restricted to the
+models the extension declared, applies a non-overridable visibility floor to
+every query, and runs inside core's audit with the reason you pass.
 
 `tenant(tenantId)` returns a `ScopedDb` whose every operation is bound to that
 tenant **by construction**. `TenantId` is an opaque branded string with no
@@ -336,23 +358,22 @@ circles, entity relationships, and discovery. It is **read-only**: graph
 mutations (sync, remove, score writes, relationship creation) are reserved for
 the core and are not exposed.
 
-## Lifecycle hooks
+## Lifecycle
 
-`ExtensionHooks` are optional callbacks the core invokes **after** the named
-operation completes. Omit any hook the extension does not need.
+`shutdown()` is the only lifecycle callback core invokes. There is **no
+event-hook mechanism**: an extension cannot currently be notified that a post
+was created, an entity was deleted, or scores were recomputed.
 
-| Hook | Called when |
-| --- | --- |
-| `onPostCreated(post, ctx)` | a post is created |
-| `onEntityCreated(entity, ctx)` | an entity is created |
-| `onRelationshipCreated(userId, targetId, targetType, ctx)` | a relationship is created between users/entities |
-| `onScoreRecompute(userId, scores, ctx)` | relationship scores are recomputed |
-| `onEntityDeleted(entityId, entityType, ctx)` | an entity is deleted |
+Versions before `0.9.0` declared five such hooks (`onPostCreated`,
+`onEntityCreated`, `onRelationshipCreated`, `onScoreRecompute`,
+`onEntityDeleted`) and an `init` callback. Core never dispatched any of them —
+the dispatcher existed but its only caller was its own unit test — so they
+were removed rather than left to mislead. If you need to react to a core
+event, say so: adding a genuinely-dispatched hook is an additive change, and
+the right time to design one is when there is a consumer for it.
 
-The hook interface is a **versioned contract**: any change to a hook signature,
-or removal of a hook, is breaking for consumers and requires a coordinated
-release of `@de-otio/trellis-extension-api`. Adding a new optional hook is a
-minor change.
+To do work at startup, do it in your own module before calling
+`registerExtension`.
 
 ## Scheduled jobs
 
@@ -381,8 +402,16 @@ interface ExtensionJobContext {
   tenant(tenantId: TenantId): ScopedDb;
   /** Deployment stage — for logging/metrics. */
   stage: string;
+  /** Aborts when the runner's job timeout fires. */
+  readonly signal: AbortSignal;
 }
 ```
+
+**Long jobs must observe `signal`.** The runner cannot interrupt a running job
+body — it can only stop waiting on it. A job that scans in batches should check
+`signal.aborted` between them (and forward `signal` to anything that accepts
+one), or a timed-out job keeps working unobserved. `signal` became part of this
+type in `0.9.0`; core supplied it before that, but reaching it required a cast.
 
 A job's manifest is its audit surface: the **only** cross-tenant reads it can
 perform are the models named in `crossTenantRead`, each exposed as a
@@ -403,20 +432,11 @@ in-process/no-Lambda distinction and the lock/timeout mechanics are documented
 operationally in
 [`doc/02-technical/operations/extension-job-runner.md`](../../doc/02-technical/operations/extension-job-runner.md).
 
-## Strategy and enrichment interfaces
+## Enrichment interfaces
 
-These optional fields let a vertical inject domain-specific behaviour:
+These optional fields let a vertical contribute domain-specific _display and
+derived data_. All three are invoked by core.
 
-- **`relationshipSignalProvider`** — a `RelationshipSignalProvider.computeSignal(...)`
-  returns a `0.0`–`1.0` value that is blended into the base relationship score,
-  or `null`/`undefined` to leave the score unaffected. It receives a
-  `RelationshipSignalContext` (`currentScore`, `tier`, optional
-  `entityMetadata`).
-- **`discoveryFacets`** — an array of `DiscoveryFacet` (`field`, `type` of
-  `"exact" | "range" | "geo"`, and `label`) declaring which metadata fields are
-  filterable in discovery.
-- **`recommendationStrategy`** — `getRecommendations(entityId, ctx)` returns
-  domain-specific `Recommendation[]`.
 - **`activityPub.enrichActor(entity)`** — returns display-only `ActorEnrichment`
   (`summary`, `icon`, `attachment`, custom `properties`). The core owns and
   blocks overriding identity-bearing Actor fields: `id`, `publicKey`, `inbox`,
@@ -424,12 +444,22 @@ These optional fields let a vertical inject domain-specific behaviour:
 - **`computeLifeStage(metadata, manualOverride, existingLifeStage)`** — computes
   a life-stage value persisted as `Entity.lifeStage`; return `null` when not
   applicable.
+- **`extendRecap(payload, subject, ctx)`** — computes aggregates from the
+  extension's **own** tables for a recap subject and window; core merges the
+  result under `payload.extension`. Display-only, no writes.
 
-## Taxonomy seed data
+There is no injection point for relationship scoring, discovery faceting, or
+recommendations. `relationshipSignalProvider`, `discoveryFacets` and
+`recommendationStrategy` were declared until `0.9.0` but never consumed — the
+scoring engine has no extension input, and discovery does not read facets from
+extensions.
 
-`taxonomySeed` provides `TaxonomySeedData` — `dimensions`, `categories`, and
-`taxons` — for the extension to seed at registration. Categories reference a
-`dimensionCode`; taxons reference a `categoryCode`.
+## Taxonomy
+
+Extensions do not seed taxonomy through the contract. `taxonomySeed` was
+declared until `0.9.0` and never read; a vertical that needs seed data applies
+it through its own migration or startup routine, against the taxonomy tables
+exposed on `ScopedDb`.
 
 ## Review criterion: tracker-free, anonymized client metadata
 
@@ -491,7 +521,7 @@ Three things worth knowing about how that guard behaves:
 
 - **It rejects on presence, not on value.** `{ textSourceType: undefined }` is
   refused even though Prisma would treat it as "omit". The guard exists to make
-  the *intent* fail loudly.
+  the _intent_ fail loudly.
 - **It is a total ban, not a monotonicity check.** The scoped planner is a pure
   function with no database access, so it cannot compare your value against the
   stored one. A raise is refused along with a downgrade — set provenance by

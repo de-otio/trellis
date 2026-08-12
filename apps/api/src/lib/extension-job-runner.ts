@@ -156,12 +156,11 @@ function errMessage(err: unknown): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Internal shape: the public {@link ExtensionJobContext} plus the abort
- * `signal`. The signal is exposed so a cooperative job body can observe a
- * timeout cancel; formalizing `signal?` on the public contract is a deferred
- * additive extension-api bump (see ASSUMPTIONS).
+ * Internal alias for the job context. `signal` is now part of the public
+ * {@link ExtensionJobContext} (extension-api 0.9.0), so there is nothing left
+ * to add here; the alias stays because call sites name it.
  */
-export type InternalJobContext = ExtensionJobContext & { readonly signal: AbortSignal };
+export type InternalJobContext = ExtensionJobContext;
 
 /**
  * Build the restricted job context. `read` contains EXACTLY the models the job

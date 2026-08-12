@@ -1,9 +1,13 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "ESNext",
+    // NodeNext (not ESNext/node): this package is `"type": "module"`, and
+    // NodeNext is what makes TypeScript ENFORCE the mandatory `.js` specifier
+    // on relative imports. Under the previous `node` resolution a missing
+    // extension compiled fine here and failed only at runtime in a consumer.
+    "module": "NodeNext",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "moduleResolution": "node",
+    "moduleResolution": "NodeNext",
     "ignoreDeprecations": "6.0",
     "outDir": "./lib",
     "rootDir": "./src",

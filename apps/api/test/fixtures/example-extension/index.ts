@@ -10,18 +10,24 @@
  * surface, so a breaking change to any of them fails a standalone test here,
  * before publish. `minimalExtension` proves the contract works when every
  * optional field is omitted.
+ *
+ * "Every optional surface" means every surface core actually invokes. The
+ * fixture used to also declare `hooks`, `init`, `taxonomySeed`,
+ * `discoveryFacets`, `entityRelationshipTypes`, `relationshipSignalProvider`
+ * and `recommendationStrategy` — declared by the contract, never dispatched
+ * by core. Exercising them here produced passing tests that proved only that
+ * the fixture can call itself. Removed with that surface.
  */
 
 import { z } from "zod";
 import type {
   TrellisExtension,
-  ExtensionContext,
   ExtensionHandler,
 } from "@de-otio/trellis-extension-api";
 
 // ---------------------------------------------------------------------------
 // Observable side-effects — exported so in-process contract tests (Stage 4)
-// can assert hook/lifecycle behaviour. HTTP-level standalone tests don't read
+// can assert lifecycle behaviour. HTTP-level standalone tests don't read
 // these (they run in a different process from the booted server).
 // ---------------------------------------------------------------------------
 
@@ -95,55 +101,6 @@ export const exampleExtension: TrellisExtension = {
 
   metadataSchema: exampleMetadataSchema,
 
-  taxonomySeed: {
-    dimensions: [
-      { code: "form", name: "Form", description: "Physical form factor" },
-    ],
-    categories: [
-      { code: "shape", name: "Shape", dimensionCode: "form" },
-    ],
-    taxons: [
-      { id: "example-round", name: "Round", categoryCode: "shape" },
-      { id: "example-square", name: "Square", categoryCode: "shape" },
-    ],
-  },
-
-  hooks: {
-    onPostCreated: async (post, _ctx) => {
-      record("onPostCreated", post);
-    },
-    onEntityCreated: async (entity, _ctx) => {
-      record("onEntityCreated", entity);
-    },
-    onRelationshipCreated: async (userId, targetId, targetType) => {
-      record("onRelationshipCreated", userId, targetId, targetType);
-    },
-    onEntityDeleted: async (entityId, entityType) => {
-      record("onEntityDeleted", entityId, entityType);
-    },
-  },
-
-  relationshipSignalProvider: {
-    // Constant signal — enough to prove the provider is invoked and blended.
-    computeSignal: async () => 0.5,
-  },
-
-  entityRelationshipTypes: ["LINKED_TO"],
-
-  discoveryFacets: [
-    { field: "color", type: "exact", label: "Color" },
-  ],
-
-  recommendationStrategy: {
-    getRecommendations: async () => [
-      {
-        type: "example",
-        title: "A sample recommendation",
-        description: "Returned by the example extension's strategy.",
-      },
-    ],
-  },
-
   extensionRoutes: [
     {
       path: "ping",
@@ -187,10 +144,6 @@ export const exampleExtension: TrellisExtension = {
     if (metadata?.size === "l") return "mature";
     if (metadata?.size === "s") return "new";
     return null;
-  },
-
-  init: async (ctx: ExtensionContext) => {
-    record("init", { appDomain: ctx.appDomain, stage: ctx.stage });
   },
 
   shutdown: async () => {

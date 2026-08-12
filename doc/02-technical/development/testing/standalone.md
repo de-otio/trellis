@@ -246,14 +246,22 @@ change to any of them fails a test here:
 | `metadataSchema` | small Zod object (`{ color, size }`) | metadata validation on entity create/update |
 | `routes` / `extensionRoutes` | one of each | raw route mount + core-wrapped handler path, auth modes |
 | `configSchema` | one required key | boot-time scoped-env validation (and failure on missing key) |
-| `hooks` | `onPostCreated`, `onEntityCreated` recording to a spy | hooks fire after the operation commits |
-| `taxonomySeed` | tiny dimension/category/taxon set | seed application |
-| `relationshipSignalProvider` | constant signal | signal blends into scoring |
-| `entityRelationshipTypes` | `["LINKED_TO"]` | global registration |
-| `discoveryFacets` | one `exact` facet | discovery filtering |
+| `jobs` | — | declared-job registration and the single-flight runner |
+| `crossTenantRead` | — | registration-time validation against the discover allow-list |
 | `activityPub.enrichActor` | summary + one attachment | actor enrichment (only when AP flag on) |
 | `computeLifeStage` | trivial derivation | persisted `Entity.lifeStage` |
-| `init` / `shutdown` | spies | lifecycle ordering, graceful shutdown |
+| `extendRecap` | — | recap aggregates merged under `payload.extension` |
+| `shutdown` | spy | graceful shutdown |
+
+> **"Every optional surface" means every surface core invokes.** The fixture
+> previously also declared `hooks`, `init`, `taxonomySeed`,
+> `relationshipSignalProvider`, `entityRelationshipTypes`, `discoveryFacets`
+> and `recommendationStrategy`, with a "Verifies" column claiming things like
+> *hooks fire after the operation commits* and *signal blends into scoring*.
+> Core dispatched none of them: the tests invoked the fixture's own functions
+> and passed, verifying nothing. Both the surface and those assertions were
+> removed before 1.0. If a field is listed here, a test must exercise it
+> **through core**, not by calling the fixture directly.
 
 A second, **near-empty** extension (only the required fields) should also
 exist, to prove the contract works when every optional field is omitted.

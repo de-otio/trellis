@@ -13,19 +13,6 @@ const extensions: TrellisExtension[] = [];
 /** Register an extension. Call at startup before the server starts. */
 export function registerExtension(ext: TrellisExtension): void {
   extensions.push(ext);
-  if (ext.entityRelationshipTypes && ext.entityRelationshipTypes.length > 0) {
-    console.log(
-      `[extensions] "${ext.id}" registered entityRelationshipTypes: ${ext.entityRelationshipTypes.join(", ")}`,
-    );
-  }
-  if (ext.discoveryFacets && ext.discoveryFacets.length > 0) {
-    const facetSummary = ext.discoveryFacets
-      .map((f) => `${f.field}(${f.type})`)
-      .join(", ");
-    console.log(
-      `[extensions] "${ext.id}" registered discoveryFacets: ${facetSummary}`,
-    );
-  }
 }
 
 /** Look up an extension by entity type */

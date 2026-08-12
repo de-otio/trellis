@@ -120,7 +120,8 @@ The edge tables are indexed for both forward and reverse traversal, for example 
 
 `entity_relationships` is indexed on `(entityId, type, status)` and `(relatedEntityId, type, status)` for list-by-entity and pending-by-owner queries. All edge tables carry a `tenantId` index for tenant scoping.
 
-Extensions can register additional entity-relationship type names via `entityRelationshipTypes` (see Extension Hooks below).
+Entity-relationship type names are core-defined; there is no extension-side
+registration for them today.
 
 ## Scoring Engine
 
@@ -130,26 +131,22 @@ Relationship score is a blend of manual and computed components:
 score = manualScore ?? computedScore
 computedScore = base(connectionMethod)
               + interaction_signal(interactionCount, lastInteractionAt)
-              + extension_signals(...)
               − decay(age_since_last_interaction)
 ```
 
 - **Connection method** — seeded score based on how the edge was created. The four methods and their base contributions are `code` (0.7), `import` (0.5), `suggestion` (0.3), and `discovery` (0.3).
 - **Interaction signals** — posts viewed, comments, reactions, shares, DMs. Accumulated on the `relationships` row (counts plus a JSON `signals` breakdown).
-- **Extension signals** — extensions register `RelationshipSignalProvider`s (e.g. category match, shared activities). Capped per provider to bound influence.
 - **Decay** — exponential decay by half-life: 60 days for user→user edges, 120 days for user→entity edges. Owned-entity edges are exempt — they stay pinned at score 1.0 in tier 0.
 
 Tier is derived from score using fixed thresholds (tier 0 ≥ 0.7, tier 1 ≥ 0.4, tier 2 ≥ 0.15, tier 3 ≥ 0.0). The scoring engine is pure (`scoring-engine.ts`); recompute and decay run as background passes over a user's relationships (`recomputeScores` / `applyDecay`), not inline per request.
 
-## Extension Hooks
+## How Extensions Reach the Graph
 
-Extensions plug into the graph via the `@de-otio/trellis-extension-api` interface:
-
-| Hook | Purpose |
-|------|---------|
-| `entityRelationshipTypes: string[]` | Register typed entity-entity edges (`RELATED`, `SIBLING`, …). Core handles CRUD and confirmation flow. |
-| `discoveryFacets: DiscoveryFacet[]` | Register searchable facets (category, life-stage, location, activity). Handlers wire these into `/api/discovery`. |
-| `relationshipSignalProvider: { computeSignal(userId, targetId, targetType, context) }` | Contribute a bounded signal into the scoring engine. |
+Extensions **read** the graph; they do not currently plug behavior into it.
+There is no extension hook into scoring, discovery faceting, or
+relationship-type registration — earlier versions of this document described
+three such hooks that the contract declared but core never invoked; they were
+removed from the published contract before 1.0.
 
 Extensions access the graph through `ExtensionGraphService` — a **read-only** proxy over `GraphService`. They can query visibility and traverse the graph but cannot write edges; all writes go through core handlers so invariants (ownership checks, confirmation, rate limits) are enforced in one place.
 

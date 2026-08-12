@@ -101,9 +101,9 @@ export type ApiVersionVerdict =
  * Decide how an extension's declared API version relates to core's.
  *
  * Compatibility rule (mirrors the bump policy documented on
- * {@link ExtensionHooks}): a differing MAJOR is always breaking; while the API
- * is still `0.x` a differing MINOR is breaking too, because 0.x minors carry
- * signature changes. Anything else is drift.
+ * `EXTENSION_API_VERSION`): a differing MAJOR is always breaking; while the
+ * API is still `0.x` a differing MINOR is breaking too, because 0.x minors
+ * carry signature changes. Anything else is drift.
  *
  * `core` is a parameter rather than a module constant so the malformed-core
  * branch is reachable in tests.

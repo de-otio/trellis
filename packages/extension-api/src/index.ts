@@ -12,7 +12,6 @@ export type {
   ScopedDb,
   ScopedDelegate,
   TenantId,
-  ExtensionHooks,
   ExtensionJobDecl,
   ExtensionJobContext,
   ExtensionJobSchedule,
@@ -22,16 +21,7 @@ export type {
   ExtensionSession,
   ExtensionResponse,
   DiscoverDb,
-  RelationshipSignalProvider,
-  RelationshipSignalContext,
-  DiscoveryFacet,
-  RecommendationStrategy,
-  Recommendation,
   ActorEnrichment,
-  TaxonomySeedData,
-  TaxonomySeedDimension,
-  TaxonomySeedCategory,
-  TaxonomySeedTaxon,
 } from "./extension.js";
 
 export { EXTENSION_API_VERSION } from "./extension.js";
