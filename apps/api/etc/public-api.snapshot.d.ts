@@ -1279,6 +1279,24 @@ export declare class FrameSamplingVideoModerationAdapter implements MediaModerat
      * provider that names itself lazily is still reported correctly.
      */
     get name(): string | undefined;
+    /**
+     * Who to attribute an AGGREGATE verdict to: the classifier that actually
+     * scored the frames, falling back to this adapter only when that classifier
+     * reports no name.
+     *
+     * Not {@link PROVIDER_NAME} unconditionally. `"frame-sampling"` is the same
+     * string for every classifier, so attributing scored verdicts to it collides
+     * every backend into one identity — which defeats a per-provider cache key
+     * and makes per-provider counters meaningless. It would also disagree with
+     * what {@link name} reports, and a verdict field that contradicts the
+     * provider's own name leaves two sets of counters with nothing to say which
+     * is right.
+     *
+     * The REFUSAL verdicts are deliberately not routed through here: when core
+     * declines to sample at all, no classifier ran, and `"frame-sampling"` is the
+     * honest answer to who produced that verdict.
+     */
+    private scoredAttribution;
     /** Images pass straight through to the underlying classifier. */
     moderateImage(input: ImageRef, options?: ModerationCallOptions): Promise<ModerationVerdict>;
     /**
@@ -1814,6 +1832,26 @@ export interface TranscribePort {
     }): Promise<{
         jobId: string;
     }>;
+    /**
+     * Poll a transcription job.
+     *
+     * **No model echo, deliberately absent rather than forgotten.** Transcription
+     * APIs commonly return only the text and a usage figure — one checked backend
+     * returns exactly `{ text, usage }` — with no identifier for the model that
+     * produced it. So there is nothing here to pin a model version *against*.
+     *
+     * The consequence for whoever designs the audio lane: the audio leg's version
+     * pin can only ever be REQUEST-side — you record what you asked for, not what
+     * answered. That is strictly weaker than the visual path, where a provider
+     * reports `modelVersion` on its verdict and a pinned label policy floors an
+     * unverifiable version at `review`. A request-side pin cannot detect a silent
+     * vendor-side model swap, which is the exact failure a response-side pin
+     * exists to catch.
+     *
+     * Do not add a `modelVersion` field here expecting a backend to fill it, and
+     * do not treat a request-side record as equivalent to the visual pin when
+     * reasoning about taxonomy drift on this track.
+     */
     getTranscription(jobId: string): Promise<{
         status: TranscriptionStatus;
         transcript?: string;
@@ -2510,6 +2548,22 @@ export interface ModerationJobDetail {
     /** Per-frame evidence, in temporal order. */
     readonly frames?: ReadonlyArray<ModerationFrameDetail>;
 }
+/**
+ * Per-frame evidence for one sampled still. Server-side only.
+ *
+ * **This shape is expected to grow a per-frame perceptual hash, and when it
+ * does the hash MUST be computed during the scoring pass.** The frame-sampling
+ * adapter deletes every frame it extracted in a `finally` — see the cleanup in
+ * `frame-sampling-adapter.ts` — so a hash added later cannot be backfilled from
+ * stored data: the only way to recompute it is to re-extract from the original
+ * video and re-sample, which is the expensive work a frame hash exists to
+ * avoid. Capture it here at scoring time, or lose it for all media already
+ * processed.
+ *
+ * That ordering is the whole constraint. Adding the field is easy; adding it in
+ * the wrong place yields a column that is correct going forward and empty for
+ * everything historical, which looks like a working cache with a zero hit rate.
+ */
 export interface ModerationFrameDetail {
     /** Position in the sampled sequence. */
     readonly index: number;
@@ -2544,6 +2598,13 @@ export interface MediaModerationProvider {
      * cache lookup that happens *before* the call — core has no way to attribute
      * the work except by asking the provider. A provider that reports no name is
      * attributed to {@link UNKNOWN_PROVIDER_NAME} on those paths.
+     *
+     * Keep it identical to the token you put in `verdict.provider`, so the
+     * pre-call and post-hoc attributions agree. The one principled exception is a
+     * core adapter that AGGREGATES other providers' work: its refusal verdicts
+     * are its own (no classifier ran) while its scored verdicts are attributed to
+     * the classifier underneath. `FrameSamplingVideoModerationAdapter` does
+     * exactly that, and documents it at `scoredAttribution`.
      *
      * Read it through {@link moderationProviderName} rather than directly, and
      * see the wrapper rule documented there.

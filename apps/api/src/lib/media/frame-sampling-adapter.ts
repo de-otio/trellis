@@ -54,6 +54,10 @@ import type {
   S3Ref,
   VideoModerationStart,
 } from "./moderation-provider.js";
+import {
+  UNKNOWN_PROVIDER_NAME,
+  moderationProviderName,
+} from "./moderation-provider.js";
 
 /**
  * Sampling parameters. Both moderation-relevant values are operator-supplied
@@ -207,6 +211,28 @@ export class FrameSamplingVideoModerationAdapter
    */
   get name(): string | undefined {
     return this.deps.images.name;
+  }
+
+  /**
+   * Who to attribute an AGGREGATE verdict to: the classifier that actually
+   * scored the frames, falling back to this adapter only when that classifier
+   * reports no name.
+   *
+   * Not {@link PROVIDER_NAME} unconditionally. `"frame-sampling"` is the same
+   * string for every classifier, so attributing scored verdicts to it collides
+   * every backend into one identity — which defeats a per-provider cache key
+   * and makes per-provider counters meaningless. It would also disagree with
+   * what {@link name} reports, and a verdict field that contradicts the
+   * provider's own name leaves two sets of counters with nothing to say which
+   * is right.
+   *
+   * The REFUSAL verdicts are deliberately not routed through here: when core
+   * declines to sample at all, no classifier ran, and `"frame-sampling"` is the
+   * honest answer to who produced that verdict.
+   */
+  private scoredAttribution(): string {
+    const inner = moderationProviderName(this.deps.images);
+    return inner === UNKNOWN_PROVIDER_NAME ? PROVIDER_NAME : inner;
   }
 
   /** Images pass straight through to the underlying classifier. */
@@ -364,7 +390,7 @@ export class FrameSamplingVideoModerationAdapter
         verdict: {
           decision,
           labels: frames.flatMap((f) => f.labels ?? []),
-          provider: PROVIDER_NAME,
+          provider: this.scoredAttribution(),
         },
         detail: {
           expectedFrames: plan.expectedFrames,
@@ -373,6 +399,11 @@ export class FrameSamplingVideoModerationAdapter
             0,
             plan.expectedFrames - frames.filter((f) => f.decision !== null).length,
           ),
+          // If a per-frame perceptual hash is ever added, it belongs HERE — in
+          // this mapping, inside the scoring pass — not in a later stage. The
+          // `finally` below deletes every frame, so a hash computed afterwards
+          // has nothing to read and cannot be backfilled for media already
+          // processed. See the note on `ModerationFrameDetail`.
           frames: frames.map<ModerationFrameDetail>((f, index) => ({
             index,
             offsetSeconds: index * interval,

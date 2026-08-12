@@ -7,6 +7,7 @@ import {
 } from "../../../src/lib/media/media-ports.js";
 import {
   MockModerationProvider,
+  moderationProviderName,
   type ModerationVerdict,
   type S3Ref,
 } from "../../../src/lib/media/moderation-provider.js";
@@ -32,8 +33,9 @@ function makeAdapter(opts: {
   maxDurationSeconds?: number | null;
   extractable?: number;
   transcode?: TranscodePort;
+  images?: MockModerationProvider;
 } = {}) {
-  const images = new MockModerationProvider();
+  const images = opts.images ?? new MockModerationProvider();
   const transcode =
     opts.transcode ?? new MockTranscodePort({ duration: opts.duration ?? 4 });
   if (transcode instanceof MockTranscodePort && opts.extractable !== undefined) {
@@ -553,5 +555,46 @@ describe("FrameSamplingVideoModerationAdapter — the operator's policy governs 
     images.setImageVerdict({ decision: "review", labels: [], provider: "mock" });
 
     expect((await adapter.startVideoModeration(REF)).initialDecision).toBe("review");
+  });
+});
+
+describe("attribution — who gets credit for an aggregate verdict", () => {
+  it("attributes a SCORED verdict to the classifier, not to the adapter", async () => {
+    // "frame-sampling" is the same string for every classifier. Attributing
+    // scored verdicts to it collides every backend into one identity, which
+    // defeats a per-provider cache key and empties per-provider counters.
+    const { adapter } = makeAdapter({ duration: 2 });
+    const started = await adapter.startVideoModeration(REF);
+    const got = await adapter.getVideoModeration(started.jobId);
+    expect(got.provider).toBe("mock");
+  });
+
+  it("agrees with what the adapter reports as its own name", async () => {
+    // The invariant the doc comment claims: the pre-call name and the post-hoc
+    // verdict field must not contradict each other on the scored path.
+    const { adapter } = makeAdapter({ duration: 2 });
+    const started = await adapter.startVideoModeration(REF);
+    const got = await adapter.getVideoModeration(started.jobId);
+    expect(got.provider).toBe(moderationProviderName(adapter));
+  });
+
+  it("falls back to the adapter's own name when the classifier reports none", async () => {
+    const anonymous = new MockModerationProvider();
+    Object.defineProperty(anonymous, "name", { value: undefined });
+    const { adapter } = makeAdapter({ duration: 2, images: anonymous });
+    const started = await adapter.startVideoModeration(REF);
+    const got = await adapter.getVideoModeration(started.jobId);
+    expect(got.provider).toBe("frame-sampling");
+  });
+
+  it("attributes a REFUSAL to the adapter — no classifier ran", async () => {
+    // Core declining to sample is core's own verdict. Blaming the classifier
+    // for a decision it was never asked to make would misattribute an
+    // operator misconfiguration as a provider problem.
+    const { adapter } = makeAdapter({ framesPerSecond: null });
+    const started = await adapter.startVideoModeration(REF);
+    const got = await adapter.getVideoModeration(started.jobId);
+    expect(got.decision).toBe("review");
+    expect(got.provider).toBe("frame-sampling");
   });
 });

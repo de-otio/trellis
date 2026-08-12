@@ -199,6 +199,22 @@ export interface ModerationJobDetail {
   readonly frames?: ReadonlyArray<ModerationFrameDetail>;
 }
 
+/**
+ * Per-frame evidence for one sampled still. Server-side only.
+ *
+ * **This shape is expected to grow a per-frame perceptual hash, and when it
+ * does the hash MUST be computed during the scoring pass.** The frame-sampling
+ * adapter deletes every frame it extracted in a `finally` — see the cleanup in
+ * `frame-sampling-adapter.ts` — so a hash added later cannot be backfilled from
+ * stored data: the only way to recompute it is to re-extract from the original
+ * video and re-sample, which is the expensive work a frame hash exists to
+ * avoid. Capture it here at scoring time, or lose it for all media already
+ * processed.
+ *
+ * That ordering is the whole constraint. Adding the field is easy; adding it in
+ * the wrong place yields a column that is correct going forward and empty for
+ * everything historical, which looks like a working cache with a zero hit rate.
+ */
 export interface ModerationFrameDetail {
   /** Position in the sampled sequence. */
   readonly index: number;
@@ -234,6 +250,13 @@ export interface MediaModerationProvider {
    * cache lookup that happens *before* the call — core has no way to attribute
    * the work except by asking the provider. A provider that reports no name is
    * attributed to {@link UNKNOWN_PROVIDER_NAME} on those paths.
+   *
+   * Keep it identical to the token you put in `verdict.provider`, so the
+   * pre-call and post-hoc attributions agree. The one principled exception is a
+   * core adapter that AGGREGATES other providers' work: its refusal verdicts
+   * are its own (no classifier ran) while its scored verdicts are attributed to
+   * the classifier underneath. `FrameSamplingVideoModerationAdapter` does
+   * exactly that, and documents it at `scoredAttribution`.
    *
    * Read it through {@link moderationProviderName} rather than directly, and
    * see the wrapper rule documented there.

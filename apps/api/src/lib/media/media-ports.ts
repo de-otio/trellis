@@ -201,6 +201,26 @@ export interface TranscribePort {
     key: string;
     jobName: string;
   }): Promise<{ jobId: string }>;
+  /**
+   * Poll a transcription job.
+   *
+   * **No model echo, deliberately absent rather than forgotten.** Transcription
+   * APIs commonly return only the text and a usage figure — one checked backend
+   * returns exactly `{ text, usage }` — with no identifier for the model that
+   * produced it. So there is nothing here to pin a model version *against*.
+   *
+   * The consequence for whoever designs the audio lane: the audio leg's version
+   * pin can only ever be REQUEST-side — you record what you asked for, not what
+   * answered. That is strictly weaker than the visual path, where a provider
+   * reports `modelVersion` on its verdict and a pinned label policy floors an
+   * unverifiable version at `review`. A request-side pin cannot detect a silent
+   * vendor-side model swap, which is the exact failure a response-side pin
+   * exists to catch.
+   *
+   * Do not add a `modelVersion` field here expecting a backend to fill it, and
+   * do not treat a request-side record as equivalent to the visual pin when
+   * reasoning about taxonomy drift on this track.
+   */
   getTranscription(jobId: string): Promise<{
     status: TranscriptionStatus;
     transcript?: string;
