@@ -1,3 +1,40 @@
+// ===== db.d.ts =====
+import type { PrismaClient } from "@prisma/client";
+export interface EnvWithDb {
+    DATABASE_URL: string;
+    LOG_LEVEL?: string;
+    DATABASE_CONNECTION_TIMEOUT_MS?: string;
+    DATABASE_STATEMENT_TIMEOUT_MS?: string;
+}
+export type ManagedPrismaClient = PrismaClient & {
+    release: () => Promise<void>;
+};
+export declare function createPrisma(env: EnvWithDb, region?: string): ManagedPrismaClient;
+export declare function withPrisma<T>(env: EnvWithDb, fn: (client: PrismaClient) => Promise<T>, region?: string): Promise<T>;
+export declare function withPrismaRetry<T>(env: EnvWithDb, queryFn: (client: PrismaClient) => Promise<T>, options?: {
+    region?: string;
+    timeoutMs?: number;
+    retryTimeoutMs?: number;
+    maxRetries?: number;
+    baseDelayMs?: number;
+    defaultValue?: T;
+    context?: Record<string, any>;
+}): Promise<T>;
+export declare function createPrismaForRegion(region: string, env: EnvWithDb): ManagedPrismaClient;
+export declare class DatabaseClient {
+    static clearPoolCache(): void;
+    static getPoolStatus(): {
+        key: string;
+        totalCount: number;
+        idleCount: number;
+        waitingCount: number;
+        age: number;
+        errorCount: number;
+    }[];
+    static createForRegion(region: string, env: EnvWithDb): ManagedPrismaClient;
+    static create(env: EnvWithDb, region?: string): ManagedPrismaClient;
+}
+
 // ===== env.d.ts =====
 /**
  * Environment Configuration
@@ -724,7 +761,198 @@ export { setRealtimeProvider } from "./lib/realtime/index.js";
 export { setPushTransportProvider } from "./lib/push/index.js";
 export type { PushTransport, PushDeviceTarget, PushSendOutcome, PushPlatformWire, } from "./lib/push/index.js";
 export { setMediaModerationProvider } from "./lib/media/request-moderation.js";
+export { setMediaLabelPolicy } from "./lib/media/request-moderation.js";
+export { createLabelPolicy, LabelPolicyConfigError, } from "./lib/media/label-policy.js";
+export type { LabelPolicy, LabelPolicyConfig, LabelPolicyContext, CategoryPolicy, TaxonomyPinMode, } from "./lib/media/label-policy.js";
+export { setMediaReviewPromotion } from "./lib/media/media-review-handler.js";
+export type { ReviewPromotionPort, ReviewPromoteCoords, } from "./lib/media/media-review-handler.js";
+export { ModerationMetrics } from "./lib/media/moderation-metrics.js";
+export type { ModerationMetricsConfig, ModerationMetricsSnapshot, ModerationPublicHealth, } from "./lib/media/moderation-metrics.js";
+export { FrameSamplingVideoModerationAdapter } from "./lib/media/frame-sampling-adapter.js";
+export type { FrameSamplingConfig, FrameSamplingDeps, } from "./lib/media/frame-sampling-adapter.js";
+export { withModerationDeadline, ModerationDeadlineConfigError, } from "./lib/media/moderation-deadline.js";
+export { createMediaBytesAccess, MediaBytesTooLargeError, } from "./lib/media/media-bytes-access.js";
+export type { MediaBytesAccess } from "./lib/media/media-bytes-access.js";
+export { ModerationProviderError, isModerationProviderError, NullModerationProvider, assertModerationProviderAllowed, moderationProviderName, UNKNOWN_PROVIDER_NAME, } from "./lib/media/moderation-provider.js";
+export type { MediaModerationProvider, MediaPin, ImageRef, S3Ref, ModerationVerdict, ModerationLabel, ModerationCallOptions, VideoModerationStart, } from "./lib/media/moderation-provider.js";
+export { completionEnvelopeBody, parseCompletionEnvelope, } from "./lib/media/completion-envelope.js";
+export type { ModerationCompletionEnvelope } from "./lib/media/completion-envelope.js";
 export { setTextModerationProvider } from "./lib/media/request-text-moderation.js";
+
+// ===== lib/audit-composer.d.ts =====
+/**
+ * Audit composer (phase 1.C.2).
+ *
+ * Trellis-side facade over `@de-otio/saas-foundation/audit`. Replaces
+ * the old `AuditLogger` (data lifecycle) and `AuditEventEmitter`
+ * (tenant / IdP) with a single composition point that:
+ *
+ *   1. Applies trellis's default-DENY allowlist (`filterPayload`) +
+ *      IP anonymisation (`anonymizeIp`) to event metadata BEFORE the
+ *      event reaches foundation. (LOCKED: keep the allowlist.)
+ *   2. Hands the scrubbed event to foundation's `AuditLog`, which is
+ *      configured with foundation's `PiiFilter` (denylist) as a
+ *      SECOND, additive layer. (LOCKED: denylist is additive, not a
+ *      replacement.)
+ *   3. Persists via `PostgresAuditStore` over a region-resolved Prisma
+ *      client. Retention tiers: info=30, warning=90, error=365 days.
+ *      (LOCKED.)
+ *
+ * Frozen-type crossing: this module is the first trellis consumer of
+ * the frozen `AuditEvent` / `AuditAction` vocabulary. Future changes to
+ * the emitted shape go through the frozen-type RFC process.
+ *
+ * Severity collapse (trellis 4-tier -> foundation 3-tier):
+ *   low + medium -> info     (30d)
+ *   high         -> warning  (90d)
+ *   critical     -> error    (365d)
+ *
+ * ── SECURITY-SENSITIVE READ CONVENTION ───────────────────────────────
+ *
+ * Any BULK, CROSS-USER, or EXPORT read of user data MUST emit an audit
+ * event. An audit trail cannot be backfilled — if the read is not
+ * recorded at the time it occurs, it is permanently invisible to
+ * compliance reviews.
+ *
+ * Worked example — admin bulk-export of user records:
+ *
+ *   await auditLogger.logDataAccess({
+ *     action: DATA_READ,
+ *     resource:    "user",
+ *     resourceId:  `bulk:${requestedCount}`,
+ *     userId:      session.userId,          // the requesting admin's ID
+ *     region:      detectedRegion,
+ *     success:     true,
+ *     metadata: {
+ *       targetType: "user_export",
+ *       reason:     "compliance_request",
+ *     },
+ *   }, env);
+ *
+ * Scope of the rule:
+ *   - Covered NOW:  mutations (data.create / update / delete), auth,
+ *     feature_toggle.changed, tenant / IdP events.
+ *   - Deferred:     individual single-user reads (low priority).
+ *   - IN SCOPE for the research platform: any research.query,
+ *     research.extract, experiment.assign operation.
+ *
+ * See doc/02-technical/development/audit-and-toggle-conventions.md for
+ * naming conventions, prefix rules, and the research.query PII rule.
+ */
+import type { AuditAction, AuditEvent } from "@de-otio/saas-foundation/audit";
+import { type EnvWithDb } from "../db.js";
+import { type Region } from "./region-detection.js";
+export type TrellisSeverity = "low" | "medium" | "high" | "critical";
+/**
+ * Anything with an `auditEvent.create` method. The real Prisma client
+ * (`ManagedPrismaClient`), the structural `PrismaAuditClient`, and test
+ * mocks all satisfy this. Foundation's `PostgresAuditStore` requires the
+ * narrower `PrismaAuditClient`; Prisma's generated `create` is more
+ * generic than (and so not structurally assignable to) foundation's
+ * narrow shape, so we accept the broad type at the boundary and cast
+ * once inside `getAuditLog`. The cast is runtime-safe — the column
+ * names foundation writes match the generated `AuditEvent` model.
+ */
+export type AuditPrismaClientLike = {
+    readonly auditEvent: {
+        create: (...args: never[]) => unknown;
+    };
+};
+export type TrellisAuditEventType = "data_access" | "data_create" | "data_update" | "data_delete" | "user_action" | "authentication" | "authorization" | "region_change";
+export interface TrellisAuditEvent {
+    type?: TrellisAuditEventType;
+    action: string;
+    resource: string;
+    resourceId?: string;
+    userId?: string;
+    region: Region;
+    dataRegion?: string;
+    ipAddress?: string;
+    userAgent?: string;
+    metadata?: Record<string, unknown>;
+    severity?: TrellisSeverity;
+    success: boolean;
+}
+export interface TrellisAuditLoggerEnv extends EnvWithDb {
+    DEFAULT_REGION?: string;
+}
+/**
+ * `TrellisAuditLogger` — drop-in for the old `AuditLogger`. Region-aware
+ * (resolves a Prisma client per region), best-effort (never throws into
+ * the caller), and validates region before emitting (invalid-region
+ * events are dropped, as before).
+ */
+export declare class TrellisAuditLogger {
+    private readonly requestId?;
+    constructor(_env?: TrellisAuditLoggerEnv, requestId?: string | undefined);
+    withRequestId(requestId: string): TrellisAuditLogger;
+    logDataAccess(event: Omit<TrellisAuditEvent, "type" | "severity"> & {
+        type?: TrellisAuditEventType;
+        severity?: TrellisSeverity;
+    }, env: TrellisAuditLoggerEnv): Promise<void>;
+    logUserAction(event: Omit<TrellisAuditEvent, "type" | "severity"> & {
+        type?: TrellisAuditEventType;
+        severity?: TrellisSeverity;
+    }, env: TrellisAuditLoggerEnv): Promise<void>;
+    logAuthentication(event: Omit<TrellisAuditEvent, "type" | "severity"> & {
+        type?: TrellisAuditEventType;
+        severity?: TrellisSeverity;
+    }, env: TrellisAuditLoggerEnv): Promise<void>;
+    logAuthorization(event: Omit<TrellisAuditEvent, "type" | "severity"> & {
+        type?: TrellisAuditEventType;
+        severity?: TrellisSeverity;
+    }, env: TrellisAuditLoggerEnv): Promise<void>;
+    /** Generic entry point — accepts a full trellis event. */
+    log(event: Omit<TrellisAuditEvent, "severity"> & {
+        severity?: TrellisSeverity;
+    }, env: TrellisAuditLoggerEnv): Promise<void>;
+    /**
+     * Emit a system-level event where the `action` string is passed directly
+     * to the foundation audit log (bypassing the coarse `actionFor()` mapping).
+     *
+     * Use for platform-control actions like `feature_toggle.changed`,
+     * `consent.changed`, `experiment.assign` that have their own dedicated
+     * action constant and should not be collapsed to a coarse `data.*` label.
+     *
+     * The `action` parameter MUST be a known `AuditAction` constant from
+     * `audit-actions.ts`; do not pass free-form strings.
+     *
+     * Best-effort — never throws into the caller.
+     */
+    logSystemAction(action: AuditAction, event: Omit<TrellisAuditEvent, "type" | "action" | "severity"> & {
+        severity?: TrellisSeverity;
+    }, env: TrellisAuditLoggerEnv): Promise<void>;
+    private emitDirect;
+    private emit;
+}
+/** Factory — drop-in for the old `createAuditLogger`. */
+export declare function createAuditLogger(env?: TrellisAuditLoggerEnv, requestId?: string): TrellisAuditLogger;
+/** Input shape preserved from the old `AuditEventEmitter.emit`. */
+export interface TenantAuditEmitInput {
+    type: AuditAction;
+    tenantId: string;
+    actorUserId: string;
+    payload: Record<string, unknown>;
+    /** Source IP — anonymised to /24 (v4) or /64 (v6) before storage. */
+    sourceIp?: string;
+    /** Present when made through an agent session. */
+    agentSessionId?: string;
+}
+/**
+ * `TenantAuditEmitter` — replaces the CloudWatch+Postgres
+ * `AuditEventEmitter`. CloudWatch is dropped (foundation owns the sink);
+ * the Postgres write now goes through foundation's `AuditLog` /
+ * `PostgresAuditStore`. Signature `emit(input, prismaClient)` is
+ * preserved so the four consumers change only their import.
+ *
+ * Tenant/IdP events are tenant-scoped (`actor.kind = "user"`,
+ * `tenantId` set) and default to `info` severity (matching the old
+ * "medium" -> info collapse).
+ */
+export declare class TenantAuditEmitter {
+    emit(input: TenantAuditEmitInput, prisma: AuditPrismaClientLike): Promise<void>;
+}
+export type { AuditEvent };
 
 // ===== lib/extension-model-registry.d.ts =====
 /**
@@ -857,6 +1085,414 @@ export declare function getLogger(): Logger;
  * paths that need a stable correlator before a RequestContext exists.
  */
 export declare function generateRequestId(): string;
+
+// ===== lib/media/completion-envelope.d.ts =====
+/**
+ * completion-envelope.ts — the provider-neutral shape a moderation backend
+ * publishes when an async job finishes, plus a total parser for it.
+ *
+ * WHY A CANONICAL SHAPE. The completion queue used to speak exactly one
+ * vendor's wire format, which meant "implement the moderation seam" quietly
+ * also meant "emit that vendor's notification JSON". The canonical envelope is
+ * the small, documented thing an adapter can actually produce:
+ *
+ *     { "track": "VISUAL" | "AUDIO", "jobId": "<the id you returned>" }
+ *
+ * The historical shapes still parse (see {@link parseCompletionEnvelope}), so a
+ * backend already publishing them keeps working and in-flight messages are not
+ * stranded by a deploy.
+ *
+ * THE ENVELOPE IS UNTRUSTED, AND `track` IS THE SHARP EDGE. Anything that can
+ * write to the queue chooses this JSON, so `track` is a ROUTING HINT and never
+ * an authority. The worker resolves the job row by `jobId` and compares the
+ * claimed track against the row's own track; a mismatch is unroutable and is
+ * dropped WITHOUT claiming the dedupe key — because claiming it would let a
+ * forged message burn the dedupe slot that the genuine completion needs, and a
+ * completion that can be pre-emptively silenced is a completion that can be
+ * made to never arrive. The body's own verdict fields, if any, are ignored
+ * entirely: only the job id survives parsing.
+ *
+ * PURE AND TOTAL: no I/O, no clock, no throw, for any input at all.
+ */
+import type { Track } from "./track-verdict.js";
+/**
+ * The parsed pointer: which track finished, and the provider job id to re-fetch
+ * authoritative state with. Deliberately carries nothing else.
+ */
+export interface ModerationCompletionEnvelope {
+    readonly track: Track;
+    readonly jobId: string;
+}
+/**
+ * Bound and de-fang a provider-supplied string before it reaches a log line, a
+ * metric dimension, or a database lookup. Strips C0/C1 control characters
+ * (including the newlines that would forge log records) and truncates.
+ */
+export declare function sanitizeProviderString(value: string): string;
+/**
+ * Parse an untrusted completion body into a canonical envelope.
+ *
+ * Resolution order, and why:
+ *
+ *  1. **Canonical wins.** If the body carries a `track` field at all, the
+ *     message is treated as canonical: a valid track plus a usable `jobId`
+ *     parses, and anything else about it (an unknown track, a missing id)
+ *     returns `null` rather than falling through. A message that ALSO carries
+ *     legacy fields is therefore unambiguous — it cannot be steered down the
+ *     compat path by adding a second job id under a different key.
+ *  2. **Compat fallbacks**, for backends still publishing their native
+ *     notification shapes: an audio transcription job name (directly or under
+ *     an event-envelope `detail`), then a visual job id (directly or inside a
+ *     notification's JSON-string `Message`).
+ *
+ * Returns `null` for anything unrecognised. The caller drops such a message
+ * rather than retrying it — a permanently-malformed pointer that is retried is
+ * a message that loops until it reaches a dead-letter queue, and nothing about
+ * re-reading the same bytes will make them parse.
+ */
+export declare function parseCompletionEnvelope(body: string): ModerationCompletionEnvelope | null;
+/**
+ * Build the canonical body an adapter should publish. Exported so a provider
+ * implementor has an exact, testable target instead of a prose description, and
+ * so core's own tests round-trip against the same producer the docs point at.
+ */
+export declare function completionEnvelopeBody(envelope: ModerationCompletionEnvelope): string;
+
+// ===== lib/media/frame-sampling-adapter.d.ts =====
+/**
+ * frame-sampling-adapter.ts — video moderation for an IMAGE-ONLY classifier.
+ *
+ * The moderation seam asks a backend for three things, and the third — a video
+ * job model with its own start/poll lifecycle and its own completion
+ * notification — is the one most classifiers do not have. This adapter supplies
+ * it in core: given any provider that can classify a still image, it samples
+ * frames out of a video, classifies each, and aggregates the results under the
+ * law in ./frame-aggregation.ts.
+ *
+ * RESOLVES INLINE, ON PURPOSE. `startVideoModeration` does the whole job and
+ * returns `initialDecision` alongside the job id. There is no remote job to
+ * poll and no completion message will ever arrive, so the caller persists the
+ * decision immediately (the same mechanism a silent video's audio track already
+ * uses) rather than waiting for a notification that is not coming. Two
+ * consequences, stated rather than discovered later:
+ *
+ *   - Sampling time is spent inside the CALLER's budget — for the media
+ *     pipeline, the processing worker's. It is bounded by `maxFramesPerJob`
+ *     times the per-frame classifier call, plus the extraction itself.
+ *   - The job id is core-minted and carries no tenant, key, or user material:
+ *     it is crypto-random, because an id that encodes what it points at is an
+ *     id that leaks what it points at wherever ids are logged.
+ *
+ * CLEANUP covers every frame this adapter is TOLD about: success, ceiling
+ * breach, classifier error, abort. The one gap is an extractor that writes
+ * frames and then throws without reporting their paths — core cannot delete
+ * files it never learned of, so the port makes that the adapter's
+ * responsibility and core logs the prefix.
+ *
+ * FAIL-CLOSED AT EVERY EDGE. No sampling config, no `sampleFrames` capability,
+ * a ceiling breach, an extraction shortfall, an aborted deadline, a classifier
+ * that throws — every one of them resolves `review`. Nothing in this file can
+ * produce `approved` except a complete set of frames that each approved.
+ */
+import type { LabelPolicy } from "./label-policy.js";
+import type { TranscodePort } from "./media-ports.js";
+import type { ImageRef, MediaModerationProvider, ModerationCallOptions, ModerationVerdict, S3Ref, VideoModerationStart } from "./moderation-provider.js";
+/**
+ * Sampling parameters. Both moderation-relevant values are operator-supplied
+ * with NO compiled default — absence means the feature refuses to run, which is
+ * why they are optional in the type but fatal at use.
+ */
+export interface FrameSamplingConfig {
+    /** Frames sampled per second of video. Operator-supplied; no default. */
+    readonly framesPerSecond?: number;
+    /** Absolute ceiling on frames for one job. Operator-supplied; no default. */
+    readonly maxFramesPerJob?: number;
+    /**
+     * The pipeline's duration cap, passed through to the extractor so a single
+     * clip cannot make it run unbounded. Operator-supplied (Env.media); absence
+     * refuses the job rather than guessing a bound.
+     */
+    readonly maxDurationSeconds?: number;
+    /**
+     * How many frames to classify concurrently. A RESOURCE bound, not a
+     * moderation parameter — it trades wall-clock against provider rate limits
+     * and says nothing about policy — so it has a conservative code default.
+     */
+    readonly frameConcurrency?: number;
+    /**
+     * An operator-chosen name for this sampling policy, recorded on every job.
+     *
+     * When absent, a FINGERPRINT of the effective parameters is used instead: a
+     * short digest that changes if and only if the policy changed. That is the
+     * property an audit needs ("was this scanned under the policy we think?"),
+     * and it is available with no operator action, so the audit trail is never
+     * simply empty. It does NOT conceal the parameters — see
+     * {@link policyFingerprint} — so it is server-side-only material either way.
+     */
+    readonly policyVersion?: string;
+}
+/** Logging seam; the worker already has one of this shape. */
+export interface FrameSamplingLog {
+    info?: (msg: string, data?: Record<string, unknown>) => void;
+    warn?: (msg: string, data?: Record<string, unknown>) => void;
+    error?: (msg: string, data?: Record<string, unknown>) => void;
+}
+export interface FrameSamplingDeps {
+    /** The image-only classifier this adapter turns into a video classifier. */
+    readonly images: MediaModerationProvider;
+    /**
+     * The operator's label policy, applied to EVERY frame.
+     *
+     * Without it the video path would honour the provider's own per-frame
+     * decision while the image path honoured the operator's policy — so the
+     * policy's strongest rule ("a category you have not mapped quarantines")
+     * would hold for a still and not for the same content inside a clip. An
+     * operator who configures a policy reasonably believes it governs both.
+     *
+     * The policy can only degrade a frame's verdict, so wiring it can never make
+     * the video path more permissive than the provider already was.
+     */
+    readonly policy?: LabelPolicy;
+    /** Frame extraction + per-frame cleanup. */
+    readonly transcode: TranscodePort;
+    readonly config: FrameSamplingConfig;
+    /**
+     * Where frames for a job are written. Returns a storage prefix; the transcode
+     * adapter writes the numbered frames beneath it and reports their keys back.
+     */
+    readonly frameDirFor: (jobId: string) => string;
+    /**
+     * Mints the core-side job id. Injected so the adapter stays free of ambient
+     * randomness in tests; production passes a crypto-random generator.
+     */
+    readonly newJobId: () => string;
+    readonly log?: FrameSamplingLog;
+}
+export declare class FrameSamplingVideoModerationAdapter implements MediaModerationProvider {
+    private readonly deps;
+    private readonly resolved;
+    constructor(deps: FrameSamplingDeps);
+    /**
+     * The underlying classifier's name, passed through unchanged. This adapter
+     * supplies a video JOB MODEL; it does not classify anything itself, so it is
+     * not a separate provider identity. A getter rather than a copied field so a
+     * provider that names itself lazily is still reported correctly.
+     */
+    get name(): string | undefined;
+    /** Images pass straight through to the underlying classifier. */
+    moderateImage(input: ImageRef, options?: ModerationCallOptions): Promise<ModerationVerdict>;
+    /**
+     * Sample, classify, aggregate — all of it, now. Returns the minted job id
+     * together with the decision it already reached.
+     */
+    startVideoModeration(input: S3Ref, options?: ModerationCallOptions): Promise<VideoModerationStart>;
+    /**
+     * Poll. For a job this adapter minted, the answer was already known at start
+     * and persisted by the caller; this returns the cached verdict when the poll
+     * happens in the same process, and fails closed to `review` otherwise. It
+     * NEVER invents an approval for an id it does not recognise.
+     */
+    getVideoModeration(jobId: string, _options?: ModerationCallOptions): Promise<ModerationVerdict>;
+    private remember;
+    private resolveVideo;
+    /**
+     * Classify each frame, at most `frameConcurrency` at a time. A frame whose
+     * classification throws — or that is reached after the caller's deadline
+     * aborted — contributes `null`, which the aggregation law counts as `review`.
+     */
+    private classifyFrames;
+    private cleanup;
+}
+
+// ===== lib/media/label-policy.d.ts =====
+/**
+ * label-policy.ts — pure functional core: turn a provider's labels into one of
+ * the three decisions, under an operator-supplied policy.
+ *
+ * This is the module that decides whether media is approved, so it is written
+ * to be readable as a safety argument rather than as a lookup table:
+ *
+ *  1. **It refuses to exist without a policy.** {@link createLabelPolicy}
+ *     throws when the category map is missing. There is no compiled-in default
+ *     map and no default confidence bar — this file ships in a public npm
+ *     tarball, and a threshold compiled into it is a published threshold. An
+ *     operator who configures nothing gets a hard failure at wiring time, not a
+ *     silent policy nobody chose.
+ *  2. **An unmapped category quarantines.** A category the operator has not
+ *     ruled on is not a category to shrug at: the provider is reporting
+ *     something and the policy has no opinion, which is precisely when a human
+ *     should look. It dominates — one unmapped label quarantines the object
+ *     however benign every other label is.
+ *  3. **Approval requires a verifiable taxonomy.** A category→action map is
+ *     only meaningful against the taxonomy it was written for. If the provider
+ *     silently reships its model under the same category names, the map keeps
+ *     "working" while meaning something else. So under the pinned modes the
+ *     verdict must carry a `modelVersion` that matches what the operator
+ *     pinned; drift or absence degrades to `review`. Pin failure FLOORS the
+ *     decision at review — it never lifts a quarantine.
+ *  4. **No labels is not automatically approval.** Zero labels approves only
+ *     when the pin verified. A provider that returns an empty label array
+ *     because it errored internally, or because its taxonomy moved, must not
+ *     be able to approve by saying nothing.
+ *  5. **The policy can only ever DEGRADE the provider's verdict.** The result
+ *     is floored at what the provider itself said, so a policy can turn an
+ *     `approved` into a `review` and never the reverse.
+ *
+ *     This one is load-bearing and easy to get wrong, because the natural
+ *     implementation — derive a decision from the labels and return it — is
+ *     wrong in a way that inverts the whole pipeline. A provider that hits an
+ *     internal fault does what the seam contract REQUIRES: it returns
+ *     `{ decision: "review", labels: [] }`. Interpreting that from labels alone
+ *     yields "no labels, pin fine, therefore approved" — the fail-closed
+ *     verdict becomes an approval, and the fail-closed Null provider approves
+ *     everything. Some verdicts are also not expressible as labels at all (a
+ *     hash match, a rate-limit refusal), and those must survive interpretation
+ *     untouched.
+ *
+ * PURITY: no I/O, no clock, no randomness, and no numbers of its own.
+ */
+import type { ModerationDecision } from "./media-lifecycle.js";
+import type { ModerationVerdict } from "./moderation-provider.js";
+/**
+ * How the taxonomy behind the category map is pinned.
+ *
+ * - `"response"` — the provider must REPORT a `modelVersion` on every verdict,
+ *   and when the caller knows which version a job started under (video: the
+ *   version captured at job start) it must still match at completion. Detects
+ *   a mid-job taxonomy change.
+ * - `"config"` — the operator names the exact version their category map was
+ *   written for. Any other version, or none, is drift.
+ * - `"none"` — no taxonomy pin. Requires an explicit opt-in, and the resulting
+ *   policy carries a standing {@link LabelPolicy.unpinnedTaxonomy} flag so the
+ *   operations surface can show the posture continuously. A boot-time log line
+ *   would not do: nobody re-reads boot logs, and this is a condition that
+ *   persists for as long as the deployment does.
+ */
+export type TaxonomyPinMode = "response" | "config" | "none";
+/** Confidence boundaries for one opaque category token. */
+export interface CategoryPolicy {
+    /** At or above this confidence, the category means `review`. */
+    readonly review: number;
+    /** At or above this confidence, the category means `quarantine`. */
+    readonly quarantine: number;
+}
+/**
+ * The operator-supplied policy. Every value here comes from runtime config
+ * (env/SSM/feature toggles); none of it has a default in this file.
+ *
+ * `categories` maps the provider's OPAQUE category tokens to confidence bars.
+ * The tokens and the bars must be expressed on the same scale the provider
+ * reports confidences on — core never rescales, because a rescale is a policy
+ * decision disguised as arithmetic.
+ */
+export interface LabelPolicyConfig {
+    readonly categories: Readonly<Record<string, CategoryPolicy>>;
+    readonly pinMode: TaxonomyPinMode;
+    /** The pinned taxonomy version. REQUIRED when `pinMode` is `"config"`. */
+    readonly expectedModelVersion?: string;
+    /** Must be explicitly `true` when `pinMode` is `"none"`. */
+    readonly acceptUnpinnedTaxonomy?: boolean;
+}
+/** Thrown at wiring time when the policy is unusable. Never thrown per-verdict. */
+export declare class LabelPolicyConfigError extends Error {
+    constructor(message: string);
+}
+/** Context the caller knows that the verdict itself does not. */
+export interface LabelPolicyContext {
+    /**
+     * The taxonomy version recorded when this job STARTED, for the async video
+     * path. Under `"response"` mode a completion whose version differs from the
+     * one the job began under is drift, even though both are self-reported.
+     */
+    readonly pinnedModelVersion?: string;
+}
+export interface LabelPolicy {
+    /** Interpret one verdict. Total: never throws, for any verdict shape. */
+    decide(verdict: ModerationVerdict, context?: LabelPolicyContext): ModerationDecision;
+    /**
+     * True when this policy runs WITHOUT a taxonomy pin. A standing flag for the
+     * operations surface, not a one-shot log line.
+     */
+    readonly unpinnedTaxonomy: boolean;
+}
+/**
+ * Build a policy, or refuse.
+ *
+ * Refuses when: there is no category map at all; `pinMode` is unrecognised;
+ * `"config"` mode names no version; or `"none"` mode was requested without the
+ * explicit `acceptUnpinnedTaxonomy: true`. An EMPTY category map is allowed and
+ * is not the same as a missing one — it is a coherent policy meaning "every
+ * category the provider can report is unmapped, so quarantine all of them" —
+ * but a `categories` that is absent or not an object is a wiring mistake.
+ */
+export declare function createLabelPolicy(config: LabelPolicyConfig): LabelPolicy;
+/**
+ * The decision function itself, exported for direct table-driven testing.
+ *
+ * Total by construction: a malformed verdict (null, no labels array, a label
+ * with a non-numeric confidence) yields at worst `review`, never `approved`.
+ */
+export declare function decideFromLabels(verdict: ModerationVerdict, config: LabelPolicyConfig, context?: LabelPolicyContext): ModerationDecision;
+
+// ===== lib/media/media-bytes-access.d.ts =====
+/**
+ * media-bytes-access.ts — hand a moderation adapter the BYTES it needs without
+ * handing it storage credentials.
+ *
+ * Some classifiers do not read from object storage at all: they take an image
+ * in the request body. Wiring one of those up used to mean giving the adapter
+ * its own storage client and its own credentials — a second identity with read
+ * access to every piece of user media, living in a consuming application's
+ * config, for the sake of one HTTP POST.
+ *
+ * This capability closes that gap. Core reads the object through the storage
+ * port it already holds and passes a Buffer to the adapter. The adapter needs
+ * no credentials, no bucket name, and no knowledge of where media lives.
+ *
+ * TWO BOUNDS, both load-bearing:
+ *
+ *  - A SIZE CAP. The adapter names a key; core reads it. Without a cap, an
+ *    adapter (or anything that can influence which key it asks for) could make
+ *    a worker pull a multi-gigabyte object into memory. The read is RANGED to
+ *    the cap plus one byte, so an oversize object is detected by what came back
+ *    rather than by trusting a size the store reported.
+ *  - PIN PASS-THROUGH. When the ref carries a pin, the read is pinned to it, so
+ *    the adapter classifies the exact bytes the pipeline recorded rather than
+ *    whatever currently sits at the key.
+ */
+import type { StoragePort } from "./media-ports.js";
+import type { MediaPin } from "./moderation-provider.js";
+/** Raised when the object is larger than the configured cap. */
+export declare class MediaBytesTooLargeError extends Error {
+    readonly maxBytes: number;
+    constructor(maxBytes: number);
+}
+export declare class MediaBytesAccessConfigError extends Error {
+    constructor();
+}
+/**
+ * The capability handed to a provider adapter at injection time.
+ *
+ * Deliberately minimal: one method, one direction, no bucket handle and no way
+ * to write, delete, or list. An adapter holding this can read the object it was
+ * asked to classify and nothing else.
+ */
+export interface MediaBytesAccess {
+    /**
+     * Read the object a ref points at, up to the configured cap.
+     *
+     * @throws {@link MediaBytesTooLargeError} when the object exceeds the cap.
+     */
+    read(ref: {
+        readonly key: string;
+        readonly pin?: MediaPin;
+    }): Promise<Buffer>;
+    /** The cap, so an adapter can refuse early rather than provoke a throw. */
+    readonly maxBytes: number;
+}
+export declare function createMediaBytesAccess(storage: StoragePort, config: {
+    readonly maxBytes: number;
+}): MediaBytesAccess;
 
 // ===== lib/media/media-lifecycle.d.ts =====
 /**
@@ -1023,26 +1659,762 @@ export declare const ALL_MODERATION_DECISIONS: readonly ModerationDecision[];
  */
 export declare const MODERATION_RESOLVED_LIFECYCLES: readonly MediaLifecycle[];
 
+// ===== lib/media/media-ports.d.ts =====
+export interface TranscodeVideoInput {
+    readonly inputPath: string;
+    readonly outputPath: string;
+    readonly posterPath: string;
+    /** Hard cap on accepted duration; injected from Env.media (never a literal). */
+    readonly maxDurationSeconds: number;
+}
+export interface TranscodeVideoResult {
+    readonly cleanedPath: string;
+    readonly posterPath: string;
+    readonly durationSeconds: number;
+    /**
+     * Whether the cleaned output carries an audio stream. A video with no audio
+     * (a silent clip, a screen recording, a GIF-style mp4) has nothing to
+     * transcribe — the shell skips the AUDIO speech-to-text job and resolves the
+     * AUDIO track as vacuously approved (no audio ⇒ no audio content to be
+     * unsafe), instead of starting a transcription that would fail and fail the
+     * track closed to REVIEW forever. The adapter reports this from a probe of
+     * the produced output (NOT a guess); the shell never inspects bytes itself.
+     */
+    readonly hasAudio: boolean;
+}
+export interface TranscodeAudioInput {
+    readonly inputPath: string;
+    readonly outputPath: string;
+    /** Hard cap on accepted duration; injected from Env.media (never a literal). */
+    readonly maxDurationSeconds: number;
+}
+export interface TranscodeAudioResult {
+    readonly cleanedPath: string;
+    readonly durationSeconds: number;
+}
+/**
+ * A request to extract still frames from a video.
+ *
+ * Both numbers are OPERATOR-SUPPLIED and arrive as arguments (never literals in
+ * this public tarball):
+ *
+ * - `framesPerSecond` — how densely to sample.
+ * - `maxFrames` — an ABSOLUTE ceiling on frames for this one job, independent
+ *   of `framesPerSecond × duration`. It is a cost and disk bound, not a
+ *   sampling preference: without it a long clip at a high rate turns one upload
+ *   into an unbounded number of paid classifier calls and an unbounded number
+ *   of temp files. The adapter must never emit more than `maxFrames`.
+ *
+ * The adapter writes frames to `outputDir` and returns their paths. Emitted
+ * frames must carry NO inherited metadata (the container dictionary strip that
+ * the transcode argv applies) — a sampled frame is a derivative of user media
+ * and must not resurrect the GPS coordinates the transcode removed.
+ */
+export interface SampleFramesInput {
+    readonly inputPath: string;
+    readonly outputDir: string;
+    readonly framesPerSecond: number;
+    readonly maxFrames: number;
+    /** Hard cap on accepted duration; injected from Env.media (never a literal). */
+    readonly maxDurationSeconds: number;
+}
+export interface SampleFramesResult {
+    /** Paths of the extracted frames, in temporal order. Never longer than `maxFrames`. */
+    readonly framePaths: ReadonlyArray<string>;
+}
+export interface TranscodePort {
+    /** Probe the duration of an input without transcoding it. */
+    probeDurationSeconds(inputPath: string): Promise<number>;
+    /** Re-encode a video to a clean form and emit a poster frame. */
+    transcodeVideo(input: TranscodeVideoInput): Promise<TranscodeVideoResult>;
+    /** Re-encode audio to a clean form. */
+    transcodeAudio(input: TranscodeAudioInput): Promise<TranscodeAudioResult>;
+    /**
+     * Extract still frames for frame-sampled video moderation.
+     *
+     * OPTIONAL, so an existing consumer adapter still satisfies this interface —
+     * this is a published package and a required method would be a breaking
+     * change (same reasoning as `MediaPersistencePort.recordEmbeddedProvenance`).
+     * The consequence is stated rather than hidden: frame-sampled moderation
+     * REFUSES to run without it and fails the visual track closed to `review`.
+     * It never degrades to "moderate nothing and approve".
+     *
+     * IF THIS THROWS, the adapter owns whatever it already wrote. Core deletes
+     * the frames it is TOLD about, and a rejected call reports none — so an
+     * extractor that fails partway must clean its own `outputDir` before
+     * throwing. These are stills of media that may be about to be quarantined,
+     * and core cannot delete files it never learned the names of.
+     */
+    sampleFrames?(input: SampleFramesInput): Promise<SampleFramesResult>;
+    /**
+     * Delete a previously-extracted frame. Called on EVERY path — success,
+     * classifier error, deadline, ceiling breach — so sampled stills never
+     * outlive the decision they informed. Must tolerate an already-absent file.
+     *
+     * OPTIONAL for the same published-package reason; when absent the adapter is
+     * responsible for its own `outputDir` lifecycle, and core says so in a log
+     * line rather than assuming cleanup happened.
+     */
+    deleteFrame?(framePath: string): Promise<void>;
+}
+export interface StoragePort {
+    /** Read an object. `options.versionId` pins the read to that EXACT stored
+     * version (AR-SEC F3) — S3 `GetObject` with `VersionId`.
+     *
+     * `options.range` reads only `[start, end]` INCLUSIVE (S3 `Range:
+     * bytes=start-end`). Added for the Art. 50 provenance sniff on video/audio
+     * originals, which must inspect a few hundred bytes of a possibly
+     * hundreds-of-megabytes object and must not pull the whole thing into a
+     * worker's memory to do it. An implementation MAY return fewer bytes than
+     * requested (short object) but must never return more. */
+    getObject(key: string, options?: {
+        versionId?: string;
+        range?: {
+            readonly start: number;
+            readonly end: number;
+        };
+    }): Promise<Buffer>;
+    putObject(key: string, body: Buffer, contentType: string): Promise<void>;
+    /** Copy an object. `options.fromVersionId` pins the SOURCE to that exact
+     * version (AR-SEC F3) — on S3 a versioned `CopySource`; without it the
+     * CURRENT bytes at `fromKey` are copied (TOCTOU-prone for moderated media —
+     * the media pipeline always pins). */
+    copyObject(fromKey: string, toKey: string, options?: {
+        fromVersionId?: string;
+    }): Promise<void>;
+    deleteObject(key: string): Promise<void>;
+    /**
+     * Existence check. Without options: reports the CURRENT object, and — when
+     * the backing store is versioned (S3 bucket versioning, REQUIRED on the
+     * media bucket for the moderation pipeline's version pinning, AR-SEC F3) —
+     * its current `versionId`; `versionId` is `undefined` on an unversioned
+     * store (the pipeline fails closed on that). With `options.versionId`:
+     * whether that exact version exists.
+     */
+    headObject(key: string, options?: {
+        versionId?: string;
+    }): Promise<{
+        exists: boolean;
+        versionId?: string;
+        /**
+         * Object size in bytes, when the adapter reports it (S3 `HeadObject`
+         * `ContentLength`). OPTIONAL so an existing consumer adapter still satisfies
+         * this interface. Used by the Art. 50 provenance sniff to locate the TAIL
+         * range of a video original; when absent the sniff simply skips the tail read
+         * and inspects the head slice only.
+         */
+        size?: number;
+    }>;
+}
+export type TranscriptionStatus = "COMPLETED" | "FAILED" | "IN_PROGRESS";
+export interface TranscribePort {
+    startTranscription(input: {
+        key: string;
+        jobName: string;
+    }): Promise<{
+        jobId: string;
+    }>;
+    getTranscription(jobId: string): Promise<{
+        status: TranscriptionStatus;
+        transcript?: string;
+    }>;
+}
+/**
+ * In-memory TranscodePort. Returns programmable durations and echoes the
+ * requested output/poster paths back, so the shell's path-plumbing can be
+ * asserted without invoking a real encoder.
+ *
+ * Determinism: a single `duration` (default 0) is returned by `probe` and by
+ * both transcode calls unless overridden. `transcodeVideo`/`transcodeAudio`
+ * never themselves enforce `maxDurationSeconds` — duration policy lives in the
+ * functional core (a separate caps unit), and the mock must not silently make
+ * that decision for it.
+ */
+export declare class MockTranscodePort implements TranscodePort {
+    private duration;
+    private hasAudio;
+    /**
+     * How many frames extraction ACTUALLY yields, when that differs from what
+     * (rate × duration, capped) asks for — the shortfall case a real decoder hits
+     * on a partly-undecodable clip. `undefined` means "yield what was asked for".
+     */
+    private extractableFrames?;
+    /** Records of each call, for assertions. */
+    readonly probeCalls: string[];
+    readonly videoCalls: TranscodeVideoInput[];
+    readonly audioCalls: TranscodeAudioInput[];
+    readonly sampleCalls: SampleFramesInput[];
+    /** Frame paths passed to `deleteFrame`, in call order — cleanup assertions. */
+    readonly deletedFrames: string[];
+    constructor(opts?: {
+        duration?: number;
+        hasAudio?: boolean;
+    });
+    /** Program a partial extraction: only this many frames actually decode. */
+    setExtractableFrames(count: number | undefined): void;
+    /** Program the duration returned by subsequent calls. */
+    setDuration(seconds: number): void;
+    /** Program whether `transcodeVideo` reports an audio stream. */
+    setHasAudio(hasAudio: boolean): void;
+    probeDurationSeconds(inputPath: string): Promise<number>;
+    transcodeVideo(input: TranscodeVideoInput): Promise<TranscodeVideoResult>;
+    transcodeAudio(input: TranscodeAudioInput): Promise<TranscodeAudioResult>;
+    /**
+     * Deterministic frame extraction: yields `expectedFrameCount(duration, rate,
+     * maxFrames)` paths under `outputDir`, or fewer when `setExtractableFrames`
+     * programmed a partial decode. Never exceeds `maxFrames` — a mock that could
+     * would let a ceiling bug pass its own test.
+     */
+    sampleFrames(input: SampleFramesInput): Promise<SampleFramesResult>;
+    deleteFrame(framePath: string): Promise<void>;
+}
+/**
+ * In-memory StoragePort backed by a Map, modelling a VERSIONED bucket
+ * (AR-SEC F3): every put appends a new deterministic version
+ * (`mock-version-N`), reads/copies may pin a version, and a delete hides the
+ * current object behind a delete marker while prior versions stay resolvable
+ * by versionId — mirroring S3 bucket-versioning semantics, which the media
+ * pipeline's version pinning requires. `getObject` throws on a miss (callers
+ * must handle the miss explicitly — a silent empty buffer would mask bugs).
+ */
+export declare class MockStoragePort implements StoragePort {
+    private readonly objects;
+    private versionSeq;
+    constructor(seed?: Record<string, Buffer>);
+    private appendVersion;
+    /** The CURRENT (latest, non-delete-marked) version of a key, if any. */
+    private current;
+    getObject(key: string, options?: {
+        versionId?: string;
+        range?: {
+            readonly start: number;
+            readonly end: number;
+        };
+    }): Promise<Buffer>;
+    putObject(key: string, body: Buffer, contentType: string): Promise<void>;
+    copyObject(fromKey: string, toKey: string, options?: {
+        fromVersionId?: string;
+    }): Promise<void>;
+    deleteObject(key: string): Promise<void>;
+    headObject(key: string, options?: {
+        versionId?: string;
+    }): Promise<{
+        exists: boolean;
+        versionId?: string;
+        size?: number;
+    }>;
+    /** Test helper: read the content-type a key was stored with. */
+    contentTypeOf(key: string): string | undefined;
+}
+/**
+ * In-memory TranscribePort. By default a started job is immediately COMPLETED
+ * with an empty transcript; callers program per-job results via `setResult`.
+ * Job ids are a deterministic monotonic sequence.
+ */
+export declare class MockTranscribePort implements TranscribePort {
+    private seq;
+    private readonly results;
+    /** Records of each start call, for assertions. */
+    readonly startCalls: {
+        key: string;
+        jobName: string;
+    }[];
+    startTranscription(input: {
+        key: string;
+        jobName: string;
+    }): Promise<{
+        jobId: string;
+    }>;
+    /** Program the result a given job id will report. */
+    setResult(jobId: string, result: {
+        status: TranscriptionStatus;
+        transcript?: string;
+    }): void;
+    getTranscription(jobId: string): Promise<{
+        status: TranscriptionStatus;
+        transcript?: string;
+    }>;
+}
+
+// ===== lib/media/media-review-handler.d.ts =====
+/**
+ * Media REVIEW-queue moderator handler (T9) — the imperative shell.
+ *
+ * Exposes the platform-MODERATOR surface over media awaiting a human decision:
+ *   - list()        — paginated queue of REVIEW/QUARANTINED media, with the
+ *                     per-track (visual/audio→transcript) verdicts from
+ *                     MediaModerationJob surfaced for video items.
+ *   - decide()      — apply a human approve/reject through the pure lifecycle
+ *                     state machine (nextLifecycle `human` event); approve lands
+ *                     APPROVED (servable) IFF the CAS object is present, reject
+ *                     lands REJECTED. Every decision writes an AuditEvent.
+ *   - escalateCsam()— STUB: drives the item to REJECTED via the `csam` event,
+ *                     LOCKS it (hidden=true), and writes a CRITICAL audit row
+ *                     flagged for human paging. NO automated reporting — the
+ *                     statutory NCMEC/BKA path is handled by a human out-of-band.
+ *
+ * Design: functional-core / imperative-shell. The lifecycle decision is the
+ * pure `nextLifecycle` machine; this shell only performs the I/O the machine
+ * reports, and NEVER re-implements the transition inline. Role enforcement is
+ * SERVER-SIDE and DB-authoritative (the caller resolves the role from the
+ * session's userId against the User table — never a client claim); the pure
+ * predicate `isModeratorRole` lives here so both the shell and its tests share
+ * one definition.
+ *
+ * Every method takes its `db` (Prisma-like) and `auditLogger` explicitly so the
+ * unit tests inject mocks — no module-level Prisma coupling.
+ */
+import { type MediaLifecycle } from "./media-lifecycle.js";
+import type { StoragePort } from "./media-ports.js";
+import { type PromoteLog } from "./promote-staging.js";
+import type { Region } from "../region-detection.js";
+import type { TrellisAuditLogger, TrellisAuditLoggerEnv } from "../audit-composer.js";
+/**
+ * The platform roles permitted on the media review surface. MODERATOR is the
+ * purpose-built role (schema comment: "moderation-queue access"); SUPER_ADMIN is
+ * a strict superset and is also allowed. Every other role — including END_USER —
+ * is denied 403 by the shell. This is the ONE place the allow-set is defined.
+ */
+export declare const MODERATOR_ROLES: readonly ["MODERATOR", "SUPER_ADMIN"];
+/**
+ * Pure role predicate. `role` is the value read from `User.role` (server-side);
+ * a null/unknown role (no such user, or a role outside the allow-set) is denied.
+ * Fail-closed: anything not explicitly in {@link MODERATOR_ROLES} is false.
+ */
+export declare function isModeratorRole(role: string | null | undefined): boolean;
+/** A moderator decision on a review item. `reject` is terminal (→ REJECTED). */
+export type ModeratorDecision = "approve" | "reject";
+/** The media "kind" derived from its stored mimeType (drives the client view). */
+export type MediaKind = "image" | "video" | "audio" | "other";
+/** Derive the coarse media kind from a mimeType. Total; unknown → "other". */
+export declare function mediaKindOf(mimeType: string | null | undefined): MediaKind;
+/** One per-track verdict surfaced to the moderator (video items carry ≥1). */
+export interface TrackVerdictView {
+    track: "VISUAL" | "AUDIO";
+    /** The resolved classifier decision, or null while the job is in flight. */
+    decision: string | null;
+}
+/** A single queue row as returned to the admin client. */
+export interface ReviewQueueItem {
+    id: string;
+    tenantId: string;
+    mimeType: string;
+    kind: MediaKind;
+    lifecycle: MediaLifecycle;
+    size: number;
+    width: number | null;
+    height: number | null;
+    /** Video duration in seconds (null for images). */
+    duration: number | null;
+    createdAt: string;
+    /** Per-track moderation verdicts (visual / audio→transcript). */
+    tracks: TrackVerdictView[];
+}
+export interface ReviewQueuePage {
+    items: ReviewQueueItem[];
+    hasMore: boolean;
+    nextCursor?: string;
+}
+/**
+ * Minimal structural Prisma surface this handler needs. Declared narrowly so a
+ * test mock is trivial and the handler cannot reach for anything undeclared.
+ */
+export interface ReviewPrismaLike {
+    mediaFile: {
+        findMany: (args: unknown) => Promise<Array<Record<string, unknown>>>;
+        findUnique: (args: unknown) => Promise<Record<string, unknown> | null>;
+        update: (args: unknown) => Promise<Record<string, unknown>>;
+    };
+    user: {
+        findUnique: (args: unknown) => Promise<{
+            role: string;
+        } | null>;
+    };
+}
+/**
+ * Consuming app calls this at startup so a human approval actually promotes the
+ * reviewed bytes. Re-exported from `@de-otio/trellis`.
+ *
+ * Without it, `decide()` still applies the lifecycle transition but copies
+ * nothing to the serve prefix — and says so, loudly, on every approval.
+ */
+export declare function setMediaReviewPromotion(port: ReviewPromotionPort): void;
+/** The injected promotion capability, or undefined. Read by the review route. */
+export declare function getMediaReviewPromotion(): ReviewPromotionPort | undefined;
+/** Test-only: clear the injected capability between cases. */
+export declare function __resetMediaReviewPromotionForTests(): void;
+/** Outcome discriminant for decide()/escalateCsam(), mapped to HTTP by the route. */
+export type DecisionResult = {
+    ok: true;
+    status: MediaLifecycle;
+    promoted: boolean;
+} | {
+    ok: false;
+    code: "NOT_FOUND";
+} | {
+    ok: false;
+    code: "ILLEGAL_STATE";
+    from: MediaLifecycle;
+};
+/**
+ * The coordinates a promotion needs, resolved through a port rather than read
+ * off the row here.
+ *
+ * `stagingVersionId` is the pin captured when the classifier ran. Where a
+ * consuming application keeps it is its own business (today, inside an existing
+ * JSON column), which is exactly why this is a port: the handler must not know.
+ */
+export interface ReviewPromoteCoords {
+    readonly tenantId: string;
+    readonly uploadId: string;
+    readonly contentHash: string;
+    readonly stagingVersionId: string | null;
+}
+/**
+ * The capability that lets a human approval actually make bytes servable.
+ *
+ * Without it, `decide()` can flip a row to APPROVED but nothing copies the
+ * reviewed bytes to the serve prefix. With it, approval performs the SAME
+ * version-pinned promotion the automatic path performs — the moderator's
+ * approval applies to the bytes the moderator saw, and to nothing else.
+ *
+ * OPTIONAL on `decide()`, because this is a published package and a required
+ * argument would break every existing caller. The consequence is stated rather
+ * than hidden: when it is absent, `decide()` behaves as before and says so in a
+ * log line, and no promotion happens.
+ */
+export interface ReviewPromotionPort {
+    readonly storage: StoragePort;
+    /** Resolve the promote coordinates for a media object, or null when unknown. */
+    coordsFor(mediaId: string): Promise<ReviewPromoteCoords | null>;
+    readonly log?: PromoteLog;
+}
+export declare class MediaReviewHandler {
+    /**
+     * Resolve the caller's server-side role from the User table and decide whether
+     * they may access the moderator surface. Returns the role string when allowed,
+     * or null when denied (no such user, or a non-moderator role). The route maps
+     * null → 403. DB is the source of truth; the session only supplies the userId.
+     */
+    resolveModeratorRole(db: ReviewPrismaLike, userId: string): Promise<string | null>;
+    /**
+     * Paginated queue of media in REVIEW/QUARANTINED, newest first, cursor over
+     * `id`. Each row carries its per-track moderation verdicts so the client can
+     * show the visual/audio/transcript breakdown for video without a second call.
+     */
+    list(db: ReviewPrismaLike, opts?: {
+        limit?: number;
+        cursor?: string;
+        kind?: MediaKind;
+    }): Promise<ReviewQueuePage>;
+    private toQueueItem;
+    /**
+     * Apply a human approve/reject to a review item. The transition is decided by
+     * the pure `nextLifecycle` machine (`human` event); this shell only persists
+     * the resulting lifecycle, performs the promotion the machine implies, and
+     * writes the audit row.
+     *
+     * APPROVE IS A CLAIM ABOUT SPECIFIC BYTES. A moderator looked at one version
+     * of an object and said yes to that version. So when the promotion port is
+     * wired, approval copies the VERSION-PINNED bytes the classifier ran on — the
+     * same routine the automatic path uses — and refuses outright when that
+     * version can no longer be resolved. It never resolves "whatever is at the
+     * staging key now": between the review and the click, that key may hold
+     * something else entirely, and copying it would launder unreviewed bytes
+     * through a human decision.
+     *
+     * FAIL-CLOSED throughout: a missing object, an unresolvable pin, or a failed
+     * copy all leave the item in REVIEW rather than marking it servable.
+     *
+     * Returns a DecisionResult; the route maps it to HTTP. Audit is written for
+     * every APPLIED decision (success), before returning.
+     */
+    decide(db: ReviewPrismaLike, auditLogger: TrellisAuditLogger, env: TrellisAuditLoggerEnv, input: {
+        mediaId: string;
+        decision: ModeratorDecision;
+        moderatorUserId: string;
+        region: Region;
+        ipAddress?: string;
+        userAgent?: string;
+    }, promotion?: ReviewPromotionPort | undefined): Promise<DecisionResult>;
+    /**
+     * Copy the version-pinned reviewed bytes to the serve prefix.
+     *
+     * Returns true only when the serve object is genuinely there afterwards.
+     * Every failure — unknown coordinates, an unresolvable pin, a copy that
+     * throws — returns false, and the caller holds the item in REVIEW. Nothing
+     * here is best-effort: this is the step that decides whether bytes become
+     * publicly reachable.
+     */
+    private promoteReviewed;
+    /**
+     * CSAM escalation STUB. Drives the item to REJECTED via the pure `csam` event
+     * (terminal from any state), LOCKS it (hidden=true so it is never served
+     * anywhere), and writes a CRITICAL audit row flagged `pagedForHumanReview`.
+     *
+     * DELIBERATELY performs NO automated reporting: statutory CSAM handling
+     * (NCMEC / national hotline, evidence preservation) is a HUMAN process. This
+     * endpoint only locks the artifact and records the page; the runbook takes
+     * over from the audit trail. See doc/.../media-moderation-ops.md CSAM runbook.
+     */
+    escalateCsam(db: ReviewPrismaLike, auditLogger: TrellisAuditLogger, env: TrellisAuditLoggerEnv, input: {
+        mediaId: string;
+        moderatorUserId: string;
+        region: Region;
+        ipAddress?: string;
+        userAgent?: string;
+    }): Promise<DecisionResult>;
+    /**
+     * Decide + audit a moderator VIEW (bypass) of an item's bytes. Returns the
+     * servable `originalKey` when the item is bypass-eligible (REVIEW/QUARANTINED,
+     * not deleted) AND writes the audit row BEFORE the route streams bytes — the
+     * bypass is never silent. Returns null when the item is not bypass-eligible
+     * (the route then denies uniformly). The role check is done by the route via
+     * resolveModeratorRole; this method assumes an authorised moderator.
+     */
+    authorizeView(db: ReviewPrismaLike, auditLogger: TrellisAuditLogger, env: TrellisAuditLoggerEnv, input: {
+        mediaId: string;
+        moderatorUserId: string;
+        region: Region;
+        ipAddress?: string;
+        userAgent?: string;
+    }): Promise<{
+        originalKey: string;
+        mimeType: string;
+    } | null>;
+}
+
+// ===== lib/media/moderation-deadline.d.ts =====
+/**
+ * moderation-deadline.ts — bound how long a moderation call may take, and make
+ * the deadline bind the DECISION rather than merely the wait.
+ *
+ * A timeout that only stops waiting is not a timeout. Two halves are needed and
+ * both are here:
+ *
+ *  1. **Abort the call.** The wrapper passes an `AbortSignal` down, so an
+ *     adapter that honours it stops burning a connection and a provider quota
+ *     on an answer nobody is listening for any more.
+ *  2. **Commit the decision at the deadline.** When the clock runs out the
+ *     wrapper throws — permanently, for that call. If the provider resolves
+ *     `approved` a second later, that resolution is DISCARDED: the caller has
+ *     already recorded a fail-closed verdict, and a late success that could
+ *     overwrite it would mean the timeout was advisory. A late rejection is
+ *     swallowed too, so it cannot surface as an unhandled rejection and take
+ *     the worker down.
+ *
+ * The timeout thrown is `retryable: true`. A deadline says something about the
+ * moment, not about the media: the same bytes may well classify fine on the
+ * next delivery. Retrying is bounded by the existing delivery-attempt limit and
+ * its dead-letter queue, so the fail-open-for-retry choice cannot loop forever,
+ * and it keeps a provider outage visible as retries rather than silently
+ * absorbed as a pile of review items.
+ *
+ * NO COMPILED-IN TIMEOUT. The value is operator config. A timeout baked into a
+ * public tarball tells an adversary exactly how long a call must be stalled for
+ * to force every upload into review — a cheap denial of moderation. Absence is
+ * a wiring error, and this module refuses to construct rather than inventing
+ * one.
+ */
+import { ModerationProviderError, type MediaModerationProvider } from "./moderation-provider.js";
+/** Thrown at wiring time when no deadline was configured. */
+export declare class ModerationDeadlineConfigError extends Error {
+    constructor();
+}
+export interface ModerationDeadlineConfig {
+    /** Milliseconds a single seam call may take. Operator-supplied; no default. */
+    readonly timeoutMs?: number;
+}
+/** Timer seam, so tests drive the clock instead of waiting on it. */
+export interface DeadlineTimers {
+    setTimeout: (fn: () => void, ms: number) => unknown;
+    clearTimeout: (handle: unknown) => void;
+}
+/** The error a deadline breach throws. Typed, and retryable by contract. */
+export declare function deadlineExceeded(operation: string): ModerationProviderError;
+/**
+ * Wrap a provider so every seam call is deadline-bounded.
+ *
+ * Throws {@link ModerationDeadlineConfigError} when no timeout was configured —
+ * the "refuse to enable the feature" form of failing closed, chosen over a
+ * per-call review because an unconfigured deadline is a deployment mistake that
+ * should be visible at wiring time rather than as a slow drip of review items.
+ */
+export declare function withModerationDeadline(provider: MediaModerationProvider, config: ModerationDeadlineConfig, timers?: DeadlineTimers): MediaModerationProvider;
+
+// ===== lib/media/moderation-metrics.d.ts =====
+/**
+ * moderation-metrics.ts — what operators may see about moderation, and what
+ * nobody unauthenticated may see.
+ *
+ * Moderation counters are genuinely needed: a provider that has quietly started
+ * reviewing everything, or a taxonomy running unpinned for a month, are both
+ * invisible without them. But the same counters are an EVASION ORACLE if they
+ * are readable and fresh. Upload a probe, poll a public counter, watch which
+ * bucket moves: that is a per-upload verdict readout, and with it an adversary
+ * tunes content against the classifier without ever seeing a decision.
+ *
+ * Three controls, and the reasons they are shaped the way they are:
+ *
+ *  1. **Aggregates only, never per-item.** Counters are keyed by
+ *     `{provider, decision}` and carry no media id, tenant, user, or key.
+ *  2. **Closed windows only.** {@link ModerationMetrics.snapshot} reports
+ *     COMPLETED time buckets and never the one in progress. A probe uploaded
+ *     now cannot be read back now, which is what breaks the poll-and-correlate
+ *     loop rather than merely slowing it.
+ *  3. **Authenticated surface only.** The public health payload carries exactly
+ *     one moderation fact — {@link ModerationMetrics.publicHealth} — a boolean
+ *     saying a real provider is wired. That is what an uptime check needs and
+ *     it reveals nothing about any upload.
+ *
+ * The provider NAME is treated as untrusted input even though it comes from our
+ * own adapter: it becomes a metric dimension, and a hostile or merely sloppy
+ * value there means unbounded cardinality in a metrics backend. It must match
+ * one the operator declared, and it is length- and charset-checked regardless.
+ */
+import type { ModerationDecision } from "./media-lifecycle.js";
+/** The placeholder recorded when a provider name is not acceptable. */
+export declare const UNKNOWN_PROVIDER_DIMENSION = "unknown";
+/**
+ * Is this string safe and expected as a metric dimension?
+ *
+ * Both halves matter: the charset/length check bounds cardinality damage, and
+ * the declared-set check means a provider cannot introduce a new dimension
+ * value at runtime just by renaming itself.
+ */
+export declare function isAcceptableProviderDimension(name: unknown, declaredProviders: ReadonlyArray<string>): name is string;
+export interface ModerationMetricsConfig {
+    /**
+     * The provider names the operator declared. Anything else is recorded under
+     * {@link UNKNOWN_PROVIDER_DIMENSION} rather than becoming a new dimension.
+     */
+    readonly declaredProviders: ReadonlyArray<string>;
+    /**
+     * Bucket width in milliseconds. Coarser means a smaller correlation window;
+     * operator-supplied because how coarse is enough depends on upload volume.
+     */
+    readonly windowMs: number;
+    /** Injected clock — no ambient `Date.now`, so tests can freeze it. */
+    readonly now: () => number;
+    /** Standing posture flag from the label policy: is the taxonomy unpinned? */
+    readonly unpinnedTaxonomy?: boolean;
+    /** Whether a real (non-fail-closed) provider is wired. */
+    readonly providerActive?: boolean;
+}
+export declare class ModerationMetricsConfigError extends Error {
+    constructor(message: string);
+}
+/** One closed window's counters. */
+export interface ModerationWindow {
+    /** Start of the bucket, in epoch milliseconds. */
+    readonly windowStart: number;
+    /** `${provider}:${decision}` → count. */
+    readonly decisions: Readonly<Record<string, number>>;
+    /** `${provider}` → count of infrastructure faults that failed a track closed. */
+    readonly infraFaults: Readonly<Record<string, number>>;
+}
+export interface ModerationMetricsSnapshot {
+    /** COMPLETED windows only — never the one currently accumulating. */
+    readonly windows: ReadonlyArray<ModerationWindow>;
+    /**
+     * True while the label policy runs without a taxonomy pin. A standing
+     * condition, surfaced continuously rather than as a boot-time log line
+     * nobody re-reads.
+     */
+    readonly unpinnedTaxonomy: boolean;
+}
+/** Everything the UNAUTHENTICATED health payload may say about moderation. */
+export interface ModerationPublicHealth {
+    readonly moderationProviderActive: boolean;
+}
+export declare class ModerationMetrics {
+    private readonly config;
+    private readonly buckets;
+    constructor(config: ModerationMetricsConfig);
+    /** Record one classifier decision. Never throws; observability is not a gate. */
+    recordDecision(provider: unknown, decision: ModerationDecision): void;
+    /**
+     * Record an infrastructure fault that failed a track closed.
+     *
+     * This counter exists because fail-closed is otherwise INDISTINGUISHABLE from
+     * healthy caution: a provider that is down and a provider that is being
+     * careful both produce review items. Without this, an outage looks like a
+     * busy week.
+     */
+    recordInfraFault(provider: unknown): void;
+    /**
+     * Closed windows, newest last. The in-progress window is deliberately
+     * withheld — that omission is the anti-oracle control, not a rounding detail.
+     */
+    snapshot(): ModerationMetricsSnapshot;
+    /** The only moderation fact the public health endpoint may carry. */
+    publicHealth(): ModerationPublicHealth;
+    private dimensionFor;
+    private currentWindowStart;
+    private bucket;
+    private evictOldWindows;
+}
+
 // ===== lib/media/moderation-provider.d.ts =====
 import type { ModerationDecision } from "./media-lifecycle.js";
 export type { ModerationDecision };
+/**
+ * How a stored object is pinned to the EXACT bytes a moderation job scanned.
+ *
+ * Stores differ in what they can offer: object versioning (`versionId`), an
+ * entity tag (`etag`), or a caller-computed digest (`contentHash`). The union
+ * lets an adapter carry whichever its store supports without core knowing which.
+ *
+ * OPAQUE CAPTURE-AND-COMPARE. A pin is captured once, at job start, and later
+ * compared for equality against the value recorded then — it is NEVER
+ * recomputed from bytes and never interpreted. In particular an `etag` is not a
+ * content digest on every store (a multipart upload's ETag is a digest of
+ * digests plus a part count), so treating one as a hash would silently compare
+ * unequal for identical bytes. Equality is `kind` AND `value`; a differing or
+ * absent pin is drift, and drift fails closed.
+ */
+export interface MediaPin {
+    readonly kind: "versionId" | "etag" | "contentHash";
+    readonly value: string;
+}
 /** An opaque reference to an already-stored image object (key + bucket handle). */
 export interface ImageRef {
     readonly bucket: string;
     readonly key: string;
+    /**
+     * Pin the reference to the EXACT stored bytes (AR-SEC F3), so a later
+     * overwrite of the same key can never change what a started job scanned.
+     */
+    readonly pin?: MediaPin;
 }
 /** An opaque reference to an already-stored object in S3-compatible storage. */
 export interface S3Ref {
     readonly bucket: string;
     readonly key: string;
     /**
-     * Pin the reference to an EXACT stored object version (AR-SEC F3). When set,
-     * the provider adapter must moderate that specific version (Rekognition:
-     * `Video.S3Object.Version`), so a later overwrite of the same key can never
-     * change what a started job actually scanned.
+     * Pin the reference to the EXACT stored bytes (AR-SEC F3), so a later
+     * overwrite of the same key can never change what a started job scanned.
+     */
+    readonly pin?: MediaPin;
+    /**
+     * @deprecated Alias for `pin: { kind: "versionId", value }`. Kept so existing
+     * consumers keep compiling and their refs keep pinning; new code sets `pin`.
+     * When both are present `pin` wins.
      */
     readonly versionId?: string;
 }
+/**
+ * The pin a ref carries, normalised across the `pin` field and the deprecated
+ * `versionId` alias. Returns `null` when the ref is unpinned — which callers
+ * must treat as "cannot certify these bytes", never as "any bytes will do".
+ */
+export declare function refPin(ref: ImageRef | S3Ref): MediaPin | null;
+/**
+ * Opaque pin equality. Two pins match iff both are present, of the same kind,
+ * and byte-identical. A missing pin on either side is NOT a match — absence of
+ * evidence is not evidence of sameness.
+ */
+export declare function pinsEqual(a: MediaPin | null, b: MediaPin | null): boolean;
 /** A single classifier label. `category` is an OPAQUE token, never a real-category string. */
 export interface ModerationLabel {
     readonly category: string;
@@ -1057,23 +2429,193 @@ export interface ModerationVerdict {
     readonly decision: ModerationDecision;
     readonly labels: ReadonlyArray<ModerationLabel>;
     readonly provider: string;
+    /**
+     * The classifier/taxonomy build that produced this verdict, as an OPAQUE
+     * string the provider chooses (a model id, a taxonomy version, a build tag).
+     * Core never parses it — it only compares it for equality against the version
+     * the operator pinned, so a silent taxonomy change cannot keep approving
+     * against a category map that no longer means what it did.
+     *
+     * OPTIONAL, because this is a published seam and a required field would break
+     * every existing adapter. The consequence is stated rather than hidden: under
+     * a pin mode that demands a version, ABSENCE is unverifiable and therefore
+     * `review` — a provider that reports nothing gets no approvals.
+     */
+    readonly modelVersion?: string;
+}
+/**
+ * Per-call options every seam method accepts.
+ *
+ * `signal` lets the caller abort in-flight provider work when its deadline
+ * expires. Aborting is only half the contract: the DECISION is committed at the
+ * deadline, so a provider that resolves afterwards must not be able to overturn
+ * the fail-closed verdict already recorded. The deadline wrapper enforces both
+ * halves; an adapter only needs to honour the signal.
+ */
+export interface ModerationCallOptions {
+    readonly signal?: AbortSignal;
+}
+/**
+ * The handle returned when a video moderation job is started.
+ *
+ * `jobId` is the poll handle. `initialDecision` is present only when the
+ * backend ALREADY resolved the whole track during the start call — which is
+ * what core's frame-sampling adapter does: it samples, classifies and
+ * aggregates inline, so there is no remote job to poll and no completion
+ * notification will ever arrive for this id. The caller persists that decision
+ * immediately instead of waiting for a message that is not coming.
+ *
+ * Both extra fields are OPTIONAL, so an existing adapter that returns `{ jobId }`
+ * still satisfies the seam.
+ */
+export interface VideoModerationStart {
+    readonly jobId: string;
+    /** Set when the track resolved during `start`; no poll or completion follows. */
+    readonly initialDecision?: ModerationDecision;
+    /** The taxonomy version the job started under, for drift detection at completion. */
+    readonly modelVersion?: string;
+    /**
+     * Which sampling/scoring policy produced this result. Together with the
+     * content hash, the provider, and {@link modelVersion} it identifies the
+     * inputs a verdict depended on — the four things you need to answer "how do
+     * you know you caught it?" months later, and none of them can be
+     * reconstructed after the fact.
+     */
+    readonly policyVersion?: string;
+    /** The raw labels behind the collapsed decision. SERVER-SIDE ONLY (see below). */
+    readonly labels?: ReadonlyArray<ModerationLabel>;
+    /** The per-frame audit record. SERVER-SIDE ONLY (see below). */
+    readonly detail?: ModerationJobDetail;
+}
+/**
+ * The evidence behind a video verdict, for the audit trail.
+ *
+ * NEVER SEND ANY OF THIS TO A CLIENT. Confidences, frame timings, sampling
+ * parameters, and skip counts are a tuning oracle: with them an adversary
+ * learns which frames were looked at and how close a piece of content came to
+ * a bar, which is precisely enough to iterate against the classifier. It exists
+ * so operators can audit their own pipeline, and it stops at the server.
+ */
+export interface ModerationJobDetail {
+    /** How many frames the plan expected, given the clip and the policy. */
+    readonly expectedFrames?: number;
+    /** How many frames were actually classified. */
+    readonly framesScored?: number;
+    /**
+     * How many expected frames never produced a verdict — undecodable, or lost
+     * to an error. A rising number here means the pipeline is seeing less of
+     * each video than its policy claims.
+     */
+    readonly framesSkipped?: number;
+    /** Per-frame evidence, in temporal order. */
+    readonly frames?: ReadonlyArray<ModerationFrameDetail>;
+}
+export interface ModerationFrameDetail {
+    /** Position in the sampled sequence. */
+    readonly index: number;
+    /** Offset into the clip, in seconds, at the policy's sampling rate. */
+    readonly offsetSeconds: number;
+    /** `null` when the frame could not be classified. */
+    readonly decision: ModerationDecision | null;
+    readonly labels?: ReadonlyArray<ModerationLabel>;
+    readonly modelVersion?: string;
 }
 /**
  * The one canonical moderation seam. Image moderation is sync-ish (resolves a
  * verdict directly); video moderation is async (start → poll), mirroring the
  * cloud provider's job model. Audio reuses the text-moderation path and adds no
  * method here.
+ *
+ * A provider that can only classify STILL IMAGES satisfies this seam: core's
+ * frame-sampling video adapter turns `moderateImage` into video moderation by
+ * sampling frames and aggregating their verdicts. Implementing
+ * `startVideoModeration`/`getVideoModeration` natively is for backends that
+ * have their own video job model.
  */
 export interface MediaModerationProvider {
+    /**
+     * What this provider calls itself — the same token it puts in
+     * `ModerationVerdict.provider`.
+     *
+     * Optional, because adding a required member to a published seam would break
+     * every adapter already implementing it. But absence costs something real:
+     * `ModerationVerdict.provider` only exists once a call has SUCCEEDED, so on
+     * the paths where there is no verdict — a throw, a deadline breach, or a
+     * cache lookup that happens *before* the call — core has no way to attribute
+     * the work except by asking the provider. A provider that reports no name is
+     * attributed to {@link UNKNOWN_PROVIDER_NAME} on those paths.
+     *
+     * Read it through {@link moderationProviderName} rather than directly, and
+     * see the wrapper rule documented there.
+     */
+    readonly name?: string;
     /** Synchronous-style image moderation: resolves a verdict directly. */
-    moderateImage(input: ImageRef): Promise<ModerationVerdict>;
+    moderateImage(input: ImageRef, options?: ModerationCallOptions): Promise<ModerationVerdict>;
     /** Kicks off async video moderation; returns a handle to poll. */
-    startVideoModeration(input: S3Ref): Promise<{
-        jobId: string;
-    }>;
+    startVideoModeration(input: S3Ref, options?: ModerationCallOptions): Promise<VideoModerationStart>;
     /** Polls a previously-started video moderation job for its verdict. */
-    getVideoModeration(jobId: string): Promise<ModerationVerdict>;
+    getVideoModeration(jobId: string, options?: ModerationCallOptions): Promise<ModerationVerdict>;
 }
+/** Attribution for a provider that reports no name of its own. */
+export declare const UNKNOWN_PROVIDER_NAME = "unknown";
+/**
+ * The provider's self-reported name, or {@link UNKNOWN_PROVIDER_NAME}.
+ *
+ * Core calls this instead of reading `.name` so that one rule holds everywhere:
+ * a name is a non-empty string or it does not count. A provider that reports
+ * `""`, whitespace, or a non-string is attributed as unknown rather than
+ * producing an empty dimension — an empty string is the value a partly-wired
+ * adapter yields, and it must not read as a distinct identity.
+ *
+ * **The wrapper rule.** A decorator around a provider (a deadline, a
+ * frame-sampling adapter, a retry shim) must PASS THE INNER NAME THROUGH, never
+ * substitute its own. The name answers "whose classifier produced this?", and
+ * wrapping does not change the answer. Substituting would split one provider's
+ * counters and cache entries across two identities the moment an operator adds
+ * a wrapper — and the split would look like a traffic shift rather than a
+ * config change.
+ *
+ * This deliberately does NOT validate the charset. Metric dimensions have their
+ * own stricter admission rule against the operator's declared set (see
+ * `isAcceptableProviderDimension`); a name that is honest but undeclared should
+ * still be usable for a cache key and a log line.
+ */
+export declare function moderationProviderName(provider: Pick<MediaModerationProvider, "name"> | null | undefined): string;
+/**
+ * The typed error a provider adapter throws so core can classify the failure
+ * without pattern-matching on vendor error names.
+ *
+ * `retryable` is the adapter's own judgement about whether the SAME call could
+ * succeed later:
+ *   - `true`  — transient (throttle, 5xx, socket). Core retries; the existing
+ *               3-strike/DLQ path remains the upper bound.
+ *   - `false` — permanent for these bytes (rejected input, unsupported media).
+ *               Core stops retrying and fails the track closed to `review`.
+ *
+ * A typed error whose cause the adapter cannot attribute is thrown with
+ * `retryable: false` AND `unknownCause: true`: core then fails closed to
+ * `review` *and* emits an infra-fault signal, because a fail-closed verdict
+ * that silently absorbs an infrastructure outage is indistinguishable from
+ * healthy caution — exactly the blindness that lets an outage run for days.
+ */
+export declare class ModerationProviderError extends Error {
+    readonly retryable: boolean;
+    /** The adapter could not attribute the cause — core alerts as well as fails closed. */
+    readonly unknownCause: boolean;
+    constructor(message: string, options?: {
+        retryable: boolean;
+        unknownCause?: boolean;
+        cause?: unknown;
+    });
+}
+/**
+ * Structural type guard for {@link ModerationProviderError}. Structural rather
+ * than `instanceof` on purpose: an adapter bundled with its own copy of this
+ * package (npm nesting, a linked workspace) produces an error whose prototype
+ * chain is a DIFFERENT class object, and an `instanceof` check would silently
+ * demote it to the untyped fallback.
+ */
+export declare function isModerationProviderError(err: unknown): err is ModerationProviderError;
 export type WarnSink = (message: string, data?: unknown) => void;
 /**
  * A verdict that fails closed: every call resolves to `review` with no labels.
@@ -1082,14 +2624,13 @@ export type WarnSink = (message: string, data?: unknown) => void;
  * guard below).
  */
 export declare class NullModerationProvider implements MediaModerationProvider {
+    readonly name = "null";
     private readonly warn;
     constructor(warn?: WarnSink);
     private failClosed;
-    moderateImage(_input: ImageRef): Promise<ModerationVerdict>;
-    startVideoModeration(_input: S3Ref): Promise<{
-        jobId: string;
-    }>;
-    getVideoModeration(_jobId: string): Promise<ModerationVerdict>;
+    moderateImage(_input: ImageRef, _options?: ModerationCallOptions): Promise<ModerationVerdict>;
+    startVideoModeration(_input: S3Ref, _options?: ModerationCallOptions): Promise<VideoModerationStart>;
+    getVideoModeration(_jobId: string, _options?: ModerationCallOptions): Promise<ModerationVerdict>;
 }
 /**
  * Returns true for the fail-closed Null provider. The startup guard uses this to
@@ -1102,22 +2643,37 @@ export declare function isNullModerationProvider(provider: MediaModerationProvid
  * `category_b`); no real-category strings, no real imagery ever.
  */
 export declare class MockModerationProvider implements MediaModerationProvider {
+    readonly name = "mock";
     private imageVerdict;
     private videoVerdict;
+    private imageResponder?;
     private jobIdSeq;
+    /** Every `moderateImage` ref, in call order — for asserting frame fan-out. */
+    readonly imageCalls: ImageRef[];
+    /** Every `startVideoModeration` ref, in call order. */
+    readonly startVideoCalls: S3Ref[];
     constructor(canned?: {
         image?: ModerationVerdict;
         video?: ModerationVerdict;
     });
-    /** Program the verdict returned by `moderateImage`. */
+    /**
+     * Program the verdict returned by `moderateImage`. Set `modelVersion` here to
+     * exercise the taxonomy-pin modes; leave it unset to exercise the
+     * unverifiable-pin path (which must fail closed to `review`).
+     */
     setImageVerdict(verdict: ModerationVerdict): void;
+    /**
+     * Program a per-call responder for `moderateImage` — the seam for tests that
+     * need a verdict to depend on WHICH ref was asked about (per-frame verdicts),
+     * or that need the call to reject or to never settle. The responder owns its
+     * own timing, so the mock stays free of clocks.
+     */
+    setImageResponder(responder: (input: ImageRef, options?: ModerationCallOptions) => Promise<ModerationVerdict>): void;
     /** Program the verdict returned by `getVideoModeration`. */
     setVideoVerdict(verdict: ModerationVerdict): void;
-    moderateImage(_input: ImageRef): Promise<ModerationVerdict>;
-    startVideoModeration(_input: S3Ref): Promise<{
-        jobId: string;
-    }>;
-    getVideoModeration(_jobId: string): Promise<ModerationVerdict>;
+    moderateImage(input: ImageRef, options?: ModerationCallOptions): Promise<ModerationVerdict>;
+    startVideoModeration(input: S3Ref, _options?: ModerationCallOptions): Promise<VideoModerationStart>;
+    getVideoModeration(_jobId: string, _options?: ModerationCallOptions): Promise<ModerationVerdict>;
 }
 /** Abstract category tokens for Mock verdicts — never real-category strings. */
 export declare const MOCK_CATEGORY_A = "category_a";
@@ -1142,8 +2698,97 @@ export declare class NullProviderInProductionError extends Error {
  */
 export declare function assertModerationProviderAllowed(provider: MediaModerationProvider, environment: string): MediaModerationProvider;
 
+// ===== lib/media/promote-staging.d.ts =====
+/**
+ * promote-staging.ts — the version-pinned staging→CAS promotion, extracted so
+ * every path that can make bytes servable goes through ONE implementation.
+ *
+ * There are two such paths: the automatic one (both moderation tracks approve)
+ * and the human one (a moderator approves a REVIEW item). They must agree, and
+ * before this module existed only the automatic one was pinned. That asymmetry
+ * is the whole reason this is a module rather than a private helper:
+ *
+ *   A pin is captured when moderation STARTS, on the exact bytes that were
+ *   scanned. Promotion copies THAT version. It never resolves "the current
+ *   bytes at the staging key", because between the scan and the approval the
+ *   object at that key may not be the object that was scanned — and an approval
+ *   that copies whatever is there now is an approval of bytes nobody looked at.
+ *
+ * FAIL-CLOSED: when the pinned version cannot be resolved and no previously
+ * promoted CAS object exists, this module reports `none` and the caller must
+ * refuse to promote. Doubt holds in review; doubt never serves.
+ */
+import type { StoragePort } from "./media-ports.js";
+/**
+ * Where the servable bytes may legitimately come from.
+ *
+ * - `staging` — the pinned version the classifier actually scanned.
+ * - `cas`     — an object already at the CAS key from a PRIOR pinned promote;
+ *               those bytes were themselves pin-copied, so their provenance is
+ *               intact and re-copying from staging would only risk adopting
+ *               post-moderation bytes.
+ * - `none`    — nothing certifiable. Callers must not promote.
+ */
+export type PromoteSource = {
+    readonly kind: "staging";
+    readonly versionId: string;
+} | {
+    readonly kind: "cas";
+} | {
+    readonly kind: "none";
+};
+/** Minimal logging seam; every call site already has one of this shape. */
+export interface PromoteLog {
+    info?: (msg: string, data?: unknown) => void;
+    warn?: (msg: string, data?: unknown) => void;
+    error?: (msg: string, data?: unknown) => void;
+}
+/**
+ * Resolve which source, if any, may serve these bytes.
+ *
+ * Order matters: the pinned staging version is preferred (it is the freshest
+ * certified copy), then an existing CAS object. A null/empty pin is NOT
+ * degraded into an unpinned head of the staging key — that degradation is
+ * exactly the TOCTOU this module exists to prevent — so an unpinned row can
+ * only ever be satisfied by an already-promoted CAS object.
+ */
+export declare function resolvePromoteSource(args: {
+    readonly storage: StoragePort;
+    readonly stagingKey: string;
+    readonly casKey: string;
+    readonly stagingVersionId: string | null | undefined;
+}): Promise<PromoteSource>;
+/**
+ * Copy the certified bytes to the CAS key and clean up the transient copies.
+ *
+ * - `staging` source ⇒ a version-pinned copy.
+ * - `cas` source ⇒ no copy at all; the object is already there and re-copying
+ *   from staging could adopt bytes that arrived after moderation.
+ * - `none` ⇒ this function must not have been called; it throws rather than
+ *   quietly doing nothing, because a silent no-op here reads at the call site
+ *   as a successful promotion.
+ *
+ * Cleanup of the raw original and the staging copy is BEST-EFFORT: the CAS copy
+ * is what serves, so a leftover transient object is storage noise rather than a
+ * safety hole, and letting a delete failure fail the promotion would strand an
+ * approved object un-servable.
+ */
+export declare function promotePinned(args: {
+    readonly storage: StoragePort;
+    readonly source: PromoteSource;
+    readonly stagingKey: string;
+    readonly casKey: string;
+    /** Transient keys to remove after the copy (raw original, staging, poster). */
+    readonly cleanupKeys: ReadonlyArray<string>;
+    readonly log?: PromoteLog;
+    /** Correlation data for the tolerated-delete log lines. */
+    readonly logContext?: Record<string, unknown>;
+}): Promise<void>;
+
 // ===== lib/media/request-moderation.d.ts =====
-import { type MediaModerationProvider } from "./moderation-provider.js";
+import { type MediaModerationProvider, type ModerationVerdict } from "./moderation-provider.js";
+import type { LabelPolicy, LabelPolicyContext } from "./label-policy.js";
+import type { ModerationDecision } from "./media-lifecycle.js";
 /**
  * Consuming app (Skybber) calls this at startup with its concrete moderation
  * provider (e.g. an AWS Rekognition adapter). MUST run before the upload route
@@ -1160,6 +2805,20 @@ export declare function setMediaModerationProvider(provider: MediaModerationProv
 export declare function getMediaModerationProvider(): MediaModerationProvider;
 /** Test-only: clear the injected provider so tests don't leak across cases. */
 export declare function __resetMediaModerationProviderForTests(): void;
+/**
+ * Consuming app calls this at startup to make the operator's label policy
+ * authoritative over the provider's own decision. Re-exported from
+ * `@de-otio/trellis`.
+ */
+export declare function setMediaLabelPolicy(policy: LabelPolicy): void;
+/** The operator's label policy, or undefined when the provider's decision stands. */
+export declare function getMediaLabelPolicy(): LabelPolicy | undefined;
+/**
+ * Apply the operator's policy to a verdict, or pass the provider's own decision
+ * through when no policy is configured. Total: a policy that somehow throws is
+ * treated as doubt, and doubt reviews.
+ */
+export declare function interpretVerdict(verdict: ModerationVerdict, context?: LabelPolicyContext): ModerationDecision;
 
 // ===== lib/media/request-text-moderation.d.ts =====
 import { type TextModerationProvider } from "./text-moderation.js";
@@ -1224,6 +2883,52 @@ export declare class MockTextModerationProvider implements TextModerationProvide
     setVerdict(verdict: ModerationVerdict): void;
     moderateText(text: string): Promise<ModerationVerdict>;
 }
+
+// ===== lib/media/track-verdict.d.ts =====
+import type { ModerationDecision } from "./media-lifecycle.js";
+/** The two moderation tracks a media object can carry. */
+export type Track = "VISUAL" | "AUDIO";
+/**
+ * The outcome of moderating a single track.
+ *
+ * - `decided`  — the track was moderated and produced a 3-value decision.
+ * - `errored`  — the track was expected but moderation faulted (no usable
+ *                verdict). Fail-closed: treated as "must not approve".
+ * - `absent`   — the track does not apply to this object (e.g. no audio track
+ *                on a silent video, or no visual track on an audio-only object).
+ *                Absence alone is NOT approval: combining with a present-and-
+ *                approved track still degrades to "review", because we cannot
+ *                certify a track we never inspected. The shell decides, per
+ *                media kind, whether a single-track object should even call
+ *                this combinator — see the obligations below.
+ */
+export type TrackOutcome = {
+    readonly state: "decided";
+    readonly decision: ModerationDecision;
+} | {
+    readonly state: "errored";
+} | {
+    readonly state: "absent";
+};
+/**
+ * Combine two per-track outcomes into the object-level {@link ModerationDecision}.
+ *
+ * Precedence (checked in this order; total):
+ *  1. If EITHER track is decided-"quarantine" => "quarantine". A confirmed
+ *     flag on any track wins over everything: it is strictly more restrictive
+ *     than "review", and a quarantine that decayed to "review" because the
+ *     other track was absent/errored would be a safety regression.
+ *  2. Else, "approved" IFF BOTH tracks are state "decided" AND BOTH decisions
+ *     are "approved".
+ *  3. Else (any "review", any "errored", any "absent", or any mix) => "review".
+ *
+ * Consequences (property-tested):
+ *  - One missing/failed track NEVER yields "approved".
+ *  - "approved" requires positive evidence on BOTH tracks.
+ *  - "quarantine" is sticky across an absent/errored sibling track.
+ *  - The function never returns "approved" from doubt.
+ */
+export declare function combineTrackVerdicts(visual: TrackOutcome, audio: TrackOutcome): ModerationDecision;
 
 // ===== lib/mfa/totp-service.d.ts =====
 /**
@@ -1997,6 +3702,307 @@ export interface RealtimeTransport {
 export interface DeliveryPolicyResolver {
     decide(ctx: DeliveryContext): DeliveryDecision;
 }
+
+// ===== lib/region-detection.d.ts =====
+/**
+ * Region Detection Module
+ *
+ * Detects user region using multiple sources with priority ordering:
+ * 1. User preference (from authenticated session) - Most trusted
+ * 2. IP geolocation - Automatic detection
+ * 3. Accept-Language header - Fallback
+ * 4. Default region - Safe fallback
+ *
+ * Security: All detected regions are validated against known regions list.
+ *
+ * ## Foundation adoption
+ *
+ * The pure header / Accept-Language parsing is delegated to
+ * `@de-otio/saas-foundation/region`'s `RegionDetector`, configured via the
+ * trellis `RegionRegistry` in `region-registry.ts`. This module keeps:
+ *   - trellis's literal `Region` union (`"US" | "EU" | "CN"`),
+ *   - `isValidRegion` validating against that union,
+ *   - the env-driven `DEFAULT_REGION` handling,
+ *   - the legacy "unlisted CDN country -> EU" catch-all policy,
+ *   - the trellis-specific user-preference DB lookup, session handling, and
+ *     external IP-geolocation fallback.
+ *
+ * Foundation's `Region` is a generic branded string; by construction the
+ * trellis registry only ever yields US/EU/CN, so results are coerced back to
+ * the literal union via `coerceRegion`.
+ */
+import type { Env } from "../env.js";
+import { Session, SessionManager } from "./session-cookie.js";
+/**
+ * Valid regions supported by the application
+ */
+declare const VALID_REGIONS: readonly ["US", "EU", "CN"];
+export type Region = (typeof VALID_REGIONS)[number];
+/**
+ * Re-export `Env` for the legacy `region-config.ts` / extended-test imports
+ * that pull the env shape from this module.
+ */
+export type { Env } from "../env.js";
+/**
+ * Region Detector class
+ */
+export declare class RegionDetector {
+    private env;
+    private logger;
+    constructor(env: Env);
+    /**
+     * Validate region against known regions list
+     *
+     * Security: Prevents region spoofing by only allowing known regions
+     *
+     * @param region - Region code to validate
+     * @returns true if region is valid, false otherwise
+     */
+    isValidRegion(region: string): region is Region;
+    /**
+     * Resolve the effective default region from env.
+     *
+     * Mirrors the legacy behaviour: an invalid `DEFAULT_REGION` falls back to
+     * `EU` (the GDPR-safe default), NOT to the raw env value.
+     */
+    private resolveDefaultRegion;
+    /**
+     * Map a CDN geolocation header to a region.
+     *
+     * Reads CloudFront-Viewer-Country (preferred) then CF-IPCountry (legacy
+     * Cloudflare fallback). Unknown markers (XX, T1) yield `null`. Mapped
+     * countries route via the foundation registry; any other present,
+     * non-unknown country defaults to EU per the legacy GDPR-safe policy.
+     *
+     * @param request - Request object (contains geo headers)
+     * @returns Region code or null if no usable CDN country header
+     */
+    private geolocateIPFromHeaders;
+    /**
+     * Detect a region from the Accept-Language header.
+     *
+     * Parses the language tags and resolves each to a region via the foundation
+     * registry's `countryToRegion`. The language->country heuristic is a
+     * trellis domain rule (which languages imply which markets), so it stays
+     * local; only the country->region resolution is delegated to foundation.
+     *
+     * Foundation's own `RegionDetector` cannot be used directly here because its
+     * `detectSync` always falls through to the registry default when no language
+     * matches, which would mask the "no match" case this priority chain relies
+     * on to continue to the env default.
+     *
+     * Returns `null` when no language maps (so the caller's chain continues).
+     */
+    private getRegionFromLanguage;
+    /**
+     * Geolocate IP address using external service (fallback)
+     *
+     * Only used if CDN geolocation headers are not available
+     *
+     * @param ip - IP address to geolocate
+     * @returns Region code or null if not detected
+     */
+    private geolocateIPExternal;
+    /**
+     * Detect user region from request (optimized async version)
+     *
+     * Priority order (most trusted first):
+     * 1. User preference (from authenticated session)
+     * 2. IP geolocation (CloudFront-Viewer-Country / CF-IPCountry header)
+     * 3. Accept-Language header
+     * 4. Default region
+     *
+     * Security: All detected regions are validated against known regions list
+     *
+     * @param request - Request object
+     * @param sessionManager - Session manager instance (optional, for user preference)
+     * @param session - Existing session (optional, to avoid re-fetching)
+     * @returns Detected region code (always valid)
+     */
+    detectRegion(request: Request, sessionManager?: SessionManager, session?: Session | null): Promise<Region>;
+    /**
+     * Synchronous version of detectRegion (for cases where async is not needed)
+     *
+     * Uses only:
+     * - CloudFront-Viewer-Country / CF-IPCountry header (synchronous)
+     * - Accept-Language header (synchronous)
+     * - Default region (synchronous)
+     *
+     * Does NOT use:
+     * - User session (requires async)
+     * - External IP geolocation (requires async)
+     *
+     * @param request - Request object
+     * @returns Detected region code (always valid)
+     */
+    detectRegionSync(request: Request): Region;
+}
+/**
+ * Legacy functions for backward compatibility
+ * @deprecated Use new RegionDetector class instead
+ */
+export declare function isValidRegion(region: string): region is Region;
+export declare function detectRegion(request: Request, env: Env, sessionManager?: SessionManager, session?: Session | null): Promise<Region>;
+export declare function detectRegionSync(request: Request, env: Env): Region;
+
+// ===== lib/session-cookie.d.ts =====
+/**
+ * Session Management
+ *
+ * Handles encrypted cookie-based session storage for authentication.
+ *
+ * Crypto is delegated to `@de-otio/saas-foundation/session`'s
+ * `SessionCookie` (AES-256-GCM, 96-bit random IV, PBKDF2-SHA256 with
+ * the OWASP-2023 600k-iteration minimum). The envelope format is
+ * base64([IV || ciphertext+tag]) — identical in shape to the previous
+ * hand-rolled implementation, only the derived key is stronger.
+ *
+ * This module is a thin trellis-flavoured wrapper: it preserves the
+ * `SessionManager` public surface (so the ~60 call sites only change
+ * their import path), owns the trellis `Session` shape + custom-claim
+ * validation (foundation is payload-agnostic), and keeps the AUTH-5
+ * token-revocation blocklist (which has no foundation equivalent).
+ */
+import type { AgeTier } from "@prisma/client";
+import { MIN_SALT_LENGTH, MIN_SECRET_LENGTH } from "@de-otio/saas-foundation/session";
+export type UserRole = "END_USER" | "B2B_PARTNER" | "PARTNER_ADMIN" | "INTERNAL" | "CONTENT_CREATOR" | "SUPER_ADMIN";
+export interface Session {
+    userId: string;
+    email: string;
+    role?: UserRole;
+    expiresAt: number;
+    csrfToken?: string;
+    csrfTokenCreatedAt?: number;
+    csrfTokenNeedsRotation?: boolean;
+    lastActivityAt?: number;
+    sessionType?: "user" | "sso" | "dashboard";
+    dataRegion: string;
+    profileContext: "primary" | "decoy";
+    contextId?: string;
+    mfaVerified?: boolean;
+    mfaVerifiedAt?: number;
+    ageTier?: AgeTier;
+    activeTenantId?: string;
+}
+/**
+ * Test-only: clear the module-scope `SessionCookie` cache so KDF-count
+ * assertions and benchmarks start cold. Not part of the public API.
+ * @internal
+ */
+export declare function __clearSessionCookieCacheForTesting(): void;
+/**
+ * Session Manager class for handling encrypted sessions.
+ */
+export declare class SessionManager {
+    private static readonly COOKIE_NAME;
+    hadLegacySessionCookie: boolean;
+    hadInvalidSessionCookie: boolean;
+    /**
+     * Get the foundation `SessionCookie` for a secret/fallback/salt
+     * triple. Delegates to the module-scope cache (see
+     * `moduleCookieCache` above) so the derived AES key is reused across
+     * requests even though `SessionManager` itself is constructed
+     * per-request.
+     */
+    private getCookie;
+    /**
+     * Get session configuration from environment
+     */
+    private getSessionConfig;
+    /**
+     * Encrypt session data using foundation's AES-256-GCM SessionCookie.
+     *
+     * `salt` is required (mirrors foundation MIN_SALT_LENGTH); omitting
+     * it fails closed with a SESSION_SALT error.
+     *
+     * O-1 / 05a `[SR:H3]`: this is the single seal chokepoint (every seal path —
+     * `setSession`, and the CSRF/MFA re-seal sites — routes its payload through
+     * here), so it is also the single place that guarantees `activeTenantId` is
+     * never persisted in sealed material. A JWT-derived `Session` carries a
+     * trusted `activeTenantId`; if that object is fed back into a 90-day cookie /
+     * localStorage token (as the CSRF-refresh and MFA-verify handlers do), the
+     * tenant would outlive the ≤1h token it was verified from — letting a user
+     * removed from a tenant keep minting a scoped handle for it. Stripping here
+     * enforces "verified-per-request only" for every caller, present and future,
+     * instead of relying on each seal site to remember.
+     */
+    encryptSession(data: string, secret: string, salt?: string): Promise<string>;
+    /**
+     * Decrypt session data. Returns null on any decryption failure
+     * (bad MAC, wrong key, malformed input).
+     */
+    decryptSession(encryptedData: string, secret: string, salt?: string): Promise<string | null>;
+    /**
+     * Validate and narrow a decrypted/parsed payload into a trellis
+     * `Session`. Returns null (and sets `hadInvalidSessionCookie`) when
+     * the payload is not a valid Supabase session, or is a legacy
+     * BlueSky/AT-Protocol session.
+     */
+    private narrowSession;
+    /**
+     * Get session from request
+     * Checks Authorization header first (for localStorage token), then falls back to cookie
+     * Checks expiration and inactivity timeout
+     *
+     * Supports dual-secret rotation: tries primary secret first, then fallback secret
+     * This enables zero-downtime secret rotation without invalidating existing sessions
+     */
+    getSession(request: Request, secret: string, env?: {
+        [key: string]: any;
+    }): Promise<Session | null>;
+    /**
+     * Narrow a payload parsed from the Authorization-header path. This
+     * path historically accepted any object with userId + email and did
+     * NOT set hadInvalidSessionCookie, so we keep that behaviour distinct
+     * from the cookie path's narrowSession.
+     */
+    private narrowSessionForAuthHeader;
+    /**
+     * Decrypt a token trying the primary secret first, then the fallback
+     * secret (zero-downtime rotation). Foundation's `SessionCookie`
+     * already tries primary→fallback internally when both are configured
+     * on one instance, so we construct a single cookie with both.
+     */
+    private unsealWithRotation;
+    /**
+     * Set session cookie in response (alias for setSession)
+     */
+    setSessionCookie(response: Response, session: Session, secret: string, cookieDomain?: string, env?: {
+        [key: string]: any;
+    }): Promise<Response>;
+    /**
+     * Set session cookie in response
+     * Uses configurable session timeout based on session type
+     */
+    setSession(response: Response, session: Session, secret: string, cookieDomain?: string, env?: {
+        [key: string]: any;
+    }): Promise<Response>;
+    /**
+     * Clear session cookie (alias for clearSession)
+     */
+    clearSessionCookie(response: Response): Response;
+    /**
+     * Clear session cookie
+     * @param response - Response to add clear cookie headers to
+     * @param cookieDomain - Optional domain to clear cookie from (e.g., ".example.com" for cross-subdomain)
+     */
+    clearSession(response: Response, cookieDomain?: string): Response;
+    /**
+     * AUTH-5: Hash a session token for blocklist storage.
+     */
+    private hashToken;
+    /**
+     * AUTH-5: Revoke a session token by adding it to the blocklist.
+     * Call this on logout to prevent token reuse.
+     *
+     * No foundation equivalent exists — this composes over the trellis
+     * blocklist KV store and is kept verbatim.
+     */
+    revokeSession(request: Request, env: {
+        [key: string]: any;
+    }): Promise<void>;
+}
+export { MIN_SECRET_LENGTH, MIN_SALT_LENGTH };
 
 // ===== server.d.ts =====
 /**
