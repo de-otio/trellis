@@ -171,6 +171,11 @@ export function withModerationDeadline(
   }
 
   return {
+    // Pass the inner name through: a deadline changes WHEN core gives up, not
+    // whose classifier ran. Naming the wrapper here would split the wrapped
+    // provider's counters and cache entries in two the moment an operator
+    // configured a timeout.
+    name: provider.name,
     async moderateImage(
       input: ImageRef,
       options?: ModerationCallOptions,

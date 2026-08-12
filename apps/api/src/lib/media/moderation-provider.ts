@@ -223,6 +223,22 @@ export interface ModerationFrameDetail {
  * have their own video job model.
  */
 export interface MediaModerationProvider {
+  /**
+   * What this provider calls itself — the same token it puts in
+   * `ModerationVerdict.provider`.
+   *
+   * Optional, because adding a required member to a published seam would break
+   * every adapter already implementing it. But absence costs something real:
+   * `ModerationVerdict.provider` only exists once a call has SUCCEEDED, so on
+   * the paths where there is no verdict — a throw, a deadline breach, or a
+   * cache lookup that happens *before* the call — core has no way to attribute
+   * the work except by asking the provider. A provider that reports no name is
+   * attributed to {@link UNKNOWN_PROVIDER_NAME} on those paths.
+   *
+   * Read it through {@link moderationProviderName} rather than directly, and
+   * see the wrapper rule documented there.
+   */
+  readonly name?: string;
   /** Synchronous-style image moderation: resolves a verdict directly. */
   moderateImage(
     input: ImageRef,
@@ -238,6 +254,40 @@ export interface MediaModerationProvider {
     jobId: string,
     options?: ModerationCallOptions,
   ): Promise<ModerationVerdict>;
+}
+
+/** Attribution for a provider that reports no name of its own. */
+export const UNKNOWN_PROVIDER_NAME = "unknown";
+
+/**
+ * The provider's self-reported name, or {@link UNKNOWN_PROVIDER_NAME}.
+ *
+ * Core calls this instead of reading `.name` so that one rule holds everywhere:
+ * a name is a non-empty string or it does not count. A provider that reports
+ * `""`, whitespace, or a non-string is attributed as unknown rather than
+ * producing an empty dimension — an empty string is the value a partly-wired
+ * adapter yields, and it must not read as a distinct identity.
+ *
+ * **The wrapper rule.** A decorator around a provider (a deadline, a
+ * frame-sampling adapter, a retry shim) must PASS THE INNER NAME THROUGH, never
+ * substitute its own. The name answers "whose classifier produced this?", and
+ * wrapping does not change the answer. Substituting would split one provider's
+ * counters and cache entries across two identities the moment an operator adds
+ * a wrapper — and the split would look like a traffic shift rather than a
+ * config change.
+ *
+ * This deliberately does NOT validate the charset. Metric dimensions have their
+ * own stricter admission rule against the operator's declared set (see
+ * `isAcceptableProviderDimension`); a name that is honest but undeclared should
+ * still be usable for a cache key and a log line.
+ */
+export function moderationProviderName(
+  provider: Pick<MediaModerationProvider, "name"> | null | undefined,
+): string {
+  const name = provider?.name;
+  if (typeof name !== "string") return UNKNOWN_PROVIDER_NAME;
+  const trimmed = name.trim();
+  return trimmed.length === 0 ? UNKNOWN_PROVIDER_NAME : trimmed;
 }
 
 // ---------------------------------------------------------------------------
@@ -323,6 +373,7 @@ const NULL_PROVIDER_WARNING =
  * guard below).
  */
 export class NullModerationProvider implements MediaModerationProvider {
+  readonly name = NULL_PROVIDER_NAME;
   private readonly warn: WarnSink;
 
   constructor(warn: WarnSink = (msg, data) => console.warn(msg, data)) {
@@ -382,6 +433,7 @@ const MOCK_DEFAULT_VERDICT: ModerationVerdict = {
  * `category_b`); no real-category strings, no real imagery ever.
  */
 export class MockModerationProvider implements MediaModerationProvider {
+  readonly name = MOCK_PROVIDER_NAME;
   private imageVerdict: ModerationVerdict;
   private videoVerdict: ModerationVerdict;
   private imageResponder?: (

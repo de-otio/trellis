@@ -199,6 +199,16 @@ export class FrameSamplingVideoModerationAdapter
     this.deps = deps;
   }
 
+  /**
+   * The underlying classifier's name, passed through unchanged. This adapter
+   * supplies a video JOB MODEL; it does not classify anything itself, so it is
+   * not a separate provider identity. A getter rather than a copied field so a
+   * provider that names itself lazily is still reported correctly.
+   */
+  get name(): string | undefined {
+    return this.deps.images.name;
+  }
+
   /** Images pass straight through to the underlying classifier. */
   async moderateImage(
     input: ImageRef,

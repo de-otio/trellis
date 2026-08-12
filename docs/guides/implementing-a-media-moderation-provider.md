@@ -29,6 +29,8 @@ import type {
 } from "@de-otio/trellis";
 
 class MyProvider implements MediaModerationProvider {
+  readonly name = "my-provider";
+
   async moderateImage(
     input: ImageRef,
     options?: ModerationCallOptions,
@@ -79,6 +81,43 @@ interprets a token; the operator maps tokens to actions (see
 [Label policy](#label-policy-let-the-operator-decide) below). Do not put
 human-readable category names in a token if you would not want them in a public
 API response — treat the token as an identifier, not a description.
+
+## Name yourself
+
+```ts
+readonly name = "my-provider";   // the same token you put in verdict.provider
+```
+
+`name` is optional on the interface — adding a required member to a published
+seam would break every adapter already implementing it — but reporting it costs
+one line and absence costs something real.
+
+`ModerationVerdict.provider` only exists once a call has **succeeded**. On the
+paths where there is no verdict — a throw, a deadline breach, or a cache lookup
+that happens *before* the call — core has nothing to attribute the work to
+except what you call yourself. A provider that reports no name is recorded as
+`unknown` on exactly those paths, which are the paths an operator most wants
+attributed: the failures.
+
+Keep it identical to the token you put in `verdict.provider`. The two are the
+pre-call and post-hoc answers to the same question, and if they disagree then
+one set of counters is wrong with nothing to say which.
+
+If you write a **decorator** around another provider — a retry shim, your own
+deadline — pass the inner name straight through rather than substituting your
+own. Wrapping changes when or how core calls the classifier, not whose
+classifier it is; substituting splits one provider's counters and cache entries
+across two identities the moment an operator adds a wrapper, and the split looks
+like a traffic shift rather than a config change. Core's own wrappers
+(`withModerationDeadline`, `FrameSamplingVideoModerationAdapter`) follow this
+rule, so a stack of both still reports the innermost name.
+
+Read a name with `moderationProviderName(provider)` rather than `.name`
+directly: it applies one rule everywhere — a name is a non-empty string after
+trimming, or it does not count. Note that this is a *looser* test than the one
+for metric dimensions, which additionally requires the name to be in the
+operator's declared set. An honest but undeclared name is still fine for a cache
+key and a log line.
 
 ## Report your model version
 
@@ -327,6 +366,8 @@ Briefly, so the shape of the contract makes sense:
 ## Checklist
 
 - [ ] Every uncertainty returns `review`; nothing returns `approved` from doubt.
+- [ ] `name` reported, matching the token used in `verdict.provider` — and passed
+      through unchanged if you wrap another provider.
 - [ ] `modelVersion` reported on every verdict.
 - [ ] Every detected category reported as a label, low scores included.
 - [ ] `options.signal` honoured, including when already aborted on entry.

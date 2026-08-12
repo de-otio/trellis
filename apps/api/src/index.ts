@@ -82,6 +82,8 @@ export {
   isModerationProviderError,
   NullModerationProvider,
   assertModerationProviderAllowed,
+  moderationProviderName,
+  UNKNOWN_PROVIDER_NAME,
 } from "./lib/media/moderation-provider.js";
 export type {
   MediaModerationProvider,

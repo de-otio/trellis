@@ -44,6 +44,14 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   - **A bytes capability** so a classifier that takes an image in its request
     body needs no storage credentials of its own — the read is size-capped and
     pinned to the recorded version.
+  - **A self-identifying provider.** `MediaModerationProvider.name` — optional,
+    so no existing adapter breaks — lets core attribute work on the paths where
+    there is no verdict to read a provider off: a throw, a deadline breach, or a
+    cache lookup that precedes the call. Read it with
+    `moderationProviderName()`, which treats an empty or non-string name as
+    `unknown` rather than as an identity. Core's own wrappers pass the inner
+    name through unchanged, so putting a classifier behind a deadline and a
+    frame-sampling adapter does not split its counters across three identities.
   - **Pins, model versions, and abort signals** on the seam itself:
     `MediaPin` (version id / entity tag / content hash) on `ImageRef` and
     `S3Ref`, `modelVersion` on a verdict, `AbortSignal` on every method, and a

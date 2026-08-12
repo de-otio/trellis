@@ -40,6 +40,9 @@ const EXPECTED_EXPORTS = [
   "setMediaReviewPromotion",
   "ModerationMetrics",
   "withModerationDeadline",
+  // Provider self-identification: the resolver and the fallback it returns.
+  "moderationProviderName",
+  "UNKNOWN_PROVIDER_NAME",
 ].sort();
 
 describe("public API surface (@de-otio/trellis)", () => {
@@ -74,6 +77,17 @@ describe("public API surface — the media-moderation seam", () => {
 
   it("exposes the pieces that let an image-only classifier moderate video", () => {
     expect(typeof publicApi.FrameSamplingVideoModerationAdapter).toBe("function");
+  });
+
+  it("exposes provider self-identification, resolving through the package root", () => {
+    expect(typeof publicApi.moderationProviderName).toBe("function");
+    expect(publicApi.UNKNOWN_PROVIDER_NAME).toBe("unknown");
+    // Asserted through the published surface, not the module: a consumer
+    // importing this must get the fallback behaviour, not just the symbol.
+    expect(publicApi.moderationProviderName({ name: "  acme " })).toBe("acme");
+    expect(publicApi.moderationProviderName({})).toBe(
+      publicApi.UNKNOWN_PROVIDER_NAME,
+    );
   });
 
   it("exposes the operator-owned policy and its refusal", () => {
