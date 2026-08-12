@@ -183,4 +183,48 @@ console.log('');
 console.log('All ' + targets.length + ' entry point(s) loaded cleanly.');
 "
 
+# The extension-api tarball was packed and installed above purely to satisfy
+# trellis's dependency on it — nothing ever loaded it. That gap is why an
+# `exports` map added to @de-otio/trellis in 2026-08 broke 20 of 21 consumer
+# entry points without any local gate noticing: every other check runs against
+# src/, and only a packed-tarball load exercises resolution. Extension authors
+# consume this package directly, so it gets the same treatment.
+#
+# The contract asserted here is the PACKAGE ROOT, in both module systems.
+# Deep specifiers (".../lib/index.js") are deliberately NOT part of the
+# contract — the exports map exposes the root only.
+echo "==> loading @de-otio/trellis-extension-api from the packed tarball"
+node --input-type=module -e "
+const mod = await import('@de-otio/trellis-extension-api');
+if (typeof mod.EXTENSION_API_VERSION !== 'string') {
+  console.error('::error::EXTENSION_API_VERSION missing or not a string on the ESM import');
+  process.exit(1);
+}
+console.log('  ✓ ESM import — EXTENSION_API_VERSION', mod.EXTENSION_API_VERSION);
+"
+node --input-type=commonjs -e "
+const mod = require('@de-otio/trellis-extension-api');
+if (typeof mod.EXTENSION_API_VERSION !== 'string') {
+  console.error('::error::EXTENSION_API_VERSION missing or not a string on the CJS require');
+  process.exit(1);
+}
+console.log('  ✓ CJS require — EXTENSION_API_VERSION', mod.EXTENSION_API_VERSION);
+"
+
+# The published version must match the constant inside the packed artifact.
+# The in-repo lockstep gate compares source-to-source; this compares what a
+# consumer actually installs, which is the thing that can drift at pack time.
+echo "==> asserting the packed extension-api version matches its exported constant"
+node --input-type=module -e "
+const { createRequire } = await import('node:module');
+const require = createRequire(process.cwd() + '/');
+const pkg = require('@de-otio/trellis-extension-api/package.json');
+const mod = await import('@de-otio/trellis-extension-api');
+if (pkg.version !== mod.EXTENSION_API_VERSION) {
+  console.error('::error::packed extension-api version ' + pkg.version + ' != EXTENSION_API_VERSION ' + mod.EXTENSION_API_VERSION);
+  process.exit(1);
+}
+console.log('  OK: packed version and exported constant agree (' + pkg.version + ')');
+"
+
 echo "==> smoke test passed"

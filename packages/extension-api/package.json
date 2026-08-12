@@ -1,8 +1,15 @@
 {
   "name": "@de-otio/trellis-extension-api",
-  "version": "0.8.1",
+  "version": "0.9.0",
   "description": "Shared types for Trellis extensions: TrellisExtension, Route, strategy interfaces",
   "type": "module",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
   "main": "./lib/index.js",
   "types": "./lib/index.d.ts",
   "scripts": {
@@ -16,6 +23,9 @@
   "license": "MIT",
   "files": [
     "lib",
+    "src",
+    "!src/**/*.d.ts",
+    "!src/**/*.d.ts.map",
     "README.md"
   ],
   "dependencies": {

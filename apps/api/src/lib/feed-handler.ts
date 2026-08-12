@@ -623,8 +623,7 @@ export class FeedHandler {
       let result = hasMore ? posts.slice(0, limit) : posts;
 
       // Feed personalization via extension feedStrategy was removed in the
-      // redesign; recommendationStrategy (pull-model) replaces the push-model
-      // personalize hook. Leaving options.personalized as a no-op for now.
+      // redesign and nothing replaced it. `options.personalized` is a no-op.
 
       const nextCursor =
         hasMore && result.length > 0

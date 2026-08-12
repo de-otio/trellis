@@ -228,8 +228,8 @@ export class RecapService {
   /**
    * Call the registered extension's `extendRecap`, if it provides one.
    * Fire-and-catch: an extension failure never fails the core recap.
-   * Mirrors hook-dispatcher.ts's per-call timeout (without the persistent
-   * circuit breaker — recap generation is rare/batched, not hot-path).
+   * Bounded by a per-call timeout; no persistent circuit breaker, since
+   * recap generation is rare/batched rather than hot-path.
    */
   private async callExtendRecap(
     payload: RecapPayload,

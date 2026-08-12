@@ -205,7 +205,7 @@ export interface ExtensionRecapSubject {
  */
 import type { ZodSchema } from "zod";
 import type { Route } from "./route-types.js";
-import type { ExtensionCircleEntityStatus, ExtensionCircleMember, ExtensionCircleTierStatus, ExtensionEntity, ExtensionEntityRelationship, ExtensionGlanceItem, ExtensionPaginatedResult, ExtensionPost, ExtensionRecapPayload, ExtensionRecapSubject, ExtensionRelationship, ExtensionVisiblePost } from "./dto.js";
+import type { ExtensionCircleEntityStatus, ExtensionCircleMember, ExtensionCircleTierStatus, ExtensionEntityRelationship, ExtensionGlanceItem, ExtensionPaginatedResult, ExtensionRecapPayload, ExtensionRecapSubject, ExtensionRelationship, ExtensionVisiblePost } from "./dto.js";
 /**
  * Opaque tenant identifier — a branded string **minted only by core**.
  *
@@ -373,40 +373,6 @@ export interface ExtensionContext {
     config: Record<string, string>;
 }
 /**
- * VERSIONED CONTRACT — any signature change to any hook in this interface
- * requires a semver bump of `@de-otio/trellis-extension-api`.
- *
- * Hooks are called by Trellis core after the named operation completes.
- * All hooks are optional; omit them if the extension has no interest in
- * the event.
- *
- * Compatibility rules:
- * - Adding a new optional hook → minor bump (e.g. 0.2.x → 0.3.0).
- * - Changing the signature of an existing hook (parameter type, order,
- *   return type) → major bump if 1.x, minor bump while still 0.x
- *   (breaking for consumers regardless — coordinate with consuming
- *   applications and any other known extension authors before merging).
- * - Removing a hook → same as a signature change.
- *
- * Keep this interface in sync with `EXTENSION_API_VERSION` (below) and
- * the `version` field in `packages/extension-api/package.json`.
- */
-export interface ExtensionHooks {
-    /** Called after a post is created */
-    onPostCreated?: (post: ExtensionPost, ctx: ExtensionContext) => Promise<void>;
-    /** Called after an entity is created */
-    onEntityCreated?: (entity: ExtensionEntity, ctx: ExtensionContext) => Promise<void>;
-    /** Called after a relationship is created between users/entities */
-    onRelationshipCreated?: (userId: string, targetId: string, targetType: string, ctx: ExtensionContext) => Promise<void>;
-    /** Called when relationship scores are recomputed */
-    onScoreRecompute?: (userId: string, scores: Array<{
-        targetId: string;
-        score: number;
-    }>, ctx: ExtensionContext) => Promise<void>;
-    /** Called after an entity is deleted */
-    onEntityDeleted?: (entityId: string, entityType: string, ctx: ExtensionContext) => Promise<void>;
-}
-/**
  * Cadence at which a declared job runs.
  *
  * O-1 v1 ships the two coarse presets the lane-02 reminder sweep needs; the
@@ -450,6 +416,18 @@ export interface ExtensionJobContext {
     tenant(tenantId: TenantId): ScopedDb;
     /** Deployment stage (dev, prod) — for logging/metrics. */
     stage: string;
+    /**
+     * Aborts when the runner's job timeout fires.
+     *
+     * The runner cannot interrupt a running job body; it can only stop waiting
+     * on it. A long job should therefore check `signal.aborted` between batches
+     * (and forward `signal` to any fetch/query that accepts one) so a timed-out
+     * job stops doing work instead of running on unobserved.
+     *
+     * Always supplied by core. It was previously present at runtime but absent
+     * from this type, so cooperative cancellation required a cast.
+     */
+    readonly signal: AbortSignal;
 }
 /**
  * An extension-declared scheduled job (O-1 design §5.2).
@@ -493,45 +471,7 @@ export interface ExtensionJobDecl {
  *   - Bump alongside every `package.json` version change.
  *   - Never change one without changing the other.
  */
-export declare const EXTENSION_API_VERSION: "0.8.1";
-/** Signal provider for domain-specific relationship scoring */
-export interface RelationshipSignalProvider {
-    /**
-     * Compute additional score signals for a relationship.
-     * Return a value 0.0-1.0 that gets blended with the base score.
-     * Return null/undefined to not affect the score.
-     */
-    computeSignal(userId: string, targetId: string, targetType: "user" | "entity", context: RelationshipSignalContext): Promise<number | null>;
-}
-/** Context passed to signal providers */
-export interface RelationshipSignalContext {
-    /** Current computed score */
-    currentScore: number;
-    /** Relationship tier (0-3) */
-    tier: number;
-    /** Entity metadata (if targetType is "entity") */
-    entityMetadata?: Record<string, unknown>;
-}
-/** A filterable entity property for discovery */
-export interface DiscoveryFacet {
-    /** Metadata field name */
-    field: string;
-    /** Filter type */
-    type: "exact" | "range" | "geo";
-    /** Human-readable label */
-    label: string;
-}
-export interface RecommendationStrategy {
-    /** Generate domain-specific product/content recommendations */
-    getRecommendations(entityId: string, ctx: ExtensionContext): Promise<Recommendation[]>;
-}
-export interface Recommendation {
-    type: string;
-    title: string;
-    description: string;
-    url?: string;
-    metadata?: Record<string, unknown>;
-}
+export declare const EXTENSION_API_VERSION: "0.9.0";
 /** Display-only Actor fields that extensions can customize */
 export interface ActorEnrichment {
     /** Actor summary / bio — rendered on remote instances */
@@ -554,28 +494,6 @@ export interface ActorEnrichment {
      * @context, preferredUsername.
      */
     properties?: Record<string, string>;
-}
-export interface TaxonomySeedDimension {
-    code: string;
-    name: string;
-    description?: string;
-}
-export interface TaxonomySeedCategory {
-    code: string;
-    name: string;
-    dimensionCode: string;
-    description?: string;
-}
-export interface TaxonomySeedTaxon {
-    id: string;
-    name: string;
-    categoryCode: string;
-    description?: string;
-}
-export interface TaxonomySeedData {
-    dimensions: TaxonomySeedDimension[];
-    categories: TaxonomySeedCategory[];
-    taxons: TaxonomySeedTaxon[];
 }
 /**
  * Response from an extension route handler.
@@ -672,10 +590,6 @@ export interface TrellisExtension {
     routes: Route[];
     /** Zod schema for Entity.metadata when entityType matches this extension */
     metadataSchema: ZodSchema;
-    /** Taxonomy seed data */
-    taxonomySeed?: TaxonomySeedData;
-    /** Lifecycle hooks — core calls these after operations complete */
-    hooks?: ExtensionHooks;
     /**
      * Scheduled jobs this extension declares (O-1 design §5.2).
      * Run in-process in the API container with cluster-wide single-flight.
@@ -691,25 +605,6 @@ export interface TrellisExtension {
      * surface. Omit if the extension performs no cross-tenant reads.
      */
     crossTenantRead?: string[];
-    /**
-     * Domain-specific relationship scoring signals.
-     * Extensions can boost or adjust relationship scores based on
-     * domain-specific signals (e.g., breed similarity for dogs).
-     */
-    relationshipSignalProvider?: RelationshipSignalProvider;
-    /**
-     * Entity-to-entity relationship types this extension declares.
-     * These are registered globally and available for all entities of this type.
-     * Example: ["PACK_MATE", "WALK_BUDDY"] for a dog extension.
-     */
-    entityRelationshipTypes?: string[];
-    /**
-     * Searchable entity properties for discovery filtering.
-     * Extensions declare which metadata fields are filterable.
-     */
-    discoveryFacets?: DiscoveryFacet[];
-    /** Product recommendation strategy */
-    recommendationStrategy?: RecommendationStrategy;
     /** Core-wrapped extension routes — preferred over raw `routes` */
     extensionRoutes?: ExtensionRouteDefinition[];
     /** Zod schema declaring required env var keys — validated against scoped values only */
@@ -745,8 +640,6 @@ export interface TrellisExtension {
      * Optional — omit if the extension has no recap aggregates to attach.
      */
     extendRecap?: (payload: ExtensionRecapPayload, subject: ExtensionRecapSubject, ctx: ExtensionContext) => Promise<Record<string, unknown>>;
-    /** Called once at startup with the extension's scoped context */
-    init?: (ctx: ExtensionContext) => Promise<void>;
     /** Called on server shutdown (SIGTERM/SIGINT) */
     shutdown?: () => Promise<void>;
 }
@@ -758,7 +651,7 @@ export {};
  *
  * Public types for building Trellis extensions.
  */
-export type { TrellisExtension, ExtensionContext, ExtensionGraphService, ExtensionDb, ScopedDb, ScopedDelegate, TenantId, ExtensionHooks, ExtensionJobDecl, ExtensionJobContext, ExtensionJobSchedule, CrossTenantReadDelegate, ExtensionRouteDefinition, ExtensionHandler, ExtensionSession, ExtensionResponse, DiscoverDb, RelationshipSignalProvider, RelationshipSignalContext, DiscoveryFacet, RecommendationStrategy, Recommendation, ActorEnrichment, TaxonomySeedData, TaxonomySeedDimension, TaxonomySeedCategory, TaxonomySeedTaxon, } from "./extension.js";
+export type { TrellisExtension, ExtensionContext, ExtensionGraphService, ExtensionDb, ScopedDb, ScopedDelegate, TenantId, ExtensionJobDecl, ExtensionJobContext, ExtensionJobSchedule, CrossTenantReadDelegate, ExtensionRouteDefinition, ExtensionHandler, ExtensionSession, ExtensionResponse, DiscoverDb, ActorEnrichment, } from "./extension.js";
 export { EXTENSION_API_VERSION } from "./extension.js";
 export type { Route, RoutePattern, Middleware, MiddlewareContext, } from "./route-types.js";
 export type { ExtensionNodeType, ExtensionCircleTier, ExtensionConnectionMethod, ExtensionPaginatedResult, ExtensionEntity, ExtensionPost, ExtensionRelationship, ExtensionCircleMember, ExtensionCircleTierStatus, ExtensionCircleEntityStatus, ExtensionGlanceItem, ExtensionVisiblePost, ExtensionEntityRelationship, ExtensionRecapWindow, ExtensionRecapPayload, ExtensionRecapSubject, } from "./dto.js";

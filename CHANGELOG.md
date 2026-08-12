@@ -15,6 +15,42 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ## [Unreleased]
 
+### Removed
+
+- **`@de-otio/trellis-extension-api` 0.9.0 — BREAKING: seven declared
+  extension points that core never invoked are gone.** `hooks` (all five
+  lifecycle callbacks, plus the `ExtensionHooks` type and core's hook
+  dispatcher), `init`, `taxonomySeed`, `relationshipSignalProvider`,
+  `entityRelationshipTypes`, `discoveryFacets`, and `recommendationStrategy`,
+  together with the types that existed only to serve them
+  (`TaxonomySeedData`/`Dimension`/`Category`/`Taxon`,
+  `RelationshipSignalProvider`, `RelationshipSignalContext`, `DiscoveryFacet`,
+  `RecommendationStrategy`, `Recommendation`).
+
+  These type-checked, registered without complaint, and then did nothing. Two
+  of them were worse than silent: `entityRelationshipTypes` and
+  `discoveryFacets` were read at registration **only to log themselves**, so
+  an author saw `[extensions] "x" registered discoveryFacets: breed(exact)` at
+  boot and reasonably concluded the facets were live. Nothing consumed them.
+
+  This is a **removal, not a deprecation**, and it lands before 1.0
+  deliberately: from 1.0 the published contract accretes external dependents,
+  and dead surface removed later is a breaking change, whereas dead surface
+  removed now is a correction. Reintroducing any of these when a real consumer
+  exists is an additive, non-breaking change.
+
+  **If you declare any of them:** delete the declaration and the code behind
+  it. Nothing observable changes — it was never running. The removals are
+  visible in
+  `packages/extension-api/etc/public-api.snapshot.d.ts`.
+
+  Documentation that promised behaviour for these fields has been corrected
+  rather than deleted: the graph concept doc no longer shows an
+  `extension_signals(...)` term in the scoring formula (the scoring engine has
+  no extension input and never had one), and the standalone-testing doc no
+  longer claims the fixture verifies that "hooks fire after the operation
+  commits".
+
 ### Added
 
 - **A media-moderation backend no longer has to be shaped like one particular
@@ -120,6 +156,42 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   notification for such an object is not told it settled.
 
 ### Changed
+
+- **`@de-otio/trellis-extension-api` 0.9.0 — package hygiene for extension
+  authors.**
+
+  - **`ExtensionJobContext.signal` is now part of the public type.** Core
+    always supplied it; the type did not declare it, so a job that wanted to
+    observe its own timeout had to cast. Cooperative cancellation is now
+    expressible without one.
+  - **The package compiles under `NodeNext`** instead of `node` resolution.
+    This package is `"type": "module"`, and NodeNext is what makes TypeScript
+    *enforce* the mandatory `.js` specifier on relative imports — under the
+    old setting a missing extension compiled clean here and failed only at
+    runtime in a consumer. Verified by removing one and watching `TS2835`
+    fire.
+  - **BREAKING (resolution): an `exports` map is declared, exposing the
+    package root and `./package.json` only.** Deep specifiers such as
+    `@de-otio/trellis-extension-api/lib/index.js` now raise
+    `ERR_PACKAGE_PATH_NOT_EXPORTED`. No known consumer used one — a repo-wide
+    search across core and the reference vertical found zero. `main`/`types`
+    remain for older resolvers.
+
+    Declaring `exports` **disables Node's extension probing**, which is how an
+    identical map on `@de-otio/trellis` broke twenty of twenty-one consumer
+    entry points earlier this month. So this map was verified the way that
+    incident said to verify one — by packing a tarball, installing it into a
+    fresh project, and loading it — and the consumer-install smoke test now
+    loads `@de-otio/trellis-extension-api` from the packed tarball under both
+    ESM and CJS, and cross-checks the packed version against
+    `EXTENSION_API_VERSION`. That coverage did not exist before; the script
+    packed this package and never loaded it, which is precisely why the
+    sibling package's breakage reached a merge.
+  - **The published tarball now ships `src/`.** Declaration maps were already
+    published and pointed at sources that were not, so go-to-definition
+    dangled. Compiled `.d.ts`/`.d.ts.map` artifacts that accumulate under
+    `src/` in a working tree are explicitly excluded, so a dirty tree cannot
+    leak them into a release.
 
 - **Six read paths could disclose a post to someone its author had not
   admitted.** All six are closed. Every one is a *narrowing*: nothing changes
