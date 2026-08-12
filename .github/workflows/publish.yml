@@ -87,14 +87,19 @@ jobs:
             exit 1
           fi
 
-      # Consumer-install smoke for @de-otio/trellis: pack, install with
-      # --omit=dev into a fresh project, require every published entry
-      # point. Catches runtime imports of devDeps and unshipped
-      # relative imports before publishing. Skipped for the
-      # extension-api package because that one has no Lambda/server
-      # entry points to load.
-      - name: Consumer-install smoke (trellis only)
-        if: steps.pkg.outputs.name == '@de-otio/trellis'
+      # Consumer-install smoke: pack, install with --omit=dev into a fresh
+      # project, load every published entry point. Catches runtime imports of
+      # devDeps and unshipped relative imports before publishing.
+      #
+      # This used to be skipped for extension-api, on the grounds that it "has
+      # no Lambda/server entry points to load". That stopped being true in
+      # 0.9.0: extension-api now declares an `exports` map, and declaring one
+      # DISABLES Node's extension probing — the failure mode that broke twenty
+      # of twenty-one entry points on @de-otio/trellis earlier this month. A
+      # resolution defect is invisible to every gate that runs against `src/`,
+      # so the one gate that packs a real tarball is exactly the one the
+      # riskiest publish must not skip. The script covers both packages.
+      - name: Consumer-install smoke test
         run: bash apps/api/scripts/smoke-pack.sh
 
       - name: Select dist-tag from version
