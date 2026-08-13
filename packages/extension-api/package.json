@@ -1,6 +1,6 @@
 {
   "name": "@de-otio/trellis-extension-api",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "Shared types for Trellis extensions: TrellisExtension, Route, strategy interfaces",
   "type": "module",
   "exports": {
@@ -14,6 +14,7 @@
   "types": "./lib/index.d.ts",
   "scripts": {
     "build": "tsc --build tsconfig.json",
+    "test:types": "tsc --build tsconfig.json && tsc --noEmit -p tsconfig.type-tests.json",
     "dev": "tsc --watch",
     "prepare": "tsc --build tsconfig.json",
     "lint": "prettier --check .",
