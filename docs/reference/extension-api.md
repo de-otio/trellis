@@ -44,8 +44,14 @@ expected contract version.
 Import from the **package root**. The package declares an `exports` map that
 exposes the root only, so deep specifiers into `lib/` do not resolve.
 
-> **Current version: `0.9.0`.** This line is checked against the
+> **Current version: `0.9.1`.** This line is checked against the
 > `EXTENSION_API_VERSION` constant in CI, so it cannot drift.
+>
+> `0.9.0 → 0.9.1` is **additive**. Every contract type that carries the scoped
+> database gained an optional `TModels` parameter, defaulted so that omitting
+> it changes nothing. Declaring it replaces `unknown` args and results on your
+> own models with your generated Prisma types — see
+> [Typing your own models](#typing-your-own-models).
 >
 > `0.8.1 → 0.9.0` is **breaking**. It removed seven declared extension points
 > that core never invoked — `hooks` (all five), `init`, `taxonomySeed`,
@@ -305,7 +311,9 @@ below) and cannot forge one from a user-supplied string.
 `ScopedDb` exposes the tenant-carrying core delegates (`entity`, `post`,
 `postMedia`, the taxonomy tables — `taxonomyTaxon`, `taxonomyCategory`,
 `taxonomyDimension` — and `productTaxonomyTag`) by name, plus the extension's
-own composed (`ext_*`) models via an index signature. Security-sensitive
+own composed (`ext_*`) models via an index signature — or, better, via the
+model map described in [Typing your own models](#typing-your-own-models).
+Security-sensitive
 tables (`user`, `securityEvent`, `featureToggle`, `mfaEnrollment`,
 `encryptionKey`, `session`, admin tables) and two delegates that cannot carry
 a per-tenant column (`activity`, which is global/federation data, and
@@ -350,6 +358,59 @@ A few further guarantees, useful when debugging a rejected call:
 
 All violations throw a `ScopedDbError` (or the corresponding not-found
 condition for a by-id op) rather than silently narrowing or widening scope.
+
+### Typing your own models
+
+By default `ScopedDb` reaches your own models through an index signature, so
+their arguments and results are `unknown` and a misspelled model name compiles
+and fails at runtime. Since `0.9.1` you can close both gaps by declaring a
+model map, using `ScopedOf<T>` to narrow each generated Prisma delegate to the
+scoped operation set:
+
+```ts
+import type { Prisma } from "@prisma/client";
+import type { ScopedOf, TrellisExtension } from "@de-otio/trellis-extension-api";
+
+type DogModels = {
+  extDogProfile: ScopedOf<Prisma.ExtDogProfileDelegate>;
+  extDogWalk: ScopedOf<Prisma.ExtDogWalkDelegate>;
+};
+
+export const dogExtension: TrellisExtension<DogModels> = {/* … */};
+```
+
+The parameter threads through `ExtensionContext`, `ExtensionDb`,
+`ExtensionJobContext`, `ExtensionRouteDefinition` and `ExtensionJobDecl`, so
+inside a route handler or a job body:
+
+```ts
+const rows = await ctx.db.tenant(tid).extDogProfile.findMany({
+  where: { breed: "collie" }, // typed against your schema
+});
+rows[0].breed; // string, not unknown
+
+ctx.db.tenant(tid).extDogProfiles; // compile error — no such model
+```
+
+`ScopedOf<T>` keeps exactly the thirteen scoped operations that `T` has and
+drops everything else, `$queryRaw` included, so the raw-SQL escape hatch stays
+structurally absent even when you hand it a full Prisma delegate. Operations
+your Prisma version does not have are simply absent rather than an error.
+
+Two notes on the design, both deliberate:
+
+- **The default stays open.** Omitting `TModels` gives you the previous
+  behaviour, index signature and all. This keeps `0.9.1` additive, but it also
+  means an extension that does not declare a map keeps the misspelling
+  hazard. Declaring one is cheap; do it.
+- **`handle` and `extendRecap` are declared as methods**, not as function-typed
+  properties. Under `strictFunctionTypes` a function-typed property compares
+  parameters contravariantly, and a route taking `ExtensionContext<DogModels>`
+  would then not be assignable to the `ExtensionContext` core's registry holds
+  — which would make the feature unusable for any extension with routes.
+  Method parameters compare bivariantly, which is what lets a typed extension
+  register with untyped core. The property is asserted in
+  `packages/extension-api/type-tests/generic-scoped-db.test-d.ts`.
 
 ### `graphService` — read-only graph access
 

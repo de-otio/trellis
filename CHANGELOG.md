@@ -15,6 +15,45 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ## [Unreleased]
 
+### Added
+
+- **`@de-otio/trellis-extension-api` 0.9.1 — an extension can now type its own
+  models.** `ScopedDb` takes an optional `TModels` parameter, threaded through
+  `ExtensionDb`, `ExtensionContext`, `ExtensionJobContext`,
+  `ExtensionRouteDefinition`, `ExtensionJobDecl`, `ExtensionHandler` and
+  `TrellisExtension`. New exports: `ScopedOf`, `ScopedOperation`,
+  `ExtensionModelMap`, `OpenScopedModels`, `CoreScopedModels`.
+
+  ```ts
+  type DogModels = { extDogProfile: ScopedOf<Prisma.ExtDogProfileDelegate> };
+  export const dogExtension: TrellisExtension<DogModels> = {/* … */};
+  ```
+
+  `ctx.db.tenant(tid).extDogProfile.findMany({ where: … })` is then typed
+  against the schema, and `extDogProfiles` is a compile error rather than a
+  runtime `undefined`. `ScopedOf<T>` keeps exactly the thirteen scoped
+  operations `T` has and structurally drops the rest, `$queryRaw` included.
+
+  **Additive.** Every parameter is defaulted to the previous open index
+  signature, so an extension that declares nothing is unaffected — which also
+  means it keeps the misspelling hazard. Declaring the map is the fix.
+
+  Two declaration sites changed form: `ExtensionRouteDefinition.handle` and
+  `TrellisExtension.extendRecap` are now methods rather than function-typed
+  properties. Under `strictFunctionTypes` the property form compares
+  parameters contravariantly, which would have made a typed extension
+  unassignable to the untyped `TrellisExtension` core's registry holds — the
+  feature would have been unusable for any extension with routes. Method
+  parameters compare bivariantly. This is a variance change only; no call
+  signature moved.
+
+  Verified by type-level tests
+  (`packages/extension-api/type-tests/generic-scoped-db.test-d.ts`) run as
+  their own CI step, because `expectTypeOf` in a vitest file is a runtime
+  no-op and `apps/api`'s `tsc --build` excludes `test/`. Every negative case
+  is an `@ts-expect-error`, so the check fails if the error it asserts stops
+  occurring.
+
 ### Removed
 
 - **`@de-otio/trellis-extension-api` 0.9.0 — BREAKING: seven declared

@@ -11,6 +11,11 @@ export type {
   ExtensionDb,
   ScopedDb,
   ScopedDelegate,
+  ScopedOperation,
+  ScopedOf,
+  ExtensionModelMap,
+  OpenScopedModels,
+  CoreScopedModels,
   TenantId,
   ExtensionJobDecl,
   ExtensionJobContext,
@@ -26,12 +31,7 @@ export type {
 
 export { EXTENSION_API_VERSION } from "./extension.js";
 
-export type {
-  Route,
-  RoutePattern,
-  Middleware,
-  MiddlewareContext,
-} from "./route-types.js";
+export type { Route, RoutePattern, Middleware, MiddlewareContext } from "./route-types.js";
 
 // Structural DTOs — the versioned shapes of core data that extensions
 // consume (hook payloads, graph query results). Core asserts it satisfies
