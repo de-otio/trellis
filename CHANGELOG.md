@@ -54,6 +54,58 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   is an `@ts-expect-error`, so the check fails if the error it asserts stops
   occurring.
 
+### Changed
+
+- **`@de-otio/trellis-extension-api` 0.9.2 — a partial model-map delegate now
+  fails on the map, not two packages away.** `ExtensionModelMap` was
+  `Record<string, object>` while `OpenScopedModels` — the default, and what
+  core's registry holds — has an index signature of a full `ScopedDelegate`. A
+  map member declaring fewer than all thirteen scoped operations therefore
+  satisfied the constraint at its declaration and failed at the extension's
+  `registerExtension(...)` call site in the application, with a message naming
+  neither the map nor the fix. The constraint is now
+  `Record<string, ScopedDelegate>` — exactly the condition for registering into
+  core's registry, so the error arrives where the author can act on it and
+  lists the missing operations.
+
+  ```ts
+  // ✓ the hand-written form: extend the contract shape, narrow what you use
+  interface DogPrivateDelegate extends ScopedDelegate {
+    findUnique(args: unknown): Promise<DogPrivateRow | null>;
+  }
+  ```
+
+  This matters because hand-written maps are ordinary, not exotic: an extension
+  whose Prisma client is generated from a composed schema cannot import its own
+  model types at the time its package builds, so the documented
+  `ScopedOf<Prisma.XDelegate>` recipe is unavailable to it. That path is
+  unaffected — a generated delegate satisfies the tighter constraint, verified
+  against a real generated client rather than a fixture.
+
+  **No runtime component**: the emitted JavaScript is identical. Shipped as a
+  patch deliberately — core fails startup on a differing _minor_ while the API
+  is `0.x`, so releasing a type-only tightening as `0.10.0` would take down
+  every extension built against `0.9.1` until each was rebuilt.
+
+  **One behaviour is retracted**, and it was documented: `ScopedOf<T>` still
+  drops operations `T` lacks rather than erroring, but the result must now
+  satisfy `ExtensionModelMap`, so a Prisma upgrade that removes a scoped
+  operation becomes a compile error on the map. That is the intended trade — a
+  delegate that can no longer serve the scoped surface should say so at build
+  time rather than at registration.
+
+  **Who has to change:** an extension declaring a model map whose member is
+  incomplete _and_ which exposes no `extensionRoutes`, `jobs`, or `extendRecap`
+  — the only surfaces through which `TModels` is compared at registration. Such
+  an extension gains nothing from the map, so the case is expected to be empty;
+  every other incomplete map was already failing at the consumer.
+
+  The type-test suite gained the negative that would have caught this at
+  `0.9.1`, plus the corrected hand-written form as a positive. The suite's
+  existing negatives covered model _names_ and value types; none covered
+  delegate _completeness_, because its fixture delegate is complete by
+  construction.
+
 ### Removed
 
 - **`@de-otio/trellis-extension-api` 0.9.0 — BREAKING: seven declared

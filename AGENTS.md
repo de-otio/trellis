@@ -68,23 +68,33 @@ CI and this file is not.
    specifier such as `.../lib/index.js` raises
    `ERR_PACKAGE_PATH_NOT_EXPORTED`.
 
-4. **Register before the server starts.** `registerExtension(ext)` must run
+4. **A hand-written model map must declare all thirteen operations.** If you
+   type your own models (`TrellisExtension<MyModels>`) and cannot import
+   generated Prisma delegates — common, since a composed schema generates its
+   client after your package builds — write each delegate as
+   `interface X extends ScopedDelegate` and narrow only the operations you use.
+   Declaring just the one operation you call satisfies nothing: `ScopedDelegate`
+   is exactly the shape core's registry holds, so a partial delegate is rejected
+   on the map, listing what is missing. Before `0.9.2` it was accepted there and
+   failed at your `registerExtension(...)` call instead.
+
+5. **Register before the server starts.** `registerExtension(ext)` must run
    before `startServer()`; core never imports an extension itself.
    Registering two extensions with the same `id` is rejected. `id` doubles as
    the entity type and the route mount prefix (`/api/ext/{id}/{path}`).
 
-5. **Declare `extensionApiVersion: EXTENSION_API_VERSION`.** Core then
+6. **Declare `extensionApiVersion: EXTENSION_API_VERSION`.** Core then
    compares versions at boot and **fails startup** on an incompatible pairing
    instead of serving traffic with a mismatched contract. While the API is
    `0.x`, a differing _minor_ is breaking. Omitting the field is legal but
    gives up that protection.
 
-6. **A long job must observe its `signal`.** The runner cannot interrupt a
+7. **A long job must observe its `signal`.** The runner cannot interrupt a
    running job body — it can only stop waiting on it. Check
    `jobCtx.signal.aborted` between batches and forward it to anything that
    accepts one, or a timed-out job keeps working unobserved.
 
-7. **You cannot reach another tenant's data by accident, and should not try
+8. **You cannot reach another tenant's data by accident, and should not try
    on purpose.** `ctx.db.tenant(tid)` is tenant-bound by construction.
    Cross-tenant reads go only through `ctx.db.discover(reason)`, restricted to
    the models you declared in `crossTenantRead`, with a visibility floor
@@ -92,7 +102,7 @@ CI and this file is not.
    you find yourself wanting a raw client, the design is wrong — say so rather
    than working around the seam.
 
-8. **No third-party trackers, analytics SDKs, or ad-network integrations** in
+9. **No third-party trackers, analytics SDKs, or ad-network integrations** in
    server-side request handling, and client metadata only through the
    sanctioned anonymized, retention-bound paths. Extension review blocks on a
    violation. See
