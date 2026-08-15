@@ -44,8 +44,16 @@ expected contract version.
 Import from the **package root**. The package declares an `exports` map that
 exposes the root only, so deep specifiers into `lib/` do not resolve.
 
-> **Current version: `0.9.1`.** This line is checked against the
+> **Current version: `0.9.2`.** This line is checked against the
 > `EXTENSION_API_VERSION` constant in CI, so it cannot drift.
+>
+> `0.9.1 → 0.9.2` tightens `ExtensionModelMap` from `Record<string, object>` to
+> `Record<string, ScopedDelegate>`, with **no runtime change**. If you declare a
+> model map by hand, each delegate must now carry all thirteen scoped
+> operations — write `interface X extends ScopedDelegate` and narrow only what
+> you use. A map that violated this already failed, but at the application's
+> `registerExtension(...)` call rather than on the map; it now fails on the map
+> and names the missing operations. The generated-Prisma recipe is unaffected.
 >
 > `0.9.0 → 0.9.1` is **additive**. Every contract type that carries the scoped
 > database gained an optional `TModels` parameter, defaulted so that omitting
@@ -395,7 +403,63 @@ ctx.db.tenant(tid).extDogProfiles; // compile error — no such model
 `ScopedOf<T>` keeps exactly the thirteen scoped operations that `T` has and
 drops everything else, `$queryRaw` included, so the raw-SQL escape hatch stays
 structurally absent even when you hand it a full Prisma delegate. Operations
-your Prisma version does not have are simply absent rather than an error.
+your Prisma version does not have are dropped from the result rather than
+raising an error inside `ScopedOf` — but the result must still satisfy
+`ExtensionModelMap` (see below), so a Prisma upgrade that removes a scoped
+operation surfaces as a compile error on your map.
+
+#### When you cannot import Prisma types
+
+The recipe above assumes `Prisma.ExtDogProfileDelegate` exists at the moment
+your extension package compiles. Often it does not: if your Prisma client is
+generated from a schema composed at deploy time, the bare `@prisma/client`
+exports nothing — not even types — until generation runs, and your package's
+build may run before it. Write the delegate by hand in that case.
+
+Since `0.9.2`, each map member must satisfy `ScopedDelegate` — all thirteen
+operations. That is not a style rule: it is exactly the condition for your
+extension to register into core's untyped registry, so requiring it here is
+what makes a mistake fail on your map instead of at `registerExtension(...)`
+in the application, with a message naming neither the map nor the fix.
+
+So extend the contract shape and narrow only what you use:
+
+```ts
+import type { ScopedDelegate, ScopedOf } from "@de-otio/trellis-extension-api";
+
+export interface DogPrivateRow {
+  microchip: string | null;
+  passport: string | null;
+}
+
+// `extends ScopedDelegate` supplies the other twelve operations at the erased
+// contract types; only `findUnique` is narrowed to this model's row.
+interface DogPrivateDelegate extends ScopedDelegate {
+  findUnique(args: unknown): Promise<DogPrivateRow | null>;
+}
+
+type DogModels = {
+  ext_dog__private: ScopedOf<DogPrivateDelegate>;
+};
+```
+
+Declaring only the operation you call — without the `extends` — is the one
+mistake worth naming, because it looks correct and is rejected:
+
+```ts
+// ✗ missing findMany, findFirst, create, createMany, and 8 more
+interface DogPrivateDelegate {
+  findUnique(args: unknown): Promise<DogPrivateRow | null>;
+}
+```
+
+Use method syntax (`findUnique(args: unknown): …`) rather than a function-typed
+property (`findUnique: (args: unknown) => …`), for the same variance reason
+`handle` is a method — see the second design note below.
+
+A hand-written map is a **claim** about the runtime shape, not a checked fact:
+nothing verifies it against your Prisma schema. Keep the schema as the source of
+truth and the map narrow — declare the models and results you actually read.
 
 Two notes on the design, both deliberate:
 

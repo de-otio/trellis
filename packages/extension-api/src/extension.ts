@@ -78,8 +78,12 @@ export type ScopedOperation = keyof ScopedDelegate;
  * `ScopedOf<Prisma.ExtDogProfileDelegate>` keeps exactly the operations the
  * proxy implements — with their real Prisma argument and result types — and
  * structurally drops everything else, `$queryRaw` included. Operations the
- * delegate does not have are simply absent rather than an error, so a Prisma
- * upgrade that renames or removes one does not break this type.
+ * delegate does not have are simply absent from the result rather than an
+ * error — but note that the result must still satisfy
+ * {@link ExtensionModelMap} to be usable as a model map, so a Prisma upgrade
+ * that removes a scoped operation surfaces as a compile error on the map. That
+ * is deliberate: a delegate that can no longer serve the scoped surface should
+ * say so at build time, not at registration.
  *
  * This is how an extension gets typed access to its OWN models; see
  * {@link ScopedDb}.
@@ -90,12 +94,33 @@ export type ScopedOf<TDelegate> = Pick<TDelegate, Extract<keyof TDelegate, Scope
  * Constraint for the extension-owned half of {@link ScopedDb}: model name to
  * delegate type.
  *
- * `object` rather than `ScopedDelegate` on purpose — the whole point is to
- * accept a *generated* Prisma delegate, whose method signatures are far more
- * precise than the erased contract shape and are not assignable to it. It is
- * still narrow enough to reject a map whose values are plainly not delegates.
+ * `ScopedDelegate` is not merely a sanity check here — it is *exactly* the
+ * condition for the extension to register into core's untyped registry, whose
+ * {@link OpenScopedModels} index signature is a full delegate. Declaring the
+ * constraint this way is what makes a violation fail on the map, naming the
+ * missing operations, instead of failing two packages away at the consumer's
+ * `registerExtension(...)` call with a message that names neither the map nor
+ * the fix.
+ *
+ * A *generated* Prisma delegate satisfies it: its method parameters are far
+ * more precise than this erased shape but compare bivariantly, and its refined
+ * return types are assignable covariantly. Verified against a real generated
+ * client, not assumed — see `type-tests/generic-scoped-db.test-d.ts` §7.
+ *
+ * A *hand-written* delegate must therefore declare all thirteen operations.
+ * Extend this interface and narrow only what you care about:
+ *
+ * ```ts
+ * interface DogPrivateDelegate extends ScopedDelegate {
+ *   findUnique(args: unknown): Promise<DogPrivateRow | null>;
+ * }
+ * ```
+ *
+ * Hand-written is a normal case, not a corner: an extension whose Prisma client
+ * is generated from a composed schema cannot import its own model types at the
+ * time its package builds.
  */
-export type ExtensionModelMap = Record<string, object>;
+export type ExtensionModelMap = Record<string, ScopedDelegate>;
 
 /**
  * The permissive default for {@link ScopedDb} — any model name resolves to an
@@ -405,7 +430,7 @@ export interface ExtensionJobDecl<TModels extends ExtensionModelMap = OpenScoped
  *   - Bump alongside every `package.json` version change.
  *   - Never change one without changing the other.
  */
-export const EXTENSION_API_VERSION = "0.9.1" as const;
+export const EXTENSION_API_VERSION = "0.9.2" as const;
 
 // ---------------------------------------------------------------------------
 // ActivityPub Extension — display-only Actor enrichment

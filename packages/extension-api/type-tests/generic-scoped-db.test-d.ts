@@ -233,4 +233,74 @@ async function coreDispatches(): Promise<void> {
 // @ts-expect-error — a string is not a delegate
 type _Bad = ScopedDb<{ extDogProfile: string }>;
 
-export { scopedOfKeepsRealTypes, declaredMapIsTyped, coreDispatches, dogExtension, coreRegistry };
+// ---------------------------------------------------------------------------
+// 7. The constraint rejects an INCOMPLETE delegate, at the declaration
+//
+// 0.9.1 shipped without this case and it cost a consumer a morning. The
+// constraint was `Record<string, object>`, so a hand-written delegate with one
+// operation satisfied it here and failed at the extension's registration call
+// site in the consumer, with a message naming neither the map nor the fix.
+//
+// Everything above uses `FakePrismaDelegate`, which is complete by
+// construction — which is exactly why the suite could not see this. A contract
+// tested only against the shapes its author had in mind tests the author.
+// ---------------------------------------------------------------------------
+
+interface DogPrivateRow {
+  microchip: string | null;
+}
+
+/** What a hand-written map reaches for first: just the operation it uses. */
+interface PartialDelegate {
+  findUnique(args: unknown): Promise<DogPrivateRow | null>;
+}
+
+// @ts-expect-error — an incomplete delegate is missing 12 of the 13 scoped
+// operations, so it could never register into core's `OpenScopedModels`
+type _Partial = ScopedDb<{ extDogPrivate: PartialDelegate }>;
+
+// @ts-expect-error — and the same rejection reaches the extension type, so the
+// author sees it on their own declaration rather than in the consumer
+declare const partialExtension: TrellisExtension<{ extDogPrivate: PartialDelegate }>;
+void partialExtension;
+
+/**
+ * The sanctioned hand-written form: extend the full contract shape, narrow only
+ * the operations you actually care about. This is what an extension must write
+ * when it cannot import generated Prisma types — e.g. because its client is
+ * generated from a composed schema after its own package has already built.
+ */
+interface CompleteDelegate extends ScopedDelegate {
+  findUnique(args: unknown): Promise<DogPrivateRow | null>;
+}
+
+type HandWrittenModels = { extDogPrivate: ScopedOf<CompleteDelegate> };
+
+declare const handWrittenDb: ScopedDb<HandWrittenModels>;
+
+async function handWrittenMapIsTyped(): Promise<void> {
+  const row = await handWrittenDb.extDogPrivate.findUnique({ where: { id: "x" } });
+  // narrowed by the hand-written signature, not `unknown`
+  row?.microchip?.toUpperCase();
+
+  // the other twelve operations are present, at the erased contract types
+  await handWrittenDb.extDogPrivate.count();
+}
+
+// @ts-expect-error — the map still closes the model set for a hand-written map
+handWrittenDb.extDogPrivates;
+
+// and it still registers into core's untyped registry — the §5 property, which
+// is what the constraint now guarantees up front rather than discovers late
+declare const handWrittenExtension: TrellisExtension<HandWrittenModels>;
+const handWrittenRegistry: TrellisExtension[] = [handWrittenExtension];
+
+export {
+  scopedOfKeepsRealTypes,
+  declaredMapIsTyped,
+  coreDispatches,
+  dogExtension,
+  coreRegistry,
+  handWrittenMapIsTyped,
+  handWrittenRegistry,
+};
