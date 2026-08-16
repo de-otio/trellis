@@ -34,6 +34,7 @@
  */
 import type { PrismaClient } from "@prisma/client";
 import { getCurrentTenantId } from "@de-otio/saas-foundation/tenant";
+import { requireAmbientTenantId } from "./tenant-guard.js";
 import type { EntityGeoLookup } from "../../geo/entity-geo-repository.js";
 import { scoreToTier } from "../scoring-engine.js";
 import type {
@@ -110,16 +111,22 @@ export class SyncOps {
    *    directions must be deleted here: edges FROM the user (`userId = X`) and
    *    edges pointing AT the user (`targetType='user' AND targetId = X`).
    *
-   * Tenant-scoped to the ambient tenant when present (mirrors the other ops);
-   * with no tenant context the delete is unscoped so a hard user delete still
-   * fully detaches.
+   * Tenant-scoped, and REFUSES without an ambient tenant.
+   *
+   * This previously fell back to an UNSCOPED `deleteMany` "so a hard user
+   * delete still fully detaches" — a `deleteMany` with no tenant predicate, on
+   * a polymorphic `targetId` with no FK, reachable whenever `TENANT_SCOPE_MODE`
+   * is off (lane 7 HIGH-1). A cross-tenant mass delete is a worse failure than
+   * an incomplete detach, and the incomplete-detach case is recoverable
+   * (re-run with the tenant set) while the delete is not. Fail closed; if a
+   * genuine cross-tenant purge is ever needed it must be an explicit,
+   * separately-authorized operation, not a fallback nobody can see.
    */
   async removeUser(userId: string): Promise<void> {
-    const tenantId = getCurrentTenantId();
-    const tenantScope = tenantId !== undefined ? { tenantId } : {};
+    const tenantId = requireAmbientTenantId("SyncOps.removeUser");
     await this.prisma.relationship.deleteMany({
       where: {
-        ...tenantScope,
+        tenantId,
         OR: [
           { userId },
           { targetType: "user", targetId: userId },
@@ -143,15 +150,16 @@ export class SyncOps {
    * `userId = X` branch, matching the Neo4j model.)
    */
   async removeEntity(entityId: string): Promise<void> {
-    const tenantId = getCurrentTenantId();
-    const tenantScope = tenantId !== undefined ? { tenantId } : {};
+    // Refuses without an ambient tenant — same reasoning as removeUser: the
+    // previous `{}` fallback made this a cross-tenant `deleteMany`.
+    const tenantId = requireAmbientTenantId("SyncOps.removeEntity");
     await this.prisma.$transaction([
       this.prisma.relationship.deleteMany({
-        where: { ...tenantScope, targetType: "entity", targetId: entityId },
+        where: { tenantId, targetType: "entity", targetId: entityId },
       }),
       this.prisma.entityRelationship.deleteMany({
         where: {
-          ...tenantScope,
+          tenantId,
           OR: [{ entityId }, { relatedEntityId: entityId }],
         },
       }),
@@ -261,7 +269,10 @@ export class SyncOps {
       // Auto-pin RELATES_TO (user → entity) at 1.0 via manualScore override.
       await tx.relationship.upsert({
         where: {
-          userId_targetType_targetId: {
+          // Tenant is part of the unique key (M7): the auto-pin must upsert
+          // THIS tenant's edge, not collide with a same-pair edge in another.
+          tenantId_userId_targetType_targetId: {
+            tenantId,
             userId,
             targetType: "entity",
             targetId: entityId,
@@ -297,19 +308,22 @@ export class SyncOps {
    * `DELETE r` (not a status flip).
    */
   async removeOwnership(entityId: string, userId: string): Promise<void> {
-    const tenantId = getCurrentTenantId();
-    const tenantScope = tenantId !== undefined ? { tenantId } : {};
+    // Refuses without an ambient tenant — the `{}` fallback made both the OWNS
+    // delete and the un-pin cross-tenant (lane 7 HIGH-1). `syncOwnership`, the
+    // matching write, already returned early without a tenant, so the pair was
+    // asymmetric as well as unscoped.
+    const tenantId = requireAmbientTenantId("SyncOps.removeOwnership");
 
     await this.prisma.$transaction(async (tx) => {
       // Remove the OWNS edge (idempotent — deleteMany no-ops when absent).
       await tx.entityOwnership.deleteMany({
-        where: { ...tenantScope, entityId, userId },
+        where: { tenantId, entityId, userId },
       });
 
       // Un-pin: clear the manualScore override if a RELATES_TO row exists, and
       // recompute the advisory tier from the computed score. Keep the edge.
       const existing = await tx.relationship.findFirst({
-        where: { ...tenantScope, userId, targetType: "entity", targetId: entityId },
+        where: { tenantId, userId, targetType: "entity", targetId: entityId },
       });
       if (existing && existing.manualScore !== null) {
         await tx.relationship.update({
