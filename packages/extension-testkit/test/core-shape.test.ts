@@ -50,9 +50,12 @@ describe("assertCoreShape", () => {
     const stale = wellFormedCore();
     delete stale.classifyApiVersion;
 
-    expect(() => assertCoreShape(stale)).toThrow(
-      new RegExp(`>= ${MINIMUM_CORE_VERSION.replace(/\./g, "\\.")}`),
-    );
+    // A plain string is a substring match, so the version needs no escaping —
+    // and hand-escaping it was wrong anyway: `.replace(/\./g, …)` leaves a
+    // backslash in the input unescaped, which CodeQL flags as
+    // js/incomplete-sanitization. Escaping a value into a pattern is only ever
+    // needed when a pattern is what you want; here it never was.
+    expect(() => assertCoreShape(stale)).toThrow(`>= ${MINIMUM_CORE_VERSION}`);
   });
 
   it("rejects a member of the wrong kind, not merely a missing one", () => {
