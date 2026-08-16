@@ -8,6 +8,8 @@
  * exported function rather than an inline `if` inside `loadCore()`.
  */
 
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { assertCoreShape, MINIMUM_CORE_VERSION } from "../src/core.js";
 
@@ -73,5 +75,51 @@ describe("assertCoreShape", () => {
   it("survives a null or undefined module instead of throwing on property access", () => {
     expect(() => assertCoreShape(undefined)).toThrow(/does not export/);
     expect(() => assertCoreShape(null)).toThrow(/does not export/);
+  });
+});
+
+describe("MINIMUM_CORE_VERSION vs the peerDependencies range", () => {
+  /** `MAJOR.MINOR.PATCH[-prerelease]`, ordered with prerelease below release. */
+  function compare(a: string, b: string): number {
+    const parse = (v: string) => {
+      const m = v.match(/^(\d+)\.(\d+)\.(\d+)(?:-(.+))?$/);
+      if (!m) throw new Error(`unparseable version: ${v}`);
+      return { nums: [Number(m[1]), Number(m[2]), Number(m[3])], pre: m[4] ?? null };
+    };
+    const x = parse(a);
+    const y = parse(b);
+    for (let i = 0; i < 3; i++) {
+      if (x.nums[i] !== y.nums[i]) return x.nums[i] - y.nums[i];
+    }
+    if (x.pre === y.pre) return 0;
+    if (x.pre === null) return 1;
+    if (y.pre === null) return -1;
+    return x.pre < y.pre ? -1 : 1;
+  }
+
+  const manifest = JSON.parse(
+    readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8"),
+  ) as { peerDependencies?: Record<string, string> };
+  const range = manifest.peerDependencies?.["@de-otio/trellis"] ?? "";
+
+  it("declares core as a `>=` peer range", () => {
+    expect(range).toMatch(/^>=\d/);
+  });
+
+  it("keeps the guard at or ahead of the range floor, never behind it", () => {
+    // Ahead is the normal state: a peer range may only name a version that is
+    // already on the registry, and three of the members the testkit calls ship
+    // for the first time alongside this package. Behind would mean npm refuses
+    // installs the testkit would have accepted — enforcement nobody wrote down.
+    expect(compare(MINIMUM_CORE_VERSION, range.slice(2))).toBeGreaterThanOrEqual(0);
+  });
+
+  it("orders prereleases below the release they precede", () => {
+    // Guards the comparator itself: without this the check above would pass
+    // vacuously on exactly the version shapes this repo uses.
+    expect(compare("0.25.0-alpha.8", "0.25.0-alpha.7")).toBeGreaterThan(0);
+    expect(compare("0.25.0", "0.25.0-alpha.8")).toBeGreaterThan(0);
+    expect(compare("0.25.0-alpha.7", "0.25.0-alpha.7")).toBe(0);
+    expect(compare("0.24.0", "0.25.0-alpha.7")).toBeLessThan(0);
   });
 });

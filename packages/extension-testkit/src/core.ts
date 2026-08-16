@@ -40,13 +40,24 @@ export type CoreApiVersionVerdict =
 
 /**
  * The lowest `@de-otio/trellis` that exports everything {@link CoreModule}
- * names. Keep in lockstep with this package's `peerDependencies` entry.
+ * names.
  *
  * Three of those members — `shutdownTrellis`, `classifyApiVersion` and the
- * `EXTENSION_API_VERSION` re-export — landed together with this package and
- * are not in any earlier release. A range that admitted one would resolve, and
- * then fail inside a conformance check with `x is not a function`, which reads
- * like a testkit bug and is not one.
+ * `EXTENSION_API_VERSION` re-export — landed together with this package, so the
+ * first release carrying them is one that does not exist yet.
+ *
+ * **This is deliberately stricter than the `peerDependencies` range, and the
+ * two must not be "reconciled".** A peer range may only name a version that is
+ * actually published: npm resolves it against the registry, and a range whose
+ * floor has no matching version fails `npm ci` with `ETARGET` — including in
+ * this repo, where the workspace link does not spare it. So the range names the
+ * newest published core, and this names the real requirement. {@link
+ * assertCoreShape} is what enforces it, at load time, where the module can be
+ * inspected instead of trusted.
+ *
+ * Bump this only when the requirement genuinely changes. It stays ahead of the
+ * range until the release that ships these members, and then stops being ahead
+ * on its own.
  */
 export const MINIMUM_CORE_VERSION = "0.25.0-alpha.8";
 

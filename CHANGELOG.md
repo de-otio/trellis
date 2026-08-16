@@ -52,10 +52,18 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   `prepare`, and `apps/api/dist` cannot exist then), so the load is an unchecked
   cast by construction. `assertCoreShape()` closes that: it verifies the loaded
   module really exports the seven members the testkit calls, and names the
-  missing ones and the minimum version when it does not. Three of those members
-  ship for the first time alongside this package, so a semver range alone was
-  not enough — and a range is advisory anyway the moment an author links a local
-  core build, which is exactly what extension development looks like.
+  missing ones and the minimum version when it does not.
+
+  That check, rather than the `peerDependencies` range, is the enforcement — and
+  it has to be. Three of those seven members ship for the first time alongside
+  this package, so the first core that satisfies the testkit is a release that
+  does not exist yet, and a peer range may only name a published version: npm
+  resolves it against the registry and fails the whole install on a floor with
+  no match. So the range names the newest published core, `MINIMUM_CORE_VERSION`
+  names the real requirement, and the gap between them closes by itself at the
+  next release. A range would have been the weaker guard regardless — it is
+  advisory the moment an author links a local core build, which is exactly what
+  extension development looks like.
 
   Gated by a new `Testkit lane` CI job, which boots through the packaged path
   (resolving `@de-otio/trellis` from `node_modules`, i.e. `dist`) rather than

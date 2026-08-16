@@ -481,19 +481,25 @@ Before tagging:
 - [ ] If extension-api is bumped, `apps/api`'s `@de-otio/trellis-extension-api` constraint accepts the new version (npm caret on `0.x` only allows patch)
 - [ ] `package-lock.json` is updated to match
 
-**Version numbers live in the release commit, not the feature PR.** Between a
-feature landing and the release that ships it, `apps/api/package.json` still
-carries the _last published_ version. Anything in-repo that names a _future_
-core version — the testkit's `peerDependencies` range and its matching
-`MINIMUM_CORE_VERSION` — is therefore ahead of the tree on purpose, and
-`smoke-pack.sh` tolerates exactly that skew and says so in its output. If you
-see that NOTE after a release, the release forgot a bump.
+**A `peerDependencies` range may only name a version that is already
+published.** npm resolves peer ranges against the registry even for a workspace
+package, so a floor with no matching version fails `npm ci` at the repo root
+with `ETARGET` and takes every CI job down with it. Version numbers live in the
+release commit, so during development the newest core is the _last published_
+one — which means a package here can never express "I need the release that is
+about to happen" through its peer range.
 
-**Ordering constraint for the testkit.** `@de-otio/trellis-extension-testkit`
-calls `shutdownTrellis`, `classifyApiVersion` and `EXTENSION_API_VERSION`, none
-of which are in a published core before `0.25.0-alpha.8`. Publish core first,
-then the testkit. Publishing the testkit against an older core produces an
-install that resolves and fails at boot — which is why `assertCoreShape()`
-exists, but a good error is not a substitute for the right order.
+The testkit does need exactly that: it calls `shutdownTrellis`,
+`classifyApiVersion` and `EXTENSION_API_VERSION`, none of which exist in a
+published core before `0.25.0-alpha.8`. So its peer range names the newest
+published core and its `MINIMUM_CORE_VERSION` constant names the real
+requirement, deliberately ahead. `assertCoreShape()` enforces the constant at
+load time by reading the module. Do not "reconcile" the two by raising the
+range — that is the change that broke CI — and do not lower the constant;
+`smoke-pack.sh` fails if the constant ever falls _below_ the range floor.
+
+**Ordering constraint for the testkit.** Publish core first, then the testkit.
+An install against an older core resolves cleanly and fails at boot; the error
+names what is missing, but a good error is not a substitute for the right order.
 
 After tagging, watch the workflow run and confirm the version is on npm with `npm view <pkg> versions --json --registry=https://registry.npmjs.org`. `npm view` lags the registry by a minute or so; a `curl` of the registry URL is the faster confirmation.

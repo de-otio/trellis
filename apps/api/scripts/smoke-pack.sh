@@ -451,42 +451,17 @@ if ! tar -tzf "${TESTKIT_TARBALL}" | grep -q 'package/fixtures/docker-compose.ym
   exit 1
 fi
 
-# The testkit's peer range names the first PUBLISHED core that exports
-# everything it calls. In this repo, `apps/api/package.json` still carries the
-# LAST published version until a release commit bumps it — so between a feature
-# landing and the release that ships it, the locally packed core is content-
-# complete but version-stale, and npm's peer resolution refuses an install that
-# would work fine.
-#
-# Tolerate exactly that skew and nothing else: the flag is used only while the
-# packed core is older than the minimum, it says so out loud, and it disappears
-# on its own at the release that makes the versions agree. A peer conflict for
-# any other reason still fails the script.
-CORE_PACKED_VERSION="$(node -p "require('${REPO_ROOT}/apps/api/package.json').version")"
-TESTKIT_MIN_CORE="$(node -p "require('${REPO_ROOT}/packages/extension-testkit/package.json').peerDependencies['@de-otio/trellis'].replace('>=','')")"
-PEER_FLAGS=""
-if [ "${CORE_PACKED_VERSION}" != "${TESTKIT_MIN_CORE}" ]; then
-  echo "==> NOTE: packed core is ${CORE_PACKED_VERSION}, testkit's peer minimum is ${TESTKIT_MIN_CORE}"
-  echo "    pre-release version skew — installing with --legacy-peer-deps."
-  echo "    The runtime guard (assertCoreShape) still checks the real surface below."
-  PEER_FLAGS="--legacy-peer-deps"
-  # --legacy-peer-deps also stops npm auto-installing peers, and it re-resolves
-  # the whole tree — which prunes the @prisma/client that core's peer range
-  # pulled in above and leaves core's dist unloadable. Pin the version already
-  # verified against core's range so the flag cannot take it away.
-  PINNED_PRISMA_CLIENT="$(node -p "require('${CONSUMER_DIR}/node_modules/@prisma/client/package.json').version")"
-  echo "    pinning @prisma/client@${PINNED_PRISMA_CLIENT} so the re-resolve cannot prune it."
-  npm install "@prisma/client@${PINNED_PRISMA_CLIENT}" --no-fund --no-audit --silent --legacy-peer-deps
-fi
-
 echo "==> installing the testkit tarball into the consumer project"
 # Not --omit=dev: the testkit IS a devDependency for a consumer, so its own
 # runtime deps (pg, prisma, the DynamoDB client) must come with it.
-npm install "${TESTKIT_TARBALL}" --no-fund --no-audit --silent ${PEER_FLAGS}
+npm install "${TESTKIT_TARBALL}" --no-fund --no-audit --silent
 
-# Whatever npm did or did not enforce, the installed core must actually carry
-# the surface the testkit calls. This is the check that matters: the version
-# string is a claim, and this reads the module.
+# The testkit's peer range can only name a PUBLISHED core — npm resolves it
+# against the registry, and a floor with no matching version fails the install
+# outright. Its real requirement is `MINIMUM_CORE_VERSION`, which is allowed to
+# be ahead of the range and is enforced by reading the module rather than its
+# version string. So this is the check that means something: does the core that
+# actually got installed carry the surface the testkit calls?
 echo "==> asserting the installed core satisfies the testkit's required surface"
 node --input-type=module -e "
 const { assertCoreShape } = await import('@de-otio/trellis-extension-testkit');
@@ -506,18 +481,36 @@ for (const name of ['startStandaloneServer', 'assertExtensionConformance', 'chec
 }
 console.log('  ✓ root export — harness + conformance surface present');
 
-// The peer range and MINIMUM_CORE_VERSION describe the same fact in two files:
-// npm enforces the first, the runtime guard reports the second. If they drift,
-// npm admits a core that the guard then rejects — an install that resolves
-// cleanly and fails at boot. Only the packed tarball has both to compare.
+// The guard must never be LOOSER than the peer range. If it were, npm would
+// refuse an install that the testkit would then have accepted — the range
+// would be doing enforcement nobody wrote down, and loosening the guard would
+// look like the fix. Ahead is fine and expected; behind is a mistake.
 const { createRequire: createRequireForManifest } = await import('node:module');
 const manifest = createRequireForManifest(process.cwd() + '/')('@de-otio/trellis-extension-testkit/package.json');
 const peerRange = manifest.peerDependencies?.['@de-otio/trellis'];
-if (peerRange !== '>=' + harness.MINIMUM_CORE_VERSION) {
-  console.error('::error::peerDependencies range ' + peerRange + ' disagrees with MINIMUM_CORE_VERSION ' + harness.MINIMUM_CORE_VERSION);
+if (typeof peerRange !== 'string' || !peerRange.startsWith('>=')) {
+  console.error('::error::testkit peerDependencies[\"@de-otio/trellis\"] is not a >= range:', peerRange);
   process.exit(1);
 }
-console.log('  ✓ peer range and MINIMUM_CORE_VERSION agree —', peerRange);
+// Both are 'MAJOR.MINOR.PATCH[-prerelease]'; compare numerically, then treat a
+// prerelease as lower than the release it precedes.
+const parse = (v) => {
+  const m = v.match(/^(\d+)\.(\d+)\.(\d+)(?:-(.+))?$/);
+  if (!m) { console.error('::error::unparseable version:', v); process.exit(1); }
+  return { nums: [Number(m[1]), Number(m[2]), Number(m[3])], pre: m[4] ?? null };
+};
+const floor = parse(peerRange.slice(2));
+const guard = parse(harness.MINIMUM_CORE_VERSION);
+let cmp = 0;
+for (let i = 0; i < 3 && cmp === 0; i++) cmp = guard.nums[i] - floor.nums[i];
+if (cmp === 0) {
+  cmp = (guard.pre === floor.pre) ? 0 : (guard.pre === null ? 1 : floor.pre === null ? -1 : (guard.pre < floor.pre ? -1 : 1));
+}
+if (cmp < 0) {
+  console.error('::error::MINIMUM_CORE_VERSION ' + harness.MINIMUM_CORE_VERSION + ' is BELOW the peer range floor ' + peerRange);
+  process.exit(1);
+}
+console.log('  ✓ guard ' + harness.MINIMUM_CORE_VERSION + ' is at or ahead of the peer floor ' + peerRange);
 
 "
 
