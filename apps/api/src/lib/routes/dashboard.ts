@@ -1660,12 +1660,24 @@ export const dashboardRoutes: Route[] = [
                 id: true,
                 email: true,
                 role: true,
+                subject: true,
                 createdAt: true,
               },
             });
           },
           QueryTimeoutPresets.STANDARD,
         );
+
+        // Claims-cache freshness audit: this is a GLOBAL-ROLE change, the
+        // strongest privilege mutation in the product (it can grant or revoke
+        // SUPER_ADMIN). A pre-token-generation cache HIT skips the RDS read
+        // entirely, so without invalidation a demoted admin keeps minting
+        // SUPER_ADMIN JWTs for up to one cache TTL (~1h). This call site was
+        // missing it.
+        const { invalidateClaims } = await import(
+          "../auth/claims-invalidation.js"
+        );
+        await invalidateClaims([updatedUser.subject], "user.change_global_role");
 
         const response = securityHeaders.createSecureResponse(
           JSON.stringify({
