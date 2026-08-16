@@ -34,7 +34,7 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   (`/example`), and the individual steps for lanes that own part of the stack.
 
   The conformance suite is the part that is not obvious, and it is deliberately
-  **stricter than core**. Core validates what would make *core* unsafe and is
+  **stricter than core**. Core validates what would make _core_ unsafe and is
   permissive about what merely makes an extension wrong — an undeclared
   `extensionApiVersion` is one line in a log nobody reads. Every defect the
   extensibility review found in the first real vertical was of that second kind:
@@ -44,9 +44,18 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   finding.
 
   One limit is stated rather than papered over: `cross-tenant-read` catches a
-  grant no shipped surface can reach, but *not* a declared model that is simply
+  grant no shipped surface can reach, but _not_ a declared model that is simply
   never read. That needs core to record which models `discover()` touched during
   a run, and that instrumentation does not exist yet.
+
+  The testkit does not resolve core's types at build time (`npm ci` runs its
+  `prepare`, and `apps/api/dist` cannot exist then), so the load is an unchecked
+  cast by construction. `assertCoreShape()` closes that: it verifies the loaded
+  module really exports the seven members the testkit calls, and names the
+  missing ones and the minimum version when it does not. Three of those members
+  ship for the first time alongside this package, so a semver range alone was
+  not enough — and a range is advisory anyway the moment an author links a local
+  core build, which is exactly what extension development looks like.
 
   Gated by a new `Testkit lane` CI job, which boots through the packaged path
   (resolving `@de-otio/trellis` from `node_modules`, i.e. `dist`) rather than
@@ -67,7 +76,7 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 - **`EXTENSION_API_VERSION` is re-exported from `@de-otio/trellis`.** A
   conformance check asks "is this extension compatible with the core it is
-  about to run against", and only core can answer which contract version *it*
+  about to run against", and only core can answer which contract version _it_
   loaded — a caller's own `@de-otio/trellis-extension-api` import may be a
   different copy.
 

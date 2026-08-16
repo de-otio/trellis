@@ -44,7 +44,7 @@
     "zod": "^4.4.3"
   },
   "peerDependencies": {
-    "@de-otio/trellis": ">=0.25.0-alpha.7"
+    "@de-otio/trellis": ">=0.25.0-alpha.8"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",

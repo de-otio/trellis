@@ -7,7 +7,7 @@ This file provides guidance to Claude Code when working with this repository.
 **Trellis** is a generic multi-tenant social-network platform core. It provides the foundation (auth + **multi-tenant identity federation (SAML/OIDC)**, feeds, posts, comments, media, moderation, ActivityPub federation) that vertical-specific applications build on via extensions. Multi-tenancy is a first-class capability — every product on trellis can serve B2C consumers and B2B organizations with their own identity providers, side-by-side. See [`doc/02-technical/identity-federation/`](doc/02-technical/identity-federation/) for the design.
 
 - **Repository Type**: TypeScript/Node.js monorepo (npm workspaces)
-- **Distribution**: Published to npm as `@de-otio/trellis` and `@de-otio/trellis-extension-api`
+- **Distribution**: Published to npm as `@de-otio/trellis`, `@de-otio/trellis-extension-api`, and `@de-otio/trellis-extension-testkit`
 - **Database (target)**: PostgreSQL via Prisma + DynamoDB for KV/cache
 - **Auth (target)**: AWS Cognito
 - **Federation (target)**: ActivityPub via Fedify
@@ -22,11 +22,11 @@ End-to-end verification of code that touches infrastructure (e.g., the graph lay
 
 Trellis is developed alongside two sibling repos:
 
-| Repo | Path | Role |
-|------|------|------|
-| **trellis** (this repo) | — | Domain-agnostic API core (see Project Overview above) |
-| **skybber** | `~/repos/dot/skybber` | The primary consuming vertical application today: Flutter frontend, the `@skybber/ext-dogs` extension, CDK infra, and the live AWS deployment (dev + prod). Owns the AWS environment this repo has none of (see Deployment Status above). |
-| **trellis-internal** | `~/repos/dot/trellis-internal` | Internal-only docs, plans, and platform-level analyses; canonical generic (non-neutral) test content and its standalone dummy-target lane. Not published to npm; scrubbed/neutral subsets get mirrored into this repo before release. |
+| Repo                    | Path                           | Role                                                                                                                                                                                                                                      |
+| ----------------------- | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **trellis** (this repo) | —                              | Domain-agnostic API core (see Project Overview above)                                                                                                                                                                                     |
+| **skybber**             | `~/repos/dot/skybber`          | The primary consuming vertical application today: Flutter frontend, the `@skybber/ext-dogs` extension, CDK infra, and the live AWS deployment (dev + prod). Owns the AWS environment this repo has none of (see Deployment Status above). |
+| **trellis-internal**    | `~/repos/dot/trellis-internal` | Internal-only docs, plans, and platform-level analyses; canonical generic (non-neutral) test content and its standalone dummy-target lane. Not published to npm; scrubbed/neutral subsets get mirrored into this repo before release.     |
 
 ### Testing a trellis change from skybber
 
@@ -57,7 +57,9 @@ apps/
   └── api/              # Node.js HTTP API (consumed by verticals as @de-otio/trellis)
 
 packages/
-  └── extension-api/    # TrellisExtension interface and types (@de-otio/trellis-extension-api)
+  ├── extension-api/      # TrellisExtension interface and types (@de-otio/trellis-extension-api)
+  └── extension-testkit/  # Standalone boot + conformance suite for extension authors
+                          # (@de-otio/trellis-extension-testkit)
 
 prisma/                 # Prisma schema + migrations
 scripts/                # Local dev helpers only (see scripts/README.md)
@@ -122,6 +124,7 @@ Test setup: Docker Compose must be running for integration tests.
 ## Environment Variables
 
 All configuration comes from `process.env`. Secrets are in AWS SSM Parameter Store:
+
 - `/{appName}/{stage}/db-secret-arn` — RDS credentials (Secrets Manager ARN)
 - `/{appName}/{stage}/cognito-user-pool-id`
 - `/{appName}/{stage}/cognito-app-client-id`
@@ -138,6 +141,7 @@ Trellis sends transactional email (magic-link login tokens) through a swappable 
 **Provider selection:** `EMAIL_SERVICE` env var (`"aws-ses"` | `"resend"`, default: `"aws-ses"`)
 
 **AWS SES** (`EMAIL_SERVICE=aws-ses`):
+
 - Credentials: Uses the default AWS credential provider chain (IAM role on ECS/Lambda; no static keys stored).
 - Required: `FROM_EMAIL` — default sender address (email address verified in SES for the sending region).
 - Optional: `AWS_SES_REGION` or `SES_REGION` (defaults to `AWS_REGION` or `us-east-1`).
@@ -146,6 +150,7 @@ Trellis sends transactional email (magic-link login tokens) through a swappable 
 - **Note:** Domain identity, Easy DKIM, custom MAIL FROM, and bounce/complaint SNS topic are provisioned separately by the `SesEmailIdentity` CDK construct in `@de-otio/saas-foundation-cdk` (no SES configuration needed in the trellis package itself).
 
 **Resend** (`EMAIL_SERVICE=resend`):
+
 - Required: `RESEND_API_KEY` — API key for Resend (stored in SSM Parameter Store).
 - Sends via HTTPS REST API; no AWS credentials needed.
 
@@ -182,6 +187,7 @@ All other configuration (DMARC policy, DNS records, event destinations) is handl
 ## Infinite Loop Prevention
 
 When implementing pagination, polling, retries, or recurring operations:
+
 1. Always include a maximum iteration count
 2. Always include a circuit breaker
 3. Never call async methods from `build()` without a guard
@@ -258,6 +264,7 @@ export class ExampleHandler {
 ```
 
 Key conventions:
+
 - Use dynamic imports (`await import(...)`) for tree-shaking
 - Error responses use `{ error: "CODE", message: "user-friendly text" }` format
 - Always validate at the handler boundary, not deeper
@@ -272,7 +279,7 @@ import type { Route } from "./types";
 
 export const exampleRoutes: Route[] = [
   {
-    path: /^\/api\/examples\/([^/]+)$/,  // Regex with capture groups
+    path: /^\/api\/examples\/([^/]+)$/, // Regex with capture groups
     method: "POST",
     handler: async (request, env, { pathname, requestContext }) => {
       // 1. Instantiate dependencies
@@ -283,10 +290,10 @@ export const exampleRoutes: Route[] = [
       // 2. Check auth
       const session = await sessionManager.getSession(request, Secrets.getSessionSecret(env));
       if (!session) {
-        return securityHeaders.createSecureResponse(
-          JSON.stringify({ error: "Unauthorized" }),
-          { status: 401, headers: { "content-type": "application/json" } },
-        );
+        return securityHeaders.createSecureResponse(JSON.stringify({ error: "Unauthorized" }), {
+          status: 401,
+          headers: { "content-type": "application/json" },
+        });
       }
 
       // 3. Extract path params
@@ -305,6 +312,7 @@ export const exampleRoutes: Route[] = [
 ```
 
 Key conventions:
+
 - Instantiate dependencies inside the handler function, not at module level
 - Always check auth before delegating to the handler
 - Always wrap response with `securityHeaders.addSecurityHeaders()`
@@ -382,6 +390,7 @@ describe("ExampleHandler", () => {
 ```
 
 Key conventions:
+
 - Use `vi.hoisted()` for mock factories that need to be available before module loading
 - Use `vi.clearAllMocks()` in `beforeEach`, not `afterEach`
 - Test the success case, not-found case, and database error case at minimum
@@ -417,6 +426,7 @@ export const handler = async (event: any) => {
 ```
 
 Key conventions:
+
 - AWS SDK clients instantiated at module level for connection reuse
 - Use `process.env` for configuration (set via CDK Lambda environment)
 - Throw errors to let Lambda retry (don't swallow them)
@@ -442,6 +452,7 @@ model Example {
 ```
 
 Key conventions:
+
 - `@map()` for snake_case column and table names
 - `@default(cuid())` for primary keys
 - `@updatedAt` for audit trails
@@ -454,15 +465,35 @@ Key conventions:
 
 ## Release Checklist
 
-Trellis ships via npm. Two tag-triggered publish flows exist (`.github/workflows/publish.yml`):
+Trellis ships via npm. Three tag-triggered publish flows exist (`.github/workflows/publish.yml`):
 
 - `extension-api-v<x.y.z>` → publishes `@de-otio/trellis-extension-api`
+- `extension-testkit-v<x.y.z>` → publishes `@de-otio/trellis-extension-testkit`
 - `v<x.y.z>` → publishes `@de-otio/trellis` (the api package)
 
+The `v` prefix is a prefix of the other two, so the workflow matches
+longest-first. Adding a fourth series means adding its arm **above** `v*`.
+
 Before tagging:
+
 - [ ] Tests + lint pass on `main`
 - [ ] `packages/extension-api/package.json` and `apps/api/package.json` versions match the tags you're about to push
 - [ ] If extension-api is bumped, `apps/api`'s `@de-otio/trellis-extension-api` constraint accepts the new version (npm caret on `0.x` only allows patch)
 - [ ] `package-lock.json` is updated to match
 
-After tagging, watch the workflow run and confirm the version is on npm with `npm view <pkg> versions --json --registry=https://registry.npmjs.org`.
+**Version numbers live in the release commit, not the feature PR.** Between a
+feature landing and the release that ships it, `apps/api/package.json` still
+carries the _last published_ version. Anything in-repo that names a _future_
+core version — the testkit's `peerDependencies` range and its matching
+`MINIMUM_CORE_VERSION` — is therefore ahead of the tree on purpose, and
+`smoke-pack.sh` tolerates exactly that skew and says so in its output. If you
+see that NOTE after a release, the release forgot a bump.
+
+**Ordering constraint for the testkit.** `@de-otio/trellis-extension-testkit`
+calls `shutdownTrellis`, `classifyApiVersion` and `EXTENSION_API_VERSION`, none
+of which are in a published core before `0.25.0-alpha.8`. Publish core first,
+then the testkit. Publishing the testkit against an older core produces an
+install that resolves and fails at boot — which is why `assertCoreShape()`
+exists, but a good error is not a substitute for the right order.
+
+After tagging, watch the workflow run and confirm the version is on npm with `npm view <pkg> versions --json --registry=https://registry.npmjs.org`. `npm view` lags the registry by a minute or so; a `curl` of the registry URL is the faster confirmation.

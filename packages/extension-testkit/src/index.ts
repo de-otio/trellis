@@ -42,4 +42,10 @@ export {
   type ConformanceSeverity,
 } from "./conformance.js";
 
-export { loadCore, type CoreModule, type CoreApiVersionVerdict } from "./core.js";
+export {
+  loadCore,
+  assertCoreShape,
+  MINIMUM_CORE_VERSION,
+  type CoreModule,
+  type CoreApiVersionVerdict,
+} from "./core.js";

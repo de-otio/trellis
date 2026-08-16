@@ -451,15 +451,54 @@ if ! tar -tzf "${TESTKIT_TARBALL}" | grep -q 'package/fixtures/docker-compose.ym
   exit 1
 fi
 
+# The testkit's peer range names the first PUBLISHED core that exports
+# everything it calls. In this repo, `apps/api/package.json` still carries the
+# LAST published version until a release commit bumps it — so between a feature
+# landing and the release that ships it, the locally packed core is content-
+# complete but version-stale, and npm's peer resolution refuses an install that
+# would work fine.
+#
+# Tolerate exactly that skew and nothing else: the flag is used only while the
+# packed core is older than the minimum, it says so out loud, and it disappears
+# on its own at the release that makes the versions agree. A peer conflict for
+# any other reason still fails the script.
+CORE_PACKED_VERSION="$(node -p "require('${REPO_ROOT}/apps/api/package.json').version")"
+TESTKIT_MIN_CORE="$(node -p "require('${REPO_ROOT}/packages/extension-testkit/package.json').peerDependencies['@de-otio/trellis'].replace('>=','')")"
+PEER_FLAGS=""
+if [ "${CORE_PACKED_VERSION}" != "${TESTKIT_MIN_CORE}" ]; then
+  echo "==> NOTE: packed core is ${CORE_PACKED_VERSION}, testkit's peer minimum is ${TESTKIT_MIN_CORE}"
+  echo "    pre-release version skew — installing with --legacy-peer-deps."
+  echo "    The runtime guard (assertCoreShape) still checks the real surface below."
+  PEER_FLAGS="--legacy-peer-deps"
+  # --legacy-peer-deps also stops npm auto-installing peers, and it re-resolves
+  # the whole tree — which prunes the @prisma/client that core's peer range
+  # pulled in above and leaves core's dist unloadable. Pin the version already
+  # verified against core's range so the flag cannot take it away.
+  PINNED_PRISMA_CLIENT="$(node -p "require('${CONSUMER_DIR}/node_modules/@prisma/client/package.json').version")"
+  echo "    pinning @prisma/client@${PINNED_PRISMA_CLIENT} so the re-resolve cannot prune it."
+  npm install "@prisma/client@${PINNED_PRISMA_CLIENT}" --no-fund --no-audit --silent --legacy-peer-deps
+fi
+
 echo "==> installing the testkit tarball into the consumer project"
 # Not --omit=dev: the testkit IS a devDependency for a consumer, so its own
 # runtime deps (pg, prisma, the DynamoDB client) must come with it.
-npm install "${TESTKIT_TARBALL}" --no-fund --no-audit --silent
+npm install "${TESTKIT_TARBALL}" --no-fund --no-audit --silent ${PEER_FLAGS}
+
+# Whatever npm did or did not enforce, the installed core must actually carry
+# the surface the testkit calls. This is the check that matters: the version
+# string is a claim, and this reads the module.
+echo "==> asserting the installed core satisfies the testkit's required surface"
+node --input-type=module -e "
+const { assertCoreShape } = await import('@de-otio/trellis-extension-testkit');
+const core = await import('@de-otio/trellis');
+assertCoreShape(core);
+console.log('  ✓ installed core exports every member the testkit calls');
+"
 
 echo "==> loading @de-otio/trellis-extension-testkit entry points"
 node --input-type=module -e "
 const harness = await import('@de-otio/trellis-extension-testkit');
-for (const name of ['startStandaloneServer', 'assertExtensionConformance', 'checkExtensionConformance', 'standaloneEnv', 'applyCoreMigrations', 'coreSchemaPath', 'seedGlobalFeatureToggles', 'waitForHealth']) {
+for (const name of ['startStandaloneServer', 'assertExtensionConformance', 'checkExtensionConformance', 'standaloneEnv', 'applyCoreMigrations', 'coreSchemaPath', 'seedGlobalFeatureToggles', 'waitForHealth', 'assertCoreShape']) {
   if (typeof harness[name] !== 'function') {
     console.error('::error::' + name + ' missing from the testkit root export');
     process.exit(1);
@@ -467,20 +506,19 @@ for (const name of ['startStandaloneServer', 'assertExtensionConformance', 'chec
 }
 console.log('  ✓ root export — harness + conformance surface present');
 
-const example = await import('@de-otio/trellis-extension-testkit/example');
-if (example.exampleExtension?.id !== 'example') {
-  console.error('::error::/example did not export the reference extension');
+// The peer range and MINIMUM_CORE_VERSION describe the same fact in two files:
+// npm enforces the first, the runtime guard reports the second. If they drift,
+// npm admits a core that the guard then rejects — an install that resolves
+// cleanly and fails at boot. Only the packed tarball has both to compare.
+const { createRequire: createRequireForManifest } = await import('node:module');
+const manifest = createRequireForManifest(process.cwd() + '/')('@de-otio/trellis-extension-testkit/package.json');
+const peerRange = manifest.peerDependencies?.['@de-otio/trellis'];
+if (peerRange !== '>=' + harness.MINIMUM_CORE_VERSION) {
+  console.error('::error::peerDependencies range ' + peerRange + ' disagrees with MINIMUM_CORE_VERSION ' + harness.MINIMUM_CORE_VERSION);
   process.exit(1);
 }
-// The reference extension must pass the checks it is the reference FOR. A
-// fixture that its own suite would reject teaches the wrong thing, and this is
-// the cheapest place to notice — no server needed, since the version check is
-// a pure comparison over data the tarball already carries.
-if (typeof example.exampleExtension.extensionApiVersion !== 'string') {
-  console.error('::error::the reference extension declares no extensionApiVersion');
-  process.exit(1);
-}
-console.log('  ✓ /example export — reference extension loads with core absent');
+console.log('  ✓ peer range and MINIMUM_CORE_VERSION agree —', peerRange);
+
 "
 
 # The `docker-compose.yml` subpath is exported as a real file, so it must be
@@ -513,5 +551,61 @@ if (!readFileSync(p, 'utf8').includes('generator client')) {
 }
 console.log('  ✓ coreSchemaPath() ->', p);
 "
+
+# ---------------------------------------------------------------------------
+# The testkit ALONE, with no core installed.
+#
+# This needs its own project. The consumer directory above has core installed,
+# so loading `/example` there proves nothing about whether the reference
+# extension can be read before an author installs anything else — and "read the
+# reference extension first" is the order authors actually work in.
+#
+# It is also the only place the missing-core error message is reachable, and a
+# bad message here is expensive: it is the first thing an author sees when they
+# get the install order wrong.
+# ---------------------------------------------------------------------------
+AUTHOR_DIR="$(mktemp -d -t trellis-author-XXXXXX)"
+trap 'rm -rf "${CONSUMER_DIR}" "${PACK_DIR}" "${AUTHOR_DIR}"' EXIT
+cd "${AUTHOR_DIR}"
+npm init -y >/dev/null
+
+echo "==> installing the testkit with NO core present"
+# --legacy-peer-deps unconditionally here: the point of this project is that
+# the peer is absent, which is the state being tested.
+npm install "${TESTKIT_TARBALL}" --no-fund --no-audit --silent --legacy-peer-deps
+
+node --input-type=module -e "
+const example = await import('@de-otio/trellis-extension-testkit/example');
+if (example.exampleExtension?.id !== 'example') {
+  console.error('::error::/example did not export the reference extension');
+  process.exit(1);
+}
+// The reference extension must pass the checks it is the reference FOR. A
+// fixture that its own suite would reject teaches the wrong thing, and this is
+// the cheapest place to notice — no server needed, since the version check is
+// a pure comparison over data the tarball already carries.
+if (typeof example.exampleExtension.extensionApiVersion !== 'string') {
+  console.error('::error::the reference extension declares no extensionApiVersion');
+  process.exit(1);
+}
+console.log('  ✓ /example — reference extension loads with core genuinely absent');
+
+const { loadCore } = await import('@de-otio/trellis-extension-testkit');
+let message = '';
+try {
+  await loadCore();
+  console.error('::error::loadCore() resolved with no core installed');
+  process.exit(1);
+} catch (err) {
+  message = err instanceof Error ? err.message : String(err);
+}
+if (!message.includes('peer dependency')) {
+  console.error('::error::loadCore() failed without explaining the missing peer:', message);
+  process.exit(1);
+}
+console.log('  ✓ loadCore() names the missing peer dependency');
+"
+
+cd "${CONSUMER_DIR}"
 
 echo "==> smoke test passed"

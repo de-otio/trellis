@@ -38,6 +38,18 @@ export type CoreApiVersionVerdict =
   | { readonly kind: "drift"; readonly declared: string; readonly core: string }
   | { readonly kind: "match" };
 
+/**
+ * The lowest `@de-otio/trellis` that exports everything {@link CoreModule}
+ * names. Keep in lockstep with this package's `peerDependencies` entry.
+ *
+ * Three of those members — `shutdownTrellis`, `classifyApiVersion` and the
+ * `EXTENSION_API_VERSION` re-export — landed together with this package and
+ * are not in any earlier release. A range that admitted one would resolve, and
+ * then fail inside a conformance check with `x is not a function`, which reads
+ * like a testkit bug and is not one.
+ */
+export const MINIMUM_CORE_VERSION = "0.25.0-alpha.8";
+
 /** The subset of `@de-otio/trellis`'s public API this package uses. */
 export interface CoreModule {
   registerExtension(extension: TrellisExtension<any>): void;
@@ -52,6 +64,53 @@ export interface CoreModule {
   readonly EXTENSION_API_VERSION: string;
 }
 
+/** The members {@link assertCoreShape} requires, and how each must look. */
+const REQUIRED_CORE_MEMBERS: readonly (readonly [keyof CoreModule, "function" | "string"])[] = [
+  ["registerExtension", "function"],
+  ["getExtension", "function"],
+  ["getExtensions", "function"],
+  ["startServer", "function"],
+  ["shutdownTrellis", "function"],
+  ["classifyApiVersion", "function"],
+  ["EXTENSION_API_VERSION", "string"],
+];
+
+/**
+ * Check that a loaded module really is the core this package needs, and say
+ * what is missing when it is not.
+ *
+ * The cast in {@link loadCore} is unchecked by construction — core's types are
+ * deliberately not resolved at build time — so nothing else stands between a
+ * too-old core and a `TypeError` thrown from the middle of a conformance run.
+ * Semver alone will not do it either: the peer range is advisory the moment a
+ * consumer links a local build, which is exactly what an extension author
+ * developing against core does.
+ *
+ * Exported so it can be tested against a stub; {@link loadCore} applies it.
+ */
+export function assertCoreShape(mod: unknown): CoreModule {
+  const candidate = mod as Record<string, unknown> | null | undefined;
+  const missing = REQUIRED_CORE_MEMBERS.filter(
+    ([name, kind]) => typeof candidate?.[name as string] !== kind,
+  ).map(([name]) => name);
+
+  if (missing.length > 0) {
+    throw new Error(
+      `[testkit] the installed @de-otio/trellis does not export: ${missing.join(", ")}. ` +
+        `This package needs @de-otio/trellis >= ${MINIMUM_CORE_VERSION}; ` +
+        `you likely have an older one. ` +
+        `(Found version: ${describeVersion(candidate)}.)`,
+    );
+  }
+  return mod as CoreModule;
+}
+
+/** Best-effort version for the error above; core need not export one. */
+function describeVersion(candidate: Record<string, unknown> | null | undefined): string {
+  const version = candidate?.["VERSION"] ?? candidate?.["version"];
+  return typeof version === "string" ? version : "unknown";
+}
+
 /**
  * Load `@de-otio/trellis` from the consumer's install.
  *
@@ -61,8 +120,9 @@ export interface CoreModule {
  */
 export async function loadCore(): Promise<CoreModule> {
   const specifier = "@de-otio/trellis";
+  let mod: unknown;
   try {
-    return (await import(specifier)) as unknown as CoreModule;
+    mod = await import(specifier);
   } catch (err) {
     throw new Error(
       "[testkit] could not load @de-otio/trellis. It is a peer dependency of " +
@@ -70,4 +130,5 @@ export async function loadCore(): Promise<CoreModule> {
         `(${err instanceof Error ? err.message : String(err)})`,
     );
   }
+  return assertCoreShape(mod);
 }
