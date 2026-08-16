@@ -71,6 +71,19 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   which now packs and loads the testkit tarball. That tarball gate is the one
   that would have caught the 0.9.0 `exports` incident.
 
+- **`@de-otio/trellis-extension-testkit` 0.1.1 — the peer range catches up.**
+  `0.25.0-alpha.8` published the three members, so the range moves from
+  `>=0.25.0-alpha.7` to `>=0.25.0-alpha.8` and now equals `MINIMUM_CORE_VERSION`.
+  Installing `0.1.0` against a `0.25.0-alpha.7` core resolved cleanly and then
+  failed at load with `assertCoreShape`'s message; `0.1.1` is refused by npm up
+  front, which is where that belongs once the release exists to name.
+
+  The guard-vs-floor check stays **directional**, not equality. Equal is the
+  resting state, not an invariant — the gap reopens legitimately whenever the
+  testkit starts calling a member no release exports yet, and a check demanding
+  equality would forbid that bump and reproduce the `ETARGET` failure it was
+  written to prevent.
+
 - **The reference extension moved into the testkit.** `exampleExtension` and
   `minimalExtension` now live at
   `@de-otio/trellis-extension-testkit/example` instead of
