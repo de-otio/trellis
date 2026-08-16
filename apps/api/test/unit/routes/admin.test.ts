@@ -163,6 +163,7 @@ vi.mock("../../../src/lib/domain-reputation-service", () => ({
 
 describe("Admin Routes", () => {
   let mockEnv: Env;
+  let devEnv: Env;
   let mockSession: Session;
   let mockRequest: Request;
   let mockDb: any;
@@ -176,6 +177,12 @@ describe("Admin Routes", () => {
       ENVIRONMENT: "dev",
       CI: "false",
     } as any;
+
+    // SEC L1: the `/api/admin/test/*` seam is now fail-closed — it needs an
+    // explicit STAGE=dev (or CI / ENABLE_TEST_ROUTES) *and* a real SUPER_ADMIN
+    // session. `mockEnv` deliberately keeps STAGE unset so the unset-STAGE
+    // denial is the default; the happy-path tests opt in via `devEnv`.
+    devEnv = { ...mockEnv, STAGE: "dev" } as any;
 
     mockSession = {
       userId: "user-123",
@@ -309,7 +316,14 @@ describe("Admin Routes", () => {
       (r) => r.method === "POST" && r.path === "/api/admin/test/users",
     );
 
-    it("should create test user successfully in dev environment", async () => {
+    /** Make the caller a verified SUPER_ADMIN. */
+    function asSuperAdmin() {
+      mockGetSession.mockResolvedValue(mockSession);
+      mockDb.user.findUnique.mockResolvedValue({ role: "SUPER_ADMIN" });
+    }
+
+    it("should create test user successfully in dev environment (as SUPER_ADMIN)", async () => {
+      asSuperAdmin();
       const mockUser = {
         id: "user-123",
         email: "test@test.example.com",
@@ -319,7 +333,7 @@ describe("Admin Routes", () => {
       };
       mockCreateUser.mockResolvedValue(mockUser);
 
-      const response = await route!.handler(mockRequest, mockEnv);
+      const response = await route!.handler(mockRequest, devEnv);
 
       expect(mockCreateUser).toHaveBeenCalled();
       expect(mockCreateSecureResponse).toHaveBeenCalledWith(
@@ -334,44 +348,128 @@ describe("Admin Routes", () => {
     });
 
     it("should return 403 in production environment", async () => {
-      const prodEnv = { ...mockEnv, STAGE: "prod" };
+      asSuperAdmin();
+      const prodEnv = { ...devEnv, STAGE: "prod" };
 
       const response = await route!.handler(mockRequest, prodEnv);
 
-      expect(mockCreateSecureResponse).toHaveBeenCalledWith(
-        expect.stringContaining("Forbidden"),
-        { status: 403, headers: { "content-type": "application/json" } },
-      );
+      expect(response.status).toBe(403);
       expect(mockCreateUser).not.toHaveBeenCalled();
     });
 
-    it("should check SUPER_ADMIN role for non-test users", async () => {
-      const nonTestRequest = new Request(
-        "https://example.com/api/admin/test/users",
-        {
-          method: "POST",
-          body: JSON.stringify({ email: "real@example.com" }),
-        },
-      );
-      const mockUser = { role: "SUPER_ADMIN" };
-      mockDb.user.findUnique.mockResolvedValue(mockUser);
-      mockCreateUser.mockResolvedValue({
-        id: "user-123",
-        email: "real@example.com",
+    // ---------------------------------------------------------------------
+    // SEC L1 — the finding: this seam allowed unauthenticated SUPER_ADMIN
+    // creation (and handed back a valid session cookie for the new user) in
+    // any environment that wasn't literally `prod`.
+    // ---------------------------------------------------------------------
+
+    it("SEC L1: 403s when STAGE/DEPLOY_ENV is UNSET (fail-closed gate)", async () => {
+      asSuperAdmin();
+      // mockEnv has no STAGE and CI:"false" — the old code defaulted to "dev"
+      // and served the endpoint.
+      const response = await route!.handler(mockRequest, mockEnv);
+
+      expect(response.status).toBe(403);
+      expect(mockCreateUser).not.toHaveBeenCalled();
+    });
+
+    it("SEC L1: 403s for STAGE=staging (only dev / CI / explicit opt-in allowed)", async () => {
+      asSuperAdmin();
+      const response = await route!.handler(mockRequest, {
+        ...mockEnv,
+        STAGE: "staging",
+      } as any);
+
+      expect(response.status).toBe(403);
+      expect(mockCreateUser).not.toHaveBeenCalled();
+    });
+
+    it("SEC L1: prod wins over CI — CI=true cannot re-open a prod stage", async () => {
+      asSuperAdmin();
+      const response = await route!.handler(mockRequest, {
+        ...mockEnv,
+        STAGE: "prod",
+        CI: "true",
+      } as any);
+
+      expect(response.status).toBe(403);
+      expect(mockCreateUser).not.toHaveBeenCalled();
+    });
+
+    it("SEC L1: 401s with NO session, even in dev", async () => {
+      mockGetSession.mockResolvedValue(null);
+
+      const response = await route!.handler(mockRequest, devEnv);
+
+      expect(response.status).toBe(401);
+      expect(mockCreateUser).not.toHaveBeenCalled();
+      // And critically: no session cookie handed out.
+      expect(mockSetSession).not.toHaveBeenCalled();
+    });
+
+    it("SEC L1: 403s for an authenticated NON-super-admin", async () => {
+      mockGetSession.mockResolvedValue(mockSession);
+      mockDb.user.findUnique.mockResolvedValue({ role: "END_USER" });
+
+      const response = await route!.handler(mockRequest, devEnv);
+
+      expect(response.status).toBe(403);
+      expect(mockCreateUser).not.toHaveBeenCalled();
+    });
+
+    it("SEC L1: a `test-` / @test.example.com email no longer bypasses auth", async () => {
+      // The exact exploit from the review: an unauthenticated POST of
+      // {"email":"test-x@test.example.com","role":"SUPER_ADMIN"} used to skip
+      // the session check entirely, create a SUPER_ADMIN and set its cookie.
+      mockGetSession.mockResolvedValue(null);
+      const exploit = new Request("https://example.com/api/admin/test/users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: "test-x@test.example.com",
+          role: "SUPER_ADMIN",
+        }),
       });
 
-      await route!.handler(nonTestRequest, mockEnv);
+      const response = await route!.handler(exploit, devEnv);
 
-      expect(mockDb.user.findUnique).toHaveBeenCalled();
+      expect(response.status).toBe(401);
+      expect(mockCreateUser).not.toHaveBeenCalled();
+      expect(mockSetSession).not.toHaveBeenCalled();
+    });
+
+    it("SEC L1: CI=true still requires a SUPER_ADMIN session", async () => {
+      mockGetSession.mockResolvedValue(null);
+
+      const response = await route!.handler(mockRequest, {
+        ...mockEnv,
+        CI: "true",
+      } as any);
+
+      expect(response.status).toBe(401);
+      expect(mockCreateUser).not.toHaveBeenCalled();
+    });
+
+    it("SEC L1: a role-lookup failure denies (fail closed), it does not skip the check", async () => {
+      mockGetSession.mockResolvedValue(mockSession);
+      // The old code passed `defaultValue: null` and used null to SKIP the
+      // role check; null must now mean "deny".
+      mockWithQueryTimeoutAndRetry.mockResolvedValue(null);
+
+      const response = await route!.handler(mockRequest, devEnv);
+
+      expect(response.status).toBe(403);
+      expect(mockCreateUser).not.toHaveBeenCalled();
     });
 
     it("should handle errors", async () => {
+      asSuperAdmin();
       const error = new Error("Database error");
       mockCreateUser.mockRejectedValue(error);
 
-      const response = await route!.handler(mockRequest, mockEnv);
+      const response = await route!.handler(mockRequest, devEnv);
 
-            expect(response.status).toBe(500);
+      expect(response.status).toBe(500);
     });
   });
 
@@ -380,9 +478,81 @@ describe("Admin Routes", () => {
       (r) => r.method === "DELETE" && r.path.toString().includes("test/users"),
     );
 
+    /** Make the caller a verified SUPER_ADMIN. */
+    function asSuperAdmin() {
+      mockGetSession.mockResolvedValue(mockSession);
+      mockDb.user.findUnique.mockResolvedValue({
+        role: "SUPER_ADMIN",
+        id: "user-123",
+      });
+    }
+
+    // -------------------------------------------------------------------
+    // SEC L1 — DELETE used to allow unauthenticated deletion whenever CI was
+    // set, and otherwise fell through a "no session in local dev, still
+    // allow" branch.
+    // -------------------------------------------------------------------
+
+    it("SEC L1: 401s with no session, even with CI=true", async () => {
+      mockGetSession.mockResolvedValue(null);
+      const response = await route!.handler(
+        new Request("https://example.com/api/admin/test/users/user-123", {
+          method: "DELETE",
+        }),
+        { ...mockEnv, CI: "true" } as any,
+        { pathname: "/api/admin/test/users/user-123" },
+      );
+
+      expect(response.status).toBe(401);
+      expect(mockDb.user.delete).not.toHaveBeenCalled();
+    });
+
+    it("SEC L1: 401s with no session in dev (the 'still allow' branch is gone)", async () => {
+      mockGetSession.mockResolvedValue(null);
+      const response = await route!.handler(
+        new Request("https://example.com/api/admin/test/users/user-123", {
+          method: "DELETE",
+        }),
+        devEnv,
+        { pathname: "/api/admin/test/users/user-123" },
+      );
+
+      expect(response.status).toBe(401);
+      expect(mockDb.user.delete).not.toHaveBeenCalled();
+    });
+
+    it("SEC L1: 403s for an authenticated non-super-admin", async () => {
+      mockGetSession.mockResolvedValue(mockSession);
+      mockDb.user.findUnique.mockResolvedValue({ role: "END_USER" });
+      const response = await route!.handler(
+        new Request("https://example.com/api/admin/test/users/user-123", {
+          method: "DELETE",
+        }),
+        devEnv,
+        { pathname: "/api/admin/test/users/user-123" },
+      );
+
+      expect(response.status).toBe(403);
+      expect(mockDb.user.delete).not.toHaveBeenCalled();
+    });
+
+    it("SEC L1: 403s when STAGE is unset (fail-closed gate)", async () => {
+      asSuperAdmin();
+      const response = await route!.handler(
+        new Request("https://example.com/api/admin/test/users/user-123", {
+          method: "DELETE",
+        }),
+        mockEnv,
+        { pathname: "/api/admin/test/users/user-123" },
+      );
+
+      expect(response.status).toBe(403);
+      expect(mockDb.user.delete).not.toHaveBeenCalled();
+    });
+
     it("should delete test user successfully", async () => {
-      // Set CI mode to allow unauthenticated access
       const ciEnv = { ...mockEnv, CI: "true" };
+      asSuperAdmin();
       mockDb.postComment.findMany.mockResolvedValue([]);
       mockDb.post.findMany.mockResolvedValue([]);
       mockDb.entity.findMany.mockResolvedValue([]);
@@ -438,8 +608,8 @@ describe("Admin Routes", () => {
     });
 
     it("should handle user not found gracefully", async () => {
-      // Set CI mode to allow unauthenticated access
       const ciEnv = { ...mockEnv, CI: "true" };
+      asSuperAdmin();
       const error = new Error("Record to delete does not exist");
       mockDb.postComment.findMany.mockResolvedValue([]);
       mockDb.post.findMany.mockResolvedValue([]);
@@ -1905,8 +2075,11 @@ describe("Admin Routes", () => {
           r.path === "/api/admin/test/users/:userId" && r.method === "DELETE",
       );
 
-      // Ensure we're in dev environment and CI mode to skip auth
-      const devEnv = { ...mockEnv, ENVIRONMENT: "dev", CI: "true" };
+      // SEC L1: the seam is gated AND SUPER_ADMIN-authenticated; both must be
+      // satisfied before the pathname is even parsed.
+      const devEnv = { ...mockEnv, STAGE: "dev", CI: "true" };
+      mockGetSession.mockResolvedValue(mockSession);
+      mockDb.user.findUnique.mockResolvedValue({ role: "SUPER_ADMIN" });
 
       const request = new Request(
         "https://api.example.com/api/admin/test/users/",
@@ -1924,11 +2097,15 @@ describe("Admin Routes", () => {
     });
 
     it("should handle foreign key constraint errors gracefully", async () => {
-      // Ensure we're in dev environment and CI mode to skip auth
-      const devEnv = { ...mockEnv, ENVIRONMENT: "dev", CI: "true" };
+      const devEnv = { ...mockEnv, STAGE: "dev", CI: "true" };
+      mockGetSession.mockResolvedValue(mockSession);
 
       const error = new Error("Foreign key constraint violated");
-      mockWithQueryTimeoutAndRetry.mockRejectedValue(error);
+      // First call = the SEC L1 SUPER_ADMIN role check (must succeed), then the
+      // deletion itself fails with the FK error.
+      mockWithQueryTimeoutAndRetry
+        .mockResolvedValueOnce({ role: "SUPER_ADMIN" })
+        .mockRejectedValue(error);
 
       // Mock the verification query to return false (user doesn't exist)
       const verifyDb = {
