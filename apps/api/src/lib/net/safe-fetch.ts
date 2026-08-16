@@ -403,7 +403,10 @@ export async function safeFetch(
         signal: controller.signal,
       });
 
-      if (!REDIRECT_STATUSES.has(response.status)) {
+      // `maxRedirects: 0` means "do not follow" — the 3xx is the result, and
+      // the caller inspects Location itself (the redirect resolver does this,
+      // so it can stop at the last validated hop instead of failing the chain).
+      if (maxRedirects === 0 || !REDIRECT_STATUSES.has(response.status)) {
         const bytes = await readCapped(response.body, maxBytes, target.url.href);
         return {
           status: response.status,

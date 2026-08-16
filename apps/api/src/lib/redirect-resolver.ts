@@ -11,6 +11,12 @@ import type { KVNamespace, R2Bucket, CloudflareQueue } from "../types/cloudflare
 import { getLogger, Logger, type LoggerEnv } from "./logger.js";
 
 import { LinkSecurityHandler } from "./link-security-handler.js";
+import {
+  safeFetch,
+  SsrfBlockedError,
+  type DnsResolver,
+  type Transport,
+} from "./net/safe-fetch.js";
 
 /**
  * Redirect resolution result
@@ -76,6 +82,13 @@ const MAX_REDIRECTS = 5;
  */
 const REQUEST_TIMEOUT = 5000;
 
+/**
+ * Cap on bytes read while resolving a chain. We only ever want headers, so
+ * anything past this is either a misbehaving server or a deliberate attempt to
+ * make us buffer a multi-gigabyte body.
+ */
+const MAX_BODY_BYTES = 64 * 1024;
+
 export class RedirectResolver {
   private logger: Logger;
   private linkSecurityHandler: LinkSecurityHandler;
@@ -95,6 +108,7 @@ export class RedirectResolver {
   async resolveRedirects(
     url: string,
     env: RedirectResolverEnv,
+    options: { resolver?: DnsResolver; transport?: Transport } = {},
   ): Promise<RedirectResult | null> {
     // Check cache first
     const cached = await this.getCachedResult(url, env);
@@ -122,24 +136,50 @@ export class RedirectResolver {
 
       // Follow redirects up to MAX_REDIRECTS
       while (hops < MAX_REDIRECTS) {
-        const response = await this.fetchWithTimeout(
-          currentUrl,
-          REQUEST_TIMEOUT,
-        );
+        // Every hop — INCLUDING the first — goes through the SSRF-safe fetch,
+        // which validates the URL (DNS resolution and all resolved A/AAAA
+        // records) before a socket is opened and pins the connection to the
+        // validated address. Previously only redirect *destinations* were
+        // checked, so the initial URL was fetched entirely unvalidated: this
+        // resolver would happily HEAD `http://169.254.169.254/` on hop zero.
+        let response: Awaited<ReturnType<typeof safeFetch>>;
+        try {
+          response = await this.fetchHop(currentUrl, options);
+        } catch (error) {
+          if (error instanceof SsrfBlockedError) {
+            this.logger.warn("Redirect hop blocked by SSRF guard:", {
+              originalUrl: url,
+              blockedUrl: currentUrl,
+              reason: error.reason,
+              detail: error.detail,
+            });
+            // The very first hop being unsafe means we have nothing to return.
+            if (hops === 0) return null;
+            break;
+          }
+          throw error;
+        }
+
+        const isRedirectStatus =
+          response.status === 301 ||
+          response.status === 302 ||
+          response.status === 303 ||
+          response.status === 307 ||
+          response.status === 308;
 
         if (
-          !response.ok &&
-          response.status !== 301 &&
-          response.status !== 302 &&
-          response.status !== 307 &&
-          response.status !== 308
+          !isRedirectStatus &&
+          (response.status < 200 || response.status >= 300)
         ) {
           // Not a redirect, return current URL as final
           break;
         }
 
         // Check for redirect
-        const location = response.headers.get("Location");
+        const locationHeader = response.headers["location"];
+        const location = Array.isArray(locationHeader)
+          ? locationHeader[0]
+          : locationHeader;
         if (!location) {
           // No redirect header, current URL is final
           break;
@@ -148,7 +188,9 @@ export class RedirectResolver {
         // Resolve relative redirects
         const nextUrl = new URL(location, currentUrl).href;
 
-        // Security check: validate redirect destination
+        // Security check: validate redirect destination. This is the lexical
+        // pre-screen; the authoritative check (DNS + pinning) runs inside
+        // `fetchHop` on the next iteration.
         const redirectValidation =
           this.linkSecurityHandler.validateUrlSync(nextUrl);
         if (redirectValidation.status === "blocked") {
@@ -209,51 +251,36 @@ export class RedirectResolver {
   }
 
   /**
-   * Fetch URL with timeout
+   * Fetch one hop through the SSRF-safe fetcher.
    *
-   * @param url - URL to fetch
-   * @param timeoutMs - Timeout in milliseconds
-   * @returns Fetch response
+   * `maxRedirects: 0` returns the 3xx rather than following it, so this class
+   * keeps its own chain bookkeeping (loop detection, "stop at the last good
+   * hop" behaviour) while the validation, IP pinning, timeout and body cap all
+   * come from the shared helper.
+   *
+   * @param url - URL to fetch (validated inside `safeFetch`)
+   * @param options - Injected resolver/transport for tests
+   * @returns The response for this single hop
    */
-  private async fetchWithTimeout(
+  private async fetchHop(
     url: string,
-    timeoutMs: number,
-  ): Promise<Response> {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    options: { resolver?: DnsResolver; transport?: Transport },
+  ): Promise<Awaited<ReturnType<typeof safeFetch>>> {
+    const common = {
+      timeoutMs: REQUEST_TIMEOUT,
+      maxRedirects: 0,
+      maxBytes: MAX_BODY_BYTES,
+      headers: { "user-agent": "Trellis-LinkSecurity/1.0" },
+      resolver: options.resolver,
+      transport: options.transport,
+    };
 
-    try {
-      // Try HEAD first (more efficient), fallback to GET if HEAD not supported
-      let response = await fetch(url, {
-        method: "HEAD",
-        redirect: "manual", // Manual redirect handling
-        signal: controller.signal,
-        headers: {
-          "User-Agent": "Trellis-LinkSecurity/1.0",
-        },
-      });
-
-      // If HEAD not supported, try GET
-      if (response.status === 405 || response.status === 501) {
-        response = await fetch(url, {
-          method: "GET",
-          redirect: "manual",
-          signal: controller.signal,
-          headers: {
-            "User-Agent": "Trellis-LinkSecurity/1.0",
-          },
-        });
-      }
-
-      clearTimeout(timeoutId);
-      return response;
-    } catch (error: any) {
-      clearTimeout(timeoutId);
-      if (error.name === "AbortError") {
-        throw new Error(`Request timeout after ${timeoutMs}ms`);
-      }
-      throw error;
+    // HEAD first (cheap); fall back to GET where the origin refuses it.
+    const response = await safeFetch(url, { ...common, method: "HEAD" });
+    if (response.status === 405 || response.status === 501) {
+      return safeFetch(url, { ...common, method: "GET" });
     }
+    return response;
   }
 
   /**
