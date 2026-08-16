@@ -420,4 +420,98 @@ if (pkg.version !== mod.EXTENSION_API_VERSION) {
 console.log('  OK: packed version and exported constant agree (' + pkg.version + ')');
 "
 
+# ---------------------------------------------------------------------------
+# @de-otio/trellis-extension-testkit, from a packed tarball.
+#
+# Same argument as extension-api above, one degree sharper: the testkit's whole
+# job is to be installed by someone outside this repo, so a resolution defect in
+# it is a defect in the only tool an author has for finding defects.
+#
+# Two entry points, and the split matters. `.` pulls in the harness, which
+# reaches for `@de-otio/trellis` at runtime; `./example` is the fixture an
+# author copies, and it must load with core ABSENT — an author reading the
+# reference extension has not necessarily installed anything else yet.
+# ---------------------------------------------------------------------------
+echo "==> packing @de-otio/trellis-extension-testkit from ${REPO_ROOT}/packages/extension-testkit"
+( cd "${REPO_ROOT}/packages/extension-testkit" && npm pack --silent --pack-destination "${PACK_DIR}" >/dev/null )
+TESTKIT_TARBALL="$(find "${PACK_DIR}" -name 'de-otio-trellis-extension-testkit-*.tgz' -type f | head -n1)"
+if [ -z "${TESTKIT_TARBALL}" ] || [ ! -f "${TESTKIT_TARBALL}" ]; then
+  echo "::error::Could not locate packed extension-testkit tarball under ${PACK_DIR}"
+  exit 1
+fi
+echo "==> packed extension-testkit: ${TESTKIT_TARBALL}"
+
+# The compose fixture is the one non-JS file the package promises. `files`
+# lists it, but `files` is edited by hand and this is the only place that
+# notices when it stops being true.
+echo "==> asserting the compose fixture ships"
+if ! tar -tzf "${TESTKIT_TARBALL}" | grep -q 'package/fixtures/docker-compose.yml'; then
+  echo "::error::fixtures/docker-compose.yml is missing from the testkit tarball"
+  tar -tzf "${TESTKIT_TARBALL}"
+  exit 1
+fi
+
+echo "==> installing the testkit tarball into the consumer project"
+# Not --omit=dev: the testkit IS a devDependency for a consumer, so its own
+# runtime deps (pg, prisma, the DynamoDB client) must come with it.
+npm install "${TESTKIT_TARBALL}" --no-fund --no-audit --silent
+
+echo "==> loading @de-otio/trellis-extension-testkit entry points"
+node --input-type=module -e "
+const harness = await import('@de-otio/trellis-extension-testkit');
+for (const name of ['startStandaloneServer', 'assertExtensionConformance', 'checkExtensionConformance', 'standaloneEnv', 'applyCoreMigrations', 'coreSchemaPath', 'seedGlobalFeatureToggles', 'waitForHealth']) {
+  if (typeof harness[name] !== 'function') {
+    console.error('::error::' + name + ' missing from the testkit root export');
+    process.exit(1);
+  }
+}
+console.log('  ✓ root export — harness + conformance surface present');
+
+const example = await import('@de-otio/trellis-extension-testkit/example');
+if (example.exampleExtension?.id !== 'example') {
+  console.error('::error::/example did not export the reference extension');
+  process.exit(1);
+}
+// The reference extension must pass the checks it is the reference FOR. A
+// fixture that its own suite would reject teaches the wrong thing, and this is
+// the cheapest place to notice — no server needed, since the version check is
+// a pure comparison over data the tarball already carries.
+if (typeof example.exampleExtension.extensionApiVersion !== 'string') {
+  console.error('::error::the reference extension declares no extensionApiVersion');
+  process.exit(1);
+}
+console.log('  ✓ /example export — reference extension loads with core absent');
+"
+
+# The `docker-compose.yml` subpath is exported as a real file, so it must be
+# resolvable AS a path — an author is going to hand it to `docker compose -f`.
+echo "==> asserting the compose fixture resolves through the exports map"
+node --input-type=module -e "
+const { createRequire } = await import('node:module');
+const require = createRequire(process.cwd() + '/');
+const p = require.resolve('@de-otio/trellis-extension-testkit/docker-compose.yml');
+const { readFileSync } = await import('node:fs');
+if (!readFileSync(p, 'utf8').includes('postgis/postgis')) {
+  console.error('::error::resolved compose fixture does not look like the shipped one:', p);
+  process.exit(1);
+}
+console.log('  ✓ docker-compose.yml resolves to', p);
+"
+
+# The tarball path that `coreSchemaPath()` exists to find. It could only be
+# wrong in a real install — in the monorepo apps/api/prisma does not exist at
+# all, because core's prepack creates it — so this is the one place the
+# happy path is reachable.
+echo "==> asserting coreSchemaPath() finds core's shipped schema"
+node --input-type=module -e "
+const { coreSchemaPath } = await import('@de-otio/trellis-extension-testkit');
+const { readFileSync } = await import('node:fs');
+const p = coreSchemaPath();
+if (!readFileSync(p, 'utf8').includes('generator client')) {
+  console.error('::error::coreSchemaPath() returned something that is not a prisma schema:', p);
+  process.exit(1);
+}
+console.log('  ✓ coreSchemaPath() ->', p);
+"
+
 echo "==> smoke test passed"

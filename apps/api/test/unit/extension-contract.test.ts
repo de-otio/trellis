@@ -26,13 +26,11 @@ import {
   minimalExtension,
   hookCalls,
   resetHookCalls,
-} from "../fixtures/example-extension/index.js";
+} from "@de-otio/trellis-extension-testkit/example";
 
 describe("extension contract: validateExtensions", () => {
   it("accepts the full and minimal reference extensions", () => {
-    expect(() =>
-      validateExtensions([exampleExtension, minimalExtension]),
-    ).not.toThrow();
+    expect(() => validateExtensions([exampleExtension, minimalExtension])).not.toThrow();
   });
 
   it("rejects a reserved id", () => {
@@ -41,18 +39,16 @@ describe("extension contract: validateExtensions", () => {
   });
 
   it("rejects an invalid id format (uppercase / too short)", () => {
-    expect(() =>
-      validateExtensions([{ ...minimalExtension, id: "X" }]),
-    ).toThrow(/lowercase|2-32/i);
-    expect(() =>
-      validateExtensions([{ ...minimalExtension, id: "Widget" }]),
-    ).toThrow(/lowercase|2-32/i);
+    expect(() => validateExtensions([{ ...minimalExtension, id: "X" }])).toThrow(/lowercase|2-32/i);
+    expect(() => validateExtensions([{ ...minimalExtension, id: "Widget" }])).toThrow(
+      /lowercase|2-32/i,
+    );
   });
 
   it("rejects duplicate ids", () => {
-    expect(() =>
-      validateExtensions([minimalExtension, { ...minimalExtension }]),
-    ).toThrow(/duplicate/i);
+    expect(() => validateExtensions([minimalExtension, { ...minimalExtension }])).toThrow(
+      /duplicate/i,
+    );
   });
 
   it("rejects routes that shadow a reserved core prefix", () => {
@@ -81,23 +77,27 @@ describe("extension contract: validateExtensions", () => {
 describe("extension contract: extensionApiVersion (extension-api 0.8.0)", () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it("the reference extensions omit the field and remain valid", () => {
-    // Backward compatibility: the field is additive, never required.
-    expect(exampleExtension.extensionApiVersion).toBeUndefined();
+  it("the minimal reference extension omits the field and remains valid", () => {
+    // Backward compatibility: the field is additive, never required. The
+    // minimal fixture is the one that carries this promise — it exists to omit
+    // every optional field — while `exampleExtension` models the good version
+    // and declares it. Two fixtures, two jobs.
     expect(minimalExtension.extensionApiVersion).toBeUndefined();
-    expect(() =>
-      validateExtensions([exampleExtension, minimalExtension]),
-    ).not.toThrow();
+    expect(exampleExtension.extensionApiVersion).toBe(EXTENSION_API_VERSION);
+    expect(() => validateExtensions([exampleExtension, minimalExtension])).not.toThrow();
   });
 
-  it("omitting the field warns exactly once, naming the extensions", () => {
-    validateExtensions([exampleExtension, minimalExtension]);
+  it("omitting the field warns exactly once, naming every extension that omits it", () => {
+    const alsoUndeclared: TrellisExtension = { ...minimalExtension, id: "undeclared" };
+    validateExtensions([exampleExtension, minimalExtension, alsoUndeclared]);
     const versionWarnings = mockLogger.warn.mock.calls
       .map((c) => String(c[0]))
       .filter((m) => m.includes("extensionApiVersion"));
     expect(versionWarnings).toHaveLength(1);
-    expect(versionWarnings[0]).toContain(`"${exampleExtension.id}"`);
     expect(versionWarnings[0]).toContain(`"${minimalExtension.id}"`);
+    expect(versionWarnings[0]).toContain(`"${alsoUndeclared.id}"`);
+    // …and says nothing about the one that declared it.
+    expect(versionWarnings[0]).not.toContain(`"${exampleExtension.id}"`);
   });
 
   it("declaring the current version is accepted silently", () => {
@@ -141,9 +141,7 @@ describe("extension contract: metadataSchema", () => {
   });
 
   it("the example schema rejects missing required fields and unknown keys", () => {
-    expect(exampleExtension.metadataSchema.safeParse({ color: "blue" }).success).toBe(
-      false,
-    );
+    expect(exampleExtension.metadataSchema.safeParse({ color: "blue" }).success).toBe(false);
     expect(
       exampleExtension.metadataSchema.safeParse({
         color: "blue",
@@ -154,17 +152,13 @@ describe("extension contract: metadataSchema", () => {
   });
 
   it("the minimal schema accepts arbitrary object metadata", () => {
-    expect(
-      minimalExtension.metadataSchema.safeParse({ anything: true }).success,
-    ).toBe(true);
+    expect(minimalExtension.metadataSchema.safeParse({ anything: true }).success).toBe(true);
   });
 });
 
 describe("extension contract: optional surfaces", () => {
   it("computeLifeStage derives a value from metadata", () => {
-    expect(exampleExtension.computeLifeStage?.({ size: "l" }, false, null)).toBe(
-      "mature",
-    );
+    expect(exampleExtension.computeLifeStage?.({ size: "l" }, false, null)).toBe("mature");
     expect(exampleExtension.computeLifeStage?.({ size: "m" }, false, null)).toBeNull();
   });
 
@@ -176,7 +170,6 @@ describe("extension contract: optional surfaces", () => {
     expect(a?.summary).toContain("Spinny");
     expect(a?.attachment?.[0]).toMatchObject({ name: "Color", value: "red" });
   });
-
 });
 
 describe("extension contract: lifecycle", () => {

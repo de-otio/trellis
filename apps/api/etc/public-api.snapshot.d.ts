@@ -759,6 +759,7 @@ export { startServer } from "./server.js";
 export { registerExtension, getExtension, getExtensions } from "./extensions.js";
 export { shutdownTrellis } from "./shutdown.js";
 export type { ShutdownResult } from "./shutdown.js";
+export { EXTENSION_API_VERSION } from "@de-otio/trellis-extension-api";
 export { classifyApiVersion, parseApiVersion } from "./lib/extension-validator.js";
 export type { ApiVersionVerdict, ParsedApiVersion } from "./lib/extension-validator.js";
 export { setRealtimeProvider } from "./lib/realtime/index.js";

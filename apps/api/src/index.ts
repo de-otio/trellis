@@ -12,6 +12,13 @@ export type { ShutdownResult } from "./shutdown.js";
 // Version-compatibility rules, public so a conformance check can apply the
 // SAME rule core applies at boot rather than reimplementing the 0.x
 // minor-is-breaking policy and drifting from it.
+//
+// `EXTENSION_API_VERSION` is re-exported rather than left to the caller's own
+// `@de-otio/trellis-extension-api` import because those can be different
+// copies. The question a conformance check asks is "is this extension
+// compatible with the core it is about to run against", and only core can
+// answer which contract version *it* loaded.
+export { EXTENSION_API_VERSION } from "@de-otio/trellis-extension-api";
 export { classifyApiVersion, parseApiVersion } from "./lib/extension-validator.js";
 export type { ApiVersionVerdict, ParsedApiVersion } from "./lib/extension-validator.js";
 // Realtime transport seam: a consuming app (e.g. Skybber) injects a concrete

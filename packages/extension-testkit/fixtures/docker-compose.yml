@@ -1,0 +1,39 @@
+# The local stack a standalone Trellis boot needs.
+#
+#   docker compose -f node_modules/@de-otio/trellis-extension-testkit/fixtures/docker-compose.yml up -d
+#
+# Or copy it into your repo and edit the ports — nothing here is magic, and
+# `startStandaloneServer` will point at whatever you tell it to.
+#
+# Ports match the testkit's defaults. If you already run a Trellis stack, skip
+# this file and pass `databaseUrl` / `dynamoEndpoint` instead: two lanes can
+# share one stack as long as they use different `port` and `dynamoTable`.
+
+services:
+  postgres:
+    # PostGIS, not plain Postgres: core's entity-location migration runs
+    # `CREATE EXTENSION IF NOT EXISTS postgis`, which needs control files the
+    # alpine image does not ship. Same PG16 on-disk format, so an existing
+    # volume is reused.
+    image: postgis/postgis:16-3.4
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: trellis_dev
+      POSTGRES_USER: trellis
+      POSTGRES_PASSWORD: trellis_dev_password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trellis -d trellis_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  dynamodb:
+    image: amazon/dynamodb-local:latest
+    ports:
+      - "8000:8000"
+    # In-memory: ephemeral, fast, and the mode AWS recommends for tests. The
+    # file-backed (-dbPath) engine can deadlock on a mounted volume, hanging
+    # every DynamoDB operation while the HTTP port still answers — which looks
+    # exactly like a bug in your extension.
+    command: "-jar DynamoDBLocal.jar -sharedDb -inMemory"

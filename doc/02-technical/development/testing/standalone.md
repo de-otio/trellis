@@ -32,13 +32,26 @@ with the dummy extensions and drives the full HTTP path — no AWS, no consuming
 vertical. It is wired into CI as the `standalone` job, and `smoke-pack.sh`
 asserts the fixtures never ship.
 
-- **Fixture:** `apps/api/test/fixtures/example-extension/` — `exampleExtension`
+- **Fixture:** `@de-otio/trellis-extension-testkit/example` — `exampleExtension`
   (id `example`, terminology `widget`/`widgets`, exercising every optional
-  `TrellisExtension` surface) + `minimalExtension` (required fields only).
+  `TrellisExtension` surface core dispatches) + `minimalExtension` (required
+  fields only). It moved out of `test/fixtures/` and into the published testkit
+  in 2026-08: it is the reference an extension author copies, and a reference
+  nobody can install is not one. Core still imports it here, which is what
+  keeps it honest.
 - **Harness:** `apps/api/test/standalone/` — `global-setup.ts` (creates the
   DynamoDB-local table, seeds feature toggles, boots, health-gates, tears down
   cleanly) + `vitest.standalone.config.ts`. Auth reuses `test-auth.ts`
   (cookie-minted sessions via the real `SessionManager`).
+
+  This lane deliberately does **not** use the testkit's
+  `startStandaloneServer()`, which is the packaged form of exactly this
+  `global-setup.ts`. The testkit resolves `@de-otio/trellis`, which in this
+  workspace is `apps/api/dist`; core's own lane has to boot from `src` or it
+  becomes a test of the last build rather than of the working tree, and stops
+  being a pre-publish gate. The **testkit lane**
+  (`packages/extension-testkit/`, CI job `Testkit lane`) covers the packaged
+  path. Neither substitutes for the other.
 - **Suites:** health/gating, extension routes (`ping`/`whoami`/`echo` — auth
   + CSRF), and entity metadata-schema validation.
 
@@ -268,20 +281,25 @@ exist, to prove the contract works when every optional field is omitted.
 
 ### Where it lives
 
+As originally built (2026-06):
+
 ```
 apps/api/test/
   fixtures/
     example-extension/        # the dummy vertical (NOT shipped — under test/)
       index.ts                # exampleExtension + minimalExtension
       boot.ts                 # registerExtension + startServer against local infra
-  standalone/                 # NEW — local full-path tests
+  standalone/                 # local full-path tests
     *.test.ts                 # drive the booted server over HTTP on localhost
 ```
 
-Keep the fixture under `test/` so it never lands in the published tarball
-(`apps/api/package.json` `files` is `dist`, `prisma`, `src/lambda` — fixtures
-are already excluded). `smoke-pack.sh` should additionally assert the dummy
-extension is **absent** from the packed tarball.
+**Superseded in 2026-08.** `index.ts` moved to
+`packages/extension-testkit/src/example/`, and `boot.ts` now imports the
+extensions from there. The reasoning below — keep the fixture out of core's
+tarball — still holds and `smoke-pack.sh` still asserts it: core's `files` list
+is `dist`, `prisma`, `src/lambda`, and the assertion fails if `test/` or
+`example-extension` appears in core's tarball. What changed is that the fixture
+now ships in a *different* package, the one whose job is to be installed.
 
 ### Local E2E config (`vitest.standalone.config.ts`)
 
