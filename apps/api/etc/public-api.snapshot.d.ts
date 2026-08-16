@@ -757,21 +757,25 @@ export declare function getExtensions(): readonly TrellisExtension[];
  */
 export { startServer } from "./server.js";
 export { registerExtension, getExtension, getExtensions } from "./extensions.js";
+export { shutdownTrellis } from "./shutdown.js";
+export type { ShutdownResult } from "./shutdown.js";
+export { classifyApiVersion, parseApiVersion } from "./lib/extension-validator.js";
+export type { ApiVersionVerdict, ParsedApiVersion } from "./lib/extension-validator.js";
 export { setRealtimeProvider } from "./lib/realtime/index.js";
 export { setPushTransportProvider } from "./lib/push/index.js";
 export type { PushTransport, PushDeviceTarget, PushSendOutcome, PushPlatformWire, } from "./lib/push/index.js";
 export { setMediaModerationProvider } from "./lib/media/request-moderation.js";
 export { setMediaLabelPolicy } from "./lib/media/request-moderation.js";
-export { createLabelPolicy, LabelPolicyConfigError, } from "./lib/media/label-policy.js";
+export { createLabelPolicy, LabelPolicyConfigError } from "./lib/media/label-policy.js";
 export type { LabelPolicy, LabelPolicyConfig, LabelPolicyContext, CategoryPolicy, TaxonomyPinMode, } from "./lib/media/label-policy.js";
 export { setMediaReviewPromotion } from "./lib/media/media-review-handler.js";
-export type { ReviewPromotionPort, ReviewPromoteCoords, } from "./lib/media/media-review-handler.js";
+export type { ReviewPromotionPort, ReviewPromoteCoords } from "./lib/media/media-review-handler.js";
 export { ModerationMetrics } from "./lib/media/moderation-metrics.js";
 export type { ModerationMetricsConfig, ModerationMetricsSnapshot, ModerationPublicHealth, } from "./lib/media/moderation-metrics.js";
 export { FrameSamplingVideoModerationAdapter } from "./lib/media/frame-sampling-adapter.js";
-export type { FrameSamplingConfig, FrameSamplingDeps, } from "./lib/media/frame-sampling-adapter.js";
+export type { FrameSamplingConfig, FrameSamplingDeps } from "./lib/media/frame-sampling-adapter.js";
 export { withModerationDeadline, ModerationDeadlineConfigError, } from "./lib/media/moderation-deadline.js";
-export { createMediaBytesAccess, MediaBytesTooLargeError, } from "./lib/media/media-bytes-access.js";
+export { createMediaBytesAccess, MediaBytesTooLargeError } from "./lib/media/media-bytes-access.js";
 export type { MediaBytesAccess } from "./lib/media/media-bytes-access.js";
 export { ModerationProviderError, isModerationProviderError, NullModerationProvider, assertModerationProviderAllowed, moderationProviderName, UNKNOWN_PROVIDER_NAME, } from "./lib/media/moderation-provider.js";
 export type { MediaModerationProvider, MediaPin, ImageRef, S3Ref, ModerationVerdict, ModerationLabel, ModerationCallOptions, VideoModerationStart, } from "./lib/media/moderation-provider.js";
@@ -1035,6 +1039,94 @@ export declare function getExtensionModelRegistry(): readonly ExtensionModelRegi
  * exists so unit tests can exercise set/freeze in isolation.
  */
 export declare function __resetExtensionModelRegistryForTest(): void;
+
+// ===== lib/extension-validator.d.ts =====
+/**
+ * Extension Validator
+ *
+ * Validates extension registrations at startup:
+ * - Extension IDs are valid format and not reserved
+ * - No duplicate IDs
+ * - The declared `extensionApiVersion` is compatible with core's
+ *   `EXTENSION_API_VERSION` (absent ⇒ one warning, incompatible ⇒ fail boot)
+ * - Routes don't shadow core endpoints
+ * - Warns about routes without auth middleware
+ */
+import { type TrellisExtension } from "@de-otio/trellis-extension-api";
+/**
+ * Hard length cap applied BEFORE any regex touches the input. Bounding the
+ * input, not just the pattern, is what keeps a hostile or accidentally huge
+ * string from becoming a matcher problem at all.
+ */
+export declare const MAX_API_VERSION_LENGTH = 64;
+/** A parsed `major.minor.patch` triple. Suffixes are already discarded. */
+export interface ParsedApiVersion {
+    readonly major: number;
+    readonly minor: number;
+    readonly patch: number;
+}
+/**
+ * Parse a version string under the bounded rule above. Pure and total: any
+ * input at all yields either a triple or `null` — never a throw.
+ */
+export declare function parseApiVersion(raw: unknown): ParsedApiVersion | null;
+/**
+ * The verdict for one extension's declared API version. A closed union so the
+ * caller must handle every case, and so the decision itself stays a pure
+ * function that can be unit-tested without booting anything.
+ */
+export type ApiVersionVerdict = 
+/** No declaration — warn once at boot, never fatal. */
+{
+    readonly kind: "absent";
+}
+/** Declared, but not a version string under the bounded rule — fatal. */
+ | {
+    readonly kind: "unparseable";
+    readonly raw: unknown;
+}
+/** Core's own constant is malformed — a core packaging bug; fatal. */
+ | {
+    readonly kind: "core-unparseable";
+    readonly core: string;
+}
+/** Outside the compatibility window — fatal. */
+ | {
+    readonly kind: "incompatible";
+    readonly declared: string;
+    readonly core: string;
+    readonly reason: string;
+}
+/** Inside the compatibility window but not identical — log only. */
+ | {
+    readonly kind: "drift";
+    readonly declared: string;
+    readonly core: string;
+}
+/** Same compatibility window and same triple — silent. */
+ | {
+    readonly kind: "match";
+};
+/**
+ * Decide how an extension's declared API version relates to core's.
+ *
+ * Compatibility rule (mirrors the bump policy documented on
+ * `EXTENSION_API_VERSION`): a differing MAJOR is always breaking; while the
+ * API is still `0.x` a differing MINOR is breaking too, because 0.x minors
+ * carry signature changes. Anything else is drift.
+ *
+ * `core` is a parameter rather than a module constant so the malformed-core
+ * branch is reachable in tests.
+ */
+export declare function classifyApiVersion(declaredRaw: unknown, core: string): ApiVersionVerdict;
+/**
+ * Validate every registered extension. Throws on the first fatal problem —
+ * callers (`server.ts`) treat a throw as "do not serve".
+ *
+ * @param coreApiVersion core's extension-API version; defaults to the shipped
+ *   `EXTENSION_API_VERSION` constant and is only overridden by tests.
+ */
+export declare function validateExtensions(extensions: TrellisExtension[], coreApiVersion?: string): void;
 
 // ===== lib/logger.d.ts =====
 /**
@@ -4088,6 +4180,68 @@ export interface StartServerOptions {
     readonly extensionModelRegistry?: readonly ExtensionModelRegistryEntry[];
 }
 export declare function startServer(options?: StartServerOptions): Promise<http.Server>;
+
+// ===== shutdown.d.ts =====
+/**
+ * Graceful shutdown of the process-wide resources core owns.
+ *
+ * Core opens two pools lazily and holds them in module state: the shared
+ * database connection manager (Prisma clients + pg pools) and the shared graph
+ * service. Neither had a public entry point, so every consumer that needed to
+ * release them — a standalone test lane, a script, a worker that boots the app
+ * out of process — reached into `dist/lib/…` for the internals:
+ *
+ * ```ts
+ * // what a consumer had to write, and what this replaces
+ * const { sharedDatabaseConnectionManager } = await import(
+ *   "@de-otio/trellis/dist/lib/database-connection-manager.js");
+ * await sharedDatabaseConnectionManager.shutdown();
+ * ```
+ *
+ * That is a false-affordance of the same family the `exports` map closes: the
+ * only way to do a supported thing was to import an unsupported path. It also
+ * blocks curating `dist/**` behind named subpaths, because those deep
+ * specifiers are load-bearing for anyone running the server outside a
+ * container.
+ *
+ * **Best-effort by construction.** Each step is attempted independently and a
+ * failure in one does not prevent the others — a teardown that throws halfway
+ * leaves sockets open, which is the problem it exists to solve. Failures are
+ * returned rather than thrown so a caller that cares can report them.
+ *
+ * Idempotent: calling it twice is safe, and calling it when nothing was ever
+ * opened is a no-op.
+ */
+/** What `shutdownTrellis()` managed to close, and what it could not. */
+export interface ShutdownResult {
+    /** Names of the subsystems that shut down cleanly. */
+    closed: string[];
+    /**
+     * Subsystems that threw, with the error. Non-empty does NOT mean the process
+     * is unhealthy — a pool that was never opened can fail to close.
+     */
+    failed: {
+        subsystem: string;
+        error: unknown;
+    }[];
+}
+/**
+ * Release core's process-wide resources so the process can exit.
+ *
+ * Call from a `SIGTERM` handler, a test lane's teardown, or any script that
+ * booted the server in-process. Does **not** stop an HTTP server — close the
+ * `Server` returned by {@link startServer} first, then call this.
+ *
+ * @example
+ * ```ts
+ * const server = await startServer();
+ * // …
+ * server.closeAllConnections?.();
+ * await new Promise<void>((r) => server.close(() => r()));
+ * await shutdownTrellis();
+ * ```
+ */
+export declare function shutdownTrellis(): Promise<ShutdownResult>;
 
 // ===== types/cloudflare-compat.d.ts =====
 /**

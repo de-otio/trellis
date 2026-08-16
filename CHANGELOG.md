@@ -17,6 +17,39 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ### Added
 
+- **`shutdownTrellis()` — a public way to release core's process-wide
+  resources.** Core opens two pools lazily and holds them in module state (the
+  shared database connection manager, the shared graph service), and neither had
+  a public entry point. Anything running the server outside a container — a
+  standalone test lane, a script, a worker booting the app in-process — had to
+  reach into internals to release them:
+
+  ```ts
+  // what a consumer had to write
+  const { sharedDatabaseConnectionManager } =
+    await import("@de-otio/trellis/dist/lib/database-connection-manager.js");
+  await sharedDatabaseConnectionManager.shutdown();
+  ```
+
+  That is the same false-affordance the `exports` map closes, inverted: the only
+  way to do a supported thing was through an unsupported path. It also made
+  those deep specifiers load-bearing, which blocks curating `dist/**` behind
+  named subpaths.
+
+  Best-effort by construction: each subsystem is attempted independently, a
+  failure in one does not strand the others, and the function never rejects —
+  a teardown that throws halfway leaves exactly the sockets open that it exists
+  to close. Failures are returned in `ShutdownResult.failed` for a caller that
+  cares. Core's own standalone lane now uses it instead of the deep imports, so
+  the path an extension author takes is the path core exercises.
+
+- **`classifyApiVersion` / `parseApiVersion` are public.** The rule that a
+  differing minor is breaking while the API is `0.x` lived only inside core's
+  boot-time validator, so anything checking an extension's declared
+  `extensionApiVersion` ahead of boot had to restate it — and drift from it.
+  Exported with `ApiVersionVerdict` and `ParsedApiVersion` so a conformance
+  check applies the same rule core applies.
+
 - **`@de-otio/trellis-extension-api` 0.9.1 — an extension can now type its own
   models.** `ScopedDb` takes an optional `TModels` parameter, threaded through
   `ExtensionDb`, `ExtensionContext`, `ExtensionJobContext`,
