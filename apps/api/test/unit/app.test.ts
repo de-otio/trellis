@@ -181,12 +181,18 @@ describe("Hono app seam (H0)", () => {
     // the preflight is still served.
     const app = buildHonoApp();
 
+    // SEC M4: CORS now fails closed when NEITHER APP_DOMAIN nor
+    // ALLOWED_ORIGINS is configured (it used to reflect any origin, with
+    // credentials). Configure the app domain so this test exercises preflight
+    // handling rather than the — now removed — fail-open reflection.
+    const corsEnv = { APP_DOMAIN: "https://example.com" } as unknown as Env;
+
     const res = await app.fetch(
       new Request("http://localhost/api/config", {
         method: "OPTIONS",
         headers: { Origin: "https://example.com" },
       }),
-      { trellisEnv: env },
+      { trellisEnv: corsEnv },
     );
 
     expect(res.status).toBe(204);
