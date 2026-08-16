@@ -264,15 +264,29 @@ export function validateExtensions(
       );
     }
 
-    // Warn about routes without auth middleware
+    // SEC M5 — REJECT (was: warn) raw `ext.routes` without auth middleware.
+    //
+    // `routes/index.ts` splices raw extension routes straight into the core
+    // route table: core applies NO auth, NO CSRF, NO security headers, and the
+    // handler receives the full core `Env` — SESSION_SECRET, DATABASE_URL, every
+    // KV binding and queue. A raw route with no auth middleware is therefore an
+    // unauthenticated endpoint with total core access, and a warning in the boot
+    // log is not a control. The wrapped path (`extensionRoutes` →
+    // `wrapExtensionRoutes`) is the supported way to add routes: core enforces
+    // auth, CORS, CSRF and hands the handler a scoped `ExtensionContext`
+    // instead of `Env`.
     for (const route of ext.routes) {
       const hasAuth = route.middleware?.some(
         (m: any) =>
           m.name === "authMiddleware" || m.name === "csrfMiddleware",
       );
       if (!hasAuth) {
-        logger.warn(
-          `Extension "${ext.id}" route "${route.description ?? route.path}" has no auth middleware`,
+        throw new Error(
+          `Extension "${ext.id}" raw route "${route.description ?? String(route.path)}" ` +
+            `has no auth middleware. Raw ext.routes bypass core auth/CSRF and receive the ` +
+            `full core Env (SESSION_SECRET, DATABASE_URL, KV bindings). Either add ` +
+            `authMiddleware/csrfMiddleware to the route, or — preferred — declare it under ` +
+            `\`extensionRoutes\` so core wraps it (auth enforced, scoped ExtensionContext).`,
         );
       }
     }

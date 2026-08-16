@@ -353,7 +353,17 @@ import { getExtensions } from "../../extensions.js";
 import { wrapExtensionRoutes } from "../extension-route-wrapper.js";
 
 const extensionRoutes: Route[] = [
-  // Raw routes (legacy — app-side wired handlers)
+  // Raw routes (legacy — app-side wired handlers).
+  //
+  // SEC M5 / TRUST MODEL: extensions are NOT sandboxed. A raw route is spliced
+  // into the core table verbatim — core applies no auth, no CSRF and no
+  // security headers, and the handler is invoked with the full core `Env`
+  // (SESSION_SECRET, DATABASE_URL, every KV binding and queue). Registering an
+  // extension is therefore a decision to trust its code at the same level as
+  // core code. `validateExtensions` now REJECTS at startup any raw route with
+  // no auth middleware, so the unauthenticated-with-full-Env shape can no
+  // longer boot; the remaining exposure (a raw route's access to `Env`) is
+  // inherent to this legacy path. Prefer `extensionRoutes` below.
   ...getExtensions().flatMap((ext) => ext.routes as Route[]),
   // Core-wrapped routes (clean pattern — extension provides handler, core wraps)
   ...getExtensions().flatMap((ext) => wrapExtensionRoutes(ext)),
