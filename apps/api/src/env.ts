@@ -170,6 +170,22 @@ export interface Env {
    */
   ACTIVITYPUB_ENABLED: boolean;
 
+  /**
+   * Defederation list: comma- or whitespace-separated instance domains whose
+   * activities are refused at inbox admission, before any rate-limit budget is
+   * spent. A leading `.`/`*.` is optional — matching is on label boundaries,
+   * so `example.com` also blocks `mastodon.example.com` but never
+   * `notexample.com`. Unset means "federate with everyone".
+   */
+  ACTIVITYPUB_BLOCKED_DOMAINS?: string;
+
+  /**
+   * Per-minute inbox request ceiling per remote INSTANCE DOMAIN (not per
+   * actor — actor URIs are free to mint). Defaults to 60. Enforced through the
+   * shared distributed token bucket, so it holds across replicas and restarts.
+   */
+  ACTIVITYPUB_INSTANCE_RATE_LIMIT?: string;
+
   // ── Client version policy (served by GET /api/app/version-policy) ─────────
   // All four are OPTIONAL and all four are DORMANT by default: unset means the
   // endpoint returns nulls and the 426 backstop is a no-op. Values are
@@ -1591,6 +1607,9 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     // Federation master switch — fail closed: anything other than the exact
     // string "true" leaves federation disabled.
     ACTIVITYPUB_ENABLED: process.env.ACTIVITYPUB_ENABLED === "true",
+    ACTIVITYPUB_BLOCKED_DOMAINS: process.env.ACTIVITYPUB_BLOCKED_DOMAINS,
+    ACTIVITYPUB_INSTANCE_RATE_LIMIT:
+      process.env.ACTIVITYPUB_INSTANCE_RATE_LIMIT,
 
     // Client version policy — raw passthrough; boot validation (env-schema.ts)
     // has already rejected malformed values, and resolveVersionPolicy() treats

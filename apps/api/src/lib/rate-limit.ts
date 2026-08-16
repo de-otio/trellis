@@ -149,6 +149,30 @@ function getLimiter(env: RateLimitEnv): FoundationLimiter {
   return cachedLimiter;
 }
 
+/**
+ * Consume from the SHARED (distributed) token bucket under an explicit key.
+ *
+ * The `RateLimiter` methods derive their key from a `Request` (IP, session,
+ * user). Some limits are keyed by something else entirely — ActivityPub
+ * federation limits per remote instance DOMAIN, not per connection — and this
+ * is the seam for those. It deliberately PROPAGATES limiter errors so each
+ * caller picks its own failure policy; the inbox fails closed.
+ *
+ * @param env - Environment carrying the limiter configuration
+ * @param key - Fully-qualified bucket key (namespaced by the caller)
+ * @param limit - Bucket capacity (max burst)
+ * @param windowSeconds - Window the capacity refills over
+ * @returns The limiter's decision
+ */
+export async function consumeSharedBucket(
+  env: RateLimitEnv,
+  key: string,
+  limit: number,
+  windowSeconds: number,
+): Promise<RateLimitResult> {
+  return getLimiter(env).consume(key, 1, windowToConfig(limit, windowSeconds));
+}
+
 /** Test seam: reset the memoized module-level limiter between tests. */
 export function __resetRateLimiterForTests(): void {
   cachedLimiter = undefined;

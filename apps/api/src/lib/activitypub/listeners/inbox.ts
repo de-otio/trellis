@@ -24,7 +24,7 @@ import { detectRegionSync } from "../../region-detection.js";
 import { verifyInboxRequest } from "./http-signatures.js";
 import { assertActorBinding } from "../http-signatures.js";
 import { processRemoteActivity } from "../services/remote-activity-handler.js";
-import { validateActivity } from "../services/abuse-prevention.js";
+import { admitActivity } from "../services/abuse-prevention.js";
 import { getActivityPubBaseUrl } from "../fedify/context.js";
 import { isStandaloneModeEnabled, isRemoteUri } from "../standalone-mode.js";
 
@@ -173,16 +173,23 @@ export async function processInboxActivity(
         );
       }
 
-      // Validate activity for abuse prevention (Fedify handles rate limiting)
-      const isValid = await validateActivity(activity, actorUri, env);
-      if (!isValid) {
-        logger.warn("[Fedify Inbox] Activity failed abuse prevention check", {
+      // Admission control: instance blocklist, then the shared domain-keyed
+      // rate limit, then abuse heuristics. Fails CLOSED — a check that cannot
+      // run is a refusal, not an admission.
+      const admission = await admitActivity(activity, actorUri, env);
+      if (!admission.admitted) {
+        logger.warn("[Fedify Inbox] Activity refused admission", {
           username,
           actorUri,
           activityType: activity.type,
+          reason: admission.reason,
+          detail: admission.detail,
         });
+        // A rate-limited peer should back off and retry; everything else is a
+        // flat refusal.
+        const status = admission.reason === "rate-limited" ? 429 : 403;
         return new Response(JSON.stringify({ error: "Activity rejected" }), {
-          status: 403,
+          status,
           headers: { "content-type": "application/json" },
         });
       }

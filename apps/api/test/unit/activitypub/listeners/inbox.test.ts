@@ -53,7 +53,7 @@ vi.mock(
 );
 
 vi.mock("../../../../src/lib/activitypub/services/abuse-prevention", () => ({
-  validateActivity: vi.fn(),
+  admitActivity: vi.fn(),
 }));
 
 vi.mock("../../../../src/lib/activitypub/standalone-mode", () => ({
@@ -289,10 +289,13 @@ describe("Fedify Inbox Listener", () => {
       );
       vi.mocked(isStandaloneModeEnabled).mockResolvedValue(false); // Not in standalone mode
 
-      const { validateActivity } = await import(
+      const { admitActivity } = await import(
         "../../../../src/lib/activitypub/services/abuse-prevention.js"
       );
-      vi.mocked(validateActivity).mockResolvedValue(false); // Abuse prevention fails
+      vi.mocked(admitActivity).mockResolvedValue({
+        admitted: false,
+        reason: "abusive",
+      }); // Abuse prevention fails
 
       const response = await processInboxActivity(
         request,
@@ -416,10 +419,10 @@ describe("Fedify Inbox Listener", () => {
       );
       vi.mocked(isStandaloneModeEnabled).mockResolvedValue(false); // Not in standalone mode
 
-      const { validateActivity } = await import(
+      const { admitActivity } = await import(
         "../../../../src/lib/activitypub/services/abuse-prevention.js"
       );
-      vi.mocked(validateActivity).mockResolvedValue(true); // Abuse prevention passes
+      vi.mocked(admitActivity).mockResolvedValue({ admitted: true }); // Abuse prevention passes
 
       const { processRemoteActivity } = await import(
         "../../../../src/lib/activitypub/services/remote-activity-handler.js"
@@ -662,10 +665,10 @@ describe("Fedify Inbox Listener", () => {
       vi.mocked(isStandaloneModeEnabled).mockResolvedValue(false); // Standalone mode disabled
       vi.mocked(isRemoteUri).mockReturnValue(true); // Remote URI
 
-      const { validateActivity } = await import(
+      const { admitActivity } = await import(
         "../../../../src/lib/activitypub/services/abuse-prevention.js"
       );
-      vi.mocked(validateActivity).mockResolvedValue(true);
+      vi.mocked(admitActivity).mockResolvedValue({ admitted: true });
 
       const { processRemoteActivity } = await import(
         "../../../../src/lib/activitypub/services/remote-activity-handler.js"
@@ -925,10 +928,10 @@ describe("Fedify Inbox Listener", () => {
       vi.mocked(isStandaloneModeEnabled).mockResolvedValue(false);
       vi.mocked(isRemoteUri).mockReturnValue(true);
 
-      const { validateActivity } = await import(
+      const { admitActivity } = await import(
         "../../../../src/lib/activitypub/services/abuse-prevention.js"
       );
-      vi.mocked(validateActivity).mockResolvedValue(true);
+      vi.mocked(admitActivity).mockResolvedValue({ admitted: true });
 
       const { processRemoteActivity } = await import(
         "../../../../src/lib/activitypub/services/remote-activity-handler.js"
@@ -970,10 +973,13 @@ describe("Fedify Inbox Listener", () => {
       vi.mocked(isStandaloneModeEnabled).mockResolvedValue(false);
       vi.mocked(isRemoteUri).mockReturnValue(true);
 
-      const { validateActivity } = await import(
+      const { admitActivity } = await import(
         "../../../../src/lib/activitypub/services/abuse-prevention.js"
       );
-      vi.mocked(validateActivity).mockResolvedValue(false); // Abuse detected
+      vi.mocked(admitActivity).mockResolvedValue({
+        admitted: false,
+        reason: "abusive",
+      }); // Abuse detected
 
       const response = await processInboxActivity(
         request,

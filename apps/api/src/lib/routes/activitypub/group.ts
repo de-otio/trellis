@@ -13,6 +13,7 @@ import {
   assertActorBinding,
   HttpSignatureService,
 } from "../../activitypub/http-signatures.js";
+import { admitActivity } from "../../activitypub/services/abuse-prevention.js";
 import { sharedDatabaseConnectionManager } from "../../database-connection-manager.js";
 import {
   QueryTimeoutPresets,
@@ -286,6 +287,30 @@ export const groupRoutes: Route[] = [
           const errorResponse = securityHeaders.createSecureResponse(
             JSON.stringify({ error: "Actor mismatch" }),
             { status: 403, headers: { "content-type": "application/json" } },
+          );
+          return addCorsHeaders(errorResponse, request, env);
+        }
+
+        // Admission control (F6). The group inbox previously had NONE — no
+        // blocklist, no rate limit — so it was the softer of the two inboxes.
+        const admission = await admitActivity(
+          activity,
+          verification.owner,
+          env as any,
+        );
+        if (!admission.admitted) {
+          logger.warn("[GroupInbox] Activity refused admission", {
+            groupId,
+            owner: verification.owner,
+            reason: admission.reason,
+            detail: admission.detail,
+          });
+          const errorResponse = securityHeaders.createSecureResponse(
+            JSON.stringify({ error: "Activity rejected" }),
+            {
+              status: admission.reason === "rate-limited" ? 429 : 403,
+              headers: { "content-type": "application/json" },
+            },
           );
           return addCorsHeaders(errorResponse, request, env);
         }
