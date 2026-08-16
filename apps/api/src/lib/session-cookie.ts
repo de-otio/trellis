@@ -71,6 +71,19 @@ export interface Session {
   // Age tier for child safety feature gating (Safer Social Design)
   ageTier?: AgeTier;
 
+  // SEC L2 — per-user session epoch, sealed into the payload.
+  //
+  // Stamped at seal time (`setSession`) with `Date.now()`. `revokeAllSessions`
+  // writes a newer epoch to the blocklist KV under `sessionepoch:{userId}`;
+  // `getSession` rejects any sealed session whose `sessionEpoch` is older than
+  // the stored one. That is the "revoke all sessions" primitive — without it,
+  // the only way to kill every session was rotating SESSION_SECRET, which kills
+  // *everyone's*.
+  //
+  // Doubles as the issue-time fallback for the inactivity check when a payload
+  // carries no `lastActivityAt` (Phase 8).
+  sessionEpoch?: number;
+
   // O-1 / 05a: the caller's verified active tenant.
   //
   // Populated ONLY from a verified Cognito JWT (getSession Strategy 1a), where
@@ -106,7 +119,7 @@ const SEAL_FORBIDDEN_FIELDS = ["activeTenantId"] as const;
  * `Session`), it is returned unchanged: the strip is a session-scope invariant,
  * not a general transform, and must not corrupt a non-session payload.
  */
-function stripSealForbiddenFields(data: string): string {
+function prepareSealPayload(data: string): string {
   let parsed: unknown;
   try {
     parsed = JSON.parse(data);
@@ -124,6 +137,21 @@ function stripSealForbiddenFields(data: string): string {
       mutated = true;
     }
   }
+
+  // SEC L2 / Phase 8: stamp the seal-time epoch here — the single seal
+  // chokepoint — so EVERY sealed session carries one, no matter which call
+  // site produced it. Two properties depend on it:
+  //   1. `revokeAllSessions` can invalidate everything sealed before a given
+  //      instant (`isEpochStale`).
+  //   2. The inactivity check has an issue-time fallback when the payload has
+  //      no `lastActivityAt` (`isInactive`), instead of silently skipping.
+  // Only stamped for session-shaped payloads (`userId` present) so this stays a
+  // session invariant, not a general JSON transform.
+  if (typeof obj.userId === "string" && typeof obj.sessionEpoch !== "number") {
+    obj.sessionEpoch = Date.now();
+    mutated = true;
+  }
+
   return mutated ? JSON.stringify(obj) : data;
 }
 
@@ -226,6 +254,57 @@ function getModuleCookie(
 }
 
 /**
+ * SEC L2 — the blocklist KV surface `SessionManager` needs.
+ *
+ * `revokeSession` has always written `blocked:{sha256(rawToken)}` here; the
+ * reader added in this change uses the SAME key format (see
+ * `blocklistKeyForToken`). `get` is added to the shape so the read is typed.
+ */
+interface SessionBlocklistKv {
+  get(key: string): Promise<string | null>;
+  put(
+    key: string,
+    value: string,
+    opts: { expirationTtl: number },
+  ): Promise<unknown>;
+}
+
+/** Key format for a revoked raw token. MUST match `revokeSession`'s writer. */
+function blocklistKeyForToken(tokenHash: string): string {
+  return `blocked:${tokenHash}`;
+}
+
+/** Key format for a user's session epoch ("revoke all sessions"). */
+function sessionEpochKey(userId: string): string {
+  return `sessionepoch:${userId}`;
+}
+
+/** TTL for blocklist + epoch entries: the maximum cookie lifetime (90 days). */
+const BLOCKLIST_TTL_SECONDS = 90 * 24 * 60 * 60;
+
+/**
+ * The blocklist binding, resolved separately for reads and writes.
+ *
+ * Reader and writer are resolved independently because the two capabilities are
+ * independently optional in practice: a deployment (or a test double) may bind
+ * a put-only store. A missing READER must not be mistaken for "not blocked" any
+ * more than it must be mistaken for an outage — see `isTokenRevoked`.
+ */
+function getBlocklistReader(
+  env: { [key: string]: any } | undefined,
+): Pick<SessionBlocklistKv, "get"> | undefined {
+  const kv = env?.SESSION_BLOCKLIST_KV as SessionBlocklistKv | undefined;
+  return kv && typeof kv.get === "function" ? kv : undefined;
+}
+
+function getBlocklistWriter(
+  env: { [key: string]: any } | undefined,
+): Pick<SessionBlocklistKv, "put"> | undefined {
+  const kv = env?.SESSION_BLOCKLIST_KV as SessionBlocklistKv | undefined;
+  return kv && typeof kv.put === "function" ? kv : undefined;
+}
+
+/**
  * Session Manager class for handling encrypted sessions.
  */
 export class SessionManager {
@@ -279,7 +358,7 @@ export class SessionManager {
     secret: string,
     salt?: string,
   ): Promise<string> {
-    return this.getCookie(secret, salt).seal(stripSealForbiddenFields(data));
+    return this.getCookie(secret, salt).seal(prepareSealPayload(data));
   }
 
   /**
@@ -495,7 +574,7 @@ export class SessionManager {
             return null;
           }
 
-          return {
+          const jwtSession: Session = {
             userId,
             email: claims.email || claims.username,
             role: role || "END_USER",
@@ -506,7 +585,19 @@ export class SessionManager {
             ageTier:
               (claimsRecord["custom:ageTier"] as AgeTier) || "ADULT",
             ...(activeTenantId ? { activeTenantId } : {}),
-          } satisfies Session;
+          };
+
+          // SEC L2: the JWT is verified — now check revocation. `revokeSession`
+          // hashes whatever raw token sat in the Authorization header, so a
+          // logged-out bearer JWT is on the blocklist under the same key. The
+          // epoch check applies too: "revoke all sessions" must cut short-lived
+          // tokens as well as 90-day cookies.
+          if (await this.isSealedSessionRevoked(token, jwtSession, env)) {
+            logger.debug("[SessionManager] Bearer JWT session revoked");
+            return null;
+          }
+
+          return jwtSession;
         } catch (jwtErr) {
           logger.debug(
             "[SessionManager] Cognito JWT verification failed, trying encrypted session",
@@ -536,6 +627,28 @@ export class SessionManager {
               );
               return null;
             }
+
+            // SEC L2: blocklist + epoch on the Authorization/sealed-token path
+            // too. This path was entirely unchecked; a "logged out"
+            // localStorage token stayed valid for its full lifetime.
+            if (await this.isSealedSessionRevoked(token, session, env)) {
+              logger.debug(
+                "[SessionManager] Session from Authorization header revoked",
+              );
+              return null;
+            }
+
+            // Phase 8: the Authorization path checked ONLY `expiresAt` — the
+            // inactivity timeout was silently unenforced for every
+            // localStorage-token client. Same rule as the cookie path now.
+            if (await this.isInactive(session, now, env)) {
+              logger.debug(
+                "[SessionManager] Session from Authorization header expired due to inactivity",
+              );
+              return null;
+            }
+
+            session.lastActivityAt = now;
             return session;
           }
         } catch (parseError) {
@@ -603,17 +716,18 @@ export class SessionManager {
         return null;
       }
 
+      // SEC L2: blocklist + epoch check on the cookie path. `revokeSession`
+      // wrote `blocked:{hash}` on logout and nothing ever read it, so a stolen
+      // cookie stayed valid for up to its 90-day lifetime after "logout".
+      if (await this.isSealedSessionRevoked(sessionToken, session, env)) {
+        logger.debug("[SessionManager] Session revoked");
+        return null;
+      }
+
       // Check inactivity timeout if configured
-      if (env && session.lastActivityAt) {
-        const config = await this.getSessionConfig(env);
-        if (config.inactivityTimeoutMinutes > 0) {
-          const inactivityTimeout = config.inactivityTimeoutMinutes * 60 * 1000;
-          const timeSinceLastActivity = now - session.lastActivityAt;
-          if (timeSinceLastActivity > inactivityTimeout) {
-            logger.debug("[SessionManager] Session expired due to inactivity");
-            return null;
-          }
-        }
+      if (await this.isInactive(session, now, env)) {
+        logger.debug("[SessionManager] Session expired due to inactivity");
+        return null;
       }
 
       // Update last activity timestamp
@@ -696,6 +810,10 @@ export class SessionManager {
   ): Promise<Response> {
     const logger = getLogger();
     const salt = env?.SESSION_SALT as string | undefined;
+
+    // SEC L2: the seal-time epoch is stamped by `prepareSealPayload` inside
+    // `encryptSession` (the single seal chokepoint) — every seal site gets it,
+    // not just this one.
     const encrypted = await this.encryptSession(
       JSON.stringify(session),
       secret,
@@ -799,6 +917,128 @@ export class SessionManager {
   }
 
   /**
+   * Phase 8 — inactivity-timeout check, FAIL CLOSED on a missing timestamp.
+   *
+   * Previously guarded by `if (env && session.lastActivityAt)`: a sealed
+   * payload that simply omitted `lastActivityAt` skipped the check entirely, so
+   * the inactivity timeout was advisory — any client (or any code path that
+   * sealed a session without the field) opted out of it for free.
+   *
+   * The effective "last seen" is `lastActivityAt`, falling back to the seal-time
+   * `sessionEpoch` (stamped by `setSession`, i.e. the issue time — the plan's
+   * "default missing lastActivityAt to issue time"). When NEITHER is present —
+   * only possible for a cookie sealed before this change — the session is
+   * treated as inactive and rejected, forcing one re-authentication rather than
+   * grandfathering an unbounded-idle session.
+   *
+   * Returns `true` when the session must be rejected.
+   */
+  private async isInactive(
+    session: Session,
+    now: number,
+    env: { [key: string]: any } | undefined,
+  ): Promise<boolean> {
+    if (!env) return false;
+    const config = await this.getSessionConfig(env);
+    if (!(config.inactivityTimeoutMinutes > 0)) return false;
+
+    const lastSeen = session.lastActivityAt ?? session.sessionEpoch;
+    if (typeof lastSeen !== "number" || !Number.isFinite(lastSeen)) {
+      // Fail closed: no evidence of recent activity, and no issue time.
+      return true;
+    }
+    const inactivityTimeout = config.inactivityTimeoutMinutes * 60 * 1000;
+    return now - lastSeen > inactivityTimeout;
+  }
+
+  /**
+   * SEC L2 — is this raw token on the revocation blocklist?
+   *
+   * Returns `true` (⇒ deny) when the token is blocked OR when the check could
+   * not be completed. Failing CLOSED is the point of the finding: a
+   * best-effort blocklist that silently allows on a KV outage is a blocklist an
+   * attacker can bypass by causing (or waiting for) an outage.
+   *
+   * Configuration note: when NO blocklist KV is bound at all, the check is a
+   * no-op (returns `false`). That is a deployment shape — local dev and the
+   * unit-test envs bind no KV — not an outage, and treating it as a denial
+   * would make trellis unusable without a KV. Operators who want the strict
+   * reading set `SESSION_BLOCKLIST_REQUIRED=true`, which turns a missing
+   * binding into a denial as well.
+   */
+  private async isTokenRevoked(
+    token: string,
+    env: { [key: string]: any } | undefined,
+  ): Promise<boolean> {
+    const kv = getBlocklistReader(env);
+    if (!kv) {
+      if (env?.SESSION_BLOCKLIST_REQUIRED === "true") {
+        getLogger().error(
+          "[SessionManager] SESSION_BLOCKLIST_REQUIRED=true but no SESSION_BLOCKLIST_KV is bound; denying",
+        );
+        return true;
+      }
+      return false;
+    }
+    try {
+      const hash = await this.hashToken(token);
+      const blocked = await kv.get(blocklistKeyForToken(hash));
+      return blocked !== null && blocked !== undefined;
+    } catch (err) {
+      // Fail CLOSED — see the doc comment above.
+      getLogger().error(
+        "[SessionManager] Session blocklist lookup failed; denying session",
+        err,
+      );
+      return true;
+    }
+  }
+
+  /**
+   * SEC L2 — has this user's session epoch been bumped since the session was
+   * sealed ("revoke all sessions")?
+   *
+   * Returns `true` (⇒ deny) when the sealed epoch is older than the stored one,
+   * and when the lookup fails (fail closed). A sealed session predating this
+   * change carries no `sessionEpoch`; it is treated as epoch 0, so any stored
+   * epoch invalidates it — which is exactly the intent of a revoke-all.
+   */
+  private async isEpochStale(
+    session: Session,
+    env: { [key: string]: any } | undefined,
+  ): Promise<boolean> {
+    const kv = getBlocklistReader(env);
+    if (!kv) return env?.SESSION_BLOCKLIST_REQUIRED === "true";
+    try {
+      const raw = await kv.get(sessionEpochKey(session.userId));
+      if (raw === null || raw === undefined || raw === "") return false;
+      const storedEpoch = Number(raw);
+      if (!Number.isFinite(storedEpoch)) return false;
+      return (session.sessionEpoch ?? 0) < storedEpoch;
+    } catch (err) {
+      getLogger().error(
+        "[SessionManager] Session-epoch lookup failed; denying session",
+        err,
+      );
+      return true;
+    }
+  }
+
+  /**
+   * SEC L2 — combined post-verification gate for a SEALED session (cookie or
+   * localStorage token): blocklist + epoch. Returns `true` when the session
+   * must be rejected.
+   */
+  private async isSealedSessionRevoked(
+    token: string,
+    session: Session,
+    env: { [key: string]: any } | undefined,
+  ): Promise<boolean> {
+    if (await this.isTokenRevoked(token, env)) return true;
+    return this.isEpochStale(session, env);
+  }
+
+  /**
    * AUTH-5: Hash a session token for blocklist storage.
    */
   private async hashToken(token: string): Promise<string> {
@@ -820,7 +1060,7 @@ export class SessionManager {
     request: Request,
     env: { [key: string]: any },
   ): Promise<void> {
-    const kvStore = (env as { SESSION_BLOCKLIST_KV?: { put: (key: string, value: string, opts: { expirationTtl: number }) => Promise<unknown> } }).SESSION_BLOCKLIST_KV;
+    const kvStore = getBlocklistWriter(env);
     if (!kvStore) return; // No blocklist KV configured
 
     // Extract the raw token from the request
@@ -840,9 +1080,37 @@ export class SessionManager {
     if (!token) return;
 
     const tokenHash = await this.hashToken(token);
-    // Store with TTL matching max session lifetime (90 days)
-    await kvStore.put(`blocked:${tokenHash}`, "1", {
-      expirationTtl: 90 * 24 * 60 * 60,
+    // Store with TTL matching max session lifetime (90 days). Key format is
+    // read back by `isTokenRevoked` via `blocklistKeyForToken`.
+    await kvStore.put(blocklistKeyForToken(tokenHash), "1", {
+      expirationTtl: BLOCKLIST_TTL_SECONDS,
+    });
+  }
+
+  /**
+   * SEC L2: revoke EVERY session for a user ("log out everywhere") by bumping
+   * the stored session epoch. Any sealed session whose `sessionEpoch` predates
+   * the bump is rejected by `getSession`.
+   *
+   * Call this on password/credential change, on account suspension, and from
+   * the user-facing "sign out of all devices" action. Without it the only
+   * global kill switch was rotating `SESSION_SECRET`, which logs out everyone.
+   *
+   * Throws if the KV write fails — the caller must not report success for a
+   * revocation that did not persist.
+   */
+  async revokeAllSessions(
+    userId: string,
+    env: { [key: string]: any },
+  ): Promise<void> {
+    const kvStore = getBlocklistWriter(env);
+    if (!kvStore) {
+      throw new Error(
+        "revokeAllSessions requires SESSION_BLOCKLIST_KV to be configured",
+      );
+    }
+    await kvStore.put(sessionEpochKey(userId), String(Date.now()), {
+      expirationTtl: BLOCKLIST_TTL_SECONDS,
     });
   }
 }

@@ -158,9 +158,14 @@ describe("extension tenant context — Part A (session layer)", () => {
   describe("unseal strip — a sealed payload can never supply a tenant", () => {
     // Inject a "legacy" sealed payload that CONTAINS activeTenantId, bypassing
     // encryptSession's seal-time strip, via the foundation cookie directly.
+    // Phase 8: the inactivity check now fails CLOSED when a sealed payload
+    // carries neither `lastActivityAt` nor the seal-time `sessionEpoch`. These
+    // fixtures deliberately bypass `encryptSession` (which stamps the epoch),
+    // so they supply `lastActivityAt` themselves — otherwise getSession would
+    // reject them for inactivity before the tenant-strip assertion is reached.
     async function sealRaw(payload: object): Promise<string> {
       return new SessionCookie({ primarySecret: secret, salt }).seal(
-        JSON.stringify(payload),
+        JSON.stringify({ lastActivityAt: Date.now(), ...payload }),
       );
     }
 
