@@ -131,9 +131,15 @@ describe("resolveAuthConfig — [SEC-6b] non-Cognito issuer requires OIDC_JWKS_U
   });
 
   it("points at the discovery document so the fix is actionable", () => {
+    // A plain string is a SUBSTRING match, not a pattern — which is what this
+    // assertion always meant. Interpolating a URL into `new RegExp` left every
+    // `.` as a wildcard, so a message naming `httpsX//keycloakXexampleXcom/…`
+    // would have satisfied it too. CodeQL flags that as
+    // js/incomplete-hostname-regexp, and it is right: the check read stricter
+    // than it was.
     expect(() =>
       resolveAuthConfig({ ...COGNITO_ENV, OIDC_ISSUER_URL: KC, OIDC_APP_CLIENT_ID: "a" }),
-    ).toThrow(new RegExp(`${KC}/\\.well-known/openid-configuration`));
+    ).toThrow(`${KC}/.well-known/openid-configuration`);
   });
 
   it("does NOT require OIDC_JWKS_URL for a Cognito issuer", () => {
