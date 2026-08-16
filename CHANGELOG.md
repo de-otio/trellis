@@ -56,6 +56,45 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ### Changed
 
+- **`@de-otio/trellis` declares an `exports` map — the unwired voting crypto is
+  no longer importable.** `apps/api/src/lib/crypto/voting/` is real ElGamal /
+  hybrid / post-quantum code with unit tests and no production consumer. It was
+  decided _keep_ — it is the first slice of a designed feature — but with no
+  `exports` map every file in the tarball was a public entry point, so a
+  consumer, or an agent reading the package, could deep-import it and mistake it
+  for supported API. It is now refused with `ERR_PACKAGE_PATH_NOT_EXPORTED`, in
+  both the explicit-`.js` and extensionless spellings, and by `tsc` as well as
+  by Node.
+
+  **Nothing else changes.** Every other published path resolves exactly as
+  before — all 21 core entry points, and all 24 deep specifiers the downstream
+  application imports.
+
+  The mechanism is worth recording, because a first attempt at this was reverted
+  the same day for breaking 20 of 21 entry points: **declaring `exports` at all
+  disables Node's extension probing.** Without a map, `…/dist/lambda/hourly-cron`
+  finds `hourly-cron.js`; with one, the target must be exact, and the wildcard
+  `"./*": "./*"` added to preserve consumers substitutes the path but not the
+  extension search. A fallback array (`["./*", "./*.js"]`) does not fix it
+  either — Node's `exports` fallbacks fall through on an _invalid target_, not
+  on a _missing file_. What works is two patterns per prefix, `./dist/*.js` and
+  `./dist/*`, with Node's most-specific-pattern rule selecting between them and
+  a `null` on the narrower `voting/` base beating both.
+
+  `smoke-pack.sh` gained the gate that makes this checkable: the downstream
+  specifiers in both spellings, **negative** assertions that each private path
+  fails with the right error code, and a TypeScript resolution check. The last
+  one matters because an `exports` map governs `tsc` under
+  `moduleResolution: nodenext` too, so a map can resolve perfectly at runtime
+  and still break a consumer's build with every runtime check green.
+
+  Only `voting/` is blocked, not `dist/lib/crypto/*` as originally planned:
+  `crypto/software-hmac-mac.js` is a live seam, not dead code — it is startup
+  wiring a deployment calls for the Scaleway profile, where Key Manager has no
+  KMS `GenerateMac` equivalent, and core itself never calls it. Blocking it
+  would have walled off a function whose entire purpose is to be imported by a
+  consumer.
+
 - **`@de-otio/trellis-extension-api` 0.9.2 — a partial model-map delegate now
   fails on the map, not two packages away.** `ExtensionModelMap` was
   `Record<string, object>` while `OpenScopedModels` — the default, and what
