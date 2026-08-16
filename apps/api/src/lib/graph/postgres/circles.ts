@@ -192,16 +192,44 @@ function getCircleTierBounds(
 }
 
 interface CircleCursor {
-  createdAt: string;
+  /** Parsed and validated — never the raw client string. */
+  createdAt: Date;
   postId: string;
 }
 
+/**
+ * Decode a client-supplied keyset cursor, or return null.
+ *
+ * Returning null for anything malformed is the whole contract: a bad cursor
+ * means "start from the beginning", never an error and never a partially-valid
+ * cursor. The `createdAt` field is PARSED HERE rather than at the two
+ * `new Date(cursor.createdAt)` interpolation sites it used to feed. Those sites
+ * accepted whatever string arrived: `new Date("nope")` yields an Invalid Date,
+ * which Prisma rejects when binding the parameter, which surfaces as a 500. The
+ * value was always a bound parameter — never an injection — but "any
+ * authenticated caller can 500 this endpoint by editing one base64 field" is a
+ * free error-rate lever, and it was reachable on the hot feed path (lane 7
+ * LOW-6).
+ *
+ * `postId` is validated only for shape (non-empty string). It is compared, not
+ * parsed, so a nonsense value simply matches nothing.
+ */
 function decodeCircleCursor(cursor?: string): CircleCursor | null {
   if (!cursor) return null;
   try {
-    const d = JSON.parse(Buffer.from(cursor, "base64").toString("utf8"));
-    if (d.createdAt && d.postId) return d as CircleCursor;
-    return null;
+    const d: unknown = JSON.parse(Buffer.from(cursor, "base64").toString("utf8"));
+    if (typeof d !== "object" || d === null) return null;
+    const { createdAt, postId } = d as {
+      createdAt?: unknown;
+      postId?: unknown;
+    };
+    if (typeof createdAt !== "string" || typeof postId !== "string") return null;
+    if (postId.length === 0) return null;
+    const parsed = new Date(createdAt);
+    // Number.isNaN(getTime()) is the only reliable Invalid-Date test: an
+    // Invalid Date is still `instanceof Date` and still typeof "object".
+    if (Number.isNaN(parsed.getTime())) return null;
+    return { createdAt: parsed, postId };
   } catch {
     return null;
   }
@@ -464,8 +492,8 @@ export class CircleOps {
     const fetchLimit = pagination.limit + 1;
 
     const cursorClause = cursor
-      ? Prisma.sql`AND (p.created_at < ${new Date(cursor.createdAt)}
-            OR (p.created_at = ${new Date(cursor.createdAt)} AND p.id < ${cursor.postId}))`
+      ? Prisma.sql`AND (p.created_at < ${cursor.createdAt}
+            OR (p.created_at = ${cursor.createdAt} AND p.id < ${cursor.postId}))`
       : Prisma.empty;
 
     // Branch 1 — posts ABOUT an entity the viewer relates to in this tier band.
