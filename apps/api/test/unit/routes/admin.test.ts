@@ -5,9 +5,9 @@
  * feature toggles, domain management, and reports.
  */
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "../../../src/env.js";
-import { adminRoutes } from "../../../src/lib/routes/admin.js";
+import { adminRoutes, testRoutesEnabled } from "../../../src/lib/routes/admin.js";
 import type { Session } from "../../../src/lib/session-cookie.js";
 
 // Mock SessionManager
@@ -182,7 +182,10 @@ describe("Admin Routes", () => {
     // explicit STAGE=dev (or CI / ENABLE_TEST_ROUTES) *and* a real SUPER_ADMIN
     // session. `mockEnv` deliberately keeps STAGE unset so the unset-STAGE
     // denial is the default; the happy-path tests opt in via `devEnv`.
-    devEnv = { ...mockEnv, STAGE: "dev" } as any;
+    // Uses the EXPLICIT opt-in rather than STAGE=dev, so these tests do not
+    // depend on the ambient `process.env.STAGE` (see the `testRoutesEnabled`
+    // block at the bottom of this file for that interaction).
+    devEnv = { ...mockEnv, STAGE: "dev", ENABLE_TEST_ROUTES: "true" } as any;
 
     mockSession = {
       userId: "user-123",
@@ -2077,7 +2080,7 @@ describe("Admin Routes", () => {
 
       // SEC L1: the seam is gated AND SUPER_ADMIN-authenticated; both must be
       // satisfied before the pathname is even parsed.
-      const devEnv = { ...mockEnv, STAGE: "dev", CI: "true" };
+      const devEnv = { ...mockEnv, STAGE: "dev", CI: "true", ENABLE_TEST_ROUTES: "true" };
       mockGetSession.mockResolvedValue(mockSession);
       mockDb.user.findUnique.mockResolvedValue({ role: "SUPER_ADMIN" });
 
@@ -2097,7 +2100,7 @@ describe("Admin Routes", () => {
     });
 
     it("should handle foreign key constraint errors gracefully", async () => {
-      const devEnv = { ...mockEnv, STAGE: "dev", CI: "true" };
+      const devEnv = { ...mockEnv, STAGE: "dev", CI: "true", ENABLE_TEST_ROUTES: "true" };
       mockGetSession.mockResolvedValue(mockSession);
 
       const error = new Error("Foreign key constraint violated");
@@ -2634,5 +2637,92 @@ describe("Admin Routes", () => {
         expect(typeof route.description).toBe("string");
       });
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SEC L1 — the environment gate itself.
+//
+// Split out from the route tests because the interesting case involves
+// `process.env`, not just the `Env` object: `buildEnv` DEFAULTS `STAGE` to
+// `"dev"` when `process.env.STAGE` is unset, so a gate that trusted
+// `env.STAGE === "dev"` alone would be open on exactly the deployment the
+// finding describes — "the deployer didn't set STAGE".
+// ---------------------------------------------------------------------------
+
+describe("testRoutesEnabled (SEC L1 environment gate)", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("DENIES the runtime shape of an unset STAGE (env.STAGE defaulted to 'dev')", () => {
+    // This is what `buildEnv` actually produces when nobody set STAGE. The
+    // Env object says "dev"; the raw environment says nothing.
+    vi.stubEnv("STAGE", undefined as unknown as string);
+    expect(testRoutesEnabled({ STAGE: "dev" })).toBe(false);
+  });
+
+  it("ALLOWS a genuinely explicit STAGE=dev", () => {
+    vi.stubEnv("STAGE", "dev");
+    expect(testRoutesEnabled({ STAGE: "dev" })).toBe(true);
+  });
+
+  it("DENIES prod and production, even with CI and the explicit opt-in set", () => {
+    vi.stubEnv("STAGE", "prod");
+    for (const stage of ["prod", "production", "PROD", "Production"]) {
+      expect(
+        testRoutesEnabled({
+          STAGE: stage,
+          CI: "true",
+          GITHUB_ACTIONS: "true",
+          ENABLE_TEST_ROUTES: "true",
+        }),
+        `expected ${stage} to be denied`,
+      ).toBe(false);
+    }
+  });
+
+  it("DENIES an unrecognised stage", () => {
+    vi.stubEnv("STAGE", "staging");
+    for (const stage of ["staging", "qa", "uat", ""]) {
+      expect(testRoutesEnabled({ STAGE: stage })).toBe(false);
+    }
+  });
+
+  it("ALLOWS the explicit opt-in regardless of stage", () => {
+    vi.stubEnv("STAGE", "staging");
+    expect(
+      testRoutesEnabled({ STAGE: "staging", ENABLE_TEST_ROUTES: "true" }),
+    ).toBe(true);
+  });
+
+  it("only the exact string 'true' opts in", () => {
+    vi.stubEnv("STAGE", "staging");
+    for (const v of ["1", "yes", "TRUE", "true ", ""]) {
+      expect(
+        testRoutesEnabled({ STAGE: "staging", ENABLE_TEST_ROUTES: v }),
+        `expected ${JSON.stringify(v)} not to opt in`,
+      ).toBe(false);
+    }
+  });
+
+  it("ALLOWS CI", () => {
+    vi.stubEnv("STAGE", "staging");
+    expect(testRoutesEnabled({ STAGE: "staging", CI: "true" })).toBe(true);
+    expect(
+      testRoutesEnabled({ STAGE: "staging", GITHUB_ACTIONS: "true" }),
+    ).toBe(true);
+  });
+
+  it("DEPLOY_ENV=prod blocks even when STAGE is absent", () => {
+    vi.stubEnv("STAGE", undefined as unknown as string);
+    expect(
+      testRoutesEnabled({ DEPLOY_ENV: "prod", ENABLE_TEST_ROUTES: "true" }),
+    ).toBe(false);
+  });
+
+  it("a completely empty env denies", () => {
+    vi.stubEnv("STAGE", undefined as unknown as string);
+    expect(testRoutesEnabled({})).toBe(false);
   });
 });

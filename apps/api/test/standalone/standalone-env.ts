@@ -57,6 +57,15 @@ const DEFAULTS: Record<string, string> = {
 
   // --- App / deployment ---
   STAGE: "test",
+  // SEC L1: the `/api/admin/test/*` seam is fail-closed — it is OFF unless the
+  // operator opts in, and `STAGE: "test"` above is deliberately not one of the
+  // implicit opt-ins (only `dev` and CI are). The standalone lane mints its
+  // user pool through that seam, so it opts in explicitly here. This is the
+  // gate working as designed: enabling the seam is now a visible, greppable
+  // decision instead of the default for anything that is not literally `prod`.
+  // It does NOT bypass authentication — the harness still presents a real
+  // SUPER_ADMIN session (see getTestAdminAuth in test/utils/test-auth.ts).
+  ENABLE_TEST_ROUTES: "true",
   NODE_ENV: "test",
   ENVIRONMENT: "dev",
   DEFAULT_REGION: "US",

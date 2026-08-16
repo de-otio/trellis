@@ -16,6 +16,88 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ## [Unreleased]
 
+### Security
+
+- **`/api/admin/test/*` is fail-closed — BREAKING for test harnesses.** The
+  test-user create/delete endpoints allowed unauthenticated SUPER_ADMIN
+  creation, and handed back a valid session cookie for the new account, in any
+  environment that was not literally `prod`. Three defects compounded: the
+  environment gate defaulted to `dev` when `STAGE`/`DEPLOY_ENV` was unset (for a
+  published, reusable core, "the deployer didn't set STAGE" is a realistic
+  deployment); the authentication check was skipped entirely for any request
+  whose body `email` contained `test-` or `@test.example.com`, so the caller
+  chose their own authorization; and even otherwise, the role check ran only
+  `if (session)`, with DELETE additionally allowing unauthenticated access
+  whenever `CI` was set.
+
+  The seam is now OFF unless explicitly enabled — `STAGE=dev` (genuinely set,
+  not defaulted), a CI flag, or the new **`ENABLE_TEST_ROUTES=true`** — and
+  `prod`/`production` can never enable it. When enabled it requires a real
+  authenticated **SUPER_ADMIN** session, evaluated before the request body is
+  read, plus CSRF like any other cookie-authenticated write.
+
+  **Downstream test harnesses must be updated.** A harness that calls these
+  endpoints anonymously will now see `403 {"error":"Forbidden: Test endpoints
+  are not enabled"}` (gate) or, once the env opt-in is set, `401
+  {"error":"Unauthorized"}` (no session). Trellis's own standalone e2e lane
+  shows the intended pattern: seed one SUPER_ADMIN row in the test database,
+  seal a session cookie with the server's secret, then fetch a CSRF token from
+  `/api/csrf-token` — see `getTestAdminAuth()` in `test/utils/test-auth.ts`.
+  There is deliberately no bootstrap header or "trusted" bypass env var; any
+  such seam would be the original hole under a new name.
+
+- **Session revocation is enforced, not just recorded.** `revokeSession()`
+  wrote `blocked:{sha256(token)}` to the blocklist KV on logout and nothing ever
+  read it, so a token stayed valid for its full lifetime — up to 90 days for a
+  cookie session — after "logging out". `getSession()` now consults the
+  blocklist on all three paths (cookie, Authorization sealed-token,
+  Authorization JWT) and fails **closed** when the KV read throws. Adds a
+  per-user session epoch sealed into the payload and `revokeAllSessions()`, the
+  "log out everywhere" primitive that previously did not exist — the only global
+  kill switch was rotating `SESSION_SECRET`, which logs out every user.
+
+  Two consequences worth planning for: sessions sealed by an earlier version
+  carry no activity or issue timestamp, so the (now enforced) inactivity timeout
+  rejects them — expect one forced re-login at rollout. And
+  `SESSION_BLOCKLIST_REQUIRED=true` is available for deployments that want a
+  missing KV binding to deny rather than pass.
+
+- **CORS fails closed when unconfigured.** With neither `APP_DOMAIN` nor
+  `ALLOWED_ORIGINS` set, `getAllowedOrigin` reflected the request `Origin`
+  verbatim while `Access-Control-Allow-Credentials: true` was sent
+  unconditionally — any site could make credentialed cross-origin requests and
+  read the responses. Reflection is now limited to loopback origins
+  (`localhost`, `127.0.0.0/8`, `[::1]`, hostname-exact), so local development is
+  unaffected and no remote origin is reflected. `example.com` is also removed
+  from the shipped `knownDomains` allow-list, which had made every
+  `*.example.com` origin allowed out of the box.
+
+- **CSRF is no longer skipped on the shape of an `Authorization` header.** The
+  middleware waived CSRF for any Bearer token with three dot-separated segments,
+  unverified. A cross-origin script can set that header while the browser still
+  attaches the session cookie, so `Bearer a.b.c` disabled CSRF on a
+  cookie-authenticated request. The predicate is now session-cookie presence:
+  if a request carries one, CSRF applies regardless of any Bearer. Pure Bearer
+  clients (mobile, server-to-server) send no cookie and still skip.
+
+- **Extensions: an unauthenticated raw route now fails startup.** Raw
+  `ext.routes` entries are spliced into the core route table verbatim — no auth,
+  no CSRF, no security headers, and the handler receives the full core `Env`
+  including `SESSION_SECRET` and `DATABASE_URL`. The validator only *warned*
+  when such a route declared no auth middleware; it now throws. The
+  extension-api README documents the real trust model: extensions are **not**
+  sandboxed. Extensions using the wrapped `extensionRoutes` path are unaffected.
+
+- **Claims-cache invalidation has one choke point, and three paths that were
+  missing it now invalidate.** The pre-token-generation Lambda re-derives every
+  authorization claim from Postgres, but only on a cache miss — a hit skips the
+  suspension and role checks entirely. Any mutation that changed authorization
+  state without invalidating left the old privileges mintable into new JWTs for
+  up to the cache TTL. Newly covered: the account-deletion grace period (which
+  suspends), the admin change-global-role endpoint (which grants and revokes
+  SUPER_ADMIN), and tenant creation. Also adds `object-src 'none'` and
+  `base-uri 'self'` to the CSP.
+
 ### Added
 
 - **`@de-otio/trellis-extension-testkit` (new package, 0.1.0).** An extension

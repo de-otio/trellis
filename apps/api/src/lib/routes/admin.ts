@@ -46,7 +46,7 @@ import type { Route } from "./types.js";
  * The gate is now an ALLOW-LIST: the seam is off unless the operator explicitly
  * opted in, and `prod`/`production` can never opt in.
  */
-function testRoutesEnabled(env: {
+export function testRoutesEnabled(env: {
   STAGE?: string;
   DEPLOY_ENV?: string;
   CI?: string;
@@ -54,10 +54,26 @@ function testRoutesEnabled(env: {
   ENABLE_TEST_ROUTES?: string;
 }): boolean {
   const stage = (env.STAGE || env.DEPLOY_ENV || "").toLowerCase();
+
   // Belt and braces: an explicit prod marker always wins, even over CI.
   if (stage === "prod" || stage === "production") return false;
-  const isCI = env.CI === "true" || env.GITHUB_ACTIONS === "true";
-  return stage === "dev" || isCI || env.ENABLE_TEST_ROUTES === "true";
+
+  // The explicit opt-in. This is the supported way to turn the seam on
+  // (trellis's own standalone e2e lane uses it).
+  if (env.ENABLE_TEST_ROUTES === "true") return true;
+
+  if (env.CI === "true" || env.GITHUB_ACTIONS === "true") return true;
+
+  // `dev` also enables it — but ONLY when STAGE was genuinely set to `dev`.
+  //
+  // `buildEnv` defaults `STAGE` to `"dev"` when `process.env.STAGE` is unset
+  // (env.ts), so `env.STAGE === "dev"` cannot distinguish "the operator chose
+  // dev" from "the operator set nothing". Trusting it alone would re-open the
+  // precise hole this gate exists to close — "the deployer didn't set STAGE" is
+  // the realistic case for a published, reusable core. So the unset case is
+  // resolved against the raw environment, where the default has not been
+  // applied yet.
+  return stage === "dev" && process.env.STAGE !== undefined;
 }
 
 /**

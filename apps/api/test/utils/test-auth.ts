@@ -524,6 +524,145 @@ export async function cleanupTestPrismaClient(): Promise<void> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// SEC L1 — SUPER_ADMIN bootstrap for the `/api/admin/test/*` seam.
+// ---------------------------------------------------------------------------
+
+/**
+ * Credentials for calling the test-user admin endpoints.
+ *
+ * ## Why this exists
+ *
+ * `/api/admin/test/users` used to be callable with no credentials at all: the
+ * route skipped authentication for any request whose body `email` contained
+ * `test-` or `@test.example.com`, which is precisely the shape this harness
+ * sends. That was an unauthenticated SUPER_ADMIN-creation endpoint (security
+ * review finding L1), and it is now gated two ways:
+ *
+ *   1. an explicit environment opt-in (`STAGE=dev`, CI, or
+ *      `ENABLE_TEST_ROUTES=true` — the standalone lane sets the last one), and
+ *   2. a real authenticated SUPER_ADMIN session, checked before the body is
+ *      even parsed, plus CSRF like any other cookie-authenticated write.
+ *
+ * So the harness now has to be a genuine super-admin instead of relying on the
+ * hole. It does that honestly: seed one SUPER_ADMIN row directly in the test
+ * database (the harness already owns a Prisma client for schema checks), seal a
+ * session cookie for it with the same secret the server uses, then fetch a CSRF
+ * token from `/api/csrf-token` exactly as a browser client would.
+ *
+ * Deliberately NOT done: adding a back door (a shared bootstrap header, a
+ * "trusted" env var that skips the session check). Any such seam would be the
+ * L1 hole again under a different name.
+ */
+export interface TestAdminAuth {
+  userId: string;
+  email: string;
+  /** Raw `trellis_session` cookie value for the SUPER_ADMIN. */
+  sessionToken: string;
+  csrfToken: string;
+  /** Ready-to-spread request headers (`Cookie` + `X-CSRF-Token`). */
+  headers: Record<string, string>;
+}
+
+/**
+ * Stable identity for the bootstrap admin, so repeated runs reuse one row
+ * instead of littering the database. cuid-shaped (`c[a-z0-9]{24,40}`) so it
+ * satisfies every id validator in the stack.
+ */
+const BOOTSTRAP_ADMIN_ID = "ce2ebootstrapsuperadmin0001";
+const BOOTSTRAP_ADMIN_EMAIL = "e2e-bootstrap-admin@test.example.com";
+const BOOTSTRAP_ADMIN_HANDLE = "e2e-bootstrap-admin";
+
+let adminAuthPromise: Promise<TestAdminAuth> | null = null;
+
+/**
+ * Reset the memoized bootstrap admin. Only useful when a test deliberately
+ * invalidates the admin session (e.g. a revocation test).
+ */
+export function __resetTestAdminAuth(): void {
+  adminAuthPromise = null;
+}
+
+async function seedBootstrapAdmin(): Promise<void> {
+  const db = await createTestPrismaClient();
+  await db.user.upsert({
+    where: { id: BOOTSTRAP_ADMIN_ID },
+    // Re-assert the role on every run: a previous test may have demoted or
+    // suspended the row, and a silently non-super-admin bootstrap would fail
+    // every later call with an opaque 403.
+    update: {
+      role: "SUPER_ADMIN",
+      suspended: false,
+      suspendedAt: null,
+      suspendedReason: null,
+    },
+    create: {
+      id: BOOTSTRAP_ADMIN_ID,
+      email: BOOTSTRAP_ADMIN_EMAIL,
+      handle: BOOTSTRAP_ADMIN_HANDLE,
+      role: "SUPER_ADMIN",
+    },
+  });
+}
+
+/**
+ * Get (and memoize) the SUPER_ADMIN credentials the test-user endpoints now
+ * require. Every caller of `/api/admin/test/*` must spread `.headers`.
+ */
+export async function getTestAdminAuth(): Promise<TestAdminAuth> {
+  if (adminAuthPromise) return adminAuthPromise;
+
+  adminAuthPromise = (async () => {
+    const { getApiUrl } = await import("./test-config.js");
+    const API_URL = getApiUrl();
+
+    try {
+      await seedBootstrapAdmin();
+    } catch (error) {
+      // Fail loudly and specifically. Without the row, the sealed cookie
+      // authenticates to a user the server cannot find, and every subsequent
+      // call returns a bare 403 that reads like a bug in the route.
+      throw new Error(
+        `[test-auth] Could not seed the bootstrap SUPER_ADMIN. The ` +
+          `/api/admin/test/* endpoints require a real SUPER_ADMIN session ` +
+          `(security fix L1), so the harness needs write access to the test ` +
+          `database (DATABASE_URL / DIRECT_DATABASE_URL). Underlying error: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    const sealed = await createAuthenticatedSession(
+      BOOTSTRAP_ADMIN_ID,
+      BOOTSTRAP_ADMIN_EMAIL,
+      "SUPER_ADMIN",
+    );
+
+    // Ask the server for a CSRF token the same way a browser client does,
+    // rather than hand-crafting one into the seal. This also re-issues the
+    // session cookie (the server re-seals it with the token), so the updated
+    // cookie is the one we keep.
+    const { token, updatedSessionToken } = await getCsrfToken(API_URL, sealed);
+
+    return {
+      userId: BOOTSTRAP_ADMIN_ID,
+      email: BOOTSTRAP_ADMIN_EMAIL,
+      sessionToken: updatedSessionToken,
+      csrfToken: token,
+      headers: {
+        Cookie: `trellis_session=${updatedSessionToken}`,
+        "X-CSRF-Token": token,
+      },
+    };
+  })();
+
+  try {
+    return await adminAuthPromise;
+  } catch (error) {
+    adminAuthPromise = null; // let a later caller retry
+    throw error;
+  }
+}
+
 /**
  * Create a test user via API (no direct database connection)
  *
@@ -562,10 +701,13 @@ export async function createTestUser(
   const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
   try {
+    // SEC L1: the seam now requires a real SUPER_ADMIN session + CSRF.
+    const admin = await getTestAdminAuth();
     const response = await fetch(`${API_URL}/api/admin/test/users`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        ...admin.headers,
       },
       body: JSON.stringify({
         id: userId,
@@ -764,6 +906,24 @@ export async function cleanupTestUser(userId: string): Promise<void> {
   // If it takes longer, something is wrong with the API/DB
   const REQUEST_TIMEOUT_MS = 2000; // 2 seconds - DB should be fast
 
+  // SEC L1: DELETE now requires a real SUPER_ADMIN session + CSRF too — the
+  // old route allowed unauthenticated deletion whenever CI was set, and
+  // otherwise fell through a "no session in local dev, still allow" branch.
+  // Resolved once, outside the per-region fan-out (it is memoized anyway).
+  // Cleanup is best-effort by design, so a bootstrap failure degrades to
+  // "cleanup skipped with a warning" rather than failing an otherwise green
+  // test's teardown.
+  let adminHeaders: Record<string, string> = {};
+  try {
+    adminHeaders = (await getTestAdminAuth()).headers;
+  } catch (error) {
+    console.warn(
+      `[cleanupTestUser] Could not obtain SUPER_ADMIN credentials; skipping cleanup of ${userId}:`,
+      error instanceof Error ? error.message : String(error),
+    );
+    return;
+  }
+
   // Try deleting from all regions in parallel for speed
   // Test users may exist in different regions, so we try all
   const regions = ["US", "EU", "CN"];
@@ -783,6 +943,7 @@ export async function cleanupTestUser(userId: string): Promise<void> {
           `${API_URL}/api/admin/test/users/${userId}?region=${region}`,
           {
             method: "DELETE",
+            headers: adminHeaders,
             signal: controller.signal,
           },
         );
@@ -845,6 +1006,7 @@ export async function cleanupTestUser(userId: string): Promise<void> {
           `${API_URL}/api/admin/test/users/${userId}`,
           {
             method: "DELETE",
+            headers: adminHeaders,
             signal: controller.signal,
           },
         );
@@ -926,10 +1088,13 @@ export async function createTestUserWithSession(
   const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
   try {
+    // SEC L1: the seam now requires a real SUPER_ADMIN session + CSRF.
+    const admin = await getTestAdminAuth();
     const response = await fetch(`${API_URL}/api/admin/test/users`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        ...admin.headers,
       },
       body: JSON.stringify({
         id: userId,
