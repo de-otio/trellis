@@ -489,14 +489,20 @@ release commit, so during development the newest core is the _last published_
 one — which means a package here can never express "I need the release that is
 about to happen" through its peer range.
 
-The testkit does need exactly that: it calls `shutdownTrellis`,
-`classifyApiVersion` and `EXTENSION_API_VERSION`, none of which exist in a
+The testkit hits this whenever it starts calling a core member no release
+exports yet — as it did at birth, needing `shutdownTrellis`,
+`classifyApiVersion` and `EXTENSION_API_VERSION`, none of which existed in a
 published core before `0.25.0-alpha.8`. So its peer range names the newest
 published core and its `MINIMUM_CORE_VERSION` constant names the real
-requirement, deliberately ahead. `assertCoreShape()` enforces the constant at
-load time by reading the module. Do not "reconcile" the two by raising the
-range — that is the change that broke CI — and do not lower the constant;
-`smoke-pack.sh` fails if the constant ever falls _below_ the range floor.
+requirement, running ahead until the release that closes the gap.
+`assertCoreShape()` enforces the constant at load time by reading the module.
+Do not "reconcile" the two by raising the range ahead of a release — that is the
+change that broke CI — and do not lower the constant; `smoke-pack.sh` fails if
+the constant ever falls _below_ the range floor.
+
+The two are equal today. That is the resting state, not an invariant: the check
+is deliberately directional, because demanding equality would forbid the bump
+that opens the gap legitimately and put you back in `ETARGET`.
 
 **Ordering constraint for the testkit.** Publish core first, then the testkit.
 An install against an older core resolves cleanly and fails at boot; the error

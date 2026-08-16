@@ -1,6 +1,6 @@
 {
   "name": "@de-otio/trellis-extension-testkit",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Boot a real Trellis server against your extension, and check that it conforms",
   "type": "module",
   "exports": {
@@ -44,7 +44,7 @@
     "zod": "^4.4.3"
   },
   "peerDependencies": {
-    "@de-otio/trellis": ">=0.25.0-alpha.7"
+    "@de-otio/trellis": ">=0.25.0-alpha.8"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",

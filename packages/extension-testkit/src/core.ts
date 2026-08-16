@@ -42,22 +42,22 @@ export type CoreApiVersionVerdict =
  * The lowest `@de-otio/trellis` that exports everything {@link CoreModule}
  * names.
  *
- * Three of those members — `shutdownTrellis`, `classifyApiVersion` and the
- * `EXTENSION_API_VERSION` re-export — landed together with this package, so the
- * first release carrying them is one that does not exist yet.
- *
- * **This is deliberately stricter than the `peerDependencies` range, and the
- * two must not be "reconciled".** A peer range may only name a version that is
- * actually published: npm resolves it against the registry, and a range whose
- * floor has no matching version fails `npm ci` with `ETARGET` — including in
- * this repo, where the workspace link does not spare it. So the range names the
- * newest published core, and this names the real requirement. {@link
+ * **This may sit ahead of the `peerDependencies` range, and the two must not be
+ * "reconciled" by raising the range.** A peer range may only name a version
+ * that is actually published: npm resolves it against the registry, and a range
+ * whose floor has no matching version fails `npm ci` with `ETARGET` — including
+ * in this repo, where the workspace link does not spare it. So the range names
+ * the newest published core, and this names the real requirement. {@link
  * assertCoreShape} is what enforces it, at load time, where the module can be
  * inspected instead of trusted.
  *
- * Bump this only when the requirement genuinely changes. It stays ahead of the
- * range until the release that ships these members, and then stops being ahead
- * on its own.
+ * The gap opens whenever this package starts calling a core member that no
+ * release exports yet — as it did at birth, when `shutdownTrellis`,
+ * `classifyApiVersion` and the `EXTENSION_API_VERSION` re-export all landed
+ * alongside it. It closes on its own at the next core release. Right now the
+ * two are equal; treat that as the resting state, not an invariant, and do not
+ * add a check demanding it. Requiring equality would forbid the bump that opens
+ * the gap legitimately, which is the `ETARGET` trap wearing a different hat.
  */
 export const MINIMUM_CORE_VERSION = "0.25.0-alpha.8";
 

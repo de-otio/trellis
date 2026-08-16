@@ -110,10 +110,13 @@ describe("MINIMUM_CORE_VERSION vs the peerDependencies range", () => {
   });
 
   it("keeps the guard at or ahead of the range floor, never behind it", () => {
-    // Ahead is the normal state: a peer range may only name a version that is
-    // already on the registry, and three of the members the testkit calls ship
-    // for the first time alongside this package. Behind would mean npm refuses
-    // installs the testkit would have accepted — enforcement nobody wrote down.
+    // Deliberately directional, not equality. A peer range may only name a
+    // version already on the registry, so the guard runs ahead whenever this
+    // package starts calling a core member no release exports yet — and equal
+    // once that release ships. Demanding equality would forbid the first of
+    // those, which is the ETARGET failure again. Behind is the real error: npm
+    // would refuse installs the testkit would have accepted, making the range
+    // enforce something nobody wrote down.
     expect(compare(MINIMUM_CORE_VERSION, range.slice(2))).toBeGreaterThanOrEqual(0);
   });
 
