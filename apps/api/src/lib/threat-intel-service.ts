@@ -10,16 +10,43 @@ import type { KVNamespace, R2Bucket, CloudflareQueue } from "../types/cloudflare
 
 
 import { getLogger, Logger, type LoggerEnv } from "./logger.js";
+import type { MetricsPort } from "./workers/metrics-port.js";
+
+/**
+ * Disposition of a threat-intel lookup.
+ *
+ * The distinction between SAFE and UNKNOWN is the entire point of this type.
+ * Previously every failure mode — unset key, non-ok response, thrown error —
+ * returned `safe: true`, i.e. an attacker who wanted a malware link to pass
+ * only had to make the call fail (flood the quota, trip a transient error).
+ * A lookup that did not happen is now UNKNOWN, and callers are expected to
+ * render the interstitial for it rather than waving the link through.
+ */
+export type ThreatIntelStatus = "safe" | "unsafe" | "unknown";
 
 /**
  * Threat intelligence result
  */
 export interface ThreatIntelResult {
+  /**
+   * Kept for source compatibility. NOTE: `safe === true` no longer means "we
+   * checked and it was clean" on its own — read `status` when the difference
+   * matters. It is false for both "unsafe" and "unknown".
+   */
   safe: boolean;
+  status: ThreatIntelStatus;
   threats?: string[];
   cacheHit: boolean;
   cachedAt?: Date;
+  /** Present when `status === "unknown"`: why the lookup could not complete. */
+  failOpenReason?: ThreatIntelFailReason;
 }
+
+/** Why a lookup could not produce a verdict. */
+export type ThreatIntelFailReason =
+  | "api-key-missing"
+  | "api-error"
+  | "api-exception";
 
 /**
  * Google Safe Browsing API response
@@ -40,6 +67,10 @@ interface SafeBrowsingResponse {
 export interface ThreatIntelEnv {
   GOOGLE_SAFE_BROWSING_API_KEY?: string;
   THREAT_INTEL_CACHE_KV?: KVNamespace;
+  /** Optional sink for the fail-open counter. */
+  METRICS?: MetricsPort;
+  STAGE?: string;
+  NODE_ENV?: string;
 }
 
 /**
@@ -51,6 +82,31 @@ const CACHE_KEY_PREFIX = "threat-intel:";
  * Cache TTL in seconds (24 hours)
  */
 const CACHE_TTL = 24 * 60 * 60;
+
+/** Metric name for the fail-open counter — alarm on this. */
+export const THREAT_INTEL_FAIL_OPEN_METRIC = "ThreatIntelFailOpen";
+
+/**
+ * Startup assertion: in production, a missing Safe Browsing key is a
+ * misconfiguration, not a degraded mode. Without it every link check returns
+ * UNKNOWN forever and the interstitial fires on everything — better to refuse
+ * the deploy than to ship a link-safety feature that silently does nothing.
+ *
+ * Returns a list of error strings so it can be folded into `validateEnv()`.
+ */
+export function validateThreatIntelEnv(env: {
+  GOOGLE_SAFE_BROWSING_API_KEY?: string;
+  STAGE?: string;
+  NODE_ENV?: string;
+}): string[] {
+  const isProd = env.STAGE === "prod" || env.NODE_ENV === "production";
+  if (isProd && !env.GOOGLE_SAFE_BROWSING_API_KEY) {
+    return [
+      "GOOGLE_SAFE_BROWSING_API_KEY is required in production — without it every link check fails to UNKNOWN and the safety interstitial fires on every uncached link",
+    ];
+  }
+  return [];
+}
 
 export class ThreatIntelService {
   private logger: Logger;
@@ -73,13 +129,22 @@ export class ThreatIntelService {
     env: ThreatIntelEnv,
   ): Promise<ThreatIntelResult> {
     if (!env.GOOGLE_SAFE_BROWSING_API_KEY) {
-      this.logger.warn(
-        "Google Safe Browsing API key not configured, skipping check",
-      );
-      return {
-        safe: true, // Fail open - don't block if service unavailable
-        cacheHit: false,
-      };
+      // A cached verdict is still trustworthy even with the key now absent —
+      // prefer it over UNKNOWN so a key rotation does not interstitial the
+      // whole corpus.
+      const cachedWithoutKey = await this.getCachedResult(url, env);
+      if (cachedWithoutKey) {
+        return {
+          safe: cachedWithoutKey.safe,
+          status: cachedWithoutKey.safe ? "safe" : "unsafe",
+          threats: cachedWithoutKey.threats,
+          cacheHit: true,
+          cachedAt: cachedWithoutKey.cachedAt,
+        };
+      }
+      return this.failOpen("api-key-missing", env, {
+        message: "Google Safe Browsing API key not configured",
+      });
     }
 
     // Check cache first
@@ -87,6 +152,7 @@ export class ThreatIntelService {
     if (cached) {
       return {
         safe: cached.safe,
+        status: cached.safe ? "safe" : "unsafe",
         threats: cached.threats,
         cacheHit: true,
         cachedAt: cached.cachedAt,
@@ -128,17 +194,12 @@ export class ThreatIntelService {
 
       if (!response.ok) {
         const errorText = await response.text();
-        this.logger.error("Safe Browsing API error:", {
+        return this.failOpen("api-error", env, {
+          message: "Safe Browsing API returned a non-ok response",
           status: response.status,
           statusText: response.statusText,
-          error: errorText,
+          error: errorText.slice(0, 500),
         });
-
-        // Fail open - don't block if API fails
-        return {
-          safe: true,
-          cacheHit: false,
-        };
       }
 
       const data: SafeBrowsingResponse = await response.json();
@@ -149,6 +210,7 @@ export class ThreatIntelService {
 
       const result: ThreatIntelResult = {
         safe: !hasThreats,
+        status: hasThreats ? "unsafe" : "safe",
         threats,
         cacheHit: false,
       };
@@ -158,13 +220,48 @@ export class ThreatIntelService {
 
       return result;
     } catch (error: any) {
-      this.logger.error("Error checking Safe Browsing API:", error);
-      // Fail open - don't block if service unavailable
-      return {
-        safe: true,
-        cacheHit: false,
-      };
+      return this.failOpen("api-exception", env, {
+        message: "Error checking Safe Browsing API",
+        error: (error as Error)?.message,
+      });
     }
+  }
+
+  /**
+   * Record a lookup that could not produce a verdict and return UNKNOWN.
+   *
+   * Every branch that used to `return { safe: true }` funnels through here, so
+   * there is exactly one place that (a) emits the alarm-able counter and (b)
+   * decides the disposition. The disposition is deliberately NOT "safe": an
+   * uncached link whose check failed gets the interstitial.
+   */
+  private failOpen(
+    reason: ThreatIntelFailReason,
+    env: ThreatIntelEnv,
+    context: Record<string, unknown>,
+  ): ThreatIntelResult {
+    this.logger.error("[ThreatIntel] fail-open: lookup produced no verdict", {
+      ...context,
+      reason,
+      metric: THREAT_INTEL_FAIL_OPEN_METRIC,
+    });
+
+    // Metrics must never change the disposition — swallow any sink failure.
+    try {
+      env.METRICS?.emitCounts(
+        { reason },
+        [{ name: THREAT_INTEL_FAIL_OPEN_METRIC, value: 1 }],
+      );
+    } catch {
+      // deliberately ignored
+    }
+
+    return {
+      safe: false,
+      status: "unknown",
+      cacheHit: false,
+      failOpenReason: reason,
+    };
   }
 
   /**

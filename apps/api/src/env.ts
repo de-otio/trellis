@@ -28,6 +28,7 @@ import type {
   AnalyticsEngineDataset,
 } from "./types/cloudflare-compat.js";
 import type { NotificationType } from "@prisma/client";
+import { validateThreatIntelEnv } from "./lib/threat-intel-service.js";
 import type { RealtimeTransport } from "./lib/realtime/index.js";
 import {
   PollTransport,
@@ -1316,6 +1317,18 @@ export function validateEnv(env: Env): string[] {
   if (process.env.EMAIL_SERVICE) {
     errors.push(...validateEmailEnv(process.env));
   }
+
+  // SECURITY (Phase 6 M3): in production a missing Safe Browsing key means
+  // every uncached link check fails to UNKNOWN and the interstitial fires on
+  // everything — a link-safety feature that silently does nothing. Refuse the
+  // deploy instead. Non-prod stages are unaffected.
+  errors.push(
+    ...validateThreatIntelEnv({
+      GOOGLE_SAFE_BROWSING_API_KEY: env.GOOGLE_SAFE_BROWSING_API_KEY,
+      STAGE: env.STAGE,
+      NODE_ENV: env.NODE_ENV,
+    }),
+  );
 
   return errors;
 }
