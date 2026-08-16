@@ -21,7 +21,8 @@ import {
   QueryTimeoutPresets,
 } from "../../db-query-helper.js";
 import { detectRegionSync } from "../../region-detection.js";
-import { verifyHttpSignature } from "./http-signatures.js";
+import { verifyInboxRequest } from "./http-signatures.js";
+import { assertActorBinding } from "../http-signatures.js";
 import { processRemoteActivity } from "../services/remote-activity-handler.js";
 import { validateActivity } from "../services/abuse-prevention.js";
 import { getActivityPubBaseUrl } from "../fedify/context.js";
@@ -40,12 +41,19 @@ import { isStandaloneModeEnabled, isRemoteUri } from "../standalone-mode.js";
 export async function parseActivity(
   request: Request,
   env: Env,
+  authenticatedBody?: Buffer,
 ): Promise<ActivityStreamsActivity | null> {
   const logger = getLogger();
 
   try {
-    // Parse JSON from request
-    const activity = (await request.json()) as any;
+    // Parse the bytes the signature's digest authenticated when we have them.
+    // Re-reading the request would reintroduce a gap between what was verified
+    // and what gets processed.
+    const activity = (
+      authenticatedBody !== undefined
+        ? JSON.parse(authenticatedBody.toString("utf8"))
+        : await request.json()
+    ) as any;
 
     // Validate activity structure
     if (!activity?.type || !activity?.actor) {
@@ -85,22 +93,47 @@ export async function processInboxActivity(
   const logger = getLogger();
 
   try {
-    // Verify HTTP Signature (Fedify handles this)
-    const signatureValid = await verifyHttpSignature(request, env);
-    if (!signatureValid) {
-      logger.warn("[Fedify Inbox] Invalid HTTP signature", { username });
+    // Verify the HTTP Signature. This now also authenticates the BODY (digest
+    // must be signed and must match) and bounds the Date, and it hands back
+    // the actor URI that owns the signing key.
+    const verification = await verifyInboxRequest(request, env);
+    if (!verification.valid) {
+      logger.warn("[Fedify Inbox] Invalid HTTP signature", {
+        username,
+        reason: verification.reason,
+        detail: verification.detail,
+      });
       return new Response(JSON.stringify({ error: "Unauthorized" }), {
         status: 401,
         headers: { "content-type": "application/json" },
       });
     }
 
-    // Parse activity (Fedify handles parsing)
-    const activity = await parseActivity(request, env);
+    // Parse the exact bytes the digest covered.
+    const activity = await parseActivity(request, env, verification.body);
     if (!activity) {
       logger.warn("[Fedify Inbox] Failed to parse activity", { username });
       return new Response(JSON.stringify({ error: "Invalid activity" }), {
         status: 400,
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    // Bind keyId → owner → activity.actor. Verifying a signature only proves
+    // that someone holding that key sent the request; without this, an
+    // attacker signs with their own valid key and sets
+    // `"actor": "https://victim/users/admin"`, and the activity is stored and
+    // processed as the victim.
+    const binding = assertActorBinding(verification.owner, activity);
+    if (!binding.ok) {
+      logger.warn("[Fedify Inbox] Actor binding failed — possible spoofing", {
+        username,
+        keyId: verification.keyId,
+        owner: verification.owner,
+        reason: binding.reason,
+      });
+      return new Response(JSON.stringify({ error: "Actor mismatch" }), {
+        status: 403,
         headers: { "content-type": "application/json" },
       });
     }
@@ -214,6 +247,9 @@ export async function processInboxActivity(
         request,
         user.actorUri!,
         env,
+        // Pass our verification down: re-verifying would re-fetch the remote
+        // actor and trip replay suppression on our own request.
+        verification,
       );
       if (!processed) {
         logger.warn("[Fedify Inbox] Failed to process remote activity", {

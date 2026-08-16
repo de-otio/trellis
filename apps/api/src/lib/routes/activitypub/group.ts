@@ -9,7 +9,10 @@ import { addCorsHeaders } from "../../../worker.js";
 import { ActivityProcessor } from "../../activitypub/activity-processor.js";
 import { ActivityService } from "../../activitypub/activity-service.js";
 import { GroupService } from "../../activitypub/group-service.js";
-import { HttpSignatureService } from "../../activitypub/http-signatures.js";
+import {
+  assertActorBinding,
+  HttpSignatureService,
+} from "../../activitypub/http-signatures.js";
 import { sharedDatabaseConnectionManager } from "../../database-connection-manager.js";
 import {
   QueryTimeoutPresets,
@@ -222,16 +225,19 @@ export const groupRoutes: Route[] = [
       const { groupId } = params;
 
       try {
-        // Clone request for signature verification
-        const requestClone = request.clone();
-
-        // Verify HTTP Signature
-        const signatureValid = await HttpSignatureService.verifyRequest(
-          requestClone,
+        // Verify HTTP Signature. This authenticates the body (signed digest,
+        // constant-time compared), bounds the Date, and returns the actor URI
+        // that owns the signing key.
+        const verification = await HttpSignatureService.verifyRequest(
+          request.clone(),
           env as any,
         );
-        if (!signatureValid) {
-          logger.warn("[GroupInbox] Invalid HTTP signature", { groupId });
+        if (!verification.valid) {
+          logger.warn("[GroupInbox] Invalid HTTP signature", {
+            groupId,
+            reason: verification.reason,
+            detail: verification.detail,
+          });
           const errorResponse = securityHeaders.createSecureResponse(
             JSON.stringify({ error: "Unauthorized" }),
             { status: 401, headers: { "content-type": "application/json" } },
@@ -239,10 +245,10 @@ export const groupRoutes: Route[] = [
           return addCorsHeaders(errorResponse, request, env);
         }
 
-        // Parse activity
+        // Parse the exact bytes the digest covered, not a fresh read.
         let activity: import("../../activitypub/activity-service.js").ActivityStreamsActivity;
         try {
-          activity = await request.json();
+          activity = JSON.parse(verification.body.toString("utf8"));
         } catch (error) {
           logger.warn("[GroupInbox] Failed to parse activity JSON", {
             error: (error as Error).message,
@@ -264,6 +270,22 @@ export const groupRoutes: Route[] = [
           const errorResponse = securityHeaders.createSecureResponse(
             JSON.stringify({ error: "Invalid activity structure" }),
             { status: 400, headers: { "content-type": "application/json" } },
+          );
+          return addCorsHeaders(errorResponse, request, env);
+        }
+
+        // Bind keyId → owner → activity.actor (F1).
+        const binding = assertActorBinding(verification.owner, activity);
+        if (!binding.ok) {
+          logger.warn("[GroupInbox] Actor binding failed — possible spoofing", {
+            groupId,
+            keyId: verification.keyId,
+            owner: verification.owner,
+            reason: binding.reason,
+          });
+          const errorResponse = securityHeaders.createSecureResponse(
+            JSON.stringify({ error: "Actor mismatch" }),
+            { status: 403, headers: { "content-type": "application/json" } },
           );
           return addCorsHeaders(errorResponse, request, env);
         }

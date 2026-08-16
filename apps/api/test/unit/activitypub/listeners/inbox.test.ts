@@ -42,7 +42,7 @@ vi.mock("../../../../src/lib/activitypub/activity-processor", () => ({
 }));
 
 vi.mock("../../../../src/lib/activitypub/listeners/http-signatures", () => ({
-  verifyHttpSignature: vi.fn(),
+  verifyInboxRequest: vi.fn(),
 }));
 
 vi.mock(
@@ -60,6 +60,26 @@ vi.mock("../../../../src/lib/activitypub/standalone-mode", () => ({
   isStandaloneModeEnabled: vi.fn(),
   isRemoteUri: vi.fn(),
 }));
+
+/**
+ * Build a successful verification whose key OWNER matches the activity's own
+ * actor — i.e. what an honest peer produces. Tests that want to exercise the
+ * spoofing path deliberately pass a different owner.
+ *
+ * The owner must be supplied explicitly because the inbox now enforces
+ * `keyId -> owner -> activity.actor` (F1): a verification result whose owner
+ * does not match the body is rejected with 403, which is the whole point.
+ */
+function verifiedAs(activity: any, owner?: string) {
+  const actor =
+    typeof activity?.actor === "string" ? activity.actor : activity?.actor?.id;
+  return {
+    valid: true as const,
+    keyId: `${owner ?? actor}#main-key`,
+    owner: owner ?? actor,
+    body: Buffer.from(JSON.stringify(activity), "utf8"),
+  };
+}
 
 describe("Fedify Inbox Listener", () => {
   const mockEnv: Partial<Env> = {
@@ -175,10 +195,13 @@ describe("Fedify Inbox Listener", () => {
         }),
       });
 
-      const { verifyHttpSignature } = await import(
+      const { verifyInboxRequest } = await import(
         "../../../../src/lib/activitypub/listeners/http-signatures.js"
       );
-      vi.mocked(verifyHttpSignature).mockResolvedValue(false);
+      vi.mocked(verifyInboxRequest).mockResolvedValue({
+        valid: false,
+        reason: "bad-signature",
+      });
 
       const response = await processInboxActivity(
         request,
@@ -198,10 +221,16 @@ describe("Fedify Inbox Listener", () => {
         body: "invalid json",
       });
 
-      const { verifyHttpSignature } = await import(
+      const { verifyInboxRequest } = await import(
         "../../../../src/lib/activitypub/listeners/http-signatures.js"
       );
-      vi.mocked(verifyHttpSignature).mockResolvedValue(true);
+      // Signature verifies, but the authenticated bytes are not JSON.
+      vi.mocked(verifyInboxRequest).mockResolvedValue({
+        valid: true,
+        keyId: "https://remote.example/users/alice#main-key",
+        owner: "https://remote.example/users/alice",
+        body: Buffer.from("invalid json", "utf8"),
+      });
 
       const response = await processInboxActivity(
         request,
@@ -245,10 +274,10 @@ describe("Fedify Inbox Listener", () => {
         },
       );
 
-      const { verifyHttpSignature } = await import(
+      const { verifyInboxRequest } = await import(
         "../../../../src/lib/activitypub/listeners/http-signatures.js"
       );
-      vi.mocked(verifyHttpSignature).mockResolvedValue(true);
+      vi.mocked(verifyInboxRequest).mockResolvedValue(verifiedAs(remoteActivity));
 
       const { isRemoteUri } = await import(
         "../../../../src/lib/activitypub/standalone-mode.js"
@@ -307,10 +336,10 @@ describe("Fedify Inbox Listener", () => {
         },
       );
 
-      const { verifyHttpSignature } = await import(
+      const { verifyInboxRequest } = await import(
         "../../../../src/lib/activitypub/listeners/http-signatures.js"
       );
-      vi.mocked(verifyHttpSignature).mockResolvedValue(true);
+      vi.mocked(verifyInboxRequest).mockResolvedValue(verifiedAs(localActivity));
 
       const { isRemoteUri } = await import(
         "../../../../src/lib/activitypub/standalone-mode.js"
@@ -372,10 +401,10 @@ describe("Fedify Inbox Listener", () => {
         },
       );
 
-      const { verifyHttpSignature } = await import(
+      const { verifyInboxRequest } = await import(
         "../../../../src/lib/activitypub/listeners/http-signatures.js"
       );
-      vi.mocked(verifyHttpSignature).mockResolvedValue(true);
+      vi.mocked(verifyInboxRequest).mockResolvedValue(verifiedAs(remoteActivity));
 
       const { isRemoteUri } = await import(
         "../../../../src/lib/activitypub/standalone-mode.js"
@@ -415,16 +444,17 @@ describe("Fedify Inbox Listener", () => {
     });
 
     it("should return 404 for non-existent user", async () => {
+      const remoteActivity = {
+        type: "Create",
+        actor: "https://example.com/users/alice",
+        object: { type: "Note" },
+      };
       const request = new Request(
         "https://example.com/users/nonexistent/inbox",
         {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            type: "Create",
-            actor: "https://example.com/users/alice",
-            object: { type: "Note" },
-          }),
+          body: JSON.stringify(remoteActivity),
         },
       );
 
@@ -443,10 +473,10 @@ describe("Fedify Inbox Listener", () => {
         },
       );
 
-      const { verifyHttpSignature } = await import(
+      const { verifyInboxRequest } = await import(
         "../../../../src/lib/activitypub/listeners/http-signatures.js"
       );
-      vi.mocked(verifyHttpSignature).mockResolvedValue(true);
+      vi.mocked(verifyInboxRequest).mockResolvedValue(verifiedAs(remoteActivity));
 
       const response = await processInboxActivity(
         request,
@@ -458,14 +488,15 @@ describe("Fedify Inbox Listener", () => {
     });
 
     it("should return 400 for user missing actorId", async () => {
+      const remoteActivity = {
+        type: "Create",
+        actor: "https://example.com/users/alice",
+        object: { type: "Note" },
+      };
       const request = new Request("https://example.com/users/bob/inbox", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          type: "Create",
-          actor: "https://example.com/users/alice",
-          object: { type: "Note" },
-        }),
+        body: JSON.stringify(remoteActivity),
       });
 
       const mockDb = {
@@ -488,10 +519,10 @@ describe("Fedify Inbox Listener", () => {
         },
       );
 
-      const { verifyHttpSignature } = await import(
+      const { verifyInboxRequest } = await import(
         "../../../../src/lib/activitypub/listeners/http-signatures.js"
       );
-      vi.mocked(verifyHttpSignature).mockResolvedValue(true);
+      vi.mocked(verifyInboxRequest).mockResolvedValue(verifiedAs(remoteActivity));
 
       const response = await processInboxActivity(
         request,
@@ -513,10 +544,10 @@ describe("Fedify Inbox Listener", () => {
         }),
       });
 
-      const { verifyHttpSignature } = await import(
+      const { verifyInboxRequest } = await import(
         "../../../../src/lib/activitypub/listeners/http-signatures.js"
       );
-      vi.mocked(verifyHttpSignature).mockRejectedValue(
+      vi.mocked(verifyInboxRequest).mockRejectedValue(
         new Error("Unexpected error"),
       );
 
@@ -562,10 +593,10 @@ describe("Fedify Inbox Listener", () => {
         },
       );
 
-      const { verifyHttpSignature } = await import(
+      const { verifyInboxRequest } = await import(
         "../../../../src/lib/activitypub/listeners/http-signatures.js"
       );
-      vi.mocked(verifyHttpSignature).mockResolvedValue(true);
+      vi.mocked(verifyInboxRequest).mockResolvedValue(verifiedAs(remoteActivity));
 
       const { isStandaloneModeEnabled, isRemoteUri } = await import(
         "../../../../src/lib/activitypub/standalone-mode.js"
@@ -620,10 +651,10 @@ describe("Fedify Inbox Listener", () => {
         },
       );
 
-      const { verifyHttpSignature } = await import(
+      const { verifyInboxRequest } = await import(
         "../../../../src/lib/activitypub/listeners/http-signatures.js"
       );
-      vi.mocked(verifyHttpSignature).mockResolvedValue(true);
+      vi.mocked(verifyInboxRequest).mockResolvedValue(verifiedAs(remoteActivity));
 
       const { isStandaloneModeEnabled, isRemoteUri } = await import(
         "../../../../src/lib/activitypub/standalone-mode.js"
@@ -684,10 +715,10 @@ describe("Fedify Inbox Listener", () => {
         },
       );
 
-      const { verifyHttpSignature } = await import(
+      const { verifyInboxRequest } = await import(
         "../../../../src/lib/activitypub/listeners/http-signatures.js"
       );
-      vi.mocked(verifyHttpSignature).mockResolvedValue(true);
+      vi.mocked(verifyInboxRequest).mockResolvedValue(verifiedAs(localActivity));
 
       const { isRemoteUri } = await import(
         "../../../../src/lib/activitypub/standalone-mode.js"
@@ -752,10 +783,10 @@ describe("Fedify Inbox Listener", () => {
         },
       );
 
-      const { verifyHttpSignature } = await import(
+      const { verifyInboxRequest } = await import(
         "../../../../src/lib/activitypub/listeners/http-signatures.js"
       );
-      vi.mocked(verifyHttpSignature).mockResolvedValue(true);
+      vi.mocked(verifyInboxRequest).mockResolvedValue(verifiedAs(activityWithObjectActor));
 
       const { isRemoteUri } = await import(
         "../../../../src/lib/activitypub/standalone-mode.js"
@@ -831,10 +862,10 @@ describe("Fedify Inbox Listener", () => {
         },
       );
 
-      const { verifyHttpSignature } = await import(
+      const { verifyInboxRequest } = await import(
         "../../../../src/lib/activitypub/listeners/http-signatures.js"
       );
-      vi.mocked(verifyHttpSignature).mockResolvedValue(true);
+      vi.mocked(verifyInboxRequest).mockResolvedValue(verifiedAs(localActivity));
 
       const { isRemoteUri } = await import(
         "../../../../src/lib/activitypub/standalone-mode.js"
@@ -883,10 +914,10 @@ describe("Fedify Inbox Listener", () => {
         },
       );
 
-      const { verifyHttpSignature } = await import(
+      const { verifyInboxRequest } = await import(
         "../../../../src/lib/activitypub/listeners/http-signatures.js"
       );
-      vi.mocked(verifyHttpSignature).mockResolvedValue(true);
+      vi.mocked(verifyInboxRequest).mockResolvedValue(verifiedAs(remoteActivity));
 
       const { isStandaloneModeEnabled, isRemoteUri } = await import(
         "../../../../src/lib/activitypub/standalone-mode.js"
@@ -928,10 +959,10 @@ describe("Fedify Inbox Listener", () => {
         body: JSON.stringify(remoteActivity),
       });
 
-      const { verifyHttpSignature } = await import(
+      const { verifyInboxRequest } = await import(
         "../../../../src/lib/activitypub/listeners/http-signatures.js"
       );
-      vi.mocked(verifyHttpSignature).mockResolvedValue(true);
+      vi.mocked(verifyInboxRequest).mockResolvedValue(verifiedAs(remoteActivity));
 
       const { isStandaloneModeEnabled, isRemoteUri } = await import(
         "../../../../src/lib/activitypub/standalone-mode.js"
@@ -975,10 +1006,10 @@ describe("Fedify Inbox Listener", () => {
         new Error("Database error"),
       );
 
-      const { verifyHttpSignature } = await import(
+      const { verifyInboxRequest } = await import(
         "../../../../src/lib/activitypub/listeners/http-signatures.js"
       );
-      vi.mocked(verifyHttpSignature).mockResolvedValue(true);
+      vi.mocked(verifyInboxRequest).mockResolvedValue(verifiedAs(localActivity));
 
       const { isRemoteUri } = await import(
         "../../../../src/lib/activitypub/standalone-mode.js"
