@@ -18,13 +18,15 @@
  * Neptune graph, the Postgres edge/ownership tables carry a `tenant_id`. To
  * stay consistent with the other Postgres groups (B1/B2/B4/B5) and to keep
  * tenant isolation defensible under a future audit, every read/lookup is
- * tenant-scoped via {@link tenantScope} when an ambient tenant context exists.
+ * tenant-scoped via {@link EntityRelationshipOps.tenantScope}, which now
+ * REFUSES rather than returning an empty filter when no ambient tenant context
+ * exists (lane 7 HIGH-1 — see ./tenant-guard.ts).
  * Ownership lookups also filter `status = ACTIVE`: a removed/left owner no
  * longer holds the OWNS edge, which is the Postgres equivalent of Neptune
  * edge-absence (matches the discovery/sync groups).
  */
 import type { PrismaClient } from "@prisma/client";
-import { getCurrentTenantId } from "@de-otio/saas-foundation/tenant";
+import { requireAmbientTenantId } from "./tenant-guard.js";
 import type {
   CreateEntityRelationshipInput,
   EntityRelationship,
@@ -61,19 +63,29 @@ export class EntityRelationshipOps {
   constructor(private readonly prisma: PrismaClient) {}
 
   /**
-   * Tenant filter for reads/lookups — applied when an ambient tenant context
-   * exists, absent otherwise (matches B1/B2/B4/B5 and the Neo4j no-tenant path).
+   * Tenant filter for reads/lookups.
+   *
+   * Was: `return t ? { tenantId: t } : {}` — with no ambient tenant this
+   * returned an EMPTY object, so every `{ ...scope, … }` spread below produced
+   * a query with no tenant predicate at all. Ownership checks, edge lookups and
+   * the `deleteMany` in {@link removeEntityRelationship} then ran across every
+   * tenant, and nothing anywhere logged it (lane 7 HIGH-1).
+   *
+   * Now refuses. See ./tenant-guard.ts for the deployment precondition
+   * (`TENANT_SCOPE_MODE` must not be `"off"`), which this class's write path
+   * already required via {@link requireTenantId}.
    */
-  private tenantScope(): { tenantId?: string } {
-    const t = getCurrentTenantId();
-    return t ? { tenantId: t } : {};
+  private tenantScope(method: string): { tenantId: string } {
+    return {
+      tenantId: requireAmbientTenantId(`EntityRelationshipOps.${method}`),
+    };
   }
 
   async createEntityRelationship(
     input: CreateEntityRelationshipInput,
   ): Promise<EntityRelationship> {
     const { entityId, relatedEntityId, type, proposedByUserId } = input;
-    const scope = this.tenantScope();
+    const scope = this.tenantScope("createEntityRelationship");
 
     // 1. Verify proposing user actively owns the source entity.
     const ownership = await this.prisma.entityOwnership.findFirst({
@@ -86,16 +98,38 @@ export class EntityRelationshipOps {
       );
     }
 
-    // 2. Verify both entity nodes exist. Keyed by the globally-unique cuid PK,
-    // so no tenant scope is needed for an existence check.
+    // 2. Verify both entity nodes exist IN THE CALLER'S TENANT.
+    //
+    // The old comment here read "keyed by the globally-unique cuid PK, so no
+    // tenant scope is needed for an existence check" — which is true of
+    // uniqueness and false of authorization (lane 7 MEDIUM-4). Two consequences
+    // followed from the tenant-blind lookup:
+    //
+    //  - a T1 user could create a PENDING edge (stored with tenantId = T1)
+    //    pointing at a T2 entity: an orphan the T2 owner never sees in any
+    //    pending list, because their list is scoped to T2;
+    //  - the two error paths (`GraphNotFoundError` here vs.
+    //    `GraphConflictError`/success later) turned this endpoint into a
+    //    cross-tenant entity-id existence oracle. cuid unguessability made that
+    //    expensive, not impossible — and "expensive" is not an access control.
+    //
+    // Both entities are now resolved with `findFirst({ id, tenantId })`, and a
+    // cross-tenant target is indistinguishable from a nonexistent one: same
+    // error type, same message, which names NEITHER id.
     const [sourceEntity, targetEntity] = await Promise.all([
-      this.prisma.entity.findUnique({ where: { id: entityId }, select: { id: true } }),
-      this.prisma.entity.findUnique({ where: { id: relatedEntityId }, select: { id: true } }),
+      this.prisma.entity.findFirst({
+        where: { id: entityId, ...scope },
+        select: { id: true },
+      }),
+      this.prisma.entity.findFirst({
+        where: { id: relatedEntityId, ...scope },
+        select: { id: true },
+      }),
     ]);
     if (!sourceEntity || !targetEntity) {
-      throw new GraphNotFoundError(
-        `One or both entities not found: ${entityId}, ${relatedEntityId}`,
-      );
+      // Uniform, id-free message: which of the two was missing, and whether it
+      // was missing or merely foreign, are both non-disclosures.
+      throw new GraphNotFoundError("One or both entities not found");
     }
 
     // 3. Check for an existing relationship of this type (A→B).
@@ -138,7 +172,9 @@ export class EntityRelationshipOps {
     }
 
     const now = new Date();
-    const tenantId = this.requireTenantId();
+    // Same tenant the checks above ran in — `tenantScope` already refused if
+    // there is none, so this cannot diverge from the authorization scope.
+    const { tenantId } = scope;
 
     if (status === "CONFIRMED") {
       // Auto-confirmed PACK_MATE: create bidirectional edges immediately.
@@ -163,7 +199,7 @@ export class EntityRelationshipOps {
     relatedEntityId: string,
     confirmingUserId: string,
   ): Promise<EntityRelationship> {
-    const scope = this.tenantScope();
+    const scope = this.tenantScope("confirmEntityRelationship");
 
     // 1. Verify confirming user actively owns the target (related) entity.
     const ownership = await this.prisma.entityOwnership.findFirst({
@@ -247,7 +283,7 @@ export class EntityRelationshipOps {
     relatedEntityId: string,
     rejectingUserId: string,
   ): Promise<void> {
-    const scope = this.tenantScope();
+    const scope = this.tenantScope("rejectEntityRelationship");
 
     // 1. Verify rejecting user actively owns the target (related) entity.
     const ownership = await this.prisma.entityOwnership.findFirst({
@@ -283,7 +319,7 @@ export class EntityRelationshipOps {
     relatedEntityId: string,
     removingUserId: string,
   ): Promise<void> {
-    const scope = this.tenantScope();
+    const scope = this.tenantScope("removeEntityRelationship");
 
     // 1. Verify removing user actively owns either entity.
     const ownership = await this.prisma.entityOwnership.findFirst({
@@ -327,7 +363,7 @@ export class EntityRelationshipOps {
   ): Promise<EntityRelationship[]> {
     const rows = await this.prisma.entityRelationship.findMany({
       where: {
-        ...this.tenantScope(),
+        ...this.tenantScope("getEntityRelationships"),
         entityId,
         ...(options?.type ? { type: options.type as EntityRelationshipType } : {}),
         ...(options?.status ? { status: options.status } : {}),
@@ -355,7 +391,7 @@ export class EntityRelationshipOps {
   async getPendingEntityRelationships(
     userId: string,
   ): Promise<EntityRelationship[]> {
-    const scope = this.tenantScope();
+    const scope = this.tenantScope("getPendingEntityRelationships");
 
     // Edges that are PENDING and whose TARGET (related) entity is actively
     // owned by the user.
@@ -394,19 +430,4 @@ export class EntityRelationshipOps {
     }));
   }
 
-  /**
-   * Resolve the ambient tenant for writes. The Postgres `entity_relationships`
-   * table has a non-nullable `tenant_id`; Neptune carried no tenant scope, so
-   * this is the one place the Postgres port must source a tenant. The handler
-   * runs inside the tenant ALS context (see saas-foundation/tenant).
-   */
-  private requireTenantId(): string {
-    const tenantId = getCurrentTenantId();
-    if (!tenantId) {
-      throw new GraphConflictError(
-        "Cannot create entity relationship without an active tenant context",
-      );
-    }
-    return tenantId;
-  }
 }
