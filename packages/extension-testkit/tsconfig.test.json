@@ -1,0 +1,17 @@
+{
+  // Typecheck for the test tree. Separate from tsconfig.json on purpose: this
+  // one resolves `@de-otio/trellis`, which only exists once `apps/api` has
+  // been built — so it must never be reachable from `prepare`, or a plain
+  // `npm ci` would become unsatisfiable. See src/core.ts.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "rootDir": ".",
+    "types": ["node"]
+  },
+  "include": ["src/**/*", "test/**/*"],
+  "exclude": ["node_modules", "lib"]
+}

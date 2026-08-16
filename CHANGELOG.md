@@ -5,17 +5,88 @@ All notable changes to Trellis are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-Trellis publishes two npm packages from this repository, each with its own tag
+Trellis publishes three npm packages from this repository, each with its own tag
 series:
 
 - `@de-otio/trellis` — tags `v<x.y.z>`
 - `@de-otio/trellis-extension-api` — tags `extension-api-v<x.y.z>`
+- `@de-otio/trellis-extension-testkit` — tags `extension-testkit-v<x.y.z>`
 
 Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ## [Unreleased]
 
 ### Added
+
+- **`@de-otio/trellis-extension-testkit` (new package, 0.1.0).** An extension
+  author could typecheck against the contract and do nothing else: the server
+  boot, the docker stack, the migrations and the feature-toggle seeding all
+  lived in core's test tree, which is excluded from the published tarball. So
+  the one thing that would let an author — or an author's coding agent — verify
+  their own work was the one thing not shipped. The mechanism was already
+  proven: the first downstream vertical reproduced it by hand, and that
+  reproduction is what this packages.
+
+  `startStandaloneServer({ extensions })` applies core's required environment,
+  runs core's migrations, creates the DynamoDB table, registers, boots, health-
+  gates, seeds the toggles core's own handlers gate on, and runs a conformance
+  suite. Also shipped: a docker-compose fixture, the reference extension
+  (`/example`), and the individual steps for lanes that own part of the stack.
+
+  The conformance suite is the part that is not obvious, and it is deliberately
+  **stricter than core**. Core validates what would make _core_ unsafe and is
+  permissive about what merely makes an extension wrong — an undeclared
+  `extensionApiVersion` is one line in a log nobody reads. Every defect the
+  extensibility review found in the first real vertical was of that second kind:
+  five dead extension points, an over-broad `crossTenantRead`, a missing
+  `extensionApiVersion`. The checks are `registration`, `api-version`,
+  `routes-mount` and `cross-tenant-read`, each reporting a `fix` alongside the
+  finding.
+
+  One limit is stated rather than papered over: `cross-tenant-read` catches a
+  grant no shipped surface can reach, but _not_ a declared model that is simply
+  never read. That needs core to record which models `discover()` touched during
+  a run, and that instrumentation does not exist yet.
+
+  The testkit does not resolve core's types at build time (`npm ci` runs its
+  `prepare`, and `apps/api/dist` cannot exist then), so the load is an unchecked
+  cast by construction. `assertCoreShape()` closes that: it verifies the loaded
+  module really exports the seven members the testkit calls, and names the
+  missing ones and the minimum version when it does not.
+
+  That check, rather than the `peerDependencies` range, is the enforcement — and
+  it has to be. Three of those seven members ship for the first time alongside
+  this package, so the first core that satisfies the testkit is a release that
+  does not exist yet, and a peer range may only name a published version: npm
+  resolves it against the registry and fails the whole install on a floor with
+  no match. So the range names the newest published core, `MINIMUM_CORE_VERSION`
+  names the real requirement, and the gap between them closes by itself at the
+  next release. A range would have been the weaker guard regardless — it is
+  advisory the moment an author links a local core build, which is exactly what
+  extension development looks like.
+
+  Gated by a new `Testkit lane` CI job, which boots through the packaged path
+  (resolving `@de-otio/trellis` from `node_modules`, i.e. `dist`) rather than
+  from source as core's own standalone lane does — and by `smoke-pack.sh`,
+  which now packs and loads the testkit tarball. That tarball gate is the one
+  that would have caught the 0.9.0 `exports` incident.
+
+- **The reference extension moved into the testkit.** `exampleExtension` and
+  `minimalExtension` now live at
+  `@de-otio/trellis-extension-testkit/example` instead of
+  `apps/api/test/fixtures/example-extension/`. A reference nobody can install
+  is not a reference. Core's contract tests and standalone lane import it from
+  there, so it stays exercised rather than becoming a second copy that drifts.
+
+  `exampleExtension` now declares `extensionApiVersion` — it is the fixture an
+  author copies, so it must model the good version. `minimalExtension` still
+  omits it, and still carries the promise that every optional field is optional.
+
+- **`EXTENSION_API_VERSION` is re-exported from `@de-otio/trellis`.** A
+  conformance check asks "is this extension compatible with the core it is
+  about to run against", and only core can answer which contract version _it_
+  loaded — a caller's own `@de-otio/trellis-extension-api` import may be a
+  different copy.
 
 - **`shutdownTrellis()` — a public way to release core's process-wide
   resources.** Core opens two pools lazily and holds them in module state (the

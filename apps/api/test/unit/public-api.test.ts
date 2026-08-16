@@ -26,9 +26,12 @@ const EXPECTED_EXPORTS = [
   // in-process had to import dist/lib/… to tear down.
   "shutdownTrellis",
   // Version-compatibility rules, so a conformance check applies the same rule
-  // core applies at boot instead of restating the 0.x policy.
+  // core applies at boot instead of restating the 0.x policy — plus the
+  // version core itself loaded, which is the only authoritative answer to
+  // "compatible with what".
   "classifyApiVersion",
   "parseApiVersion",
+  "EXTENSION_API_VERSION",
   // Media-moderation seam: everything a provider implementor needs from the
   // package root, so an adapter is written against published names rather than
   // deep paths into dist/.
@@ -94,6 +97,13 @@ describe("public API surface (@de-otio/trellis)", () => {
     expect(publicApi.classifyApiVersion("0.9.1", "0.9.2").kind).toBe("drift");
     expect(publicApi.classifyApiVersion("0.9.2", "0.9.2").kind).toBe("match");
     expect(publicApi.classifyApiVersion(undefined, "0.9.2").kind).toBe("absent");
+    // And the constant core re-exports must be the version core would compare
+    // against — a copy that had drifted would make every verdict above answer
+    // a different question than the one a conformance check is asking.
+    expect(
+      publicApi.classifyApiVersion(publicApi.EXTENSION_API_VERSION, publicApi.EXTENSION_API_VERSION)
+        .kind,
+    ).toBe("match");
   });
 });
 

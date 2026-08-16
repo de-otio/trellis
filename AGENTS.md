@@ -111,21 +111,39 @@ CI and this file is not.
 
 ## Verifying your extension
 
-Three lanes exist in this repository and are the model to copy:
+**Install `@de-otio/trellis-extension-testkit` and run your extension.** It
+boots a real Trellis server with your extension registered, against a local
+docker stack, and tells you what is wrong with it:
 
-- a **contract lock test** asserting the shape you declare still matches the
-  published types;
-- a **standalone HTTP lane** that boots a real server with an extension
-  registered and makes requests against it;
-- the **reference extension** at
-  `apps/api/test/fixtures/example-extension/`, a domain-free `widget` vertical
-  that exercises every wired surface. It is the closest thing to a worked
-  example. It lives under `test/` and is deliberately excluded from the
-  published tarball, so read it here rather than expecting it in your
-  `node_modules`.
+```ts
+import { startStandaloneServer } from "@de-otio/trellis-extension-testkit";
 
-Lane details:
-[`doc/02-technical/development/testing/standalone.md`](doc/02-technical/development/testing/standalone.md).
+const server = await startStandaloneServer({ extensions: [myExtension] });
+// …drive HTTP against server.url…
+await server.stop();
+```
+
+Call it from your runner's **setup file, not a test file**: core's extension
+registry is in-process state, and every mainstream runner executes test files
+in workers with their own module graph.
+
+That call also runs a conformance suite — `registration`, `api-version`,
+`routes-mount`, `cross-tenant-read` — which is stricter than core's boot
+validation on purpose. Core checks what would make *core* unsafe; these check
+what makes an *extension* wrong, which is the category every defect found in
+the first real vertical fell into.
+
+The **reference extension** is
+`@de-otio/trellis-extension-testkit/example`: a domain-free `widget` vertical
+exercising every wired surface, and the thing to copy. `minimalExtension`
+alongside it omits every optional field — including `extensionApiVersion`, so
+it fails conformance by design.
+
+In-repo lanes worth reading as models: a **contract lock test** asserting the
+shape you declare still matches the published types, and the **standalone HTTP
+lane**. Details:
+[`doc/02-technical/development/testing/standalone.md`](doc/02-technical/development/testing/standalone.md),
+[`packages/extension-testkit/README.md`](packages/extension-testkit/README.md).
 
 ## When the contract is wrong
 

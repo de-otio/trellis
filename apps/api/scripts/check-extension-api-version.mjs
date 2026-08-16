@@ -49,8 +49,19 @@ import {
 
 const DEPENDENCY_NAME = "@de-otio/trellis-extension-api";
 
-/** Workspaces that depend on the contract package. */
-const CONSUMER_MANIFESTS = ["apps/api/package.json", "apps/worker/package.json"];
+/**
+ * Workspaces that depend on the contract package.
+ *
+ * The testkit is on this list for the same reason the apps are: it declares a
+ * range, and a range that excludes the published version is invisible to every
+ * gate except a clean `npm ci`. It is also the package most likely to be
+ * forgotten, because it is the newest.
+ */
+const CONSUMER_MANIFESTS = [
+  "apps/api/package.json",
+  "apps/worker/package.json",
+  "packages/extension-testkit/package.json",
+];
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..", "..", "..");

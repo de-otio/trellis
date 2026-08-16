@@ -1,13 +1,18 @@
 name: Publish
 
-# Tag-triggered npm publish for the two publishable packages in this
-# monorepo. Uses npm Trusted Publishing via OIDC — the package must be
-# registered as a Trusted Publisher on npmjs.org first; once set up,
-# subsequent tagged releases publish without any manual OTP.
+# Tag-triggered npm publish for the publishable packages in this monorepo.
+# Uses npm Trusted Publishing via OIDC — the package must be registered as a
+# Trusted Publisher on npmjs.org first; once set up, subsequent tagged releases
+# publish without any manual OTP.
 #
 # Tag formats:
-#   v<version>                  → @de-otio/trellis            (apps/api)
-#   extension-api-v<version>    → @de-otio/trellis-extension-api  (packages/extension-api)
+#   v<version>                    → @de-otio/trellis                  (apps/api)
+#   extension-api-v<version>      → @de-otio/trellis-extension-api    (packages/extension-api)
+#   extension-testkit-v<version>  → @de-otio/trellis-extension-testkit (packages/extension-testkit)
+#
+# Prefix matching is longest-first below, and it has to be: `v*` also matches
+# nothing else here, but a future `v`-prefixed sibling would silently win the
+# case arm if the specific prefixes did not come first.
 #
 # The workflow verifies that the tag's version matches the target
 # package.json's version before publishing, so a bad tag can't publish
@@ -18,6 +23,7 @@ on:
     tags:
       - 'v*'
       - 'extension-api-v*'
+      - 'extension-testkit-v*'
 
 permissions:
   contents: read
@@ -58,6 +64,11 @@ jobs:
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
           case "$TAG" in
+            extension-testkit-v*)
+              DIR="packages/extension-testkit"
+              NAME="@de-otio/trellis-extension-testkit"
+              EXPECTED_VERSION="${TAG#extension-testkit-v}"
+              ;;
             extension-api-v*)
               DIR="packages/extension-api"
               NAME="@de-otio/trellis-extension-api"
@@ -69,7 +80,7 @@ jobs:
               EXPECTED_VERSION="${TAG#v}"
               ;;
             *)
-              echo "::error::Unrecognised tag format: $TAG (expected v<x> or extension-api-v<x>)"
+              echo "::error::Unrecognised tag format: $TAG (expected v<x>, extension-api-v<x> or extension-testkit-v<x>)"
               exit 1
               ;;
           esac
