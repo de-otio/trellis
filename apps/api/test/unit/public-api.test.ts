@@ -21,6 +21,14 @@ const EXPECTED_EXPORTS = [
   "setRealtimeProvider",
   "setTextModerationProvider",
   "startServer",
+  // Lifecycle: releasing core's process-wide pools is a supported operation,
+  // so it has a supported name. Without it a consumer booting the server
+  // in-process had to import dist/lib/… to tear down.
+  "shutdownTrellis",
+  // Version-compatibility rules, so a conformance check applies the same rule
+  // core applies at boot instead of restating the 0.x policy.
+  "classifyApiVersion",
+  "parseApiVersion",
   // Media-moderation seam: everything a provider implementor needs from the
   // package root, so an adapter is written against published names rather than
   // deep paths into dist/.
@@ -65,6 +73,28 @@ describe("public API surface (@de-otio/trellis)", () => {
   it("exposes the push-transport injection hook as a callable (T8)", () => {
     expect(typeof publicApi.setPushTransportProvider).toBe("function");
   });
+
+  it("exposes shutdown as a callable, and it resolves rather than throwing", async () => {
+    expect(typeof publicApi.shutdownTrellis).toBe("function");
+    // Asserted through the published surface: nothing was ever opened here, so
+    // this is the "called when idle" case, and it must be a quiet no-op rather
+    // than a rejection — a teardown that throws is the failure it prevents.
+    await expect(publicApi.shutdownTrellis()).resolves.toMatchObject({
+      failed: [],
+    });
+  });
+
+  it("exposes the version rules, applying core's own 0.x policy", () => {
+    expect(typeof publicApi.classifyApiVersion).toBe("function");
+    expect(typeof publicApi.parseApiVersion).toBe("function");
+    // Through the published surface, not the module: a differing MINOR is
+    // breaking while the API is 0.x, which is the rule a conformance check
+    // must not restate for itself.
+    expect(publicApi.classifyApiVersion("0.8.0", "0.9.2").kind).toBe("incompatible");
+    expect(publicApi.classifyApiVersion("0.9.1", "0.9.2").kind).toBe("drift");
+    expect(publicApi.classifyApiVersion("0.9.2", "0.9.2").kind).toBe("match");
+    expect(publicApi.classifyApiVersion(undefined, "0.9.2").kind).toBe("absent");
+  });
 });
 
 describe("public API surface — the media-moderation seam", () => {
@@ -85,9 +115,7 @@ describe("public API surface — the media-moderation seam", () => {
     // Asserted through the published surface, not the module: a consumer
     // importing this must get the fallback behaviour, not just the symbol.
     expect(publicApi.moderationProviderName({ name: "  acme " })).toBe("acme");
-    expect(publicApi.moderationProviderName({})).toBe(
-      publicApi.UNKNOWN_PROVIDER_NAME,
-    );
+    expect(publicApi.moderationProviderName({})).toBe(publicApi.UNKNOWN_PROVIDER_NAME);
   });
 
   it("exposes the operator-owned policy and its refusal", () => {
