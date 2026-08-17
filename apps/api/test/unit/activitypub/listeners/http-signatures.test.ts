@@ -39,10 +39,18 @@ vi.mock("../../../../src/lib/activitypub/remote-fetch-service", () => ({
 
 vi.mock("../../../../src/lib/activitypub/standalone-mode", () => ({
   isStandaloneModeEnabled: vi.fn().mockResolvedValue(false),
-  isRemoteUri: vi.fn(
-    (uri: string, env: any) =>
-      !uri.startsWith(env?.ACTIVITYPUB_BASE_URL ?? "https://example.com"),
-  ),
+  // Mirror the real isRemoteUri: compare parsed origins, not a string
+  // prefix — a substring/startsWith check here would let a host like
+  // "https://example.com.attacker.com" masquerade as local, and CodeQL
+  // correctly flags that shape even inside a test mock.
+  isRemoteUri: vi.fn((uri: string, env: any) => {
+    const baseUrl = env?.ACTIVITYPUB_BASE_URL ?? "https://example.com";
+    try {
+      return new URL(uri).origin !== new URL(baseUrl).origin;
+    } catch {
+      return true;
+    }
+  }),
 }));
 
 const mockEnv: Partial<Env> = {
