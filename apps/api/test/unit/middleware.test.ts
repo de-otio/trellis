@@ -711,5 +711,104 @@ describe("Middleware", () => {
       );
       expect(response.headers.get("X-Content-Type-Options")).toBe("nosniff");
     });
+
+    // ---------------------------------------------------------------------
+    // Phase 8 — the CSRF bypass used to be keyed off the SHAPE of the
+    // Authorization header ("three dot-separated segments"), unverified. A
+    // cross-origin script can set that header while the browser still attaches
+    // the session cookie, so `Authorization: Bearer a.b.c` disabled CSRF on a
+    // cookie-authenticated request. The predicate is now cookie presence.
+    // ---------------------------------------------------------------------
+    describe("Phase 8: the CSRF skip is derived from cookie presence", () => {
+      function postWith(headers: Record<string, string>): MiddlewareContext {
+        return {
+          ...mockContext,
+          request: new Request("https://api.example.com/posts", {
+            method: "POST",
+            headers,
+          }),
+          method: "POST",
+        };
+      }
+
+      it("does NOT skip CSRF for a junk Bearer alongside a session cookie", async () => {
+        const response = await csrfMiddleware()(
+          postWith({
+            Cookie: "trellis_session=encrypted-session",
+            Authorization: "Bearer a.b.c", // three segments, never verified
+          }),
+          async () => new Response("OK"),
+        );
+
+        // No X-CSRF-Token was supplied → must be rejected, not waved through.
+        expect(response.status).toBe(403);
+        expect(await response.json()).toEqual({ error: "CSRF token required" });
+      });
+
+      it("does NOT skip CSRF for a real-looking JWT alongside a session cookie", async () => {
+        const jwtish = `${btoa('{"alg":"RS256"}')}.${btoa('{"sub":"x"}')}.sig`;
+        const response = await csrfMiddleware()(
+          postWith({
+            Cookie: "trellis_session=encrypted-session",
+            Authorization: `Bearer ${jwtish}`,
+          }),
+          async () => new Response("OK"),
+        );
+
+        expect(response.status).toBe(403);
+      });
+
+      it("rejects a cookie-authenticated request with an INVALID CSRF token even with a Bearer", async () => {
+        mockValidateToken.mockResolvedValueOnce(false);
+        const response = await csrfMiddleware()(
+          postWith({
+            Cookie: "trellis_session=encrypted-session",
+            Authorization: "Bearer a.b.c",
+            "X-CSRF-Token": "forged",
+          }),
+          async () => new Response("OK"),
+        );
+
+        expect(mockValidateToken).toHaveBeenCalled();
+        expect(response.status).toBe(403);
+      });
+
+      it("still skips CSRF for a pure Bearer client (no cookie at all)", async () => {
+        const response = await csrfMiddleware()(
+          postWith({ Authorization: "Bearer some-opaque-token" }),
+          async () => new Response("OK"),
+        );
+
+        expect(response.status).toBe(200);
+        expect(mockValidateToken).not.toHaveBeenCalled();
+      });
+
+      it("a non-session cookie does not force CSRF on a Bearer client", async () => {
+        const response = await csrfMiddleware()(
+          postWith({
+            Cookie: "locale=de; theme=dark",
+            Authorization: "Bearer some-opaque-token",
+          }),
+          async () => new Response("OK"),
+        );
+
+        expect(response.status).toBe(200);
+      });
+
+      it("the legacy `session=` cookie name also forces CSRF", async () => {
+        const response = await csrfMiddleware()(
+          postWith({
+            Cookie: "session=legacy-value",
+            Authorization: "Bearer a.b.c",
+          }),
+          async () => new Response("OK"),
+        );
+
+        // No session resolves from the legacy cookie, so this falls through to
+        // the "no session" branch rather than 403 — the point is that it did
+        // NOT take the Bearer shortcut before the session lookup.
+        expect(response.status).toBe(200);
+      });
+    });
   });
 });

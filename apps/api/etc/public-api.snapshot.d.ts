@@ -220,6 +220,15 @@ export interface Env {
     CI?: string;
     GITHUB_ACTIONS?: string;
     STAGE?: string;
+    /**
+     * SEC L1 — explicit opt-in for the `/api/admin/test/*` seam (see
+     * `lib/routes/admin.ts`). The seam is OFF unless STAGE is `dev`, the process
+     * is in CI, or this is exactly `"true"`; `prod`/`production` can never enable
+     * it. Surfaced on `Env` (rather than read from `process.env` inside the
+     * route) so the gate reads its input from the same place as every other
+     * config value, and so it is greppable.
+     */
+    ENABLE_TEST_ROUTES?: string;
     AWS_REGION?: string;
     AWS_ACCOUNT_ID?: string;
     AWS_ACCESS_KEY_ID?: string;
@@ -4036,6 +4045,7 @@ export interface Session {
     mfaVerified?: boolean;
     mfaVerifiedAt?: number;
     ageTier?: AgeTier;
+    sessionEpoch?: number;
     activeTenantId?: string;
 }
 /**
@@ -4142,6 +4152,56 @@ export declare class SessionManager {
      */
     clearSession(response: Response, cookieDomain?: string): Response;
     /**
+     * Phase 8 — inactivity-timeout check, FAIL CLOSED on a missing timestamp.
+     *
+     * Previously guarded by `if (env && session.lastActivityAt)`: a sealed
+     * payload that simply omitted `lastActivityAt` skipped the check entirely, so
+     * the inactivity timeout was advisory — any client (or any code path that
+     * sealed a session without the field) opted out of it for free.
+     *
+     * The effective "last seen" is `lastActivityAt`, falling back to the seal-time
+     * `sessionEpoch` (stamped by `setSession`, i.e. the issue time — the plan's
+     * "default missing lastActivityAt to issue time"). When NEITHER is present —
+     * only possible for a cookie sealed before this change — the session is
+     * treated as inactive and rejected, forcing one re-authentication rather than
+     * grandfathering an unbounded-idle session.
+     *
+     * Returns `true` when the session must be rejected.
+     */
+    private isInactive;
+    /**
+     * SEC L2 — is this raw token on the revocation blocklist?
+     *
+     * Returns `true` (⇒ deny) when the token is blocked OR when the check could
+     * not be completed. Failing CLOSED is the point of the finding: a
+     * best-effort blocklist that silently allows on a KV outage is a blocklist an
+     * attacker can bypass by causing (or waiting for) an outage.
+     *
+     * Configuration note: when NO blocklist KV is bound at all, the check is a
+     * no-op (returns `false`). That is a deployment shape — local dev and the
+     * unit-test envs bind no KV — not an outage, and treating it as a denial
+     * would make trellis unusable without a KV. Operators who want the strict
+     * reading set `SESSION_BLOCKLIST_REQUIRED=true`, which turns a missing
+     * binding into a denial as well.
+     */
+    private isTokenRevoked;
+    /**
+     * SEC L2 — has this user's session epoch been bumped since the session was
+     * sealed ("revoke all sessions")?
+     *
+     * Returns `true` (⇒ deny) when the sealed epoch is older than the stored one,
+     * and when the lookup fails (fail closed). A sealed session predating this
+     * change carries no `sessionEpoch`; it is treated as epoch 0, so any stored
+     * epoch invalidates it — which is exactly the intent of a revoke-all.
+     */
+    private isEpochStale;
+    /**
+     * SEC L2 — combined post-verification gate for a SEALED session (cookie or
+     * localStorage token): blocklist + epoch. Returns `true` when the session
+     * must be rejected.
+     */
+    private isSealedSessionRevoked;
+    /**
      * AUTH-5: Hash a session token for blocklist storage.
      */
     private hashToken;
@@ -4153,6 +4213,21 @@ export declare class SessionManager {
      * blocklist KV store and is kept verbatim.
      */
     revokeSession(request: Request, env: {
+        [key: string]: any;
+    }): Promise<void>;
+    /**
+     * SEC L2: revoke EVERY session for a user ("log out everywhere") by bumping
+     * the stored session epoch. Any sealed session whose `sessionEpoch` predates
+     * the bump is rejected by `getSession`.
+     *
+     * Call this on password/credential change, on account suspension, and from
+     * the user-facing "sign out of all devices" action. Without it the only
+     * global kill switch was rotating `SESSION_SECRET`, which logs out everyone.
+     *
+     * Throws if the KV write fails — the caller must not report success for a
+     * revocation that did not persist.
+     */
+    revokeAllSessions(userId: string, env: {
         [key: string]: any;
     }): Promise<void>;
 }

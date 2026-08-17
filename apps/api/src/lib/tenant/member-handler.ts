@@ -26,7 +26,7 @@ import type { Env } from "../../env.js";
 import type { AuthContext } from "../auth/auth-context.js";
 import { requireActiveTenant } from "../auth/auth-middleware.js";
 import { Capability, requireCapability } from "../auth/require.js";
-import { createClaimsCacheFromEnv } from "../auth/claims-cache.js";
+import { invalidateClaims } from "../auth/claims-invalidation.js";
 import { emitTenantAudit } from "./audit-emit.js";
 import { transferOwnership } from "./transfer-ownership.js";
 
@@ -44,24 +44,20 @@ function unprocessable(message: string, remediation?: string): Response {
   });
 }
 
-async function invalidateCache(env: Env, sub: string | null | undefined): Promise<void> {
-  if (!sub) return;
-  try {
-    const cache = createClaimsCacheFromEnv();
-    await cache.invalidate(sub);
-  } catch (err) {
-    console.warn(
-      JSON.stringify({
-        level: "warn",
-        msg: "Cache invalidation failed",
-        sub,
-        error: String(err),
-      }),
-    );
-  }
-  // env is unused but kept in the signature in case T7 wants to read DDB
-  // table name from env directly rather than via the factory.
-  void env;
+/**
+ * Claims-cache invalidation now goes through the shared choke point
+ * (`auth/claims-invalidation.ts`) rather than an open-coded copy per module.
+ * A cache hit in the pre-token Lambda skips the RDS read — including the
+ * suspension and role re-derivation — so every privilege-changing mutation
+ * must land here, and one implementation is what makes that auditable.
+ */
+async function invalidateCache(
+  env: Env,
+  sub: string | null | undefined,
+  reason: string,
+): Promise<void> {
+  void env; // retained for signature stability with the T7 audit work
+  await invalidateClaims([sub], reason);
 }
 
 async function bestEffortGlobalSignOut(
@@ -231,7 +227,7 @@ export class MemberHandler {
       select: { id: true, userId: true, role: true, status: true },
     });
 
-    await invalidateCache(env, target.user.subject);
+    await invalidateCache(env, target.user.subject, "member.change_role");
 
     emitTenantAudit(
       {
@@ -301,7 +297,7 @@ export class MemberHandler {
       data: { status: "REMOVED", removedAt: new Date() },
     });
 
-    await invalidateCache(env, target.user.subject);
+    await invalidateCache(env, target.user.subject, "member.remove");
     await bestEffortGlobalSignOut(env, target.user.email);
 
     emitTenantAudit(
@@ -386,8 +382,16 @@ export class MemberHandler {
       return jsonResponse(409, { error: "CONFLICT", message: "OWNER row not found" });
     }
 
-    await invalidateCache(env, result.oldOwnerCognitoSub);
-    await invalidateCache(env, result.newOwnerCognitoSub);
+    await invalidateCache(
+      env,
+      result.oldOwnerCognitoSub,
+      "tenant.transfer_ownership",
+    );
+    await invalidateCache(
+      env,
+      result.newOwnerCognitoSub,
+      "tenant.transfer_ownership",
+    );
 
     emitTenantAudit(
       {

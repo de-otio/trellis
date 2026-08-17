@@ -322,17 +322,31 @@ export function csrfMiddleware(): Middleware {
       return next();
     }
 
-    // Skip CSRF for JWT-authenticated requests (Bearer token with 3 dot-separated parts).
-    // CSRF protection is only needed for cookie-based auth where the browser auto-sends cookies.
-    // JWT in Authorization header is not vulnerable to CSRF since the attacker cannot set headers.
-    // SECURITY INVARIANT: This bypass is safe because all state-changing routes
-    // require authentication and reject unauthenticated requests BEFORE performing
-    // any side effects. An invalid JWT (e.g., "a.b.c") will pass CSRF but fail auth.
-    const bearerHeader = request.headers.get("Authorization");
-    if (bearerHeader?.startsWith("Bearer ")) {
-      const bearerToken = bearerHeader.slice(7);
-      if (bearerToken.split(".").length === 3) {
-        return next();
+    // Phase 8 — the CSRF bypass is now derived from COOKIE PRESENCE, not from
+    // the shape of the Authorization header.
+    //
+    // It used to skip CSRF for any `Authorization: Bearer a.b.c` — three
+    // dot-separated segments, no verification. An attacker's cross-origin form
+    // cannot set that header, but their *script* can, and the browser still
+    // attaches the session cookie: any origin that CORS lets through could send
+    // a junk Bearer, skip CSRF, and be authenticated by the cookie. The two
+    // findings compounded (see the CORS fail-open fix in cors-handler.ts).
+    //
+    // The correct predicate is "is this request authenticated by something the
+    // browser attaches automatically?" — i.e. does it carry a session cookie.
+    // If it does, CSRF applies no matter what else is on the request. A pure
+    // Bearer client (mobile, server-to-server) sends no cookie and still skips.
+    const cookieHeader = request.headers.get("Cookie");
+    const carriesSessionCookie =
+      !!cookieHeader && /(?:^|;\s*)(?:trellis_session|session)=/.test(cookieHeader);
+
+    if (!carriesSessionCookie) {
+      const bearerHeader = request.headers.get("Authorization");
+      if (bearerHeader?.startsWith("Bearer ")) {
+        const bearerToken = bearerHeader.slice(7);
+        if (bearerToken.length > 0) {
+          return next();
+        }
       }
     }
 

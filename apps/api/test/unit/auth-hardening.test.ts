@@ -632,11 +632,15 @@ describe("S1.6 — CORS strict domain matching", () => {
     expect(CorsHandler.getAllowedOrigin(request, mockEnv)).toBeNull();
   });
 
-  it("should allow api.example.com as subdomain", () => {
+  it("SEC M4: api.example.com is NO LONGER allowed as a known-domain subdomain", () => {
+    // This used to pass only because the shipped `knownDomains` list contained
+    // the IANA reserved `example.com`, which meant the published core allowed
+    // every `*.example.com` origin out of the box. The entry is gone; an
+    // arbitrary subdomain of it is denied unless explicitly configured.
     const request = new Request("https://api.example.com/test", {
       headers: { Origin: "https://api.example.com" },
     });
-    expect(CorsHandler.getAllowedOrigin(request, mockEnv)).toBe("https://api.example.com");
+    expect(CorsHandler.getAllowedOrigin(request, mockEnv)).toBeNull();
   });
 
   it("should reject fakeexample.com", () => {

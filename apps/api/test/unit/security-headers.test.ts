@@ -67,6 +67,34 @@ describe("SecurityHeaders", () => {
       expect(csp).toContain("frame-ancestors 'none'");
     });
 
+    // Phase 8 hardening — the review flagged the CSP as otherwise sound but
+    // missing these two directives.
+    it("Phase 8: includes object-src 'none' (no legacy plugin embedding)", () => {
+      const csp = new SecurityHeaders()
+        .addSecurityHeaders(new Response("test"))
+        .headers.get("Content-Security-Policy");
+      expect(csp).toContain("object-src 'none'");
+    });
+
+    it("Phase 8: includes base-uri 'self' (an injected <base> cannot re-point relative URLs)", () => {
+      const csp = new SecurityHeaders()
+        .addSecurityHeaders(new Response("test"))
+        .headers.get("Content-Security-Policy");
+      expect(csp).toContain("base-uri 'self'");
+    });
+
+    it("Phase 8: both directives survive CSP_* env overrides", () => {
+      const csp = new SecurityHeaders({
+        CSP_SCRIPT_SRC: "'self' https://cdn.example.org",
+        CSP_STYLE_SRC: "'self' 'unsafe-inline'",
+        CSP_CONNECT_SRC: "https://api.example.org",
+      })
+        .addSecurityHeaders(new Response("test"))
+        .headers.get("Content-Security-Policy");
+      expect(csp).toContain("object-src 'none'");
+      expect(csp).toContain("base-uri 'self'");
+    });
+
     it("should include default connect-src domains", () => {
       const securityHeaders = new SecurityHeaders();
       const response = new Response("test");

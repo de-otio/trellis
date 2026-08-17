@@ -24,6 +24,28 @@ import { getLogger, Logger } from "./logger.js";
 export const CORS_ALLOWED_REQUEST_HEADERS =
   "Content-Type, Authorization, X-CSRF-Token, X-Retry-Count, X-Client-Version, X-Client-Platform";
 
+/**
+ * SEC M4 — is this origin a loopback (local development) origin?
+ *
+ * Only `localhost`, `127.0.0.0/8` and `[::1]` count, on any port and on
+ * http/https. Deliberately hostname-exact: `localhost.attacker.example` and
+ * `notlocalhost` must NOT match, which is why this parses the URL instead of
+ * substring-matching.
+ */
+export function isLoopbackOrigin(origin: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(origin);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+  const host = url.hostname.toLowerCase();
+  if (host === "localhost") return true;
+  if (host === "::1" || host === "[::1]") return true;
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+}
+
 export class CorsHandler {
   /**
    * Get allowed CORS origin based on request origin and configured allowed origins
@@ -72,13 +94,28 @@ export class CorsHandler {
       return normalizedRequestOrigin;
     }
 
-    // If no APP_DOMAIN or ALLOWED_ORIGINS is configured (local dev), allow the request origin
-    // This is a safety fallback for local development
+    // SEC M4 — fail CLOSED when nothing is configured.
+    //
+    // This branch used to reflect the request origin verbatim whenever neither
+    // APP_DOMAIN nor ALLOWED_ORIGINS was set. Combined with
+    // `Access-Control-Allow-Credentials: true` (added unconditionally by
+    // `addCorsHeaders`), that let ANY site make credentialed cross-origin
+    // requests and read the responses — and for a published, reusable core,
+    // "the deployer set no origin config" is a realistic deployment.
+    //
+    // Local development still works: reflection is now limited to loopback
+    // origins, which no remote attacker can present.
     if (!env.APP_DOMAIN && !env.ALLOWED_ORIGINS) {
-      getLogger().info(
-        `[CORS] No APP_DOMAIN or ALLOWED_ORIGINS configured, allowing origin: ${normalizedRequestOrigin}`,
+      if (isLoopbackOrigin(normalizedRequestOrigin)) {
+        getLogger().info(
+          `[CORS] No origin config; allowing loopback dev origin: ${normalizedRequestOrigin}`,
+        );
+        return normalizedRequestOrigin;
+      }
+      getLogger().warn(
+        `[CORS] No APP_DOMAIN or ALLOWED_ORIGINS configured; denying non-loopback origin: ${normalizedRequestOrigin}`,
       );
-      return normalizedRequestOrigin;
+      return null;
     }
 
     // Allow Cloudflare Pages domains (only specific known projects)
@@ -110,7 +147,11 @@ export class CorsHandler {
     try {
       const originUrl = new URL(normalizedRequestOrigin);
       const host = originUrl.hostname;
-      const knownDomains = ["rkm1.de", "example.com"];
+      // SEC M4: `example.com` removed — it is the IANA reserved example
+      // domain, it shipped in the published core's allow-list, and anyone can
+      // stand up a subdomain of a domain they control that ends in it only by
+      // owning it. Nothing legitimate needed it.
+      const knownDomains = ["rkm1.de"];
       const isKnownDomain = knownDomains.some(
         (domain) => host === domain || host.endsWith(`.${domain}`),
       );

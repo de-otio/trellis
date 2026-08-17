@@ -280,6 +280,15 @@ export interface Env {
   CI?: string;
   GITHUB_ACTIONS?: string;
   STAGE?: string;
+  /**
+   * SEC L1 — explicit opt-in for the `/api/admin/test/*` seam (see
+   * `lib/routes/admin.ts`). The seam is OFF unless STAGE is `dev`, the process
+   * is in CI, or this is exactly `"true"`; `prod`/`production` can never enable
+   * it. Surfaced on `Env` (rather than read from `process.env` inside the
+   * route) so the gate reads its input from the same place as every other
+   * config value, and so it is greppable.
+   */
+  ENABLE_TEST_ROUTES?: string;
 
   // AWS
   AWS_REGION?: string;
@@ -1649,6 +1658,7 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     CI: process.env.CI,
     GITHUB_ACTIONS: process.env.GITHUB_ACTIONS,
     STAGE: stage,
+    ENABLE_TEST_ROUTES: process.env.ENABLE_TEST_ROUTES,
 
     // AWS
     AWS_REGION: process.env.AWS_REGION,
