@@ -773,12 +773,19 @@ export async function createAuthenticatedSession(
   // The API uses SSM, so we should prefer SSM over env var to match production behavior
   let secret = sessionSecret;
 
-  // Check if this is a postdeployment test
+  // Check if this is a postdeployment test. Deliberately NOT gated on bare
+  // `CI`/`GITHUB_ACTIONS` (unlike createTestUserWithSession's CI-based timeout
+  // tuning below) — every job in this repo's own CI runs under those flags,
+  // including the standalone lane, which is not hitting a deployed API and
+  // has no AWS credentials. Match the detection this file uses everywhere
+  // else (getDatabaseUrl, createTestPrismaClient, test-config.ts): only a
+  // genuine `--config vitest.postdeployment*.config.ts` invocation (or an
+  // explicit VITEST_ENV override) counts. Using the CI flag here previously
+  // forced every CI run to require SSM for SESSION_SECRET, which broke the
+  // standalone lane once it started calling this function (SEC L1 follow-up).
   const isPostdeploymentTest =
     process.env.VITEST_ENV === "postdeployment" ||
-    process.argv.some((arg) => arg.includes("postdeployment")) ||
-    process.env.CI === "true" ||
-    process.env.GITHUB_ACTIONS === "true";
+    process.argv.some((arg) => arg.includes("postdeployment"));
 
   if (!secret) {
     // For postdeployment tests, try SSM first (same as API)
