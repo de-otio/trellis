@@ -60,6 +60,54 @@
  * Superseded by the audience resolver, which removes scores from access
  * entirely rather than constraining them — see trellis-internal
  * plans/audience-and-reach, D1.
+ *
+ * ---------------------------------------------------------------------------
+ * ## Is friendship tenant-scoped, or account-global? (security review 2026-08,
+ * lane 7 HIGH-2 — the semantic decision, recorded here because the code had
+ * two answers and neither was written down.)
+ *
+ * **Decision: friendship is TENANT-SCOPED. A `relationships` edge means
+ * "inside this tenant", never "between these two accounts everywhere".**
+ *
+ * This function previously carried no `tenantId` predicate at all, while
+ * `authorAudienceSql` (lib/graph/postgres/circles.ts) — the *other* reader of
+ * the very same column on the very same table, for the very same decision —
+ * requires `ar.tenant_id = ${tenantId}`. Two readers of one table cannot
+ * disagree about what a row means, so one of them had to move. Everything the
+ * schema and the write path already assert points the same way:
+ *
+ *  1. `Relationship.tenantId` is **NOT NULL** (prisma/schema.prisma). An edge
+ *     cannot be written without naming a tenant, so an edge is a fact *about a
+ *     tenant*, not about a pair of accounts.
+ *  2. `createRelationship` **refuses** without an ambient tenant. The write
+ *     side has never been account-global.
+ *  3. The per-user edge cap counts `{ userId, tenantId }` — a per-tenant
+ *     roster quota. A global roster would make the cap meaningless.
+ *  4. The unique key is `[tenantId, userId, targetType, targetId]` (M7), so the
+ *     same pair of users may be placed at *different* tiers in different
+ *     tenants. Per-tenant placement is representable, therefore intended; a
+ *     global read of a per-tenant column takes the UNION of every placement,
+ *     which is the widest possible reading of a deliberately narrow one.
+ *  5. This set is ANDed with tenant-scoped post reads (`getPost`,
+ *     `canReadPost`, `getHomeFeed` all require `activeTenantId`). Feeding a
+ *     tenant-blind friend set into a tenant-scoped post query is precisely the
+ *     leak: A and B share tenants T1 and T2; A puts B in their inner circle in
+ *     T2; B's feed and `canReadPost` in **T1** then include A in `friendIds`,
+ *     so A's NORMAL-radius posts in T1 become readable by B — and A cannot
+ *     revoke it from T1 because the grant does not live there.
+ *
+ * The alternative (declare friendship account-global and drop the predicate
+ * from `authorAudienceSql`) was rejected: it would widen the audience of every
+ * existing tiered feed query, contradict the NOT NULL column and the write-side
+ * refusal, and hand a tenant admin the ability to grant read access inside a
+ * tenant they have no relationship with.
+ *
+ * Consequence for callers: `tenantId` is a **required** argument, and it must
+ * be the caller's verified active tenant (JWT-derived), never an ambient value
+ * and never a client-supplied string. It is passed explicitly rather than read
+ * from the ambient ALS because the ambient tenant does not exist when
+ * `TENANT_SCOPE_MODE` is `"off"` (the current deploy default), and a friend set
+ * that silently goes global under a config flag is the defect being fixed.
  */
 
 /** Highest circle tier that still counts as a "friend" (0 = inner, 1 = close). */
@@ -73,6 +121,7 @@ export type RelationshipReader = {
   relationship: {
     findMany(args: {
       where: {
+        tenantId: string;
         targetId: string;
         targetType: string;
         tier: { lte: number };
@@ -84,16 +133,36 @@ export type RelationshipReader = {
 };
 
 /**
- * Resolve the authors whose friends-only posts `viewerUserId` may read (see the
- * module doc for the definition and the direction argument). Returns an empty
- * array for a viewer no author has placed close.
+ * Resolve the authors whose friends-only posts `viewerUserId` may read **within
+ * `tenantId`** (see the module doc for the definition, the direction argument,
+ * and why friendship is tenant-scoped). Returns an empty array for a viewer no
+ * author has placed close in that tenant.
+ *
+ * @param tenantId The caller's verified active tenant. Required and non-empty:
+ *   Prisma DROPS an `undefined` `where` key, so a falsy tenant would not narrow
+ *   the query — it would remove tenant isolation from it. Refused loudly rather
+ *   than defaulted, because an empty friend set is indistinguishable from a
+ *   correct one and would hide the misconfiguration.
  */
 export async function getFriendUserIds(
   db: RelationshipReader,
   viewerUserId: string,
+  tenantId: string,
 ): Promise<string[]> {
+  if (!tenantId) {
+    throw new Error(
+      "getFriendUserIds: tenantId is required for tenant isolation",
+    );
+  }
   const rows = await db.relationship.findMany({
     where: {
+      // REQUIRED, never optional. A friendship edge is scoped to the tenant it
+      // was created in; without this predicate an edge created in tenant B
+      // authorizes NORMAL-radius reads in tenant A (lane 7 HIGH-2). Matches
+      // `authorAudienceSql`'s `ar.tenant_id = ${tenantId}` in
+      // lib/graph/postgres/circles.ts — the two must agree or the feed and the
+      // per-post gate disagree about who is a friend.
+      tenantId,
       // The AUTHOR's edge, not the viewer's: `targetId` is the viewer, so `tier`
       // below is the tier the AUTHOR assigned. Flipping this back to
       // `userId: viewerUserId` hands the audience boundary to the reader, who

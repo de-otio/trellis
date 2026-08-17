@@ -931,6 +931,10 @@ export class DataRouter {
             String(session.userId),
             entityRefs,
             tx as any, // Transaction client
+            // The post's tenant — the same value stamped onto the row below.
+            // The friendship half of the tagging check is tenant-scoped
+            // (lib/friend-ids.ts), so it must be resolved in this tenant.
+            String(postData.tenantId),
           );
         }
 

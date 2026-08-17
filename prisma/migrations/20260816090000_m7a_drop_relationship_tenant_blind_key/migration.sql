@@ -1,0 +1,67 @@
+-- M7a — drop the tenant-blind `relationships` unique key.
+--
+-- Security review 2026-08, lane 7 MEDIUM-3. First of two migrations
+-- (see M7b, applied immediately after) that together replace
+-- `relationships`' unique key with one that leads on `tenant_id`.
+--
+-- WHAT WAS WRONG
+-- --------------
+-- `relationships.tenant_id` is NOT NULL, but the unique key was
+-- (user_id, target_type, target_id) — tenant-blind. One pair of users could
+-- therefore hold exactly ONE edge across the entire installation, and
+-- `findUnique` on that key returned whichever tenant's row happened to exist.
+-- Full analysis, and the backfill that repairs the resulting stale
+-- `reciprocated` grants, is in M7b's header — read it before touching either
+-- of these two files.
+--
+-- WHY TWO MIGRATIONS, NOT ONE
+-- ----------------------------
+-- Both the drop and the replacement create are done `CONCURRENTLY` — a plain
+-- `DROP INDEX` / `CREATE INDEX` takes a blocking table-level lock, and this
+-- table is written on the hot path (every relationship create/accept/remove).
+-- `CONCURRENTLY` cannot run inside a transaction block, and Prisma's
+-- migration engine only skips wrapping a migration file in a transaction when
+-- the file is exactly the bare `CONCURRENTLY` statement on its own — verified
+-- locally 2026-08-17 against the Compose Postgres: a migration containing a
+-- `SET lock_timeout` (or any other statement) ahead of `DROP INDEX
+-- CONCURRENTLY` reproduces `ERROR: DROP INDEX CONCURRENTLY cannot run inside
+-- a transaction block` (Prisma error P3018) on `prisma migrate deploy`. So the
+-- drop gets its own single-statement migration; M7b's `CREATE INDEX
+-- CONCURRENTLY` tolerates a `SET`/`SET` prologue ahead of it (verified the
+-- same way) and carries the `lock_timeout`/`statement_timeout` pair plus the
+-- backfill.
+--
+-- HAND-AUTHORED, and why
+-- ----------------------
+-- `prisma migrate diff` emits this DROP INDEX correctly (it also emits DROP
+-- INDEX for three hand-written raw-SQL indexes it cannot model —
+-- entity_location_location_idx, tenant_display_name_trgm_idx,
+-- tenant_directory_profile_desc_trgm_idx — GiST / pg_trgm; those DROPs are
+-- removed, not present here at all, same trap documented in
+-- 20260805080531_add_audience_axes and mechanically guarded by
+-- scripts/check-migration-sql.mjs), but not the `CONCURRENTLY` keyword, the
+-- `IF EXISTS` guard, or the split into its own file — all hand-added for
+-- safety against the live-traffic table this becomes once launched.
+--
+-- ---------------------------------------------------------------------------
+-- Step 1a — drop the superseded key.
+-- ---------------------------------------------------------------------------
+-- ALLOW-DROP-INDEX: relationships_user_id_target_type_target_id_key is
+-- superseded by the tenant-leading key created in M7b immediately after. It
+-- is the defect itself (a tenant-blind unique constraint on a NOT NULL tenant
+-- column), not Prisma drift, and it must go before the replacement can mean
+-- anything.
+--
+-- No preceding `SET lock_timeout`/`SET statement_timeout`: see "WHY TWO
+-- MIGRATIONS, NOT ONE" above — adding either here forces Prisma to wrap this
+-- file in a transaction, which then fails outright because `CONCURRENTLY`
+-- cannot run inside one. `DROP INDEX CONCURRENTLY` takes SHARE UPDATE
+-- EXCLUSIVE (blocks other schema changes on this table, not reads or
+-- writes), the table has no concurrent DDL running against it in any
+-- deployed environment today (pre-launch, no traffic), and dropping a
+-- pre-existing index is a fast catalog operation with no data scan — so an
+-- unbounded wait here is a theoretical, not practical, risk. Revisit this
+-- exception if `strong_migrations`/squawk ever assign the drop path its own
+-- timeout mechanism compatible with Prisma's single-statement exemption.
+-- squawk-ignore require-lock-timeout, require-statement-timeout
+DROP INDEX CONCURRENTLY IF EXISTS "relationships_user_id_target_type_target_id_key";

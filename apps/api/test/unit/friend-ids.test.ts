@@ -15,6 +15,17 @@
  * sets through PATCH /api/relationships/score). `reciprocated` is not — the
  * server sets it only when the reverse edge exists. So the predicate must
  * require reciprocation, and these tests assert the query does.
+ *
+ * L4 (security review 2026-08, lane 7 HIGH-2) adds a second invariant of the
+ * same kind:
+ *
+ *   The set is scoped to ONE tenant, and the tenant is never optional.
+ *
+ * These are predicate-shape assertions — the mock returns whatever rows it is
+ * handed regardless of the `where`. The outcome assertions (does a cross-tenant
+ * edge actually come back from Postgres) live in
+ * test/integration/post-read-isolation.integration.test.ts, which is where a
+ * predicate that admits everything would be caught.
  */
 
 import { describe, expect, it, vi } from "vitest";
@@ -23,6 +34,8 @@ import {
   getFriendUserIds,
   type RelationshipReader,
 } from "../../src/lib/friend-ids.js";
+
+const TENANT = "tenant-1";
 
 function readerReturning(rows: Array<{ userId: string }>) {
   const findMany = vi.fn().mockResolvedValue(rows);
@@ -39,7 +52,7 @@ describe("getFriendUserIds", () => {
       { userId: "author-b" },
     ]);
 
-    await expect(getFriendUserIds(db, "viewer-1")).resolves.toEqual([
+    await expect(getFriendUserIds(db, "viewer-1", TENANT)).resolves.toEqual([
       "author-a",
       "author-b",
     ]);
@@ -48,7 +61,7 @@ describe("getFriendUserIds", () => {
   it("returns an empty array when the viewer has no qualifying edges", async () => {
     const { db } = readerReturning([]);
 
-    await expect(getFriendUserIds(db, "viewer-1")).resolves.toEqual([]);
+    await expect(getFriendUserIds(db, "viewer-1", TENANT)).resolves.toEqual([]);
   });
 
   // The defect. A one-directional edge must not qualify, so the query has to
@@ -58,10 +71,11 @@ describe("getFriendUserIds", () => {
   it("requires the relationship to be reciprocated", async () => {
     const { db, findMany } = readerReturning([]);
 
-    await getFriendUserIds(db, "viewer-1");
+    await getFriendUserIds(db, "viewer-1", TENANT);
 
     expect(findMany).toHaveBeenCalledWith({
       where: {
+        tenantId: TENANT,
         targetId: "viewer-1",
         targetType: "user",
         tier: { lte: FRIEND_TIER_MAX },
@@ -78,7 +92,7 @@ describe("getFriendUserIds", () => {
   it("reads the author's edge — the viewer is the target, never the source", async () => {
     const { db, findMany } = readerReturning([]);
 
-    await getFriendUserIds(db, "viewer-9");
+    await getFriendUserIds(db, "viewer-9", TENANT);
 
     const where = findMany.mock.calls[0][0].where;
     expect(where.targetId).toBe("viewer-9");
@@ -89,7 +103,7 @@ describe("getFriendUserIds", () => {
   it("bounds the tier rather than accepting every reciprocated edge", async () => {
     const { db, findMany } = readerReturning([]);
 
-    await getFriendUserIds(db, "viewer-1");
+    await getFriendUserIds(db, "viewer-1", TENANT);
 
     // Retained on top of reciprocation: dropping it would widen the set to
     // every mutual edge however distant.
@@ -103,11 +117,45 @@ describe("getFriendUserIds", () => {
     const { db, findMany } = readerReturning([]);
 
     for (const viewer of ["a", "b-with-dash", "c".repeat(30)]) {
-      await getFriendUserIds(db, viewer);
+      await getFriendUserIds(db, viewer, TENANT);
     }
 
     for (const call of findMany.mock.calls) {
       expect(call[0].where.reciprocated).toBe(true);
+    }
+  });
+});
+
+describe("getFriendUserIds tenant scoping (L4)", () => {
+  it("refuses an empty tenant rather than querying without one", async () => {
+    const { db, findMany } = readerReturning([]);
+
+    await expect(getFriendUserIds(db, "viewer-1", "")).rejects.toThrow(
+      /tenantId is required/,
+    );
+    // The point of throwing instead of defaulting: Prisma DROPS an undefined
+    // `where` key, so a query that reached the database with no tenant would
+    // return EVERY tenant's edges. It must not reach the database at all.
+    expect(findMany).not.toHaveBeenCalled();
+  });
+
+  it("puts the caller's tenant in the predicate, verbatim", async () => {
+    const { db, findMany } = readerReturning([]);
+
+    await getFriendUserIds(db, "viewer-1", "tenant-xyz");
+
+    expect(findMany.mock.calls[0][0].where.tenantId).toBe("tenant-xyz");
+  });
+
+  it("never omits the tenant constraint, whatever the viewer id", async () => {
+    const { db, findMany } = readerReturning([]);
+
+    for (const viewer of ["a", "b-with-dash", "c".repeat(30)]) {
+      await getFriendUserIds(db, viewer, TENANT);
+    }
+
+    for (const call of findMany.mock.calls) {
+      expect(call[0].where.tenantId).toBe(TENANT);
     }
   });
 });

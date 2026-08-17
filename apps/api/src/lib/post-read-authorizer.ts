@@ -84,9 +84,14 @@ export async function canReadPost(args: CanReadPostArgs): Promise<boolean> {
   // `getFriendUserIds` reads the AUTHOR's outgoing edge and requires
   // `reciprocated` (see lib/friend-ids.ts). Do not re-derive the friend set
   // here: a local re-derivation is how the reader-side-tier defect (V1) got in.
+  //
+  // Tenant-scoped on the same `tenantId` the post lookup below uses: a friend
+  // set resolved in a different tenant than the post would authorize a read
+  // across the boundary (lane 7 HIGH-2).
   const friendIds = await getFriendUserIds(
     DataRouter.getDatabaseForRegion(region, env, undefined, viewerUserId),
     viewerUserId,
+    tenantId,
   );
 
   const row = await withQueryTimeoutAndRetry(

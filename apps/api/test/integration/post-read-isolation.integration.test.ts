@@ -16,6 +16,9 @@
  *        authenticated caller could read any post by id, WHISPER included
  *   V1 — the friend set read one-directional edges, so unilaterally adding a
  *        stranger granted read access to their close-friends posts
+ *   L4 — the friend set carried NO tenant predicate, so a friendship formed in
+ *        one tenant authorized NORMAL-radius reads in an unrelated one
+ *        (security review 2026-08, lane 7 HIGH-2)
  *
  * Runs in the setup-free integration-ci lane (real DATABASE_URL, no
  * test/setup.ts). Same bootstrap as post-create-radius.
@@ -47,6 +50,12 @@ const ONE_WAY = uuid(3);
 const OTHER_TENANT_AUTHOR = uuid(4);
 /** Author who reciprocated the viewer but kept them at a DISTANT tier. */
 const DISTANT_AUTHOR = uuid(5);
+/**
+ * L4: an author who is close friends with the viewer IN TENANT B, and posts in
+ * TENANT A. Both users are members of both tenants — the ordinary case, not a
+ * contrived one.
+ */
+const CROSS_TENANT_FRIEND = uuid(6);
 
 let prisma: PrismaClient;
 
@@ -140,6 +149,7 @@ beforeAll(async () => {
   await makeUser(ONE_WAY, `${RUN}-pt-oneway`);
   await makeUser(OTHER_TENANT_AUTHOR, `${RUN}-pt-foreign`);
   await makeUser(DISTANT_AUTHOR, `${RUN}-pt-distant`);
+  await makeUser(CROSS_TENANT_FRIEND, `${RUN}-pt-crosstenant`);
 
   // A mutual, close connection: both directions present, reciprocated true.
   await prisma.relationship.createMany({
@@ -192,6 +202,34 @@ beforeAll(async () => {
     ],
   });
 
+  // The L4 attack shape: a fully legitimate, fully mutual, tier-0 friendship —
+  // in TENANT B. Nothing about these two rows is forged; this is what a real
+  // close connection inside one organization looks like. The defect was that
+  // `getFriendUserIds` never asked which tenant the edge belonged to, so this
+  // pair of TENANT_B rows authorized reads in TENANT_A.
+  await prisma.relationship.createMany({
+    data: [
+      {
+        tenantId: TENANT_B,
+        userId: VIEWER,
+        targetType: "user",
+        targetId: CROSS_TENANT_FRIEND,
+        tier: 0,
+        reciprocated: true,
+        connectionMethod: "code",
+      },
+      {
+        tenantId: TENANT_B,
+        userId: CROSS_TENANT_FRIEND,
+        targetType: "user",
+        targetId: VIEWER,
+        tier: 0,
+        reciprocated: true,
+        connectionMethod: "code",
+      },
+    ],
+  });
+
   // The V1 attack shape: the viewer unilaterally claims a tier-0 connection to
   // someone who never reciprocated. This is exactly what one POST
   // /api/relationships used to produce.
@@ -215,7 +253,16 @@ afterAll(async () => {
   });
   await prisma.user.deleteMany({
     where: {
-      id: { in: [VIEWER, MUTUAL, ONE_WAY, OTHER_TENANT_AUTHOR, DISTANT_AUTHOR] },
+      id: {
+        in: [
+          VIEWER,
+          MUTUAL,
+          ONE_WAY,
+          OTHER_TENANT_AUTHOR,
+          DISTANT_AUTHOR,
+          CROSS_TENANT_FRIEND,
+        ],
+      },
     },
   });
   // Both the post tenants and the four personal tenants, all run-tagged.
@@ -226,12 +273,12 @@ afterAll(async () => {
 
 describe("friend-set resolution requires mutual consent (V1)", () => {
   it("includes a reciprocated close connection", async () => {
-    const friends = await getFriendUserIds(prisma, VIEWER);
+    const friends = await getFriendUserIds(prisma, VIEWER, TENANT_A);
     expect(friends).toContain(MUTUAL);
   });
 
   it("EXCLUDES a one-directional edge the viewer created for themselves", async () => {
-    const friends = await getFriendUserIds(prisma, VIEWER);
+    const friends = await getFriendUserIds(prisma, VIEWER, TENANT_A);
 
     // The whole of V1 in one assertion: the viewer wrote this edge, set it to
     // tier 0, and claimed connectionMethod "code" — and still gets nothing,
@@ -253,7 +300,7 @@ describe("friend-set resolution requires mutual consent (V1)", () => {
   // posts. The author could not revoke it by lowering their own tier, because
   // their tier was never consulted.
   it("EXCLUDES an author who reciprocated but kept the viewer at a distant tier", async () => {
-    const friends = await getFriendUserIds(prisma, VIEWER);
+    const friends = await getFriendUserIds(prisma, VIEWER, TENANT_A);
 
     expect(friends).not.toContain(DISTANT_AUTHOR);
     // Non-vacuity: the fixture really is reciprocated and really is close on the
@@ -294,7 +341,7 @@ describe("the audience predicate over real Postgres (V3)", () => {
     );
     const own = await makePost("own", VIEWER, TENANT_A, "WHISPER");
 
-    const friends = await getFriendUserIds(prisma, VIEWER);
+    const friends = await getFriendUserIds(prisma, VIEWER, TENANT_A);
     const visible = await readableByViewer(TENANT_A, friends);
 
     expect(visible).toContain(shoutFromStranger);
@@ -318,7 +365,7 @@ describe("tenant isolation on post reads (V2)", () => {
       "SHOUT",
     );
 
-    const friends = await getFriendUserIds(prisma, VIEWER);
+    const friends = await getFriendUserIds(prisma, VIEWER, TENANT_A);
     const visible = await readableByViewer(TENANT_A, friends);
 
     // SHOUT is the widest audience there is, so if anything crosses the tenant
@@ -332,5 +379,48 @@ describe("tenant isolation on post reads (V2)", () => {
     const visibleInB = await readableByViewer(TENANT_B, []);
 
     expect(visibleInB).toContain(`${RUN}-foreign-shout`);
+  });
+});
+
+describe("friendship is tenant-scoped (L4)", () => {
+  it("EXCLUDES a close friend whose friendship lives in another tenant", async () => {
+    const friends = await getFriendUserIds(prisma, VIEWER, TENANT_A);
+
+    expect(friends).not.toContain(CROSS_TENANT_FRIEND);
+  });
+
+  it("INCLUDES that same friend when reading as the tenant the friendship is in", async () => {
+    // Non-vacuity, and the reason this is a scoping fix rather than a
+    // narrowing: the fixture is a genuine reciprocated tier-0 friendship. It
+    // must still work — in the tenant where it was formed.
+    const friends = await getFriendUserIds(prisma, VIEWER, TENANT_B);
+
+    expect(friends).toContain(CROSS_TENANT_FRIEND);
+  });
+
+  it("does not let the foreign friendship admit a NORMAL post in this tenant", async () => {
+    // The attack, end to end: A and B share T1 and T2; A puts B in their inner
+    // circle in T2; A then posts at NORMAL radius in T1. Before the fix, B's
+    // friend set in T1 contained A, so the T1 post was readable.
+    const normalInA = await makePost(
+      "cross-tenant-normal",
+      CROSS_TENANT_FRIEND,
+      TENANT_A,
+      "NORMAL",
+    );
+
+    const friends = await getFriendUserIds(prisma, VIEWER, TENANT_A);
+    const visible = await readableByViewer(TENANT_A, friends);
+
+    expect(visible).not.toContain(normalInA);
+  });
+
+  it("refuses outright rather than running unscoped when the tenant is missing", async () => {
+    // Prisma DROPS an `undefined` where key, so the pre-fix behaviour of an
+    // absent tenant was not "narrow to nothing" but "match everything". A
+    // falsy tenant must therefore be an error, not a default.
+    await expect(
+      getFriendUserIds(prisma, VIEWER, ""),
+    ).rejects.toThrow(/tenantId is required/);
   });
 });
