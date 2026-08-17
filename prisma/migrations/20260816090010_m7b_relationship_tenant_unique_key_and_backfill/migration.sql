@@ -1,10 +1,12 @@
--- M7 — tenant-scope the `relationships` unique key, and repair the stale
--- `reciprocated` grants the tenant-blind key produced.
+-- M7b — the tenant-leading `relationships` unique key, and the repair of the
+-- stale `reciprocated` grants the old tenant-blind key produced.
 --
--- Security review 2026-08, lane 7 MEDIUM-3.
+-- Security review 2026-08, lane 7 MEDIUM-3. Second of two migrations — see
+-- M7a (applied immediately before this one) for why the DROP of the old key
+-- is a separate, single-statement migration file.
 --
--- WHAT WAS WRONG
--- --------------
+-- WHAT WAS WRONG (full analysis; M7a's header only summarizes)
+-- --------------------------------------------------------------
 -- `relationships.tenant_id` is NOT NULL, but the unique key was
 -- (user_id, target_type, target_id) — tenant-blind. One pair of users could
 -- therefore hold exactly ONE edge across the entire installation, and
@@ -27,43 +29,43 @@
 --
 -- HAND-AUTHORED, and why
 -- ----------------------
--- `prisma migrate diff` emits the two index statements below correctly, but it
--- ALSO emits DROP INDEX for three hand-written raw-SQL indexes it cannot model
--- (entity_location_location_idx, tenant_display_name_trgm_idx,
--- tenant_directory_profile_desc_trgm_idx — GiST / pg_trgm). Those DROPs are
--- removed here; applying them would silently destroy geo-proximity and
--- directory search. This is the same trap documented in
--- 20260805080531_add_audience_axes and mechanically guarded by
--- scripts/check-migration-sql.mjs.
+-- `prisma migrate diff` emits this CREATE UNIQUE INDEX correctly as a
+-- starting point, but not the `CONCURRENTLY` keyword, the `IF NOT EXISTS`
+-- guard, the `lock_timeout`/`statement_timeout` prologue, or the split from
+-- the DROP in M7a — all hand-added; see M7a's header for the Prisma
+-- transaction-wrapping constraint that forces the split.
 --
 -- BACKFILL / DEDUP ANALYSIS
 -- -------------------------
--- Step 1 needs NO dedup. The new key ADDS a column to the old one, so it is
--- strictly WEAKER: every row set that satisfied
--- (user_id, target_type, target_id) trivially satisfies
--- (tenant_id, user_id, target_type, target_id). A widening can never produce a
--- violation. (Had the change gone the other way — dropping a column — a dedup
--- pass would be mandatory before the CREATE UNIQUE INDEX.)
+-- Step 1 (the CREATE UNIQUE INDEX below) needs NO dedup. The new key ADDS a
+-- column to the old one, so it is strictly WEAKER: every row set that
+-- satisfied (user_id, target_type, target_id) trivially satisfies
+-- (tenant_id, user_id, target_type, target_id). A widening can never produce
+-- a violation. (Had the change gone the other way — dropping a column — a
+-- dedup pass would be mandatory before the CREATE UNIQUE INDEX.)
 --
--- Step 2 IS a real repair and is the reason this migration is not index-only.
--- Fixing the code stops NEW stale grants; it does not revoke the ones already
--- written. Step 2 revokes them.
-
+-- Step 2 IS a real repair and is the reason this migration is not
+-- index-only. Fixing the code stops NEW stale grants; it does not revoke the
+-- ones already written. Step 2 revokes them.
+--
 -- ---------------------------------------------------------------------------
--- Step 1 — replace the unique key.
+-- Step 1 — the tenant-leading replacement key.
 -- ---------------------------------------------------------------------------
--- ALLOW-DROP-INDEX: relationships_user_id_target_type_target_id_key is
--- superseded by the tenant-leading key created immediately below. It is the
--- defect itself (a tenant-blind unique constraint on a NOT NULL tenant column),
--- not Prisma drift, and it must go before the replacement can mean anything.
-DROP INDEX "relationships_user_id_target_type_target_id_key";
-
+-- `CONCURRENTLY` here does NOT force Prisma to wrap the file in a
+-- transaction — verified locally 2026-08-17: a `SET lock_timeout` / `SET
+-- statement_timeout` prologue ahead of `CREATE INDEX CONCURRENTLY` (unlike
+-- ahead of `DROP INDEX CONCURRENTLY` in M7a) applies cleanly under `prisma
+-- migrate deploy`, as does a further statement (the backfill below) after it
+-- in the same file.
+--
 -- tenant_id LEADS: the key then doubles as the tenant-scoped lookup index that
 -- every scoped read on this table wants. (The separate @@index([tenantId]) is
 -- now a prefix of this key and therefore redundant; it is deliberately KEPT —
 -- dropping an index is a separate change with its own query-plan risk, and
 -- bundling it here would make this migration harder to reason about.)
-CREATE UNIQUE INDEX "relationships_tenant_id_user_id_target_type_target_id_key"
+SET lock_timeout = '1s';
+SET statement_timeout = '5s';
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS "relationships_tenant_id_user_id_target_type_target_id_key"
   ON "relationships"("tenant_id", "user_id", "target_type", "target_id");
 
 -- ---------------------------------------------------------------------------

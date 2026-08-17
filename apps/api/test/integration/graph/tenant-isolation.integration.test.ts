@@ -20,7 +20,8 @@
  * Opt-in: needs DATABASE_URL (or TEST_DB_URL via the graph-lane config)
  * pointing at a Postgres carrying the trellis schema. Skipped otherwise.
  *
- * REQUIRES THE M7 MIGRATION (20260816090000_m7_relationship_tenant_unique_key).
+ * REQUIRES THE M7 MIGRATIONS (20260816090000_m7a_drop_relationship_tenant_blind_key,
+ * 20260816090010_m7b_relationship_tenant_unique_key_and_backfill).
  * Half of these tests put the same (user, target) pair in two tenants, which
  * the old tenant-blind unique key makes impossible — and a database still
  * carrying that key fails here with a raw
@@ -95,7 +96,7 @@ suite("graph tenant isolation (live Postgres)", () => {
       !names.includes("relationships_tenant_id_user_id_target_type_target_id_key")
     ) {
       throw new Error(
-        "This database predates migration 20260816090000_m7_relationship_tenant_unique_key. " +
+        "This database predates migration 20260816090010_m7b_relationship_tenant_unique_key_and_backfill. " +
           "The relationships unique key is still tenant-blind, so the same (user, target) " +
           "pair cannot exist in two tenants and these tests cannot express the attack. " +
           `Apply migrations first. Indexes present: ${names.join(", ")}`,

@@ -134,6 +134,15 @@
 -- STABLE, not IMMUTABLE: the value can change between statements in a
 -- transaction. Marking it IMMUTABLE would let the planner fold it into a cached
 -- plan and serve one tenant's snapshot to another.
+--
+-- lock_timeout/statement_timeout: this migration carries no `CONCURRENTLY`
+-- statement (the policies below are pure catalog metadata, applied via a
+-- plain `DO` block), so it runs inside Prisma's normal per-migration
+-- transaction — a `SET` prologue here is just a `SET`, not the
+-- transaction-wrapping hazard M7a/M7b work around. Bounds the wait if this
+-- ever lands behind a lock-holding session on a live database.
+SET lock_timeout = '1s';
+SET statement_timeout = '5s';
 CREATE OR REPLACE FUNCTION app_current_tenant_id()
 RETURNS text
 LANGUAGE sql
