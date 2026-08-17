@@ -7,8 +7,18 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# MED-1 (2026-08 security review): id-token: write used to be granted here
+# at top level, to every job — including lint-and-test, which checks out and
+# runs `npm ci` + tests against untrusted fork-PR code on `pull_request`.
+# Nothing in this workflow exchanges an OIDC token (no configure-aws-credentials,
+# no npm Trusted Publishing here — that's publish.yml, tag-triggered, a separate
+# workflow with its own narrowly-scoped id-token job); the permission had no
+# consumer and was pure downside: a malicious test/postinstall on a fork PR could
+# mint an OIDC token scoped to this repo/workflow and try to exchange it against
+# whatever trust policy would accept a `workflow_ref` of `ci.yml`. Removed. If a
+# genuine future need arises, scope id-token to the single job that needs it —
+# never the job running PR-head code.
 permissions:
-  id-token: write
   contents: read
 
 concurrency:

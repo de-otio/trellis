@@ -1,7 +1,27 @@
-# After a Dependabot PR auto-merges, bump the prerelease suffix
-# (or patch if stable), tag, and create a GitHub Release. The release
-# event then fires publish.yml, which publishes to the registry.
-
+# After a Dependabot PR auto-merges, bump the prerelease suffix and tag —
+# ALWAYS a prerelease, never straight to a stable/`latest` release. The
+# release event then fires publish.yml, which publishes to the registry
+# under a non-`latest` dist-tag (see publish.yml's "Select dist-tag from
+# version": any version containing `-` lands on alpha/beta/rc/next, never
+# `latest`). Promoting a vetted prerelease to `latest` stays a human action
+# (a manual `npm dist-tag add` or a manually tagged stable release).
+#
+# HIGH-1 (2026-08 security review): this used to default to
+# `version-strategy: auto`, which bumps a *stable* version with `patch` —
+# i.e. once trellis leaves its current alpha line, the very next Dependabot
+# merge would auto-cut straight to `latest` with no human in the loop. Pinning
+# `prerelease` here removes that silent step-change: the strategy is prerelease
+# unconditionally, not "prerelease only while the version happens to already
+# look like one."
+#
+# The compensating supply-chain review this repo used to call
+# (dependabot-handler.yml → the org's `dependabot-claude-review.yml`) was
+# rewritten in 2026-08 upstream to drop the Claude/Bedrock review entirely
+# (see de-otio/.github's workflow header) — that reusable workflow is now
+# plain semver auto-merge, so re-pointing at it is not an available fix.
+# The paired compensating control is `.github/dependabot.yml`'s `cooldown`
+# (4 days): a hijacked upstream release has a few days to be caught/pulled
+# before Dependabot even opens the PR that starts this chain.
 name: Auto-release on Dependabot merge
 
 on:
@@ -23,4 +43,6 @@ jobs:
       (github.event.head_commit.author.username == 'dependabot[bot]' ||
        contains(github.event.head_commit.message, 'dependabot[bot]'))
     uses: de-otio/.github/.github/workflows/dependabot-release-on-bump.yml@main
+    with:
+      version-strategy: prerelease
     secrets: inherit

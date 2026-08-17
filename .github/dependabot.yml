@@ -1,8 +1,21 @@
 # Dependency monitoring — see doc/02-technical/surveillance-threat-model/09-public-project-exposure.md
 # (supply-chain hardening) and 08-implementation-roadmap.md §E8.
 #
-# Dependabot PRs are reviewed by the org-shared Claude supply-chain check
-# (.github/workflows/dependabot-handler.yml) and auto-merged on approval.
+# Dependabot PRs are gated on green CI only (.github/workflows/dependabot-auto-merge.yml)
+# and auto-merged. The org-shared Claude supply-chain check this comment used to describe
+# (.github/workflows/dependabot-handler.yml) is DISABLED (too expensive per PR, see that
+# file) — its `workflow_dispatch`-only trigger is retained for manual runs, but nothing
+# calls it automatically. Do not read the disabled trigger as an active gate.
+#
+# `cooldown` below is the compensating control (HIGH-1, 2026-08 security review): a
+# hijacked upstream release has `default-days` to be caught/pulled/yanked before
+# Dependabot even opens the PR that starts auto-merge → auto-release → publish. It only
+# applies to *version* updates, not *security* updates — Dependabot's own security PRs
+# (from GitHub Advisory Database matches) bypass cooldown, which is correct: those are
+# fixes for known-bad versions, not fresh releases that might themselves be the attack.
+# Paired with dependabot-release.yml's `version-strategy: prerelease` pin (never
+# auto-cuts straight to the `latest` dist-tag) — same shape adopted in skybber for the
+# analogous chain, kept coherent across the two repos deliberately.
 
 version: 2
 updates:
@@ -13,6 +26,8 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 10
+    cooldown:
+      default-days: 4
     groups:
       aws-sdk:
         patterns:

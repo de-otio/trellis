@@ -123,6 +123,29 @@ function describeVersion(candidate: Record<string, unknown> | null | undefined):
 }
 
 /**
+ * True only for the specific failure "the `@de-otio/trellis` package itself
+ * could not be found" — Node's `ERR_MODULE_NOT_FOUND` for the top-level bare
+ * specifier {@link loadCore} imports, e.g. `Cannot find package
+ * '@de-otio/trellis' imported from ...`.
+ *
+ * Any OTHER error — a different `ERR_MODULE_NOT_FOUND` for a module core
+ * imports internally (e.g. `@prisma/client` before `prisma generate` has
+ * run), a `SyntaxError` for a missing named export, or anything thrown from
+ * core's own module body — means core WAS found and failed while loading. That
+ * is a different, unrelated problem and must not be reported as a missing
+ * peer: core was installed and correctly pinned, and the message would send
+ * an author to inspect an install that is not the issue.
+ *
+ * Exported so it can be tested against synthetic errors without importing a
+ * real broken module tree.
+ */
+export function isMissingPeerError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  if ((err as NodeJS.ErrnoException).code !== "ERR_MODULE_NOT_FOUND") return false;
+  return /Cannot find package '@de-otio\/trellis'/.test(err.message);
+}
+
+/**
  * Load `@de-otio/trellis` from the consumer's install.
  *
  * The specifier is held in a variable so TypeScript treats this as a dynamic
@@ -135,6 +158,12 @@ export async function loadCore(): Promise<CoreModule> {
   try {
     mod = await import(specifier);
   } catch (err) {
+    if (!isMissingPeerError(err)) {
+      // Core resolved and failed while loading. Re-throw the original error
+      // unchanged — see {@link isMissingPeerError} for why wrapping it as a
+      // missing-peer message here would be actively misleading.
+      throw err;
+    }
     throw new Error(
       "[testkit] could not load @de-otio/trellis. It is a peer dependency of " +
         "this package — install it alongside the testkit. " +
