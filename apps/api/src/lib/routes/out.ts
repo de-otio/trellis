@@ -314,8 +314,11 @@ export const outRoutes: Route[] = [
           );
         }
 
-        // Validate URL synchronously
-        const validation = linkSecurityHandler.validateUrlSync(targetUrl);
+        // Full SSRF validation, DNS included. The interstitial's whole job is
+        // to hand the user a destination, so a name resolving into private or
+        // link-local space must be refused here — the lexical check alone
+        // cannot see that.
+        const validation = await linkSecurityHandler.validateUrl(targetUrl);
 
         if (validation.status === LinkStatus.BLOCKED) {
           logger.info(

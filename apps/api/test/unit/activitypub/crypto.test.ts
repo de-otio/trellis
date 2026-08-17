@@ -1,305 +1,330 @@
 /**
- * Unit Tests: KeyPairService (ActivityPub crypto)
+ * Unit Tests: KeyPairService (ActivityPub crypto) — after F7.
  *
  * Contract under test
  * -------------------
  * ActivityPub actors store their RSA private keys encrypted at rest.
- * `KeyPairService` provides:
  *
- *   - `generateKeyPair()` — produces a fresh 2048-bit RSA key pair in PEM form
+ *   - `generateKeyPair()` — a fresh 2048-bit RSA key pair in PEM form
  *     (SPKI public key, PKCS#8 private key).
  *
- *   - `encryptPrivateKey(pem, env)` — encrypts a PEM string with AES-256-GCM
- *     using a 32-byte key derived via SHA-256 from either
- *     `env.ACTIVITYPUB_KEY_ENCRYPTION_KEY` (preferred) or `env.SESSION_SECRET`
- *     (fallback). Returns a JSON string containing base64-encoded `iv`,
- *     `authTag`, and `encrypted` fields. A fresh random IV is used each call,
- *     so the ciphertext is non-deterministic.
+ *   - `encryptPrivateKey(pem, env)` — AES-256-GCM under a per-record DEK
+ *     derived by HKDF-SHA256 from a dedicated 32-byte
+ *     `ACTIVITYPUB_KEY_ENCRYPTION_KEY` and a random salt. Serialized as
+ *     `v{version}:{salt}.{iv}.{tag}.{ciphertext}`.
  *
- *   - `decryptPrivateKey(json, env)` — reverses `encryptPrivateKey`. The GCM
- *     auth tag provides authenticated encryption: any tampering (flipped
- *     authTag, corrupted ciphertext, wrong key) causes an immediate throw
- *     rather than returning garbage plaintext.
+ *   - `decryptPrivateKey(value, env)` — reverses the above, and still reads
+ *     the LEGACY JSON format during migration. Any tampering fails the GCM
+ *     auth tag and throws rather than returning garbage.
  *
- *   - Neither method performs I/O or requires a database connection — they use
- *     `node:crypto` directly and are therefore fully testable as pure units.
+ * The previously-tested behaviours that are now DELIBERATELY GONE, each with a
+ * test asserting the refusal:
+ *   - falling back to `SESSION_SECRET` (secret reuse across trust domains)
+ *   - accepting a short passphrase and SHA-256-ing it into 32 bytes
  */
 
+import * as crypto from "crypto";
 import { describe, expect, it } from "vitest";
 import type { Env } from "../../../src/env.js";
-import { KeyPairService } from "../../../src/lib/activitypub/crypto.js";
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+import {
+  AP_KEY_ENC_VERSION,
+  KeyPairService,
+} from "../../../src/lib/activitypub/crypto.js";
 
 /** Minimal Env carrying only the fields KeyPairService reads. */
-function makeEnv(overrides: {
-  SESSION_SECRET?: string;
-  ACTIVITYPUB_KEY_ENCRYPTION_KEY?: string;
-}): Env {
+function makeEnv(overrides: Record<string, unknown>): Env {
   return overrides as any as Env;
 }
 
-/** Parse the JSON blob returned by encryptPrivateKey. */
-function parseCiphertext(json: string): {
-  iv: string;
-  authTag: string;
-  encrypted: string;
-} {
-  return JSON.parse(json);
+/** A real 32-byte key, hex-encoded — what an operator must now provision. */
+function key32(seed: string): string {
+  return crypto.createHash("sha256").update(seed).digest("hex");
 }
 
-/**
- * Flip a single byte inside a base64 string so it remains valid base64 but
- * decodes to different bytes. We XOR the second character of the string
- * (avoiding the first, which may already be at the boundary of a base64 group
- * and produce an out-of-bounds char) with 0xff.
- */
-function corruptBase64(b64: string): string {
-  const bytes = Buffer.from(b64, "base64");
-  bytes[Math.min(1, bytes.length - 1)] ^= 0xff;
-  return bytes.toString("base64");
-}
+const AP_KEY_A = key32("alpha");
+const AP_KEY_B = key32("beta");
 
-// Stable plaintext used across several tests (looks like a real PEM prefix)
 const SAMPLE_PEM =
   "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC" +
   "FAKE_PAYLOAD_FOR_UNIT_TESTS" +
   "\n-----END PRIVATE KEY-----\n";
 
-const SESSION_SECRET_A = "session-secret-alpha-32-chars-ok!";
-const SESSION_SECRET_B = "session-secret-beta--32-chars-ok!";
-const AP_KEY_A = "activitypub-encryption-key-alpha!";
-const AP_KEY_B = "activitypub-encryption-key-beta!!";
+const envA = makeEnv({ ACTIVITYPUB_KEY_ENCRYPTION_KEY: AP_KEY_A });
+const envB = makeEnv({ ACTIVITYPUB_KEY_ENCRYPTION_KEY: AP_KEY_B });
 
-// ---------------------------------------------------------------------------
-// generateKeyPair
-// ---------------------------------------------------------------------------
+/** Wrap `pem` the OLD way, so migration can be tested against real legacy data. */
+function legacyWrap(pem: string, secret: string): string {
+  const kek = crypto.createHash("sha256").update(secret).digest();
+  const iv = crypto.randomBytes(16);
+  const cipher = crypto.createCipheriv("aes-256-gcm", kek, iv);
+  let encrypted = cipher.update(pem, "utf8", "base64");
+  encrypted += cipher.final("base64");
+  return JSON.stringify({
+    iv: iv.toString("base64"),
+    authTag: cipher.getAuthTag().toString("base64"),
+    encrypted,
+  });
+}
 
 describe("KeyPairService.generateKeyPair", () => {
-  it("returns an object with publicKey and privateKey strings", () => {
-    const { publicKey, privateKey } = KeyPairService.generateKeyPair();
-    expect(typeof publicKey).toBe("string");
-    expect(typeof privateKey).toBe("string");
+  it("returns publicKey and privateKey strings", () => {
+    const kp = KeyPairService.generateKeyPair();
+    expect(typeof kp.publicKey).toBe("string");
+    expect(typeof kp.privateKey).toBe("string");
   });
 
-  it("publicKey is PEM SPKI (contains BEGIN PUBLIC KEY header)", () => {
-    const { publicKey } = KeyPairService.generateKeyPair();
-    expect(publicKey).toContain("-----BEGIN PUBLIC KEY-----");
-    expect(publicKey).toContain("-----END PUBLIC KEY-----");
+  it("publicKey is PEM SPKI", () => {
+    expect(KeyPairService.generateKeyPair().publicKey).toContain(
+      "BEGIN PUBLIC KEY",
+    );
   });
 
-  it("privateKey is PEM PKCS8 (contains BEGIN PRIVATE KEY header)", () => {
-    const { privateKey } = KeyPairService.generateKeyPair();
-    expect(privateKey).toContain("-----BEGIN PRIVATE KEY-----");
-    expect(privateKey).toContain("-----END PRIVATE KEY-----");
+  it("privateKey is PEM PKCS8", () => {
+    expect(KeyPairService.generateKeyPair().privateKey).toContain(
+      "BEGIN PRIVATE KEY",
+    );
   });
 
   it("successive calls produce distinct key pairs", () => {
-    const pair1 = KeyPairService.generateKeyPair();
-    const pair2 = KeyPairService.generateKeyPair();
-    expect(pair1.publicKey).not.toBe(pair2.publicKey);
-    expect(pair1.privateKey).not.toBe(pair2.privateKey);
+    expect(KeyPairService.generateKeyPair().privateKey).not.toBe(
+      KeyPairService.generateKeyPair().privateKey,
+    );
   });
 });
 
-// ---------------------------------------------------------------------------
-// encryptPrivateKey — ciphertext shape
-// ---------------------------------------------------------------------------
+describe("ciphertext shape (mirrors field-encryption.ts)", () => {
+  const enc = KeyPairService.encryptPrivateKey(SAMPLE_PEM, envA);
 
-describe("KeyPairService.encryptPrivateKey — ciphertext shape", () => {
-  const env = makeEnv({ SESSION_SECRET: SESSION_SECRET_A });
-
-  it("returns a valid JSON string", () => {
-    const json = KeyPairService.encryptPrivateKey(SAMPLE_PEM, env);
-    expect(() => JSON.parse(json)).not.toThrow();
+  it("is the versioned compact form, not a JSON blob", () => {
+    expect(enc.startsWith(`v${AP_KEY_ENC_VERSION}:`)).toBe(true);
+    expect(() => JSON.parse(enc)).toThrow();
   });
 
-  it("JSON contains iv, authTag, and encrypted fields (all strings)", () => {
-    const { iv, authTag, encrypted } = parseCiphertext(
-      KeyPairService.encryptPrivateKey(SAMPLE_PEM, env),
-    );
-    expect(typeof iv).toBe("string");
-    expect(typeof authTag).toBe("string");
-    expect(typeof encrypted).toBe("string");
+  it("has four base64url components of the documented lengths", () => {
+    const m = /^v\d+:([^.]+)\.([^.]+)\.([^.]+)\.([^.]+)$/.exec(enc);
+    expect(m).not.toBeNull();
+    expect(Buffer.from(m![1], "base64url")).toHaveLength(32); // salt
+    expect(Buffer.from(m![2], "base64url")).toHaveLength(12); // 96-bit IV
+    expect(Buffer.from(m![3], "base64url")).toHaveLength(16); // GCM tag
+    expect(Buffer.from(m![4], "base64url").length).toBeGreaterThan(0);
   });
 
-  it("all three fields are valid base64 strings (non-empty)", () => {
-    const { iv, authTag, encrypted } = parseCiphertext(
-      KeyPairService.encryptPrivateKey(SAMPLE_PEM, env),
-    );
-    for (const field of [iv, authTag, encrypted]) {
-      expect(field.length).toBeGreaterThan(0);
-      // Round-trip through Buffer to confirm decodability
-      expect(() => Buffer.from(field, "base64")).not.toThrow();
-    }
-  });
-
-  it("IV is 16 bytes (AES block size)", () => {
-    const { iv } = parseCiphertext(KeyPairService.encryptPrivateKey(SAMPLE_PEM, env));
-    expect(Buffer.from(iv, "base64").length).toBe(16);
-  });
-
-  it("authTag is 16 bytes (GCM default tag length)", () => {
-    const { authTag } = parseCiphertext(KeyPairService.encryptPrivateKey(SAMPLE_PEM, env));
-    expect(Buffer.from(authTag, "base64").length).toBe(16);
-  });
-
-  it("random IV: two encryptions of the same plaintext produce different IVs", () => {
-    const iv1 = parseCiphertext(KeyPairService.encryptPrivateKey(SAMPLE_PEM, env)).iv;
-    const iv2 = parseCiphertext(KeyPairService.encryptPrivateKey(SAMPLE_PEM, env)).iv;
-    expect(iv1).not.toBe(iv2);
-  });
-
-  it("random IV: two encryptions of the same plaintext produce different ciphertexts", () => {
-    const json1 = KeyPairService.encryptPrivateKey(SAMPLE_PEM, env);
-    const json2 = KeyPairService.encryptPrivateKey(SAMPLE_PEM, env);
-    expect(json1).not.toBe(json2);
+  it("uses a fresh random salt AND iv per call", () => {
+    const a = KeyPairService.encryptPrivateKey(SAMPLE_PEM, envA);
+    const b = KeyPairService.encryptPrivateKey(SAMPLE_PEM, envA);
+    expect(a).not.toBe(b);
+    expect(a.split(".")[0]).not.toBe(b.split(".")[0]); // salt differs
+    expect(a.split(".")[1]).not.toBe(b.split(".")[1]); // iv differs
   });
 });
 
-// ---------------------------------------------------------------------------
-// Round-trip: encrypt then decrypt
-// ---------------------------------------------------------------------------
-
-describe("KeyPairService round-trip (encrypt → decrypt)", () => {
-  it("recovers exact plaintext when using ACTIVITYPUB_KEY_ENCRYPTION_KEY", () => {
-    const env = makeEnv({ ACTIVITYPUB_KEY_ENCRYPTION_KEY: AP_KEY_A });
-    const json = KeyPairService.encryptPrivateKey(SAMPLE_PEM, env);
-    expect(KeyPairService.decryptPrivateKey(json, env)).toBe(SAMPLE_PEM);
+describe("round-trip", () => {
+  it("recovers the exact plaintext", () => {
+    const enc = KeyPairService.encryptPrivateKey(SAMPLE_PEM, envA);
+    expect(KeyPairService.decryptPrivateKey(enc, envA)).toBe(SAMPLE_PEM);
   });
 
-  it("recovers exact plaintext when falling back to SESSION_SECRET", () => {
-    const env = makeEnv({ SESSION_SECRET: SESSION_SECRET_A });
-    const json = KeyPairService.encryptPrivateKey(SAMPLE_PEM, env);
-    expect(KeyPairService.decryptPrivateKey(json, env)).toBe(SAMPLE_PEM);
+  it("round-trips a real generated RSA private key", () => {
+    const { privateKey } = KeyPairService.generateKeyPair();
+    const enc = KeyPairService.encryptPrivateKey(privateKey, envA);
+    expect(KeyPairService.decryptPrivateKey(enc, envA)).toBe(privateKey);
   });
 
-  it("ACTIVITYPUB_KEY_ENCRYPTION_KEY takes precedence over SESSION_SECRET", () => {
-    // When both are set, the dedicated key wins for both encrypt and decrypt.
+  it("accepts a base64-encoded 32-byte key as well as hex", () => {
+    const b64Env = makeEnv({
+      ACTIVITYPUB_KEY_ENCRYPTION_KEY: crypto.randomBytes(32).toString("base64"),
+    });
+    const enc = KeyPairService.encryptPrivateKey(SAMPLE_PEM, b64Env);
+    expect(KeyPairService.decryptPrivateKey(enc, b64Env)).toBe(SAMPLE_PEM);
+  });
+});
+
+describe("tamper detection", () => {
+  const enc = KeyPairService.encryptPrivateKey(SAMPLE_PEM, envA);
+  const [prefix, rest] = [enc.slice(0, enc.indexOf(":") + 1), enc.slice(enc.indexOf(":") + 1)];
+  const [salt, iv, tag, ct] = rest.split(".");
+
+  const flip = (b64url: string) => {
+    const bytes = Buffer.from(b64url, "base64url");
+    bytes[0] ^= 0xff;
+    return bytes.toString("base64url");
+  };
+
+  it("throws when the auth tag is corrupted", () => {
+    expect(() =>
+      KeyPairService.decryptPrivateKey(
+        `${prefix}${salt}.${iv}.${flip(tag)}.${ct}`,
+        envA,
+      ),
+    ).toThrow();
+  });
+
+  it("throws when the ciphertext is corrupted", () => {
+    expect(() =>
+      KeyPairService.decryptPrivateKey(
+        `${prefix}${salt}.${iv}.${tag}.${flip(ct)}`,
+        envA,
+      ),
+    ).toThrow();
+  });
+
+  it("throws when the salt is swapped (derives a different DEK)", () => {
+    expect(() =>
+      KeyPairService.decryptPrivateKey(
+        `${prefix}${flip(salt)}.${iv}.${tag}.${ct}`,
+        envA,
+      ),
+    ).toThrow();
+  });
+
+  it("throws when the iv is swapped", () => {
+    expect(() =>
+      KeyPairService.decryptPrivateKey(
+        `${prefix}${salt}.${flip(iv)}.${tag}.${ct}`,
+        envA,
+      ),
+    ).toThrow();
+  });
+
+  it("throws on an unknown key version", () => {
+    expect(() =>
+      KeyPairService.decryptPrivateKey(`v99:${rest}`, envA),
+    ).toThrow(/unsupported keyVersion/);
+  });
+
+  it("rejects non-canonical version aliases", () => {
+    expect(() =>
+      KeyPairService.decryptPrivateKey(`v01:${rest}`, envA),
+    ).toThrow(/unsupported keyVersion/);
+  });
+
+  it("throws on a bad component length", () => {
+    const shortSalt = Buffer.alloc(8).toString("base64url");
+    expect(() =>
+      KeyPairService.decryptPrivateKey(
+        `${prefix}${shortSalt}.${iv}.${tag}.${ct}`,
+        envA,
+      ),
+    ).toThrow(/bad component length/);
+  });
+
+  it("throws on a malformed value", () => {
+    expect(() => KeyPairService.decryptPrivateKey("garbage", envA)).toThrow();
+    expect(() =>
+      KeyPairService.decryptPrivateKey("x".repeat(20_000), envA),
+    ).toThrow(/malformed/);
+  });
+});
+
+describe("key separation", () => {
+  it("ciphertext under one KEK does not decrypt under another", () => {
+    const enc = KeyPairService.encryptPrivateKey(SAMPLE_PEM, envA);
+    expect(() => KeyPairService.decryptPrivateKey(enc, envB)).toThrow();
+  });
+});
+
+describe("F7 — the SESSION_SECRET fallback is gone", () => {
+  it("REFUSES to encrypt with only SESSION_SECRET present", () => {
+    // The finding: session signing and federation identity shared one secret.
+    const env = makeEnv({ SESSION_SECRET: "a".repeat(64) });
+    expect(() => KeyPairService.encryptPrivateKey(SAMPLE_PEM, env)).toThrow(
+      /ACTIVITYPUB_KEY_ENCRYPTION_KEY is required/,
+    );
+  });
+
+  it("REFUSES a short passphrase instead of hashing it into a key", () => {
+    // Previously `SHA-256(anything)` produced a 32-byte "key", so a
+    // 12-character passphrase looked like a 256-bit key. It is not.
+    const env = makeEnv({ ACTIVITYPUB_KEY_ENCRYPTION_KEY: "short-secret" });
+    expect(() => KeyPairService.encryptPrivateKey(SAMPLE_PEM, env)).toThrow(
+      /exactly 32 bytes/,
+    );
+  });
+
+  it("REFUSES a 32-CHARACTER passphrase that is not 32 bytes of key material", () => {
+    const env = makeEnv({
+      ACTIVITYPUB_KEY_ENCRYPTION_KEY: "activitypub-encryption-key-alpha!",
+    });
+    expect(() => KeyPairService.encryptPrivateKey(SAMPLE_PEM, env)).toThrow(
+      /exactly 32 bytes/,
+    );
+  });
+
+  it("REFUSES a hex string of the wrong length", () => {
+    const env = makeEnv({ ACTIVITYPUB_KEY_ENCRYPTION_KEY: "ab".repeat(16) });
+    expect(() => KeyPairService.encryptPrivateKey(SAMPLE_PEM, env)).toThrow(
+      /exactly 32 bytes/,
+    );
+  });
+
+  it("names the required variable in the error", () => {
+    expect(() =>
+      KeyPairService.encryptPrivateKey(SAMPLE_PEM, makeEnv({})),
+    ).toThrow(/ACTIVITYPUB_KEY_ENCRYPTION_KEY/);
+  });
+});
+
+describe("F7 — migration of already-wrapped keys", () => {
+  const legacySecret = "activitypub-encryption-key-alpha!";
+  const legacy = legacyWrap(SAMPLE_PEM, legacySecret);
+
+  const migrationEnv = makeEnv({
+    ACTIVITYPUB_KEY_ENCRYPTION_KEY: AP_KEY_A,
+    ACTIVITYPUB_LEGACY_KEY_ENCRYPTION_KEY: legacySecret,
+  });
+
+  it("identifies a legacy value as needing rewrap", () => {
+    expect(KeyPairService.needsRewrap(legacy)).toBe(true);
+    expect(
+      KeyPairService.needsRewrap(
+        KeyPairService.encryptPrivateKey(SAMPLE_PEM, envA),
+      ),
+    ).toBe(false);
+  });
+
+  it("still DECRYPTS a legacy value during migration", () => {
+    // Existing actors must keep working across the deploy.
+    expect(KeyPairService.decryptPrivateKey(legacy, migrationEnv)).toBe(
+      SAMPLE_PEM,
+    );
+  });
+
+  it("rewraps a legacy value into the current format", () => {
+    const rewrapped = KeyPairService.rewrapPrivateKey(legacy, migrationEnv);
+    expect(rewrapped.startsWith(`v${AP_KEY_ENC_VERSION}:`)).toBe(true);
+    expect(KeyPairService.decryptPrivateKey(rewrapped, envA)).toBe(SAMPLE_PEM);
+  });
+
+  it("rewrap is idempotent", () => {
+    const once = KeyPairService.rewrapPrivateKey(legacy, migrationEnv);
+    expect(KeyPairService.rewrapPrivateKey(once, migrationEnv)).toBe(once);
+  });
+
+  it("reads legacy data written under the old SESSION_SECRET fallback", () => {
+    const sessionSecret = "session-secret-alpha-32-chars-ok!";
+    const old = legacyWrap(SAMPLE_PEM, sessionSecret);
     const env = makeEnv({
       ACTIVITYPUB_KEY_ENCRYPTION_KEY: AP_KEY_A,
-      SESSION_SECRET: SESSION_SECRET_A,
+      ACTIVITYPUB_LEGACY_KEY_ENCRYPTION_KEY: sessionSecret,
     });
-    const json = KeyPairService.encryptPrivateKey(SAMPLE_PEM, env);
-    expect(KeyPairService.decryptPrivateKey(json, env)).toBe(SAMPLE_PEM);
+    expect(KeyPairService.decryptPrivateKey(old, env)).toBe(SAMPLE_PEM);
   });
 
-  it("round-trips a freshly generated RSA private key (full PEM)", () => {
-    const env = makeEnv({ SESSION_SECRET: SESSION_SECRET_A });
-    const { privateKey } = KeyPairService.generateKeyPair();
-    const json = KeyPairService.encryptPrivateKey(privateKey, env);
-    expect(KeyPairService.decryptPrivateKey(json, env)).toBe(privateKey);
+  it("REFUSES legacy values once the legacy path is switched off", () => {
+    // The post-backfill state: the old format must stop being readable.
+    const closed = makeEnv({
+      ACTIVITYPUB_KEY_ENCRYPTION_KEY: AP_KEY_A,
+      ACTIVITYPUB_LEGACY_KEY_ENCRYPTION_KEY: legacySecret,
+      ACTIVITYPUB_LEGACY_KEY_DECRYPT: "false",
+    });
+    expect(() => KeyPairService.decryptPrivateKey(legacy, closed)).toThrow(
+      /legacy read path is disabled/,
+    );
   });
 
-  it("round-trips with a very short ACTIVITYPUB_KEY_ENCRYPTION_KEY (SHA-256 derivation)", () => {
-    // The implementation hashes any-length key to 32 bytes via SHA-256.
-    const env = makeEnv({ ACTIVITYPUB_KEY_ENCRYPTION_KEY: "x" });
-    const json = KeyPairService.encryptPrivateKey(SAMPLE_PEM, env);
-    expect(KeyPairService.decryptPrivateKey(json, env)).toBe(SAMPLE_PEM);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Tamper detection (AES-256-GCM auth tag)
-// ---------------------------------------------------------------------------
-
-describe("KeyPairService tamper detection", () => {
-  const env = makeEnv({ SESSION_SECRET: SESSION_SECRET_A });
-
-  it("throws when the authTag is corrupted", () => {
-    const parsed = parseCiphertext(KeyPairService.encryptPrivateKey(SAMPLE_PEM, env));
-    parsed.authTag = corruptBase64(parsed.authTag);
+  it("throws a directive error on a malformed legacy blob", () => {
     expect(() =>
-      KeyPairService.decryptPrivateKey(JSON.stringify(parsed), env),
-    ).toThrow();
-  });
-
-  it("throws when the encrypted payload is corrupted", () => {
-    const parsed = parseCiphertext(KeyPairService.encryptPrivateKey(SAMPLE_PEM, env));
-    parsed.encrypted = corruptBase64(parsed.encrypted);
-    expect(() =>
-      KeyPairService.decryptPrivateKey(JSON.stringify(parsed), env),
-    ).toThrow();
-  });
-
-  it("throws when the iv is swapped (authentication fails)", () => {
-    const parsed1 = parseCiphertext(KeyPairService.encryptPrivateKey(SAMPLE_PEM, env));
-    const parsed2 = parseCiphertext(KeyPairService.encryptPrivateKey(SAMPLE_PEM, env));
-    // Use the IV from a different encryption of the same message
-    parsed1.iv = parsed2.iv;
-    expect(() =>
-      KeyPairService.decryptPrivateKey(JSON.stringify(parsed1), env),
-    ).toThrow();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Key derivation / fallback independence
-// ---------------------------------------------------------------------------
-
-describe("KeyPairService key derivation and fallback independence", () => {
-  it("ciphertext encrypted with AP key does NOT decrypt under a different AP key", () => {
-    const envA = makeEnv({ ACTIVITYPUB_KEY_ENCRYPTION_KEY: AP_KEY_A });
-    const envB = makeEnv({ ACTIVITYPUB_KEY_ENCRYPTION_KEY: AP_KEY_B });
-    const json = KeyPairService.encryptPrivateKey(SAMPLE_PEM, envA);
-    expect(() => KeyPairService.decryptPrivateKey(json, envB)).toThrow();
-  });
-
-  it("ciphertext encrypted under SESSION_SECRET round-trips without AP key", () => {
-    const env = makeEnv({ SESSION_SECRET: SESSION_SECRET_A });
-    const json = KeyPairService.encryptPrivateKey(SAMPLE_PEM, env);
-    expect(KeyPairService.decryptPrivateKey(json, env)).toBe(SAMPLE_PEM);
-  });
-
-  it("ciphertext encrypted with AP key does NOT decrypt when only a different SESSION_SECRET is present", () => {
-    const envEncrypt = makeEnv({ ACTIVITYPUB_KEY_ENCRYPTION_KEY: AP_KEY_A });
-    const envDecrypt = makeEnv({ SESSION_SECRET: SESSION_SECRET_B });
-    const json = KeyPairService.encryptPrivateKey(SAMPLE_PEM, envEncrypt);
-    // AP_KEY_A hashes to a different 32-byte key than SESSION_SECRET_B
-    expect(() => KeyPairService.decryptPrivateKey(json, envDecrypt)).toThrow();
-  });
-
-  it("two different SESSION_SECRETs are independent (cross-decrypt fails)", () => {
-    const envA = makeEnv({ SESSION_SECRET: SESSION_SECRET_A });
-    const envB = makeEnv({ SESSION_SECRET: SESSION_SECRET_B });
-    const json = KeyPairService.encryptPrivateKey(SAMPLE_PEM, envA);
-    expect(() => KeyPairService.decryptPrivateKey(json, envB)).toThrow();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Missing key error handling
-// ---------------------------------------------------------------------------
-
-describe("KeyPairService missing key errors", () => {
-  it("encryptPrivateKey throws when neither key is set", () => {
-    const env = makeEnv({});
-    expect(() => KeyPairService.encryptPrivateKey(SAMPLE_PEM, env)).toThrow();
-  });
-
-  it("decryptPrivateKey throws when neither key is set", () => {
-    // Encrypt first with a valid env, then try to decrypt without any keys.
-    const validEnv = makeEnv({ SESSION_SECRET: SESSION_SECRET_A });
-    const json = KeyPairService.encryptPrivateKey(SAMPLE_PEM, validEnv);
-    const emptyEnv = makeEnv({});
-    expect(() => KeyPairService.decryptPrivateKey(json, emptyEnv)).toThrow();
-  });
-
-  it("error message from encryptPrivateKey mentions the required env var", () => {
-    const env = makeEnv({});
-    let message = "";
-    try {
-      KeyPairService.encryptPrivateKey(SAMPLE_PEM, env);
-    } catch (err) {
-      message = err instanceof Error ? err.message : String(err);
-    }
-    // The message should reference at least one of the two env vars so callers
-    // know what to set.
-    expect(
-      message.includes("ACTIVITYPUB_KEY_ENCRYPTION_KEY") ||
-        message.includes("SESSION_SECRET"),
-    ).toBe(true);
+      KeyPairService.decryptPrivateKey('{"iv":"x"}', migrationEnv),
+    ).toThrow(/malformed legacy wrapped key/);
   });
 });

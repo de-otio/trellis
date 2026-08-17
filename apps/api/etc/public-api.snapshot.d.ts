@@ -143,6 +143,39 @@ export interface Env {
      * infrastructure layer from `config.features.activityPub`.
      */
     ACTIVITYPUB_ENABLED: boolean;
+    /**
+     * Defederation list: comma- or whitespace-separated instance domains whose
+     * activities are refused at inbox admission, before any rate-limit budget is
+     * spent. A leading `.`/`*.` is optional — matching is on label boundaries,
+     * so `example.com` also blocks `mastodon.example.com` but never
+     * `notexample.com`. Unset means "federate with everyone".
+     */
+    ACTIVITYPUB_BLOCKED_DOMAINS?: string;
+    /**
+     * Per-minute inbox request ceiling per remote INSTANCE DOMAIN (not per
+     * actor — actor URIs are free to mint). Defaults to 60. Enforced through the
+     * shared distributed token bucket, so it holds across replicas and restarts.
+     */
+    ACTIVITYPUB_INSTANCE_RATE_LIMIT?: string;
+    /**
+     * KEK wrapping actor private keys at rest. MUST be 32 bytes of real key
+     * material (64 hex chars, or base64/base64url of 32 bytes) — there is
+     * deliberately no `SESSION_SECRET` fallback, because session signing and
+     * federation identity are different trust domains and must not share a
+     * secret. Required whenever `ACTIVITYPUB_ENABLED` is true.
+     */
+    ACTIVITYPUB_KEY_ENCRYPTION_KEY?: string;
+    /**
+     * Migration only: the secret existing wrapped keys were written under, so
+     * the legacy `SHA-256(secret)` format stays readable until the rewrap
+     * backfill completes.
+     */
+    ACTIVITYPUB_LEGACY_KEY_ENCRYPTION_KEY?: string;
+    /**
+     * Set to `"false"` AFTER the rewrap backfill to close the legacy read path.
+     * Defaults to enabled — closing it early would lock actors out of their keys.
+     */
+    ACTIVITYPUB_LEGACY_KEY_DECRYPT?: string;
     /** Oldest client version the server still accepts; older ones get 426. */
     CLIENT_MIN_SUPPORTED_VERSION?: string;
     /** Version the client should nudge users toward (never enforced). */

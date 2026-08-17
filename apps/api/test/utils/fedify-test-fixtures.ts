@@ -68,6 +68,12 @@ export function createFedifyTestEnv(overrides: Partial<Env> = {}): Env {
   return createMockEnv({
     ACTIVITYPUB_BASE_URL: "https://example.com",
     APP_DOMAIN: "https://example.com",
+    // A real 32-byte KEK. `KeyPairService` refuses anything shorter (F7): the
+    // SESSION_SECRET fallback and the "SHA-256 whatever you gave me" path are
+    // both gone, so a test env must provision genuine key material like a
+    // deployment does.
+    ACTIVITYPUB_KEY_ENCRYPTION_KEY:
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     ...overrides,
   }) as Env;
 }

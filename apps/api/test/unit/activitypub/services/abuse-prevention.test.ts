@@ -1,479 +1,289 @@
 /**
- * Tests for Abuse Prevention Service
+ * Tests for ActivityPub abuse prevention (F6).
  *
- * Tests abuse prevention with Fedify integration.
+ * The previous suite largely asserted the DEFECT: that `detectAbuse` returns
+ * false for everything, and that an error in a check still admits the
+ * activity. Those expectations are inverted here, because the behaviour is.
+ *
+ * What must hold now:
+ *   - a blocked instance is refused before any budget is spent
+ *   - rate limits are keyed by INSTANCE DOMAIN and shared, not per-actor and
+ *     per-process
+ *   - a check that cannot run is a REFUSAL, never an admission
  */
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import {
+  admitActivity,
   checkRateLimit,
   detectAbuse,
+  instanceDomainOf,
+  isDomainBlocked,
+  parseBlockedDomains,
   validateActivity,
   DEFAULT_RATE_LIMITS,
 } from "../../../../src/lib/activitypub/services/abuse-prevention.js";
 import type { Env } from "../../../../src/env.js";
 
-describe("Abuse Prevention Service", () => {
-  const mockEnv: Partial<Env> = {
-    LOG_LEVEL: "INFO",
-    ACTIVITYPUB_BASE_URL: "https://example.com",
-    DATABASE_URL: "postgresql://test",
-  };
+const consumeSharedBucket = vi.fn();
+vi.mock("../../../../src/lib/rate-limit", () => ({
+  consumeSharedBucket: (...args: unknown[]) => consumeSharedBucket(...args),
+}));
 
-  beforeEach(() => {
-    vi.clearAllMocks();
+const allowed = { allowed: true, remaining: 59, resetAt: Date.now() + 60_000 };
+const denied = {
+  allowed: false,
+  remaining: 0,
+  resetAt: Date.now() + 60_000,
+  retryAfter: 30,
+};
+
+const mockEnv: Partial<Env> = {
+  LOG_LEVEL: "INFO",
+  ACTIVITYPUB_BASE_URL: "https://example.com",
+  DATABASE_URL: "postgresql://test",
+};
+
+const activity = { type: "Create", actor: "https://remote.example/users/a" };
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  consumeSharedBucket.mockResolvedValue(allowed);
+});
+
+describe("blocklist parsing and matching", () => {
+  it("parses comma- and whitespace-separated lists", () => {
+    const set = parseBlockedDomains("evil.example, spam.example\nbad.example");
+    expect(set).toEqual(
+      new Set(["evil.example", "spam.example", "bad.example"]),
+    );
   });
 
-  describe("checkRateLimit", () => {
-    it("should allow local actors without rate limit", async () => {
-      const actorUri = "https://example.com/users/alice";
-      const result = await checkRateLimit(actorUri, mockEnv as Env);
-
-      expect(result).toBe(true);
-    });
-
-    it("should allow remote actors (rate limiting handled by Fedify)", async () => {
-      const actorUri = "https://example.com/users/remote";
-      const result = await checkRateLimit(actorUri, mockEnv as Env);
-
-      expect(result).toBe(true);
-    });
-
-    it("should handle errors gracefully", async () => {
-      // checkRateLimit now always returns true (rate limiting handled by Fedify)
-      // Invalid URIs are still accepted as the function doesn't validate URIs
-      const actorUri = "invalid-uri";
-      const result = await checkRateLimit(actorUri, mockEnv as Env);
-
-      // The function always returns true now (Fedify handles rate limiting)
-      expect(result).toBe(true);
-    });
+  it("normalises leading dots and wildcards, and case", () => {
+    expect(parseBlockedDomains(".Evil.Example, *.Spam.Example")).toEqual(
+      new Set(["evil.example", "spam.example"]),
+    );
   });
 
-  describe("detectAbuse", () => {
-    it("should allow normal activities", () => {
-      const activity = {
-        type: "Create",
-        actor: "https://example.com/users/normal",
-        object: {
-          type: "Note",
-          content: "Normal post content",
-        },
-      };
-
-      const actorUri = "https://example.com/users/normal";
-      const result = detectAbuse(activity, actorUri, mockEnv as Env);
-
-      expect(result).toBe(false);
-    });
-
-    it("should allow various activity types", () => {
-      const activities = [
-        {
-          type: "Create",
-          actor: "https://example.com/users/alice",
-          object: { type: "Note" },
-        },
-        {
-          type: "Follow",
-          actor: "https://example.com/users/alice",
-          object: "https://example.com/users/bob",
-        },
-        {
-          type: "Like",
-          actor: "https://example.com/users/alice",
-          object: "https://example.com/posts/123",
-        },
-      ];
-
-      activities.forEach((activity) => {
-        const result = detectAbuse(activity, activity.actor, mockEnv as Env);
-        expect(result).toBe(false);
-      });
-    });
-
-    it("should handle errors gracefully", () => {
-      const activity = null as any;
-      const actorUri = "https://example.com/users/test";
-      const result = detectAbuse(activity, actorUri, mockEnv as Env);
-
-      expect(result).toBe(false);
-    });
+  it("returns an empty set for undefined or blank", () => {
+    expect(parseBlockedDomains(undefined).size).toBe(0);
+    expect(parseBlockedDomains("   ").size).toBe(0);
   });
 
-  describe("validateActivity", () => {
-    it("should validate safe activities", async () => {
-      const activity = {
-        type: "Create",
-        actor: "https://example.com/users/alice",
-        object: {
-          type: "Note",
-          content: "Normal post",
-        },
-      };
-
-      const actorUri = "https://example.com/users/alice";
-      const result = await validateActivity(activity, actorUri, mockEnv as Env);
-
-      expect(result).toBe(true);
-    });
-
-    it("should validate remote activities", async () => {
-      const activity = {
-        type: "Create",
-        actor: "https://example.com/users/remote",
-        object: {
-          type: "Note",
-          content: "Remote post",
-        },
-      };
-
-      const actorUri = "https://example.com/users/remote";
-      const result = await validateActivity(activity, actorUri, mockEnv as Env);
-
-      expect(result).toBe(true);
-    });
-
-    it("should handle rate limit check errors", async () => {
-      // checkRateLimit now always returns true (rate limiting handled by Fedify)
-      // So validateActivity will pass even with invalid URIs
-      const activity = {
-        type: "Create",
-        actor: "invalid-uri",
-        object: { type: "Note" },
-      };
-
-      const actorUri = "invalid-uri";
-      const result = await validateActivity(activity, actorUri, mockEnv as Env);
-
-      // The function returns true now (Fedify handles rate limiting)
-      expect(result).toBe(true);
-    });
+  it("matches the domain itself and its subdomains", () => {
+    const blocked = parseBlockedDomains("evil.example");
+    expect(isDomainBlocked("evil.example", blocked)).toBe(true);
+    expect(isDomainBlocked("mastodon.evil.example", blocked)).toBe(true);
+    expect(isDomainBlocked("EVIL.EXAMPLE", blocked)).toBe(true);
   });
 
-  describe("DEFAULT_RATE_LIMITS", () => {
-    it("should have reasonable default rate limits", () => {
-      expect(DEFAULT_RATE_LIMITS.requestsPerMinute).toBe(60);
-      expect(DEFAULT_RATE_LIMITS.requestsPerHour).toBe(1000);
-      expect(DEFAULT_RATE_LIMITS.requestsPerDay).toBe(10000);
-    });
-
-    it("should have rate limits in ascending order", () => {
-      expect(DEFAULT_RATE_LIMITS.requestsPerMinute).toBeLessThan(
-        DEFAULT_RATE_LIMITS.requestsPerHour,
-      );
-      expect(DEFAULT_RATE_LIMITS.requestsPerHour).toBeLessThan(
-        DEFAULT_RATE_LIMITS.requestsPerDay,
-      );
-    });
+  it("does NOT match on a bare suffix across a label boundary", () => {
+    // The classic off-by-one: `notevil.example` must not be caught by a block
+    // on `evil.example`.
+    const blocked = parseBlockedDomains("evil.example");
+    expect(isDomainBlocked("notevil.example", blocked)).toBe(false);
+    expect(isDomainBlocked("evil.example.co", blocked)).toBe(false);
   });
 
-  describe("validateActivity - additional edge cases", () => {
-    it("should handle null activity", async () => {
-      const result = await validateActivity(
-        null as any,
-        "https://example.com/users/test",
-        mockEnv as Env,
-      );
-      expect(result).toBe(true); // checkRateLimit returns true, detectAbuse returns false
-    });
+  it("matches nothing when the list is empty", () => {
+    expect(isDomainBlocked("anything.example", new Set())).toBe(false);
+  });
+});
 
-    it("should handle activity with missing type", async () => {
-      const activity = {
-        actor: "https://example.com/users/test",
-        object: { type: "Note" },
-      };
-
-      const result = await validateActivity(
-        activity,
-        "https://example.com/users/test",
-        mockEnv as Env,
-      );
-      expect(result).toBe(true);
-    });
-
-    it("should handle activity with missing actor", async () => {
-      const activity = {
-        type: "Create",
-        object: { type: "Note" },
-      };
-
-      const result = await validateActivity(
-        activity,
-        "https://example.com/users/test",
-        mockEnv as Env,
-      );
-      expect(result).toBe(true);
-    });
-
-    it("should handle various activity types in validation", async () => {
-      const activityTypes = [
-        "Create",
-        "Follow",
-        "Like",
-        "Announce",
-        "Accept",
-        "Reject",
-        "Undo",
-        "Delete",
-        "Update",
-      ];
-
-      for (const type of activityTypes) {
-        const activity = {
-          type,
-          actor: "https://example.com/users/test",
-          object:
-            type === "Follow"
-              ? "https://example.com/users/target"
-              : { type: "Note" },
-        };
-
-        const result = await validateActivity(
-          activity,
-          "https://example.com/users/test",
-          mockEnv as Env,
-        );
-        expect(result).toBe(true);
-      }
-    });
+describe("instanceDomainOf", () => {
+  it("extracts the host", () => {
+    expect(instanceDomainOf("https://remote.example/users/a")).toBe(
+      "remote.example",
+    );
   });
 
-  describe("detectAbuse - additional edge cases", () => {
-    it("should handle activity with object as string", () => {
-      const activity = {
-        type: "Follow",
-        actor: "https://example.com/users/test",
-        object: "https://example.com/users/target",
-      };
+  it("returns null for an unparseable URI", () => {
+    expect(instanceDomainOf("not-a-uri")).toBeNull();
+  });
+});
 
-      const result = detectAbuse(
-        activity,
-        "https://example.com/users/test",
-        mockEnv as Env,
-      );
-      expect(result).toBe(false);
-    });
+describe("checkRateLimit — keyed by instance domain, shared store", () => {
+  it("consumes a bucket keyed by DOMAIN, not by actor URI", async () => {
+    await checkRateLimit("https://remote.example/users/alice", mockEnv as Env);
 
-    it("should handle activity with object as object", () => {
-      const activity = {
-        type: "Create",
-        actor: "https://example.com/users/test",
-        object: {
-          type: "Note",
-          content: "Test content",
-        },
-      };
-
-      const result = detectAbuse(
-        activity,
-        "https://example.com/users/test",
-        mockEnv as Env,
-      );
-      expect(result).toBe(false);
-    });
-
-    it("should handle activity with actor as object", () => {
-      const activity = {
-        type: "Create",
-        actor: {
-          id: "https://example.com/users/test",
-          type: "Person",
-        },
-        object: {
-          type: "Note",
-        },
-      };
-
-      const result = detectAbuse(
-        activity,
-        "https://example.com/users/test",
-        mockEnv as Env,
-      );
-      expect(result).toBe(false);
-    });
-
-    it("should handle activity with actor as string", () => {
-      const activity = {
-        type: "Create",
-        actor: "https://example.com/users/test",
-        object: {
-          type: "Note",
-        },
-      };
-
-      const result = detectAbuse(
-        activity,
-        "https://example.com/users/test",
-        mockEnv as Env,
-      );
-      expect(result).toBe(false);
-    });
-
-    it("should handle empty activity object", () => {
-      const activity = {};
-      const result = detectAbuse(
-        activity,
-        "https://example.com/users/test",
-        mockEnv as Env,
-      );
-      expect(result).toBe(false);
-    });
-
-    it("should handle activity with nested objects", () => {
-      const activity = {
-        type: "Create",
-        actor: "https://example.com/users/test",
-        object: {
-          type: "Note",
-          content: "Test",
-          attachment: [
-            {
-              type: "Document",
-              url: "https://example.com/file.pdf",
-            },
-          ],
-        },
-      };
-
-      const result = detectAbuse(
-        activity,
-        "https://example.com/users/test",
-        mockEnv as Env,
-      );
-      expect(result).toBe(false);
-    });
+    expect(consumeSharedBucket).toHaveBeenCalledWith(
+      expect.anything(),
+      "ap:instance:remote.example",
+      DEFAULT_RATE_LIMITS.requestsPerMinute,
+      60,
+    );
   });
 
-  describe("checkRateLimit - error handling", () => {
-    it("should handle errors in checkRateLimit gracefully", async () => {
-      // The function always returns true now, but we can test error paths
-      // by checking that it handles edge cases
-      const result = await checkRateLimit("", mockEnv as Env);
-      expect(result).toBe(true);
-    });
+  it("shares one bucket across every actor on an instance", async () => {
+    // The old per-actor map gave an attacker a fresh bucket per minted actor
+    // URI; the key must not vary with the actor.
+    await checkRateLimit("https://remote.example/users/alice", mockEnv as Env);
+    await checkRateLimit("https://remote.example/users/bob", mockEnv as Env);
 
-    it("should handle very long actor URIs", async () => {
-      const longUri = "https://example.com/users/" + "a".repeat(1000);
-      const result = await checkRateLimit(longUri, mockEnv as Env);
-      expect(result).toBe(true);
-    });
-
-    it("should handle special characters in actor URI", async () => {
-      const specialUri =
-        "https://example.com/users/test%20user%20with%20spaces";
-      const result = await checkRateLimit(specialUri, mockEnv as Env);
-      expect(result).toBe(true);
-    });
+    const keys = consumeSharedBucket.mock.calls.map((c) => c[1]);
+    expect(new Set(keys).size).toBe(1);
   });
 
-  describe("Error handling paths", () => {
-    it("should rate limit actors exceeding threshold", async () => {
-      const actorUri = "https://example.com/users/spammer";
-      // First 60 requests should pass (default limit)
-      for (let i = 0; i < 60; i++) {
-        const result = await checkRateLimit(actorUri, mockEnv as Env);
-        expect(result).toBe(true);
-      }
-      // 61st should be rejected
-      const result = await checkRateLimit(actorUri, mockEnv as Env);
-      expect(result).toBe(false);
-    });
+  it("honours a configured per-instance limit", async () => {
+    await checkRateLimit("https://remote.example/users/alice", {
+      ...mockEnv,
+      ACTIVITYPUB_INSTANCE_RATE_LIMIT: "5",
+    } as Env);
 
-    it("should allow different actors independently", async () => {
-      const actor1 = "https://example.com/users/alice";
-      const actor2 = "https://example.com/users/bob";
-      const r1 = await checkRateLimit(actor1, mockEnv as Env);
-      const r2 = await checkRateLimit(actor2, mockEnv as Env);
-      expect(r1).toBe(true);
-      expect(r2).toBe(true);
-    });
+    expect(consumeSharedBucket).toHaveBeenCalledWith(
+      expect.anything(),
+      "ap:instance:remote.example",
+      5,
+      60,
+    );
+  });
 
+  it("ignores a nonsense configured limit and uses the default", async () => {
+    await checkRateLimit("https://remote.example/users/alice", {
+      ...mockEnv,
+      ACTIVITYPUB_INSTANCE_RATE_LIMIT: "not-a-number",
+    } as Env);
 
-    it("should have rate limit exceeded path structure in validateActivity", async () => {
-      // Note: This path (lines 116-118) exists in the code but is currently unreachable
-      // because checkRateLimit always returns true. The code structure is:
-      // if (!withinRateLimit) {
-      //   logger.warn('[AbusePrevention] Rate limit exceeded', { actorUri });
-      //   return false;
-      // }
-      // We verify the structure exists for when rate limiting is implemented
-      const activity = {
-        type: "Create",
-        actor: "https://example.com/users/test",
-        object: { type: "Note" },
-      };
+    expect(consumeSharedBucket.mock.calls[0][2]).toBe(
+      DEFAULT_RATE_LIMITS.requestsPerMinute,
+    );
+  });
 
-      // Since checkRateLimit always returns true, this path is never reached
-      // But we verify the code structure exists
-      const result = await validateActivity(
+  it("returns false when the bucket is exhausted", async () => {
+    consumeSharedBucket.mockResolvedValue(denied);
+    expect(
+      await checkRateLimit("https://remote.example/users/a", mockEnv as Env),
+    ).toBe(false);
+  });
+
+  it("returns false for an unparseable actor URI", async () => {
+    expect(await checkRateLimit("nonsense", mockEnv as Env)).toBe(false);
+    expect(consumeSharedBucket).not.toHaveBeenCalled();
+  });
+
+  it("PROPAGATES a limiter error so the caller can fail closed", async () => {
+    consumeSharedBucket.mockRejectedValue(new Error("limiter down"));
+    await expect(
+      checkRateLimit("https://remote.example/users/a", mockEnv as Env),
+    ).rejects.toThrow("limiter down");
+  });
+});
+
+describe("detectAbuse", () => {
+  it("treats a malformed activity as abusive", () => {
+    expect(detectAbuse(null, "https://r.example/u", mockEnv as Env)).toBe(true);
+    expect(detectAbuse("string", "https://r.example/u", mockEnv as Env)).toBe(
+      true,
+    );
+    expect(detectAbuse({}, "https://r.example/u", mockEnv as Env)).toBe(true);
+    expect(
+      detectAbuse({ type: "" }, "https://r.example/u", mockEnv as Env),
+    ).toBe(true);
+  });
+
+  it("passes a well-formed activity", () => {
+    expect(detectAbuse(activity, "https://r.example/u", mockEnv as Env)).toBe(
+      false,
+    );
+  });
+});
+
+describe("admitActivity — the admission gate", () => {
+  it("admits a well-formed activity from an unblocked instance", async () => {
+    const result = await admitActivity(
+      activity,
+      "https://remote.example/users/a",
+      mockEnv as Env,
+    );
+    expect(result.admitted).toBe(true);
+  });
+
+  it("REFUSES a blocked instance", async () => {
+    const result = await admitActivity(
+      activity,
+      "https://evil.example/users/a",
+      { ...mockEnv, ACTIVITYPUB_BLOCKED_DOMAINS: "evil.example" } as Env,
+    );
+    expect(result.admitted).toBe(false);
+    expect(result.reason).toBe("blocked-instance");
+  });
+
+  it("REFUSES a subdomain of a blocked instance", async () => {
+    const result = await admitActivity(
+      activity,
+      "https://mastodon.evil.example/users/a",
+      { ...mockEnv, ACTIVITYPUB_BLOCKED_DOMAINS: "evil.example" } as Env,
+    );
+    expect(result.admitted).toBe(false);
+    expect(result.reason).toBe("blocked-instance");
+  });
+
+  it("checks the blocklist BEFORE spending rate-limit budget", async () => {
+    await admitActivity(activity, "https://evil.example/users/a", {
+      ...mockEnv,
+      ACTIVITYPUB_BLOCKED_DOMAINS: "evil.example",
+    } as Env);
+    expect(consumeSharedBucket).not.toHaveBeenCalled();
+  });
+
+  it("REFUSES an actor URI with no derivable origin", async () => {
+    const result = await admitActivity(activity, "nonsense", mockEnv as Env);
+    expect(result.admitted).toBe(false);
+    expect(result.reason).toBe("unresolvable-origin");
+  });
+
+  it("REFUSES when the instance is over its rate limit", async () => {
+    consumeSharedBucket.mockResolvedValue(denied);
+    const result = await admitActivity(
+      activity,
+      "https://remote.example/users/a",
+      mockEnv as Env,
+    );
+    expect(result.admitted).toBe(false);
+    expect(result.reason).toBe("rate-limited");
+  });
+
+  it("FAILS CLOSED when the rate limiter is unavailable", async () => {
+    // The old code returned "not abusive" on error, i.e. admitted the
+    // activity. A check that could not run is not a pass.
+    consumeSharedBucket.mockRejectedValue(new Error("limiter down"));
+    const result = await admitActivity(
+      activity,
+      "https://remote.example/users/a",
+      mockEnv as Env,
+    );
+    expect(result.admitted).toBe(false);
+    expect(result.reason).toBe("check-failed");
+  });
+
+  it("REFUSES a malformed activity", async () => {
+    const result = await admitActivity(
+      { actor: "https://remote.example/users/a" }, // no type
+      "https://remote.example/users/a",
+      mockEnv as Env,
+    );
+    expect(result.admitted).toBe(false);
+    expect(result.reason).toBe("abusive");
+  });
+});
+
+describe("validateActivity (boolean wrapper)", () => {
+  it("mirrors admitActivity", async () => {
+    expect(
+      await validateActivity(
         activity,
-        "https://example.com/users/test",
+        "https://remote.example/users/a",
         mockEnv as Env,
-      );
-      expect(result).toBe(true);
-    });
+      ),
+    ).toBe(true);
 
-    it("should have abusive activity detected path structure in validateActivity", async () => {
-      // Note: This path (lines 123-128) exists in the code but is currently unreachable
-      // because detectAbuse always returns false. The code structure is:
-      // if (isAbusive) {
-      //   logger.warn('[AbusePrevention] Abusive activity detected', { actorUri, activityType });
-      //   return false;
-      // }
-      // We verify the structure exists for when abuse detection is implemented
-      const activity = {
-        type: "Create",
-        actor: "https://example.com/users/test",
-        object: { type: "Note" },
-      };
-
-      // Since detectAbuse always returns false, this path is never reached
-      // But we verify the code structure exists
-      const result = await validateActivity(
+    consumeSharedBucket.mockResolvedValue(denied);
+    expect(
+      await validateActivity(
         activity,
-        "https://example.com/users/test",
+        "https://remote.example/users/a",
         mockEnv as Env,
-      );
-      expect(result).toBe(true);
-    });
-
-    it("should test rate limit exceeded path structure (unreachable but code exists)", async () => {
-      // Note: This path is currently unreachable because checkRateLimit always returns true
-      // But we verify the code structure exists for future use
-      const activity = {
-        type: "Create",
-        actor: "https://example.com/users/test",
-        object: { type: "Note" },
-      };
-
-      // Since checkRateLimit always returns true, this path is never reached
-      // But the code at lines 116-118 exists for when rate limiting is implemented
-      const result = await validateActivity(
-        activity,
-        "https://example.com/users/test",
-        mockEnv as Env,
-      );
-      expect(result).toBe(true);
-    });
-
-    it("should test abusive activity detected path structure (unreachable but code exists)", async () => {
-      // Note: This path is currently unreachable because detectAbuse always returns false
-      // But we verify the code structure exists for future use
-      const activity = {
-        type: "Create",
-        actor: "https://example.com/users/test",
-        object: { type: "Note" },
-      };
-
-      // Since detectAbuse always returns false, this path is never reached
-      // But the code at lines 123-128 exists for when abuse detection is implemented
-      const result = await validateActivity(
-        activity,
-        "https://example.com/users/test",
-        mockEnv as Env,
-      );
-      expect(result).toBe(true);
-    });
+      ),
+    ).toBe(false);
   });
 });
