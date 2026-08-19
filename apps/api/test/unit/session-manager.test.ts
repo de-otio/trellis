@@ -88,7 +88,45 @@ describe("SessionManager", () => {
         testSecret,
         testSalt,
       );
-      expect(decrypted).toBe(sessionData);
+      // SEC L2: the seal chokepoint stamps `sessionEpoch` (seal time) onto
+      // every session-shaped payload, so the round-trip is equal modulo that
+      // one added field — which must be present.
+      const parsed = JSON.parse(decrypted!);
+      expect(typeof parsed.sessionEpoch).toBe("number");
+      delete parsed.sessionEpoch;
+      expect(JSON.stringify(parsed)).toBe(sessionData);
+    });
+
+    it("SEC L2: does not overwrite an explicit sessionEpoch on re-seal", async () => {
+      const sessionData = JSON.stringify({
+        userId: "u1",
+        email: "u1@example.com",
+        expiresAt: Date.now() + 3600000,
+        sessionEpoch: 1234,
+      });
+      const encrypted = await sessionManager.encryptSession(
+        sessionData,
+        testSecret,
+        testSalt,
+      );
+      const decrypted = await sessionManager.decryptSession(
+        encrypted,
+        testSecret,
+        testSalt,
+      );
+      expect(JSON.parse(decrypted!).sessionEpoch).toBe(1234);
+    });
+
+    it("SEC L2: leaves a non-session JSON payload untouched", async () => {
+      const payload = JSON.stringify({ some: "other", shape: 1 });
+      const encrypted = await sessionManager.encryptSession(
+        payload,
+        testSecret,
+        testSalt,
+      );
+      expect(
+        await sessionManager.decryptSession(encrypted, testSecret, testSalt),
+      ).toBe(payload);
     });
 
     it("should fail to decrypt with wrong secret", async () => {
@@ -160,8 +198,15 @@ describe("SessionManager", () => {
         testSecret,
         saltB,
       );
-      expect(decrypted1).toBe(sessionData);
-      expect(decrypted2).toBe(sessionData);
+      // Equal modulo the seal-time `sessionEpoch` stamp (SEC L2).
+      const strip = (s: string | null) => {
+        const o = JSON.parse(s!);
+        expect(typeof o.sessionEpoch).toBe("number");
+        delete o.sessionEpoch;
+        return JSON.stringify(o);
+      };
+      expect(strip(decrypted1)).toBe(sessionData);
+      expect(strip(decrypted2)).toBe(sessionData);
     });
   });
 

@@ -25,7 +25,9 @@ function makePrisma() {
       findMany: vi.fn(),
     },
     entity: {
-      findUnique: vi.fn(),
+      // M8: the target-entity check is now `findFirst({ id, tenantId })` — a
+      // tenant-scoped lookup, not a bare PK existence probe.
+      findFirst: vi.fn(),
     },
     entityRelationship: {
       findFirst: vi.fn(),
@@ -76,7 +78,7 @@ describe("EntityRelationshipOps (Postgres)", () => {
 
     it("throws GraphNotFoundError when an entity is missing", async () => {
       prisma.entityOwnership.findFirst.mockResolvedValue({ role: "PRIMARY_OWNER" });
-      prisma.entity.findUnique
+      prisma.entity.findFirst
         .mockResolvedValueOnce({ id: "e-src" }) // source exists
         .mockResolvedValueOnce(null); // target missing
 
@@ -87,7 +89,7 @@ describe("EntityRelationshipOps (Postgres)", () => {
 
     it("throws GraphConflictError when a relationship of this type already exists", async () => {
       prisma.entityOwnership.findFirst.mockResolvedValue({ role: "PRIMARY_OWNER" });
-      prisma.entity.findUnique.mockResolvedValue({ id: "x" });
+      prisma.entity.findFirst.mockResolvedValue({ id: "x" });
       prisma.entityRelationship.findFirst.mockResolvedValue({ id: "rel-1" });
 
       await expect(withTenant(() => ops.createEntityRelationship(input))).rejects.toBeInstanceOf(
@@ -98,7 +100,7 @@ describe("EntityRelationshipOps (Postgres)", () => {
 
     it("creates a single PENDING edge for a non-auto-confirm type", async () => {
       prisma.entityOwnership.findFirst.mockResolvedValue({ role: "PRIMARY_OWNER" });
-      prisma.entity.findUnique.mockResolvedValue({ id: "x" });
+      prisma.entity.findFirst.mockResolvedValue({ id: "x" });
       prisma.entityRelationship.findFirst.mockResolvedValue(null);
       prisma.entityRelationship.create.mockResolvedValue({});
 
@@ -123,7 +125,7 @@ describe("EntityRelationshipOps (Postgres)", () => {
       prisma.entityOwnership.findFirst
         .mockResolvedValueOnce({ role: "PRIMARY_OWNER" }) // step 1: proposer owns source
         .mockResolvedValueOnce({ userId: "u-shared" }); // step 4: shared owner on target
-      prisma.entity.findUnique.mockResolvedValue({ id: "x" });
+      prisma.entity.findFirst.mockResolvedValue({ id: "x" });
       prisma.entityRelationship.findFirst.mockResolvedValue(null);
       prisma.entityOwnership.findMany.mockResolvedValue([{ userId: "u-shared" }]);
       prisma.entityRelationship.createMany.mockResolvedValue({ count: 2 });
@@ -143,7 +145,7 @@ describe("EntityRelationshipOps (Postgres)", () => {
       prisma.entityOwnership.findFirst
         .mockResolvedValueOnce({ role: "PRIMARY_OWNER" }) // proposer owns source
         .mockResolvedValueOnce(null); // no shared owner on target
-      prisma.entity.findUnique.mockResolvedValue({ id: "x" });
+      prisma.entity.findFirst.mockResolvedValue({ id: "x" });
       prisma.entityRelationship.findFirst.mockResolvedValue(null);
       prisma.entityOwnership.findMany.mockResolvedValue([{ userId: "u-a" }]);
       prisma.entityRelationship.create.mockResolvedValue({});
@@ -154,13 +156,84 @@ describe("EntityRelationshipOps (Postgres)", () => {
       expect(prisma.entityRelationship.create).toHaveBeenCalledTimes(1);
     });
 
-    it("throws when no tenant context is active (non-nullable tenant_id)", async () => {
+    // -----------------------------------------------------------------------
+    // M8 — cross-tenant relatedEntityId (security review 2026-08, lane 7)
+    // -----------------------------------------------------------------------
+    it("scopes BOTH entity existence checks to the caller's tenant", async () => {
       prisma.entityOwnership.findFirst.mockResolvedValue({ role: "PRIMARY_OWNER" });
-      prisma.entity.findUnique.mockResolvedValue({ id: "x" });
+      prisma.entity.findFirst.mockResolvedValue({ id: "x" });
+      prisma.entityRelationship.findFirst.mockResolvedValue(null);
+      prisma.entityRelationship.create.mockResolvedValue({});
+
+      await withTenant(() => ops.createEntityRelationship(input));
+
+      // The TARGET check is the one that was tenant-blind ("keyed by the
+      // globally-unique cuid PK, so no tenant scope is needed") — which is true
+      // of uniqueness and false of authorization.
+      const wheres = prisma.entity.findFirst.mock.calls.map((c: any) => c[0].where);
+      expect(wheres).toHaveLength(2);
+      for (const where of wheres) {
+        expect(where.tenantId).toBe(TEST_TENANT);
+      }
+      expect(wheres[1].id).toBe("e-tgt");
+    });
+
+    it("REFUSES a relatedEntityId that exists only in another tenant", async () => {
+      prisma.entityOwnership.findFirst.mockResolvedValue({ role: "PRIMARY_OWNER" });
+      // The source resolves in this tenant; the target does not, because the
+      // scoped lookup does not see the other tenant's row. This is the attack:
+      // a T1 user pointing a PENDING edge at a T2 entity, producing an orphan
+      // the T2 owner never sees in any pending list.
+      prisma.entity.findFirst
+        .mockResolvedValueOnce({ id: "e-src" })
+        .mockResolvedValueOnce(null);
+
+      await expect(
+        withTenant(() => ops.createEntityRelationship(input)),
+      ).rejects.toBeInstanceOf(GraphNotFoundError);
+
+      // Nothing was written. The orphan edge is the payload of this defect.
+      expect(prisma.entityRelationship.create).not.toHaveBeenCalled();
+      expect(prisma.entityRelationship.createMany).not.toHaveBeenCalled();
+    });
+
+    it("gives the SAME error for a foreign entity and a nonexistent one, naming neither id", async () => {
+      // The existence-oracle half of M8. If "exists in T2" and "does not exist"
+      // produced distinguishable outcomes, this endpoint would answer
+      // "does entity <cuid> exist anywhere?" for any caller.
+      prisma.entityOwnership.findFirst.mockResolvedValue({ role: "PRIMARY_OWNER" });
+
+      const messages: string[] = [];
+      for (const _case of ["foreign", "absent"]) {
+        vi.clearAllMocks();
+        prisma.entityOwnership.findFirst.mockResolvedValue({ role: "PRIMARY_OWNER" });
+        prisma.entity.findFirst
+          .mockResolvedValueOnce({ id: "e-src" })
+          .mockResolvedValueOnce(null);
+        await withTenant(() => ops.createEntityRelationship(input)).catch(
+          (e: Error) => messages.push(e.message),
+        );
+      }
+
+      expect(messages).toHaveLength(2);
+      expect(messages[0]).toBe(messages[1]);
+      expect(messages[0]).not.toContain("e-tgt");
+      expect(messages[0]).not.toContain("e-src");
+    });
+
+    it("throws when no tenant context is active, BEFORE touching the database", async () => {
+      prisma.entityOwnership.findFirst.mockResolvedValue({ role: "PRIMARY_OWNER" });
+      prisma.entity.findFirst.mockResolvedValue({ id: "x" });
       prisma.entityRelationship.findFirst.mockResolvedValue(null);
 
       // No runWithTenantContext wrapper → getCurrentTenantId() is undefined.
-      await expect(ops.createEntityRelationship(input)).rejects.toBeInstanceOf(GraphConflictError);
+      // L3b moved this refusal from the WRITE (where it used to be, via the
+      // old requireTenantId) to the first line of the method, so the
+      // ownership check above never runs unscoped either.
+      await expect(ops.createEntityRelationship(input)).rejects.toBeInstanceOf(
+        GraphAuthorizationError,
+      );
+      expect(prisma.entityOwnership.findFirst).not.toHaveBeenCalled();
     });
   });
 
@@ -172,7 +245,7 @@ describe("EntityRelationshipOps (Postgres)", () => {
       prisma.entityOwnership.findFirst.mockResolvedValue(null);
 
       await expect(
-        ops.confirmEntityRelationship("e-src", "e-tgt", "u-confirmer"),
+        withTenant(() => ops.confirmEntityRelationship("e-src", "e-tgt", "u-confirmer")),
       ).rejects.toBeInstanceOf(GraphAuthorizationError);
       expect(prisma.entityRelationship.update).not.toHaveBeenCalled();
     });
@@ -182,7 +255,7 @@ describe("EntityRelationshipOps (Postgres)", () => {
       prisma.entityRelationship.findFirst.mockResolvedValue(null);
 
       await expect(
-        ops.confirmEntityRelationship("e-src", "e-tgt", "u-confirmer"),
+        withTenant(() => ops.confirmEntityRelationship("e-src", "e-tgt", "u-confirmer")),
       ).rejects.toBeInstanceOf(GraphNotFoundError);
     });
 
@@ -198,7 +271,7 @@ describe("EntityRelationshipOps (Postgres)", () => {
       });
 
       await expect(
-        ops.confirmEntityRelationship("e-src", "e-tgt", "u-confirmer"),
+        withTenant(() => ops.confirmEntityRelationship("e-src", "e-tgt", "u-confirmer")),
       ).rejects.toBeInstanceOf(GraphConflictError);
     });
 
@@ -218,7 +291,7 @@ describe("EntityRelationshipOps (Postgres)", () => {
       prisma.entityRelationship.update.mockResolvedValue({});
       prisma.entityRelationship.create.mockResolvedValue({});
 
-      const result = await ops.confirmEntityRelationship("e-src", "e-tgt", "u-confirmer");
+      const result = await withTenant(() => ops.confirmEntityRelationship("e-src", "e-tgt", "u-confirmer"));
 
       expect(result.status).toBe("CONFIRMED");
       expect(result.type).toBe("SIBLING");
@@ -251,7 +324,7 @@ describe("EntityRelationshipOps (Postgres)", () => {
         .mockResolvedValueOnce({ id: "rel-rev" }); // reverse edge already exists
       prisma.entityRelationship.update.mockResolvedValue({});
 
-      await ops.confirmEntityRelationship("e-src", "e-tgt", "u-confirmer");
+      await withTenant(() => ops.confirmEntityRelationship("e-src", "e-tgt", "u-confirmer"));
 
       expect(prisma.entityRelationship.create).not.toHaveBeenCalled();
       expect(prisma.entityRelationship.update).toHaveBeenCalledWith({
@@ -275,7 +348,7 @@ describe("EntityRelationshipOps (Postgres)", () => {
       prisma.entityRelationship.update.mockResolvedValue({});
       prisma.entityRelationship.create.mockResolvedValue({});
 
-      await ops.confirmEntityRelationship("e-src", "e-tgt", "u-confirmer");
+      await withTenant(() => ops.confirmEntityRelationship("e-src", "e-tgt", "u-confirmer"));
 
       // The reverse lookup must be for the inverse type.
       const reverseLookup = prisma.entityRelationship.findFirst.mock.calls[1][0].where;
@@ -297,7 +370,7 @@ describe("EntityRelationshipOps (Postgres)", () => {
       prisma.entityOwnership.findFirst.mockResolvedValue(null);
 
       await expect(
-        ops.rejectEntityRelationship("e-src", "e-tgt", "u-rejecter"),
+        withTenant(() => ops.rejectEntityRelationship("e-src", "e-tgt", "u-rejecter")),
       ).rejects.toBeInstanceOf(GraphAuthorizationError);
       expect(prisma.entityRelationship.update).not.toHaveBeenCalled();
     });
@@ -307,7 +380,7 @@ describe("EntityRelationshipOps (Postgres)", () => {
       prisma.entityRelationship.findFirst.mockResolvedValue(null);
 
       await expect(
-        ops.rejectEntityRelationship("e-src", "e-tgt", "u-rejecter"),
+        withTenant(() => ops.rejectEntityRelationship("e-src", "e-tgt", "u-rejecter")),
       ).rejects.toBeInstanceOf(GraphNotFoundError);
     });
 
@@ -316,7 +389,7 @@ describe("EntityRelationshipOps (Postgres)", () => {
       prisma.entityRelationship.findFirst.mockResolvedValue({ id: "rel-1" });
       prisma.entityRelationship.update.mockResolvedValue({});
 
-      await ops.rejectEntityRelationship("e-src", "e-tgt", "u-rejecter");
+      await withTenant(() => ops.rejectEntityRelationship("e-src", "e-tgt", "u-rejecter"));
 
       expect(prisma.entityRelationship.update).toHaveBeenCalledWith({
         where: { id: "rel-1" },
@@ -333,7 +406,7 @@ describe("EntityRelationshipOps (Postgres)", () => {
       prisma.entityOwnership.findFirst.mockResolvedValue(null);
 
       await expect(
-        ops.removeEntityRelationship("e-src", "e-tgt", "u-remover"),
+        withTenant(() => ops.removeEntityRelationship("e-src", "e-tgt", "u-remover")),
       ).rejects.toBeInstanceOf(GraphAuthorizationError);
       // Ownership query must allow either entity.
       const where = prisma.entityOwnership.findFirst.mock.calls[0][0].where;
@@ -349,7 +422,7 @@ describe("EntityRelationshipOps (Postgres)", () => {
       prisma.entityRelationship.findFirst.mockResolvedValue(null);
 
       await expect(
-        ops.removeEntityRelationship("e-src", "e-tgt", "u-remover"),
+        withTenant(() => ops.removeEntityRelationship("e-src", "e-tgt", "u-remover")),
       ).rejects.toBeInstanceOf(GraphNotFoundError);
     });
 
@@ -358,14 +431,26 @@ describe("EntityRelationshipOps (Postgres)", () => {
       prisma.entityRelationship.findFirst.mockResolvedValue({ id: "rel-1" });
       prisma.entityRelationship.deleteMany.mockResolvedValue({ count: 1 });
 
-      await ops.removeEntityRelationship("e-src", "e-tgt", "u-remover");
+      await withTenant(() => ops.removeEntityRelationship("e-src", "e-tgt", "u-remover"));
 
       expect(prisma.entityRelationship.deleteMany).toHaveBeenCalledTimes(2);
+      // BOTH deleteMany calls carry the tenant. This is the L3b assertion for
+      // this class: `tenantScope()` used to return `{}` with no ambient tenant,
+      // which turned these two statements into an unscoped, cross-tenant mass
+      // delete of every A↔B typed edge in the installation.
       expect(prisma.entityRelationship.deleteMany).toHaveBeenNthCalledWith(1, {
-        where: { entityId: "e-src", relatedEntityId: "e-tgt" },
+        where: {
+          tenantId: TEST_TENANT,
+          entityId: "e-src",
+          relatedEntityId: "e-tgt",
+        },
       });
       expect(prisma.entityRelationship.deleteMany).toHaveBeenNthCalledWith(2, {
-        where: { entityId: "e-tgt", relatedEntityId: "e-src" },
+        where: {
+          tenantId: TEST_TENANT,
+          entityId: "e-tgt",
+          relatedEntityId: "e-src",
+        },
       });
     });
   });
@@ -380,10 +465,12 @@ describe("EntityRelationshipOps (Postgres)", () => {
         { relatedEntityId: "e-tgt", type: "PLAYMATE", status: "CONFIRMED", proposedByUserId: "u-p", since },
       ]);
 
-      const result = await ops.getEntityRelationships("e-src", {
-        type: "PLAYMATE",
-        status: "CONFIRMED",
-      });
+      const result = await withTenant(() =>
+        ops.getEntityRelationships("e-src", {
+          type: "PLAYMATE",
+          status: "CONFIRMED",
+        }),
+      );
 
       expect(result).toEqual([
         {
@@ -403,10 +490,12 @@ describe("EntityRelationshipOps (Postgres)", () => {
     it("omits type/status filters when not provided", async () => {
       prisma.entityRelationship.findMany.mockResolvedValue([]);
 
-      await ops.getEntityRelationships("e-src");
+      await withTenant(() => ops.getEntityRelationships("e-src"));
 
       const where = prisma.entityRelationship.findMany.mock.calls[0][0].where;
-      expect(where).toEqual({ entityId: "e-src" });
+      // The tenant predicate is NOT one of the optional filters — it is always
+      // present, whatever the caller passed.
+      expect(where).toEqual({ tenantId: TEST_TENANT, entityId: "e-src" });
     });
   });
 
@@ -417,7 +506,7 @@ describe("EntityRelationshipOps (Postgres)", () => {
     it("returns [] when the user owns no entities (no query)", async () => {
       prisma.entityOwnership.findMany.mockResolvedValue([]);
 
-      const result = await ops.getPendingEntityRelationships("u-owner");
+      const result = await withTenant(() => ops.getPendingEntityRelationships("u-owner"));
 
       expect(result).toEqual([]);
       expect(prisma.entityRelationship.findMany).not.toHaveBeenCalled();
@@ -433,7 +522,7 @@ describe("EntityRelationshipOps (Postgres)", () => {
         { entityId: "e-src", relatedEntityId: "e-owned-1", type: "SIBLING", proposedByUserId: "u-p", since },
       ]);
 
-      const result = await ops.getPendingEntityRelationships("u-owner");
+      const result = await withTenant(() => ops.getPendingEntityRelationships("u-owner"));
 
       const where = prisma.entityRelationship.findMany.mock.calls[0][0].where;
       expect(where).toMatchObject({

@@ -30,6 +30,11 @@ function warnedMessages(): string {
   return mockLogger.warn.mock.calls.map((c) => String(c[0])).join("\n");
 }
 
+/** Named so `.name === "authMiddleware"` — what the validator matches on. */
+async function authMiddleware(_ctx: any, next: () => Promise<Response>) {
+  return next();
+}
+
 function makeExtension(overrides: Partial<TrellisExtension> = {}): TrellisExtension {
   return {
     id: "test",
@@ -160,6 +165,7 @@ describe("validateExtensions", () => {
           {
             path: "/api/dogs/breeds",
             handler: async () => new Response(""),
+            middleware: [authMiddleware as any],
           },
         ],
       });
@@ -173,6 +179,7 @@ describe("validateExtensions", () => {
           {
             path: /^\/entities\/dog\/[^/]+$/,
             handler: async () => new Response(""),
+            middleware: [authMiddleware as any],
           },
         ],
       });
@@ -180,9 +187,13 @@ describe("validateExtensions", () => {
     });
   });
 
-  describe("auth middleware warnings", () => {
-    it("does not throw for routes without auth middleware", () => {
-      // The validator warns but doesn't throw for missing auth middleware
+  // SEC M5 — raw `ext.routes` bypass core wrapping entirely: no auth, no CSRF,
+  // no security headers, and the handler is handed the FULL core Env
+  // (SESSION_SECRET, DATABASE_URL, KV bindings). The validator used to only
+  // *warn* about a raw route with no auth middleware; a boot-log warning is not
+  // a control, so it now REJECTS at startup.
+  describe("auth middleware on raw ext.routes (SEC M5)", () => {
+    it("REJECTS a raw route with no auth middleware", () => {
       const ext = makeExtension({
         id: "dog",
         routes: [
@@ -193,14 +204,61 @@ describe("validateExtensions", () => {
           },
         ],
       });
-      expect(() => validateExtensions([ext])).not.toThrow();
+      expect(() => validateExtensions([ext])).toThrow(
+        /raw route "List dogs" has no auth middleware/,
+      );
     });
 
-    it("does not warn for routes with auth middleware", () => {
-      // Named function so .name === "authMiddleware"
-      async function authMiddleware(_ctx: any, next: () => Promise<Response>) {
+    it("REJECTS a raw route whose middleware array is empty", () => {
+      const ext = makeExtension({
+        id: "dog",
+        routes: [
+          {
+            path: "/api/dogs",
+            handler: async () => new Response(""),
+            middleware: [],
+          },
+        ],
+      });
+      expect(() => validateExtensions([ext])).toThrow(/no auth middleware/);
+    });
+
+    it("REJECTS when middleware is present but none of it is auth/CSRF", () => {
+      async function corsMiddleware(_ctx: any, next: () => Promise<Response>) {
         return next();
       }
+      const ext = makeExtension({
+        id: "dog",
+        routes: [
+          {
+            path: "/api/dogs",
+            handler: async () => new Response(""),
+            middleware: [corsMiddleware as any],
+          },
+        ],
+      });
+      expect(() => validateExtensions([ext])).toThrow(/no auth middleware/);
+    });
+
+    it("names the offending extension and points at the wrapped path", () => {
+      const ext = makeExtension({
+        id: "evilext",
+        routes: [
+          { path: "/api/pwn", handler: async () => new Response("") },
+        ],
+      });
+      let message = "";
+      try {
+        validateExtensions([ext]);
+      } catch (err) {
+        message = (err as Error).message;
+      }
+      expect(message).toContain('"evilext"');
+      expect(message).toContain("extensionRoutes");
+      expect(message).toContain("SESSION_SECRET");
+    });
+
+    it("accepts a raw route carrying authMiddleware", () => {
       const ext = makeExtension({
         id: "dog",
         routes: [
@@ -212,7 +270,37 @@ describe("validateExtensions", () => {
           },
         ],
       });
-      // Should pass without any warnings or throws
+      expect(() => validateExtensions([ext])).not.toThrow();
+    });
+
+    it("accepts a raw route carrying csrfMiddleware", () => {
+      async function csrfMiddleware(_ctx: any, next: () => Promise<Response>) {
+        return next();
+      }
+      const ext = makeExtension({
+        id: "dog",
+        routes: [
+          {
+            path: "/api/dogs",
+            handler: async () => new Response(""),
+            middleware: [csrfMiddleware as any],
+          },
+        ],
+      });
+      expect(() => validateExtensions([ext])).not.toThrow();
+    });
+
+    it("the first-party shape (routes: [], wrapped extensionRoutes) still loads", () => {
+      // The dogs extension declares `routes: []` and wires everything through
+      // `extensionRoutes` (core-wrapped). Rejecting raw unauthenticated routes
+      // must not break it — this pins that.
+      const ext = makeExtension({
+        id: "dog",
+        routes: [],
+        extensionRoutes: [
+          { path: "/api/ext/dog/entities", method: "GET", handler: async () => ({}) },
+        ] as any,
+      });
       expect(() => validateExtensions([ext])).not.toThrow();
     });
   });

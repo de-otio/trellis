@@ -28,6 +28,7 @@ import type {
   AnalyticsEngineDataset,
 } from "./types/cloudflare-compat.js";
 import type { NotificationType } from "@prisma/client";
+import { validateThreatIntelEnv } from "./lib/threat-intel-service.js";
 import type { RealtimeTransport } from "./lib/realtime/index.js";
 import {
   PollTransport,
@@ -169,6 +170,44 @@ export interface Env {
    */
   ACTIVITYPUB_ENABLED: boolean;
 
+  /**
+   * Defederation list: comma- or whitespace-separated instance domains whose
+   * activities are refused at inbox admission, before any rate-limit budget is
+   * spent. A leading `.`/`*.` is optional — matching is on label boundaries,
+   * so `example.com` also blocks `mastodon.example.com` but never
+   * `notexample.com`. Unset means "federate with everyone".
+   */
+  ACTIVITYPUB_BLOCKED_DOMAINS?: string;
+
+  /**
+   * Per-minute inbox request ceiling per remote INSTANCE DOMAIN (not per
+   * actor — actor URIs are free to mint). Defaults to 60. Enforced through the
+   * shared distributed token bucket, so it holds across replicas and restarts.
+   */
+  ACTIVITYPUB_INSTANCE_RATE_LIMIT?: string;
+
+  /**
+   * KEK wrapping actor private keys at rest. MUST be 32 bytes of real key
+   * material (64 hex chars, or base64/base64url of 32 bytes) — there is
+   * deliberately no `SESSION_SECRET` fallback, because session signing and
+   * federation identity are different trust domains and must not share a
+   * secret. Required whenever `ACTIVITYPUB_ENABLED` is true.
+   */
+  ACTIVITYPUB_KEY_ENCRYPTION_KEY?: string;
+
+  /**
+   * Migration only: the secret existing wrapped keys were written under, so
+   * the legacy `SHA-256(secret)` format stays readable until the rewrap
+   * backfill completes.
+   */
+  ACTIVITYPUB_LEGACY_KEY_ENCRYPTION_KEY?: string;
+
+  /**
+   * Set to `"false"` AFTER the rewrap backfill to close the legacy read path.
+   * Defaults to enabled — closing it early would lock actors out of their keys.
+   */
+  ACTIVITYPUB_LEGACY_KEY_DECRYPT?: string;
+
   // ── Client version policy (served by GET /api/app/version-policy) ─────────
   // All four are OPTIONAL and all four are DORMANT by default: unset means the
   // endpoint returns nulls and the 426 backstop is a no-op. Values are
@@ -280,6 +319,15 @@ export interface Env {
   CI?: string;
   GITHUB_ACTIONS?: string;
   STAGE?: string;
+  /**
+   * SEC L1 — explicit opt-in for the `/api/admin/test/*` seam (see
+   * `lib/routes/admin.ts`). The seam is OFF unless STAGE is `dev`, the process
+   * is in CI, or this is exactly `"true"`; `prod`/`production` can never enable
+   * it. Surfaced on `Env` (rather than read from `process.env` inside the
+   * route) so the gate reads its input from the same place as every other
+   * config value, and so it is greppable.
+   */
+  ENABLE_TEST_ROUTES?: string;
 
   // AWS
   AWS_REGION?: string;
@@ -1317,6 +1365,39 @@ export function validateEnv(env: Env): string[] {
     errors.push(...validateEmailEnv(process.env));
   }
 
+  // SECURITY (Phase 7 F7): enabling federation without a real 32-byte actor-key
+  // KEK is not a degraded mode — actor private keys would be unwrappable (or,
+  // before this change, wrapped under the reused session secret). Only checked
+  // when ACTIVITYPUB_ENABLED, so non-federating deployments are unaffected.
+  if (env.ACTIVITYPUB_ENABLED) {
+    const kek = env.ACTIVITYPUB_KEY_ENCRYPTION_KEY;
+    if (!kek) {
+      errors.push(
+        "ACTIVITYPUB_KEY_ENCRYPTION_KEY is required when ACTIVITYPUB_ENABLED is true — 32 bytes (64 hex chars or base64). There is no SESSION_SECRET fallback.",
+      );
+    } else if (
+      !/^[0-9a-fA-F]{64}$/.test(kek.trim()) &&
+      !/^[A-Za-z0-9+/]{43}=?$/.test(kek.trim()) &&
+      !/^[A-Za-z0-9\-_]{43}$/.test(kek.trim())
+    ) {
+      errors.push(
+        "ACTIVITYPUB_KEY_ENCRYPTION_KEY must decode to exactly 32 bytes (64 hex chars, or base64/base64url of 32 bytes) — a passphrase is not a key.",
+      );
+    }
+  }
+
+  // SECURITY (Phase 6 M3): in production a missing Safe Browsing key means
+  // every uncached link check fails to UNKNOWN and the interstitial fires on
+  // everything — a link-safety feature that silently does nothing. Refuse the
+  // deploy instead. Non-prod stages are unaffected.
+  errors.push(
+    ...validateThreatIntelEnv({
+      GOOGLE_SAFE_BROWSING_API_KEY: env.GOOGLE_SAFE_BROWSING_API_KEY,
+      STAGE: env.STAGE,
+      NODE_ENV: env.NODE_ENV,
+    }),
+  );
+
   return errors;
 }
 
@@ -1578,6 +1659,15 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     // Federation master switch — fail closed: anything other than the exact
     // string "true" leaves federation disabled.
     ACTIVITYPUB_ENABLED: process.env.ACTIVITYPUB_ENABLED === "true",
+    ACTIVITYPUB_BLOCKED_DOMAINS: process.env.ACTIVITYPUB_BLOCKED_DOMAINS,
+    ACTIVITYPUB_INSTANCE_RATE_LIMIT:
+      process.env.ACTIVITYPUB_INSTANCE_RATE_LIMIT,
+    ACTIVITYPUB_KEY_ENCRYPTION_KEY:
+      process.env.ACTIVITYPUB_KEY_ENCRYPTION_KEY,
+    ACTIVITYPUB_LEGACY_KEY_ENCRYPTION_KEY:
+      process.env.ACTIVITYPUB_LEGACY_KEY_ENCRYPTION_KEY,
+    ACTIVITYPUB_LEGACY_KEY_DECRYPT:
+      process.env.ACTIVITYPUB_LEGACY_KEY_DECRYPT,
 
     // Client version policy — raw passthrough; boot validation (env-schema.ts)
     // has already rejected malformed values, and resolveVersionPolicy() treats
@@ -1649,6 +1739,7 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     CI: process.env.CI,
     GITHUB_ACTIONS: process.env.GITHUB_ACTIONS,
     STAGE: stage,
+    ENABLE_TEST_ROUTES: process.env.ENABLE_TEST_ROUTES,
 
     // AWS
     AWS_REGION: process.env.AWS_REGION,

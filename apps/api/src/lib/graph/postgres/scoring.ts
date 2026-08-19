@@ -104,7 +104,11 @@ export class ScoringOps {
 
     const existing = await this.prisma.relationship.findUnique({
       where: {
-        userId_targetType_targetId: {
+        // Tenant is part of the unique key (M7), so the lookup is scoped by
+        // construction — the post-hoc `existing.tenantId !== tenantId` check
+        // below is now unreachable belt-and-braces rather than the only guard.
+        tenantId_userId_targetType_targetId: {
+          tenantId,
           userId: input.userId,
           targetType: input.targetType,
           targetId: input.targetId,

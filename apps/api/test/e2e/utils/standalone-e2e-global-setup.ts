@@ -30,9 +30,15 @@ async function createCookieUser(suffix: string): Promise<CookiePoolEntry> {
   const id = crypto.randomUUID();
   const email = `e2e-std-${suffix}-${id.slice(0, 8)}@test.example.com`;
 
+  // SEC L1: `/api/admin/test/users` no longer serves unauthenticated callers.
+  // It requires an explicit environment opt-in (the standalone lane sets
+  // ENABLE_TEST_ROUTES=true) AND a real SUPER_ADMIN session with CSRF.
+  const { getTestAdminAuth } = await import("../../utils/test-auth.js");
+  const admin = await getTestAdminAuth();
+
   const res = await fetch(`${STANDALONE_API_URL}/api/admin/test/users`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...admin.headers },
     body: JSON.stringify({
       id,
       email,
@@ -79,9 +85,53 @@ async function createCookieUser(suffix: string): Promise<CookiePoolEntry> {
   return { email: body.user.email, userId: body.user.id, jwt: "", sessionCookie };
 }
 
+/**
+ * SEC L1 regression, asserted against the REAL server before the pool is built.
+ *
+ * The harness now presents SUPER_ADMIN credentials, which means a broken gate
+ * would no longer show up as a failing test — the harness would simply keep
+ * working. This probe closes that blind spot: it fires the original exploit
+ * shape (unauthenticated, `test-`-prefixed `@test.example.com` email, asking
+ * for SUPER_ADMIN) at the live route and requires a rejection.
+ *
+ * Deliberately in globalSetup rather than a test file: if the seam is open, no
+ * suite should be allowed to run and report green.
+ */
+async function assertTestSeamRejectsAnonymous(): Promise<void> {
+  const res = await fetch(`${STANDALONE_API_URL}/api/admin/test/users`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      id: crypto.randomUUID(),
+      email: `test-probe-${Date.now()}@test.example.com`,
+      role: "SUPER_ADMIN",
+    }),
+  });
+
+  if (res.status !== 401 && res.status !== 403) {
+    throw new Error(
+      `[e2e-standalone] SECURITY REGRESSION (L1): POST /api/admin/test/users ` +
+        `served an UNAUTHENTICATED SUPER_ADMIN creation request with status ` +
+        `${res.status}. This endpoint must reject anonymous callers with 401/403. ` +
+        `Body: ${await res.text()}`,
+    );
+  }
+
+  // It must also not hand back a session cookie for the account it refused.
+  const cookies = res.headers.getSetCookie?.() ?? [];
+  if (cookies.some((c) => c.includes("trellis_session="))) {
+    throw new Error(
+      "[e2e-standalone] SECURITY REGRESSION (L1): the rejected request still " +
+        "received a trellis_session cookie.",
+    );
+  }
+}
+
 export async function setup(): Promise<void> {
   // Boot the in-process server on the standalone stack + seed feature toggles.
   await standaloneSetup();
+
+  await assertTestSeamRejectsAnonymous();
 
   const count = parseInt(process.env.E2E_USER_COUNT || "2", 10);
   const pool: CookiePoolEntry[] = [];

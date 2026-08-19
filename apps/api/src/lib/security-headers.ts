@@ -38,6 +38,11 @@ export class SecurityHeaders {
       "font-src 'self' data: https://fonts.gstatic.com",
       `connect-src ${cspConnectSrc}`,
       "frame-ancestors 'none'",
+      // Phase 8 hardening: kill legacy plugin embedding (<object>/<embed>) and
+      // pin the document base URL so an injected <base href> cannot re-point
+      // every relative script/form target at an attacker host.
+      "object-src 'none'",
+      "base-uri 'self'",
     ].join("; ");
 
     this.headers = {

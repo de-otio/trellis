@@ -23,12 +23,16 @@ import {
  * @param userId - User ID attempting to tag entities
  * @param entityRefs - Array of entity IDs to tag
  * @param db - Prisma client (can be transaction client)
+ * @param tenantId - The post's active tenant. Required: the friendship half of
+ *   this permission check is tenant-scoped (see lib/friend-ids.ts), so without
+ *   it a friendship formed in another tenant would authorize tagging here.
  * @returns Promise that resolves if validation passes, rejects with EntityTaggingError if not
  */
 export async function validateEntityTagging(
   userId: string,
   entityRefs: string[],
   db: PrismaClient,
+  tenantId: string,
 ): Promise<void> {
   // Early return if no entities to tag
   if (!entityRefs || entityRefs.length === 0) {
@@ -57,7 +61,11 @@ export async function validateEntityTagging(
 
   // 3. Get friend user IDs once (single relationship-edge query)
   const friendIds = new Set(
-    await getFriendUserIds(db as unknown as RelationshipReader, userId),
+    await getFriendUserIds(
+      db as unknown as RelationshipReader,
+      userId,
+      tenantId,
+    ),
   );
 
   // 4. Group entities by ownership status

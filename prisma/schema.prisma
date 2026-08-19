@@ -2474,7 +2474,19 @@ model Relationship {
   // AR10 prune: dropped [userId] (prefix of the composite unique and of
   // [userId, tier]) and the bare [targetId] (polymorphic reverse lookups are
   // always type-qualified → [targetType, targetId] carries them).
-  @@unique([userId, targetType, targetId])
+  //
+  // M7 (security review 2026-08, lane 7 MEDIUM-3): tenantId LEADS the unique
+  // key. The key was tenant-blind while `tenant_id` is NOT NULL, so one pair of
+  // users could hold exactly one edge across the whole installation — a
+  // relationship created in tenant B blocked the same relationship in tenant A
+  // and made `findUnique` on that key return another tenant's row. That is what
+  // let `createRelationship`'s reverse-edge lookup flip `reciprocated` across a
+  // tenant boundary while `removeRelationship`'s clear (tenant-scoped) could
+  // never take it back. tenantId leads so the key doubles as the tenant-scoped
+  // lookup index, which also makes the separate @@index([tenantId]) redundant —
+  // kept anyway: dropping an index is a separate, independently-reviewable
+  // change from fixing a correctness key.
+  @@unique([tenantId, userId, targetType, targetId])
   @@index([targetType, targetId]) // reverse: who relates to X (FoF, recompute)
   @@index([userId, tier]) // circle-tier membership
   @@index([tenantId])

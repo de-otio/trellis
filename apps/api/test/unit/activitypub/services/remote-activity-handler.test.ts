@@ -39,8 +39,25 @@ vi.mock("../../../../src/lib/activitypub/activity-processor", () => ({
 }));
 
 vi.mock("../../../../src/lib/activitypub/listeners/http-signatures", () => ({
-  verifyHttpSignature: vi.fn(),
+  verifyInboxRequest: vi.fn(),
 }));
+
+/**
+ * A successful verification whose key owner matches the activity's actor —
+ * what an honest peer produces. The handler enforces
+ * `keyId -> owner -> activity.actor` (F1), so a mismatching owner is a 403,
+ * which the spoofing test below relies on.
+ */
+function verifiedAs(activity: any, owner?: string) {
+  const actor =
+    typeof activity?.actor === "string" ? activity.actor : activity?.actor?.id;
+  return {
+    valid: true as const,
+    keyId: `${owner ?? actor}#main-key`,
+    owner: owner ?? actor,
+    body: Buffer.from(JSON.stringify(activity), "utf8"),
+  };
+}
 
 vi.mock("../../../../src/lib/activitypub/standalone-mode", () => ({
   isStandaloneModeEnabled: vi.fn(),
@@ -78,10 +95,13 @@ describe("Remote Activity Handler", () => {
         body: JSON.stringify(mockRemoteActivity),
       });
 
-      const { verifyHttpSignature } = await import(
+      const { verifyInboxRequest } = await import(
         "../../../../src/lib/activitypub/listeners/http-signatures.js"
       );
-      vi.mocked(verifyHttpSignature).mockResolvedValue(false);
+      vi.mocked(verifyInboxRequest).mockResolvedValue({
+        valid: false,
+        reason: "bad-signature",
+      });
 
       const result = await processRemoteActivity(
         mockRemoteActivity as any,
@@ -91,7 +111,7 @@ describe("Remote Activity Handler", () => {
       );
 
       expect(result).toBe(false);
-      expect(verifyHttpSignature).toHaveBeenCalledWith(request, mockEnv);
+      expect(verifyInboxRequest).toHaveBeenCalledWith(request, mockEnv);
     });
 
     it("should reject local activities", async () => {
@@ -108,10 +128,10 @@ describe("Remote Activity Handler", () => {
         body: JSON.stringify(localActivity),
       });
 
-      const { verifyHttpSignature } = await import(
+      const { verifyInboxRequest } = await import(
         "../../../../src/lib/activitypub/listeners/http-signatures.js"
       );
-      vi.mocked(verifyHttpSignature).mockResolvedValue(true);
+      vi.mocked(verifyInboxRequest).mockResolvedValue(verifiedAs(localActivity));
 
       const result = await processRemoteActivity(
         localActivity as any,
@@ -161,10 +181,10 @@ describe("Remote Activity Handler", () => {
       );
       vi.mocked(isStandaloneModeEnabled).mockResolvedValue(false); // Not in standalone mode
 
-      const { verifyHttpSignature } = await import(
+      const { verifyInboxRequest } = await import(
         "../../../../src/lib/activitypub/listeners/http-signatures.js"
       );
-      vi.mocked(verifyHttpSignature).mockResolvedValue(true);
+      vi.mocked(verifyInboxRequest).mockResolvedValue(verifiedAs(mockRemoteActivity));
 
       const { isRemoteUri } = await import(
         "../../../../src/lib/activitypub/standalone-mode.js"
@@ -225,10 +245,10 @@ describe("Remote Activity Handler", () => {
       );
       vi.mocked(isStandaloneModeEnabled).mockResolvedValue(false); // Not in standalone mode
 
-      const { verifyHttpSignature } = await import(
+      const { verifyInboxRequest } = await import(
         "../../../../src/lib/activitypub/listeners/http-signatures.js"
       );
-      vi.mocked(verifyHttpSignature).mockResolvedValue(true);
+      vi.mocked(verifyInboxRequest).mockResolvedValue(verifiedAs(mockRemoteActivity));
 
       const { isRemoteUri } = await import(
         "../../../../src/lib/activitypub/standalone-mode.js"
@@ -255,10 +275,10 @@ describe("Remote Activity Handler", () => {
         body: JSON.stringify(mockRemoteActivity),
       });
 
-      const { verifyHttpSignature } = await import(
+      const { verifyInboxRequest } = await import(
         "../../../../src/lib/activitypub/listeners/http-signatures.js"
       );
-      vi.mocked(verifyHttpSignature).mockRejectedValue(
+      vi.mocked(verifyInboxRequest).mockRejectedValue(
         new Error("Verification error"),
       );
 
@@ -298,10 +318,10 @@ describe("Remote Activity Handler", () => {
       expect(result).toBe(false);
       expect(isStandaloneModeEnabled).toHaveBeenCalled();
       // Should not proceed to signature verification
-      const { verifyHttpSignature } = await import(
+      const { verifyInboxRequest } = await import(
         "../../../../src/lib/activitypub/listeners/http-signatures.js"
       );
-      expect(verifyHttpSignature).not.toHaveBeenCalled();
+      expect(verifyInboxRequest).not.toHaveBeenCalled();
     });
 
     it("should process remote activity when standalone mode is disabled", async () => {
@@ -343,10 +363,10 @@ describe("Remote Activity Handler", () => {
       vi.mocked(isStandaloneModeEnabled).mockResolvedValue(false); // Standalone mode disabled
       vi.mocked(isRemoteUri).mockReturnValue(true); // Remote URI
 
-      const { verifyHttpSignature } = await import(
+      const { verifyInboxRequest } = await import(
         "../../../../src/lib/activitypub/listeners/http-signatures.js"
       );
-      vi.mocked(verifyHttpSignature).mockResolvedValue(true);
+      vi.mocked(verifyInboxRequest).mockResolvedValue(verifiedAs(mockRemoteActivity));
 
       const { ActivityService } = await import(
         "../../../../src/lib/activitypub/activity-service.js"
@@ -368,7 +388,7 @@ describe("Remote Activity Handler", () => {
       );
 
       expect(result).toBe(true);
-      expect(verifyHttpSignature).toHaveBeenCalled();
+      expect(verifyInboxRequest).toHaveBeenCalled();
     });
 
     it("should handle activity with actor as object", async () => {
@@ -418,10 +438,10 @@ describe("Remote Activity Handler", () => {
       vi.mocked(isStandaloneModeEnabled).mockResolvedValue(false);
       vi.mocked(isRemoteUri).mockReturnValue(true);
 
-      const { verifyHttpSignature } = await import(
+      const { verifyInboxRequest } = await import(
         "../../../../src/lib/activitypub/listeners/http-signatures.js"
       );
-      vi.mocked(verifyHttpSignature).mockResolvedValue(true);
+      vi.mocked(verifyInboxRequest).mockResolvedValue(verifiedAs(activityWithObjectActor));
 
       const { ActivityService } = await import(
         "../../../../src/lib/activitypub/activity-service.js"
@@ -470,10 +490,10 @@ describe("Remote Activity Handler", () => {
       vi.mocked(isStandaloneModeEnabled).mockResolvedValue(false);
       vi.mocked(isRemoteUri).mockReturnValue(false); // Not remote since no actor
 
-      const { verifyHttpSignature } = await import(
+      const { verifyInboxRequest } = await import(
         "../../../../src/lib/activitypub/listeners/http-signatures.js"
       );
-      vi.mocked(verifyHttpSignature).mockResolvedValue(true);
+      vi.mocked(verifyInboxRequest).mockResolvedValue(verifiedAs(activityWithoutActor));
 
       const result = await processRemoteActivity(
         activityWithoutActor as any,
@@ -536,10 +556,10 @@ describe("Remote Activity Handler", () => {
       vi.mocked(isStandaloneModeEnabled).mockResolvedValue(false);
       vi.mocked(isRemoteUri).mockReturnValue(true);
 
-      const { verifyHttpSignature } = await import(
+      const { verifyInboxRequest } = await import(
         "../../../../src/lib/activitypub/listeners/http-signatures.js"
       );
-      vi.mocked(verifyHttpSignature).mockResolvedValue(true);
+      vi.mocked(verifyInboxRequest).mockResolvedValue(verifiedAs(mockRemoteActivity));
 
       const result = await processRemoteActivity(
         mockRemoteActivity as any,
@@ -590,10 +610,10 @@ describe("Remote Activity Handler", () => {
       vi.mocked(isStandaloneModeEnabled).mockResolvedValue(false);
       vi.mocked(isRemoteUri).mockReturnValue(true);
 
-      const { verifyHttpSignature } = await import(
+      const { verifyInboxRequest } = await import(
         "../../../../src/lib/activitypub/listeners/http-signatures.js"
       );
-      vi.mocked(verifyHttpSignature).mockResolvedValue(true);
+      vi.mocked(verifyInboxRequest).mockResolvedValue(verifiedAs(mockRemoteActivity));
 
       const { ActivityService } = await import(
         "../../../../src/lib/activitypub/activity-service.js"
@@ -644,10 +664,10 @@ describe("Remote Activity Handler", () => {
       vi.mocked(isStandaloneModeEnabled).mockResolvedValue(false);
       vi.mocked(isRemoteUri).mockReturnValue(true);
 
-      const { verifyHttpSignature } = await import(
+      const { verifyInboxRequest } = await import(
         "../../../../src/lib/activitypub/listeners/http-signatures.js"
       );
-      vi.mocked(verifyHttpSignature).mockResolvedValue(true);
+      vi.mocked(verifyInboxRequest).mockResolvedValue(verifiedAs(mockRemoteActivity));
 
       const result = await processRemoteActivity(
         mockRemoteActivity as any,
@@ -695,10 +715,10 @@ describe("Remote Activity Handler", () => {
       vi.mocked(isStandaloneModeEnabled).mockResolvedValue(false);
       vi.mocked(isRemoteUri).mockReturnValue(true);
 
-      const { verifyHttpSignature } = await import(
+      const { verifyInboxRequest } = await import(
         "../../../../src/lib/activitypub/listeners/http-signatures.js"
       );
-      vi.mocked(verifyHttpSignature).mockResolvedValue(true);
+      vi.mocked(verifyInboxRequest).mockResolvedValue(verifiedAs(mockRemoteActivity));
 
       const result = await processRemoteActivity(
         mockRemoteActivity as any,
@@ -709,6 +729,155 @@ describe("Remote Activity Handler", () => {
 
       // Should still process if user exists, even without actorId
       expect(result).toBe(true);
+    });
+  });
+
+  describe("F1 — actor binding", () => {
+    it("REJECTS a spoofed actor and stores NOTHING", async () => {
+      // CRITICAL 1, stated as an attack: the attacker holds a perfectly valid
+      // key for their own instance, signs correctly, and sets
+      // `actor: "https://example.com/users/victim"` in the body. Before the
+      // binding check this was stored and processed as the victim.
+      const spoofed = {
+        "@context": "https://www.w3.org/ns/activitystreams",
+        type: "Create",
+        actor: "https://example.com/users/victim",
+        object: { type: "Note", content: "posted as the victim" },
+      };
+
+      const request = new Request("https://example.com/users/bob/inbox", {
+        method: "POST",
+        body: JSON.stringify(spoofed),
+      });
+
+      const { isStandaloneModeEnabled, isRemoteUri } = await import(
+        "../../../../src/lib/activitypub/standalone-mode.js"
+      );
+      vi.mocked(isStandaloneModeEnabled).mockResolvedValue(false);
+      vi.mocked(isRemoteUri).mockReturnValue(true);
+
+      const { verifyInboxRequest } = await import(
+        "../../../../src/lib/activitypub/listeners/http-signatures.js"
+      );
+      // Signature is genuinely VALID — but for the attacker's own key.
+      vi.mocked(verifyInboxRequest).mockResolvedValue(
+        verifiedAs(spoofed, "https://attacker.example/users/mallory"),
+      );
+
+      const { ActivityService } = await import(
+        "../../../../src/lib/activitypub/activity-service.js"
+      );
+      const { ActivityProcessor } = await import(
+        "../../../../src/lib/activitypub/activity-processor.js"
+      );
+
+      const result = await processRemoteActivity(
+        spoofed as any,
+        request,
+        "https://example.com/users/bob",
+        mockEnv as Env,
+      );
+
+      expect(result).toBe(false);
+      expect(ActivityService.storeInboxActivity).not.toHaveBeenCalled();
+      expect(ActivityProcessor.processActivity).not.toHaveBeenCalled();
+    });
+
+    it("REJECTS an object smuggled from a third instance", async () => {
+      const smuggled = {
+        type: "Create",
+        actor: "https://attacker.example/users/mallory",
+        object: {
+          id: "https://victim.example/notes/1",
+          attributedTo: "https://victim.example/users/admin",
+        },
+      };
+
+      const request = new Request("https://example.com/users/bob/inbox", {
+        method: "POST",
+        body: JSON.stringify(smuggled),
+      });
+
+      const { isStandaloneModeEnabled, isRemoteUri } = await import(
+        "../../../../src/lib/activitypub/standalone-mode.js"
+      );
+      vi.mocked(isStandaloneModeEnabled).mockResolvedValue(false);
+      vi.mocked(isRemoteUri).mockReturnValue(true);
+
+      const { verifyInboxRequest } = await import(
+        "../../../../src/lib/activitypub/listeners/http-signatures.js"
+      );
+      // Actor matches the key owner here — the object is the problem.
+      vi.mocked(verifyInboxRequest).mockResolvedValue(verifiedAs(smuggled));
+
+      const { ActivityService } = await import(
+        "../../../../src/lib/activitypub/activity-service.js"
+      );
+
+      const result = await processRemoteActivity(
+        smuggled as any,
+        request,
+        "https://example.com/users/bob",
+        mockEnv as Env,
+      );
+
+      expect(result).toBe(false);
+      expect(ActivityService.storeInboxActivity).not.toHaveBeenCalled();
+    });
+
+    it("does not re-verify when the caller passes its verification", async () => {
+      // Re-verifying would re-fetch the remote actor and trip replay
+      // suppression on our own request.
+      const activity = {
+        type: "Create",
+        actor: "https://remote.example/users/alice",
+        object: {
+          id: "https://remote.example/notes/1",
+          attributedTo: "https://remote.example/users/alice",
+        },
+      };
+      const request = new Request("https://example.com/users/bob/inbox", {
+        method: "POST",
+        body: JSON.stringify(activity),
+      });
+
+      const { isStandaloneModeEnabled, isRemoteUri } = await import(
+        "../../../../src/lib/activitypub/standalone-mode.js"
+      );
+      vi.mocked(isStandaloneModeEnabled).mockResolvedValue(false);
+      vi.mocked(isRemoteUri).mockReturnValue(true);
+
+      const { withQueryTimeoutAndRetry } = await import(
+        "../../../../src/lib/db-query-helper.js"
+      );
+      vi.mocked(withQueryTimeoutAndRetry).mockImplementation(
+        async (_m, _r, _e, cb) =>
+          cb({
+            user: {
+              findUnique: vi.fn().mockResolvedValue({
+                id: "u1",
+                username: "bob",
+                actorUri: "https://example.com/users/bob",
+                inboxUrl: "https://example.com/users/bob/inbox",
+              }),
+            },
+          } as any),
+      );
+
+      const { verifyInboxRequest } = await import(
+        "../../../../src/lib/activitypub/listeners/http-signatures.js"
+      );
+
+      const result = await processRemoteActivity(
+        activity as any,
+        request,
+        "https://example.com/users/bob",
+        mockEnv as Env,
+        verifiedAs(activity),
+      );
+
+      expect(result).toBe(true);
+      expect(verifyInboxRequest).not.toHaveBeenCalled();
     });
   });
 });

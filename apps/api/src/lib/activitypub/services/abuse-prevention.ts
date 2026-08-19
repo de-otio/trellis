@@ -1,19 +1,34 @@
 /**
- * Abuse Prevention Service
+ * Abuse Prevention for ActivityPub federation (F6).
  *
- * Implements abuse prevention for ActivityPub federation.
- * Fedify provides rate limiting and signature verification.
- * This service adds custom abuse detection logic.
+ * What this replaces:
+ *
+ *   - **No blocklist at all.** There was no defederation mechanism anywhere in
+ *     the codebase. An abusive instance could only be stopped by turning
+ *     federation off entirely.
+ *   - **Per-process, in-memory rate limiting** (`actorRequestCounts`, a bare
+ *     `Map`). It reset on restart and was not shared across replicas, so the
+ *     ceiling was really `limit × replicas` and a rolling deploy cleared it.
+ *     It was also keyed per ACTOR, which is free to mint: one instance can
+ *     present a thousand actor URIs and get a thousand buckets. Limits are now
+ *     keyed by the remote INSTANCE DOMAIN, which is what actually costs an
+ *     attacker something, and they use the shared distributed token bucket.
+ *   - **`detectAbuse` that always returned false** and, in its catch, returned
+ *     false again — i.e. an error in the abuse checker ADMITTED the activity.
+ *     Nothing about "we failed to evaluate this" implies "this is fine".
+ *
+ * Failure policy: `validateActivity` fails CLOSED. If the limiter or the
+ * blocklist cannot be consulted, the activity is rejected. Federation traffic
+ * is not latency-critical and the sender will retry; admitting unevaluated
+ * traffic from arbitrary instances is the worse trade.
  */
 
 import type { Env } from "../../../env.js";
-import { getLogger, Logger } from "../../logger.js";
-import { getActivityPubBaseUrl } from "../fedify/context.js";
+import { getLogger } from "../../logger.js";
+import { consumeSharedBucket } from "../../rate-limit.js";
 
 /**
  * Rate limit configuration
- *
- * Fedify provides rate limiting, but we can configure it here.
  */
 export interface RateLimitConfig {
   requestsPerMinute: number;
@@ -30,119 +45,247 @@ export const DEFAULT_RATE_LIMITS: RateLimitConfig = {
   requestsPerDay: 10000,
 };
 
-// In-memory per-actor request tracking (resets on server restart)
-const actorRequestCounts = new Map<string, { count: number; windowStart: number }>();
+/** Bucket-key namespace for federation limits. */
+const AP_BUCKET_PREFIX = "ap:instance";
+
+/** Why an activity was refused admission. */
+export type AdmissionDenial =
+  | "blocked-instance"
+  | "rate-limited"
+  | "unresolvable-origin"
+  | "abusive"
+  | "check-failed";
+
+export interface AdmissionResult {
+  readonly admitted: boolean;
+  readonly reason?: AdmissionDenial;
+  readonly detail?: string;
+}
+
+const ADMITTED: AdmissionResult = { admitted: true };
 
 /**
- * Check rate limit for an actor.
+ * Extra environment this module reads. All optional: a deployment that
+ * configures nothing still gets domain-keyed rate limiting via the shared
+ * limiter's in-memory fallback.
+ */
+export interface AbusePreventionEnv {
+  /**
+   * Comma- or whitespace-separated domains to refuse outright. A leading `.`
+   * or `*.` blocks the domain and everything under it.
+   */
+  ACTIVITYPUB_BLOCKED_DOMAINS?: string;
+  /** Per-minute inbox request ceiling per remote instance. */
+  ACTIVITYPUB_INSTANCE_RATE_LIMIT?: string;
+}
+
+/**
+ * Parse the blocklist into a normalised set. Entries are lowercased and
+ * stripped of a leading `.`/`*.`; the suffix semantics are applied at match
+ * time so `example.com` also blocks `mastodon.example.com`.
+ */
+export function parseBlockedDomains(raw: string | undefined): Set<string> {
+  if (!raw) return new Set();
+  return new Set(
+    raw
+      .split(/[\s,]+/)
+      .map((d) => d.trim().toLowerCase().replace(/^\*?\./, ""))
+      .filter((d) => d.length > 0),
+  );
+}
+
+/**
+ * True when `domain` is the blocked domain or a subdomain of it.
  *
- * Uses a sliding window per actor URI. Returns false (and the request
- * should be rejected with 429) when the actor exceeds the limit.
+ * Suffix matching is on LABEL boundaries — `notexample.com` must not be caught
+ * by a block on `example.com`.
+ */
+export function isDomainBlocked(
+  domain: string,
+  blocked: ReadonlySet<string>,
+): boolean {
+  if (blocked.size === 0) return false;
+  const host = domain.toLowerCase().replace(/\.$/, "");
+  for (const entry of blocked) {
+    if (host === entry || host.endsWith(`.${entry}`)) return true;
+  }
+  return false;
+}
+
+/** Extract the instance domain from an actor URI, or null if unparseable. */
+export function instanceDomainOf(actorUri: string): string | null {
+  try {
+    const host = new URL(actorUri).hostname.toLowerCase();
+    return host.length > 0 ? host : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Check the per-INSTANCE rate limit using the shared distributed bucket.
+ *
+ * Keyed by domain rather than actor URI: actor URIs are free to mint, so a
+ * per-actor bucket is not a limit on anything an attacker cannot trivially
+ * multiply.
+ *
+ * @param actorUri - Actor URI (only its host is used)
+ * @param env - Environment
+ * @returns false when the instance has exceeded its ceiling
+ * @throws when the limiter cannot be consulted — the caller must fail closed
  */
 export async function checkRateLimit(
   actorUri: string,
   env: Env,
 ): Promise<boolean> {
-  const now = Date.now();
-  const windowMs = 60_000; // 1-minute window
-  const maxPerWindow = DEFAULT_RATE_LIMITS.requestsPerMinute;
+  const domain = instanceDomainOf(actorUri);
+  if (!domain) return false;
 
-  const entry = actorRequestCounts.get(actorUri);
+  const configured = Number.parseInt(
+    (env as AbusePreventionEnv).ACTIVITYPUB_INSTANCE_RATE_LIMIT ?? "",
+    10,
+  );
+  const limit =
+    Number.isFinite(configured) && configured > 0
+      ? configured
+      : DEFAULT_RATE_LIMITS.requestsPerMinute;
 
-  if (!entry || now - entry.windowStart > windowMs) {
-    // New window
-    actorRequestCounts.set(actorUri, { count: 1, windowStart: now });
-    return true;
-  }
+  const result = await consumeSharedBucket(
+    env as any,
+    `${AP_BUCKET_PREFIX}:${domain}`,
+    limit,
+    60,
+  );
 
-  entry.count++;
-  if (entry.count > maxPerWindow) {
-    const logger = getLogger();
-    logger.warn("[AbusePrevention] Rate limit exceeded", {
-      actorUri,
-      count: entry.count,
-      limit: maxPerWindow,
+  if (!result.allowed) {
+    getLogger().warn("[AbusePrevention] Instance rate limit exceeded", {
+      domain,
+      limit,
+      retryAfter: result.retryAfter,
     });
-    return false;
   }
 
-  return true;
+  return result.allowed;
 }
 
 /**
- * Detect abusive activity patterns
+ * Detect abusive activity patterns.
  *
- * Custom abuse detection logic beyond Fedify's built-in protections.
+ * Currently structural only — the heuristic work (spam scoring, burst
+ * detection) is deliberately not invented here. What matters for this change
+ * is the FAILURE behaviour: the previous implementation swallowed its own
+ * errors and returned `false` (= not abusive = admit). It now signals the
+ * failure to the caller by throwing, and the caller fails closed.
  *
  * @param activity - Activity to check
  * @param actorUri - Actor URI
- * @param env - Cloudflare Workers environment
- * @returns True if activity appears abusive, false otherwise
+ * @param env - Environment
+ * @returns True if the activity appears abusive
  */
 export function detectAbuse(
   activity: any,
   actorUri: string,
   env: Env,
 ): boolean {
-  try {
-    const logger = getLogger();
-    // Check for suspicious activity patterns
-    // 1. Rapid activity creation
-    // 2. Spam-like content
-    // 3. Suspicious actor patterns
-
-    // Custom abuse detection logic can be implemented here
-    // Fedify handles rate limiting and signature verification
-
-    return false;
-  } catch (error) {
-    // getLogger might fail, try to get logger again for error logging
-    try {
-      const logger = getLogger();
-      logger.error("[AbusePrevention] Error detecting abuse", {
-        error: (error as Error).message,
-        actorUri,
-      });
-    } catch {
-      // If logger also fails, just continue
-    }
-    return false; // Fail open on error (allow activity)
+  // A malformed activity is not something we should be storing.
+  if (!activity || typeof activity !== "object") return true;
+  if (typeof activity.type !== "string" || activity.type.length === 0) {
+    return true;
   }
+  return false;
 }
 
 /**
- * Validate activity for abuse prevention
+ * Admission check for an inbound federated activity.
  *
- * Combines rate limiting and abuse detection.
+ * Order matters: the blocklist is consulted first, so a defederated instance
+ * cannot consume rate-limit budget or reach any further logic.
  *
  * @param activity - Activity to validate
  * @param actorUri - Actor URI
- * @param env - Cloudflare Workers environment
- * @returns True if activity is safe, false if abusive
+ * @param env - Environment
+ * @returns Admission decision, with the reason when refused
+ */
+export async function admitActivity(
+  activity: any,
+  actorUri: string,
+  env: Env,
+): Promise<AdmissionResult> {
+  const logger = getLogger();
+
+  const domain = instanceDomainOf(actorUri);
+  if (!domain) {
+    return {
+      admitted: false,
+      reason: "unresolvable-origin",
+      detail: `cannot derive an instance domain from ${actorUri}`,
+    };
+  }
+
+  // 1. Defederation.
+  const blocked = parseBlockedDomains(
+    (env as AbusePreventionEnv).ACTIVITYPUB_BLOCKED_DOMAINS,
+  );
+  if (isDomainBlocked(domain, blocked)) {
+    logger.warn("[AbusePrevention] Rejecting activity from blocked instance", {
+      domain,
+    });
+    return { admitted: false, reason: "blocked-instance", detail: domain };
+  }
+
+  // 2. Shared, domain-keyed rate limit. A limiter failure is NOT an admission.
+  try {
+    if (!(await checkRateLimit(actorUri, env))) {
+      return { admitted: false, reason: "rate-limited", detail: domain };
+    }
+  } catch (error) {
+    logger.error(
+      "[AbusePrevention] Rate-limit check failed — failing CLOSED",
+      { domain, error: (error as Error).message },
+    );
+    return {
+      admitted: false,
+      reason: "check-failed",
+      detail: "rate limiter unavailable",
+    };
+  }
+
+  // 3. Abuse heuristics. Same rule: an error is a refusal.
+  try {
+    if (detectAbuse(activity, actorUri, env)) {
+      logger.warn("[AbusePrevention] Abusive activity detected", {
+        domain,
+        activityType: activity?.type,
+      });
+      return { admitted: false, reason: "abusive", detail: domain };
+    }
+  } catch (error) {
+    logger.error(
+      "[AbusePrevention] Abuse detection failed — failing CLOSED",
+      { domain, error: (error as Error).message },
+    );
+    return {
+      admitted: false,
+      reason: "check-failed",
+      detail: "abuse detection unavailable",
+    };
+  }
+
+  return ADMITTED;
+}
+
+/**
+ * Boolean wrapper over {@link admitActivity}, kept for existing call sites.
+ *
+ * @param activity - Activity to validate
+ * @param actorUri - Actor URI
+ * @param env - Environment
+ * @returns True if the activity is safe to admit
  */
 export async function validateActivity(
   activity: any,
   actorUri: string,
   env: Env,
 ): Promise<boolean> {
-  const logger = getLogger();
-
-  // Check rate limit
-  const withinRateLimit = await checkRateLimit(actorUri, env);
-  if (!withinRateLimit) {
-    logger.warn("[AbusePrevention] Rate limit exceeded", { actorUri });
-    return false;
-  }
-
-  // Check for abuse patterns
-  const isAbusive = detectAbuse(activity, actorUri, env);
-  if (isAbusive) {
-    logger.warn("[AbusePrevention] Abusive activity detected", {
-      actorUri,
-      activityType: activity.type,
-    });
-    return false;
-  }
-
-  return true;
+  return (await admitActivity(activity, actorUri, env)).admitted;
 }

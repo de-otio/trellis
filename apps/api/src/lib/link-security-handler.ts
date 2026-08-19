@@ -10,6 +10,12 @@
 
 import type { Env } from "../env.js";
 import { getLogger, Logger, type LoggerEnv } from "./logger.js";
+import { classifyHostname, parseIpLiteral } from "./net/ip-guard.js";
+import {
+  assertUrlSafe,
+  SsrfBlockedError,
+  type DnsResolver,
+} from "./net/safe-fetch.js";
 
 /**
  * Normalized URL structure
@@ -86,29 +92,6 @@ const DANGEROUS_SCHEMES = [
  * Allowed URL schemes
  */
 const ALLOWED_SCHEMES = ["http:", "https:", "mailto:", "tel:"];
-
-/**
- * Private IPv4 ranges
- */
-const PRIVATE_IPV4_RANGES = [
-  { start: 0x0a000000, end: 0x0affffff }, // 10.0.0.0/8
-  { start: 0xac100000, end: 0xac1fffff }, // 172.16.0.0/12
-  { start: 0xc0a80000, end: 0xc0a8ffff }, // 192.168.0.0/16
-  { start: 0x7f000000, end: 0x7fffffff }, // 127.0.0.0/8
-  { start: 0xa9fe0000, end: 0xa9feffff }, // 169.254.0.0/16 (link-local)
-];
-
-/**
- * Internal hostname patterns
- */
-const INTERNAL_HOSTNAME_PATTERNS = [
-  /^localhost$/i,
-  /^localhost\./i, // localhost.localdomain, localhost.local, etc.
-  /\.local$/i,
-  /\.corp$/i,
-  /\.internal$/i,
-  /\.lan$/i,
-];
 
 export class LinkSecurityHandler {
   private logger: Logger;
@@ -273,6 +256,58 @@ export class LinkSecurityHandler {
   }
 
   /**
+   * Validate a URL including DNS resolution (full SSRF check).
+   *
+   * `validateUrlSync` is a lexical gate: it sees the URL text and nothing else,
+   * so `metadata.attacker.com` — a perfectly ordinary-looking name whose A
+   * record is 169.254.169.254 — passes it. This variant runs the same lexical
+   * gate and then resolves the name, rejecting if ANY resolved A or AAAA record
+   * lands in a blocked range.
+   *
+   * Use this wherever the URL is about to be fetched server-side, or handed to
+   * a user as a destination. The sync form remains correct for the post/comment
+   * write path, which only records and displays the link (adding a DNS round
+   * trip per link to every write would buy nothing there, since no socket is
+   * opened to the host).
+   *
+   * @param url - URL to validate
+   * @param options - Optional injected resolver (tests)
+   * @returns Validation result; BLOCKED carries the specific reason
+   */
+  async validateUrl(
+    url: string,
+    options: { resolver?: DnsResolver } = {},
+  ): Promise<LinkValidationResult> {
+    const lexical = this.validateUrlSync(url);
+    if (lexical.status === LinkStatus.BLOCKED) {
+      return lexical;
+    }
+
+    try {
+      await assertUrlSafe(url, { resolver: options.resolver });
+    } catch (error) {
+      if (error instanceof SsrfBlockedError) {
+        this.logger.warn("URL failed SSRF validation", {
+          url,
+          reason: error.reason,
+          detail: error.detail,
+        });
+        return {
+          status: LinkStatus.BLOCKED,
+          reason:
+            error.reason === "dns-failure"
+              ? "Host could not be resolved"
+              : "Internal network access blocked",
+          normalizedUrl: lexical.normalizedUrl,
+        };
+      }
+      throw error;
+    }
+
+    return lexical;
+  }
+
+  /**
    * Validate URL scheme
    *
    * @param scheme - URL scheme to validate
@@ -304,7 +339,21 @@ export class LinkSecurityHandler {
   }
 
   /**
-   * Check if host/domain is internal (SSRF protection)
+   * Check whether a host is internal (SSRF protection).
+   *
+   * Delegates entirely to `net/ip-guard.classifyHostname`, which normalises the
+   * host through a real IP parser (decimal / hex / octal / short / IPv4-mapped
+   * forms) and range-checks it against loopback, RFC1918, link-local, ULA,
+   * CGNAT, multicast, reserved and documentation space, plus the internal-name
+   * patterns. The hand-rolled tables that used to live here covered five IPv4
+   * ranges and four IPv6 prefixes, and its port-stripping (`host.split(":")[0]`)
+   * mangled bracketed IPv6 into `"["`, so the IP branches never ran for IPv6
+   * hosts at all — those were caught only by the raw-IP fallback below, with a
+   * misleading reason.
+   *
+   * This is the LEXICAL layer only. It cannot see a DNS answer, so a name like
+   * `metadata.attacker.com` with an A record of 169.254.169.254 passes here.
+   * Anything that will actually open a socket must use {@link validateUrl}.
    *
    * @param host - Hostname or IP address (may include port)
    * @param domain - Domain name (without port)
@@ -314,125 +363,43 @@ export class LinkSecurityHandler {
     host: string,
     domain: string,
   ): { allowed: boolean; reason?: string } {
-    // Extract hostname without port for IP checking
-    // Handle IPv6 addresses in brackets: [::1]:8080 -> [::1 -> ::1
-    let hostnameWithoutPort = host.split(":")[0];
-    if (hostnameWithoutPort.startsWith("[")) {
-      hostnameWithoutPort = hostnameWithoutPort.substring(1);
-    }
+    const target = domain || host;
+    // Hostless schemes (mailto:, tel:) never open a socket — the scheme
+    // allowlist is the whole check for them.
+    if (!target) return { allowed: true };
 
-    // Check for localhost explicitly (before other patterns)
-    // Values are already lowercased from normalizeUrl, but check all variations
-    const checkLocalhost = (value: string): boolean => {
-      if (!value) return false;
-      const lower = value.toLowerCase();
-      return lower === "localhost" || lower.startsWith("localhost.");
+    const verdict = classifyHostname(target);
+    if (!verdict.blocked) return { allowed: true };
+
+    if (verdict.reason === "internal-hostname") {
+      return { allowed: false, reason: "Internal hostname detected" };
+    }
+    // Reason wording is preserved from the previous implementation so existing
+    // callers, logs and alerts keep matching; only the classification behind it
+    // got stricter.
+    const literal = parseIpLiteral(target.replace(/^\[|\]$/g, ""));
+    return {
+      allowed: false,
+      reason:
+        literal?.family === 6
+          ? "IPv6 internal range detected"
+          : "Private IP range detected",
     };
-
-    if (
-      checkLocalhost(domain) ||
-      checkLocalhost(hostnameWithoutPort) ||
-      checkLocalhost(host)
-    ) {
-      return {
-        allowed: false,
-        reason: "Internal hostname detected",
-      };
-    }
-
-    // Check for internal hostname patterns
-    for (const pattern of INTERNAL_HOSTNAME_PATTERNS) {
-      if (
-        pattern.test(host) ||
-        pattern.test(hostnameWithoutPort) ||
-        pattern.test(domain)
-      ) {
-        return {
-          allowed: false,
-          reason: "Internal hostname detected",
-        };
-      }
-    }
-
-    // Check for IPv4 private ranges (use hostname without port)
-    const ipv4Match = hostnameWithoutPort.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
-    if (ipv4Match) {
-      // Use unsigned 32-bit arithmetic to avoid overflow
-      const ip =
-        ((parseInt(ipv4Match[1]) << 24) |
-          (parseInt(ipv4Match[2]) << 16) |
-          (parseInt(ipv4Match[3]) << 8) |
-          parseInt(ipv4Match[4])) >>>
-        0;
-
-      for (const range of PRIVATE_IPV4_RANGES) {
-        if (ip >= range.start && ip <= range.end) {
-          return {
-            allowed: false,
-            reason: "Private IP range detected",
-          };
-        }
-      }
-    }
-
-    // Check for IPv6 internal ranges
-    // Domain is already without brackets (from normalizeUrl using hostname)
-    if (
-      domain === "::1" ||
-      domain.startsWith("fe80:") ||
-      domain.startsWith("fc00:") ||
-      domain.startsWith("fd00:")
-    ) {
-      return {
-        allowed: false,
-        reason: "IPv6 internal range detected",
-      };
-    }
-
-    return { allowed: true };
   }
 
   /**
-   * Check if domain is a raw IP address
+   * Check whether a host is a raw IP literal in any encoding.
+   *
+   * Policy (unchanged): a bare IP URL is refused even when the address is
+   * public — a legitimate link has a name. Private/reserved addresses are
+   * reported by {@link checkInternalAccess} first, so this only ever fires for
+   * public literals.
    *
    * @param domain - Domain to check
    * @returns True if domain is a raw IP
    */
   private isRawIpUrl(domain: string): boolean {
-    // Check for IPv4 (only if it's not already blocked as private IP)
-    // This check should only catch public IPs
-    if (/^\d+\.\d+\.\d+\.\d+$/.test(domain)) {
-      // Check if it's a private IP - if so, it's already handled by checkInternalAccess
-      const parts = domain.split(".").map(Number);
-      // Use unsigned 32-bit arithmetic to avoid overflow
-      const ip =
-        ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>>
-        0;
-
-      for (const range of PRIVATE_IPV4_RANGES) {
-        if (ip >= range.start && ip <= range.end) {
-          return false; // Private IPs are handled separately
-        }
-      }
-      return true; // Public IP
-    }
-
-    // Check for IPv6 (simplified check)
-    const ipv6Domain = domain.replace(/^\[|\]$/g, "");
-    if (/^[0-9a-f:]+$/i.test(ipv6Domain) && ipv6Domain.includes(":")) {
-      // Check if it's an internal IPv6 - if so, it's already handled
-      if (
-        ipv6Domain === "::1" ||
-        ipv6Domain.startsWith("fe80:") ||
-        ipv6Domain.startsWith("fc00:") ||
-        ipv6Domain.startsWith("fd00:")
-      ) {
-        return false; // Internal IPv6s are handled separately
-      }
-      return true; // Public IPv6
-    }
-
-    return false;
+    return parseIpLiteral(domain.replace(/^\[|\]$/g, "")) !== null;
   }
 
   /**

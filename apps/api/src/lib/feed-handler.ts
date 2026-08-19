@@ -346,8 +346,14 @@ export class FeedHandler {
       );
 
       // Get friend user IDs for visibility filtering (relationship edges,
-      // tier ≤ 1 — see lib/friend-ids.ts for the convergence definition)
-      const friendIds = await getFriendUserIds(db, session.userId);
+      // tier ≤ 1 — see lib/friend-ids.ts for the convergence definition).
+      // Tenant-scoped: the friend set must come from the SAME tenant as the
+      // posts it gates, or an edge created in another tenant widens this feed.
+      const friendIds = await getFriendUserIds(
+        db,
+        session.userId,
+        activeTenantId,
+      );
 
       // Build visibility filter (shared with getPost — see
       // buildPostAudienceFilter; the two paths must not diverge).
@@ -744,6 +750,7 @@ export class FeedHandler {
     const friendIds = await getFriendUserIds(
       DataRouter.getDatabaseForRegion(region, env, undefined, session.userId),
       session.userId,
+      activeTenantId,
     );
 
     const post = await withQueryTimeoutAndRetry(

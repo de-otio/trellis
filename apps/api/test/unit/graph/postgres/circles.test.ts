@@ -164,6 +164,81 @@ describe("CircleOps", () => {
       expect(decoded.createdAt).toBe("2026-02-02T00:00:00.000Z");
     });
 
+    // -----------------------------------------------------------------------
+    // L6 — the client-supplied cursor is parsed, not trusted
+    // (security review 2026-08, lane 7 LOW-6)
+    // -----------------------------------------------------------------------
+    describe("cursor validation", () => {
+      /** Base64-encode an arbitrary cursor payload, as a client would. */
+      const encode = (payload: unknown) =>
+        Buffer.from(JSON.stringify(payload)).toString("base64");
+
+      /** The bound parameters of the Nth $queryRaw call. */
+      const valuesOf = (n: number) =>
+        (prisma.$queryRaw.mock.calls[n][0] as { values: unknown[] }).values;
+
+      it("does NOT 500 on a cursor whose createdAt is not a date", async () => {
+        // The defect: `new Date("banana")` is an Invalid Date, which Prisma
+        // rejects when binding, which surfaced as a 500. Any authenticated
+        // caller could produce it by editing one base64 field on the hot feed
+        // path — a free error-rate lever.
+        const cursor = encode({ createdAt: "banana", postId: "p1" });
+
+        await expect(
+          ops.getVisiblePostIds(USER, 0, since, { limit: 10, cursor }, TENANT),
+        ).resolves.toMatchObject({ items: [], hasMore: false });
+      });
+
+      it("ignores the malformed cursor entirely rather than binding a bad date", async () => {
+        const cursor = encode({ createdAt: "banana", postId: "p1" });
+
+        await ops.getVisiblePostIds(USER, 0, since, { limit: 10, cursor }, TENANT);
+
+        // No Invalid Date reached the parameter list.
+        for (const v of valuesOf(0)) {
+          if (v instanceof Date) expect(Number.isNaN(v.getTime())).toBe(false);
+        }
+      });
+
+      it("rejects a cursor with a non-string createdAt (type confusion)", async () => {
+        // `new Date({}).getTime()` is NaN; `new Date([])` is the epoch. Both
+        // are shapes JSON.parse will happily hand back.
+        for (const bad of [{}, [], 0, null, true]) {
+          prisma.$queryRaw.mockClear();
+          const cursor = encode({ createdAt: bad, postId: "p1" });
+          await expect(
+            ops.getVisiblePostIds(USER, 0, since, { limit: 10, cursor }, TENANT),
+          ).resolves.toBeDefined();
+        }
+      });
+
+      it("still honours a well-formed cursor, binding a real Date", async () => {
+        // Non-vacuity: validation must not have turned the cursor off.
+        const iso = "2026-02-02T00:00:00.000Z";
+        const cursor = encode({ createdAt: iso, postId: "p2" });
+
+        await ops.getVisiblePostIds(USER, 0, since, { limit: 10, cursor }, TENANT);
+
+        const dates = valuesOf(0).filter(
+          (v): v is Date => v instanceof Date && v.toISOString() === iso,
+        );
+        expect(dates.length).toBeGreaterThan(0);
+        expect(valuesOf(0)).toContain("p2");
+      });
+
+      it("ignores a cursor that is not base64 JSON at all", async () => {
+        await expect(
+          ops.getVisiblePostIds(
+            USER,
+            0,
+            since,
+            { limit: 10, cursor: "!!!!not-base64!!!!" },
+            TENANT,
+          ),
+        ).resolves.toBeDefined();
+      });
+    });
+
     it("coerces a numeric/bigint resolvedTier from the driver", async () => {
       prisma.$queryRaw
         .mockResolvedValueOnce([

@@ -9,6 +9,12 @@
 
 import type { Env } from "../../env.js";
 import { Logger } from "../logger.js";
+import {
+  safeFetchJson,
+  SsrfBlockedError,
+  type DnsResolver,
+  type Transport,
+} from "../net/safe-fetch.js";
 import { JsonLdService } from "./jsonld.js";
 import { isStandaloneModeEnabled, isRemoteUri } from "./standalone-mode.js";
 
@@ -18,6 +24,14 @@ import { isStandaloneModeEnabled, isRemoteUri } from "./standalone-mode.js";
 interface CachedDocument {
   document: object;
   expires: number;
+  /** Approximate serialized size, used to bound the cache by bytes. */
+  bytes: number;
+}
+
+/** Injection seam for tests — never set in production. */
+export interface RemoteFetchOptions {
+  resolver?: DnsResolver;
+  transport?: Transport;
 }
 
 /**
@@ -30,10 +44,42 @@ export class RemoteFetchService {
   private static readonly DEFAULT_CACHE_TTL = 3600000; // 1 hour in milliseconds
 
   /**
+   * Hard ceiling on a single remote document. AP actor and object documents are
+   * kilobytes; anything past this is a hostile instance trying to make us
+   * buffer. Enforced while streaming, BEFORE any JSON parse.
+   */
+  private static readonly MAX_DOCUMENT_BYTES = 256 * 1024;
+
+  /** Whole-exchange budget for one remote dereference. */
+  private static readonly FETCH_TIMEOUT_MS = 10_000;
+
+  /** Redirect hops allowed; each one is re-validated by the helper. */
+  private static readonly MAX_REDIRECTS = 3;
+
+  /**
+   * Cache ceiling in BYTES, not entries. The previous 1000-entry cap said
+   * nothing about memory: 1000 documents of 256 KiB each is 256 MiB, which a
+   * hostile instance could park in the process for an hour.
+   */
+  private static readonly MAX_CACHE_BYTES = 8 * 1024 * 1024;
+
+  /**
    * In-memory cache (for Cloudflare Workers)
    * In production, consider using Cloudflare KV or Durable Objects for distributed caching
    */
   private static cache = new Map<string, CachedDocument>();
+
+  /** Running total of `bytes` across `cache`, kept in step with every write. */
+  private static cacheBytes = 0;
+
+  /**
+   * Fallback fetch options used when a caller passes none.
+   *
+   * TEST SEAM ONLY — production leaves this empty, so the real resolver and
+   * the pinned-socket undici transport are used. Tests set it once instead of
+   * threading an options argument through every call site.
+   */
+  static defaultFetchOptions: RemoteFetchOptions = {};
 
   /**
    * Fetch remote actor document
@@ -47,6 +93,7 @@ export class RemoteFetchService {
     actorUri: string,
     env: Env,
     logger?: Logger,
+    options: RemoteFetchOptions = {},
   ): Promise<object | null> {
     // Validate URI
     if (!this.isValidUri(actorUri)) {
@@ -88,26 +135,37 @@ export class RemoteFetchService {
     }
 
     try {
-      // Fetch actor document
-      const response = await fetch(actorUri, {
+      // Fetch through the SSRF-safe helper: https-only, DNS resolved and every
+      // A/AAAA record range-checked before connect, socket pinned to the
+      // validated address, each redirect re-validated, timeout, and the body
+      // capped BEFORE it is parsed. The previous bare `fetch(actorUri)` had
+      // none of that — an inbound activity naming
+      // `actor: "http://169.254.169.254/…"` made this a metadata reader, and
+      // an unbounded `response.json()` made it an OOM primitive.
+      const { status, data } = await safeFetchJson<any>(actorUri, {
         headers: {
-          Accept:
+          accept:
             'application/activity+json, application/ld+json; profile="https://www.w3.org/ns/activitystreams"',
-          "User-Agent": "Trellis ActivityPub Client/1.0",
+          "user-agent": "Trellis ActivityPub Client/1.0",
         },
-        // Cloudflare Workers fetch supports redirects by default
+        allowedProtocols: ["https:"],
+        timeoutMs: this.FETCH_TIMEOUT_MS,
+        maxRedirects: this.MAX_REDIRECTS,
+        maxBytes: this.MAX_DOCUMENT_BYTES,
+        resolver: options.resolver ?? this.defaultFetchOptions.resolver,
+        transport: options.transport ?? this.defaultFetchOptions.transport,
       });
 
-      if (!response.ok) {
+      if (status < 200 || status >= 300 || !data) {
         if (logger) {
           logger.warn(
-            `[RemoteFetchService] Failed to fetch actor ${actorUri}: ${response.status} ${response.statusText}`,
+            `[RemoteFetchService] Failed to fetch actor ${actorUri}: ${status}`,
           );
         }
         return null;
       }
 
-      const actor = (await response.json()) as any;
+      const actor = data;
 
       // Validate actor document
       if (!this.isValidActor(actor)) {
@@ -129,10 +187,16 @@ export class RemoteFetchService {
       return actor as object;
     } catch (error: any) {
       if (logger) {
-        logger.error(
-          `[RemoteFetchService] Error fetching actor ${actorUri}:`,
-          error,
-        );
+        if (error instanceof SsrfBlockedError) {
+          logger.warn(
+            `[RemoteFetchService] Refused actor fetch ${actorUri}: ${error.reason} — ${error.detail}`,
+          );
+        } else {
+          logger.error(
+            `[RemoteFetchService] Error fetching actor ${actorUri}:`,
+            error,
+          );
+        }
       }
       return null;
     }
@@ -150,6 +214,7 @@ export class RemoteFetchService {
     objectUri: string,
     env: Env,
     logger?: Logger,
+    options: RemoteFetchOptions = {},
   ): Promise<object | null> {
     // Validate URI
     if (!this.isValidUri(objectUri)) {
@@ -191,25 +256,31 @@ export class RemoteFetchService {
     }
 
     try {
-      // Fetch object document
-      const response = await fetch(objectUri, {
+      // Same guarantees as fetchActor — see the comment there.
+      const { status, data } = await safeFetchJson<any>(objectUri, {
         headers: {
-          Accept:
+          accept:
             'application/activity+json, application/ld+json; profile="https://www.w3.org/ns/activitystreams"',
-          "User-Agent": "Trellis ActivityPub Client/1.0",
+          "user-agent": "Trellis ActivityPub Client/1.0",
         },
+        allowedProtocols: ["https:"],
+        timeoutMs: this.FETCH_TIMEOUT_MS,
+        maxRedirects: this.MAX_REDIRECTS,
+        maxBytes: this.MAX_DOCUMENT_BYTES,
+        resolver: options.resolver ?? this.defaultFetchOptions.resolver,
+        transport: options.transport ?? this.defaultFetchOptions.transport,
       });
 
-      if (!response.ok) {
+      if (status < 200 || status >= 300 || !data) {
         if (logger) {
           logger.warn(
-            `[RemoteFetchService] Failed to fetch object ${objectUri}: ${response.status} ${response.statusText}`,
+            `[RemoteFetchService] Failed to fetch object ${objectUri}: ${status}`,
           );
         }
         return null;
       }
 
-      const obj = (await response.json()) as any;
+      const obj = data;
 
       // Validate object document
       if (!this.isValidObject(obj)) {
@@ -231,10 +302,16 @@ export class RemoteFetchService {
       return obj as object;
     } catch (error: any) {
       if (logger) {
-        logger.error(
-          `[RemoteFetchService] Error fetching object ${objectUri}:`,
-          error,
-        );
+        if (error instanceof SsrfBlockedError) {
+          logger.warn(
+            `[RemoteFetchService] Refused object fetch ${objectUri}: ${error.reason} — ${error.detail}`,
+          );
+        } else {
+          logger.error(
+            `[RemoteFetchService] Error fetching object ${objectUri}:`,
+            error,
+          );
+        }
       }
       return null;
     }
@@ -343,12 +420,16 @@ export class RemoteFetchService {
   }
 
   /**
-   * Validate URI format
+   * Validate URI format.
+   *
+   * HTTPS only (F5). Permitting `http:` meant a remote actor could be
+   * dereferenced in cleartext — the public key we then trust for signature
+   * verification would be whatever a network attacker chose to return. There
+   * is no federation scenario where a plaintext actor document is acceptable.
    */
   private static isValidUri(uri: string): boolean {
     try {
-      const url = new URL(uri);
-      return url.protocol === "https:" || url.protocol === "http:";
+      return new URL(uri).protocol === "https:";
     } catch {
       return false;
     }
@@ -416,7 +497,7 @@ export class RemoteFetchService {
 
     // Check if expired
     if (cached.expires < Date.now()) {
-      this.cache.delete(uri);
+      this.evict(uri);
       return null;
     }
 
@@ -424,34 +505,63 @@ export class RemoteFetchService {
   }
 
   /**
-   * Cache document
+   * Cache a document, keeping the cache bounded by BYTES.
+   *
+   * The old cap was 1000 *entries*, which said nothing about memory — 1000
+   * documents at the 256 KiB ceiling is 256 MiB a hostile instance could park
+   * in the process for an hour. We now track the serialized size of each entry
+   * and evict (expired first, then oldest-inserted) until the total fits.
    */
   private static setCached(
     uri: string,
     document: object,
     ttl: number = this.DEFAULT_CACHE_TTL,
   ): void {
-    this.cache.set(uri, {
-      document,
-      expires: Date.now() + ttl,
-    });
+    let bytes: number;
+    try {
+      bytes = Buffer.byteLength(JSON.stringify(document), "utf8");
+    } catch {
+      // Unserializable (cycles) — do not cache what we cannot measure.
+      return;
+    }
 
-    // Clean up expired entries periodically (simple approach)
-    // In production, use a more sophisticated cache eviction strategy
-    if (this.cache.size > 1000) {
+    // A single document larger than the whole budget is never cached.
+    if (bytes > this.MAX_CACHE_BYTES) return;
+
+    this.evict(uri); // replace cleanly if already present
+    this.cache.set(uri, { document, expires: Date.now() + ttl, bytes });
+    this.cacheBytes += bytes;
+
+    if (this.cacheBytes > this.MAX_CACHE_BYTES) {
       this.cleanupCache();
     }
   }
 
+  /** Remove one entry and keep the byte total in step. */
+  private static evict(uri: string): void {
+    const existing = this.cache.get(uri);
+    if (!existing) return;
+    this.cacheBytes -= existing.bytes;
+    this.cache.delete(uri);
+  }
+
   /**
-   * Clean up expired cache entries
+   * Drop expired entries, then — if still over budget — the oldest inserted
+   * entries (Map preserves insertion order) until the total fits.
    */
   private static cleanupCache(): void {
     const now = Date.now();
     for (const [key, value] of this.cache.entries()) {
       if (value.expires < now) {
+        this.cacheBytes -= value.bytes;
         this.cache.delete(key);
       }
+    }
+
+    for (const [key, value] of this.cache.entries()) {
+      if (this.cacheBytes <= this.MAX_CACHE_BYTES) break;
+      this.cacheBytes -= value.bytes;
+      this.cache.delete(key);
     }
   }
 
@@ -459,7 +569,7 @@ export class RemoteFetchService {
    * Invalidate cache entry
    */
   static invalidateCache(uri: string): void {
-    this.cache.delete(uri);
+    this.evict(uri);
   }
 
   /**
@@ -467,5 +577,11 @@ export class RemoteFetchService {
    */
   static clearCache(): void {
     this.cache.clear();
+    this.cacheBytes = 0;
+  }
+
+  /** Current cache footprint in bytes — exposed for tests and diagnostics. */
+  static getCacheBytes(): number {
+    return this.cacheBytes;
   }
 }

@@ -14,6 +14,7 @@ import { createPrisma } from "../db.js";
 import { createEmailProvider } from "./email-provider.js";
 
 import { getLogger, Logger, type LoggerEnv } from "./logger.js";
+import { invalidateClaimsForUserId } from "./auth/claims-invalidation.js";
 import * as crypto from "node:crypto";
 
 export interface Env {
@@ -163,6 +164,14 @@ export class UserDeletionHandlerEnhanced {
           "User requested account deletion - grace period active",
       },
     });
+
+    // SEC (claims-cache freshness audit): this is a SUSPENSION path, and a
+    // pre-token-generation cache HIT skips the RDS suspension check entirely.
+    // Without this the account is suspended in Postgres yet keeps minting
+    // fully-privileged JWTs for up to one cache TTL (~1h) — the exact gap the
+    // "G2 finding H3" note in the Lambda warns about. This call site was
+    // missing it.
+    await invalidateClaimsForUserId(db, session.userId, "user.deletion_request");
 
     // Generate 6-digit confirmation code and store with 24h TTL.
     const confirmationCode = crypto.randomInt(100000, 999999).toString();
