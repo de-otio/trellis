@@ -34,8 +34,6 @@
   "dependencies": {},
   "overrides": {
     "@hono/node-server": "^1.19.13",
-    "@opentelemetry/sdk-metrics": {
-      "@opentelemetry/core": "2.8.0"
-    }
+    "@opentelemetry/sdk-metrics": "2.8.0"
   }
 }

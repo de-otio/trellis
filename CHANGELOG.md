@@ -444,6 +444,27 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ### Fixed
 
+- **The `@opentelemetry` override moves the whole family instead of splicing
+  one package.** `GHSA-8988-4f7v-96qf` (unbounded memory allocation in W3C
+  Baggage propagation) was already closed by forcing `@opentelemetry/core` to
+  2.8.0 *inside* the `sdk-metrics` subtree. That works, but it leaves
+  `sdk-metrics@2.7.1` and `resources@2.7.1` — both of which pin `core` to an
+  exact `2.7.1` — running against 2.8.0. Overriding `sdk-metrics` to 2.8.0
+  instead moves the three packages as the unit their exact pins declare them to
+  be, satisfies every pin as published, and collapses the tree to a single
+  deduped `@opentelemetry/core@2.8.0` with no nested duplicates at all.
+
+  Why an override is needed either way: Fedify lets `core` and `sdk-trace-base`
+  float on `^2.7.1` but pins `sdk-metrics` to an exact `2.7.1`, and sdk-metrics
+  pins its own `core`/`resources` to match — so one exact pin drags a whole
+  subtree in beneath itself. There is no bump to take: 2.3.4 is the newest
+  published Fedify and the unreleased 2.4.0 dev line carries the same pin. The
+  33 ActivityPub suites (628 tests) pass unchanged.
+
+  **This does not travel to consumers.** npm honours `overrides` only in the
+  root of an install tree, so anything installing `@de-otio/trellis` still
+  resolves Fedify's exact pin and needs its own entry until Fedify relaxes it
+  upstream.
 - **A human approval now promotes the bytes that were reviewed.** Approving a
   review-queue item performs the same version-pinned copy the automatic path
   performs, and refuses when that version can no longer be resolved. It never
