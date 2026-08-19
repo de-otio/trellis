@@ -362,6 +362,28 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ### Fixed
 
+- **The vulnerable `@opentelemetry/core` copy is out of the tree.** Fedify
+  declares `@opentelemetry/core: "^2.7.1"` and `@opentelemetry/sdk-trace-base:
+  "^2.7.1"` — both of which happily resolve forward — but pins
+  `@opentelemetry/sdk-metrics` to an **exact `2.7.1`**, and sdk-metrics pins its
+  own `core`/`resources` to its exact version in turn. So the install carried
+  two cores: a patched 2.8.0 at the top and a nested 2.7.1 underneath
+  sdk-metrics, the latter vulnerable to `GHSA-8988-4f7v-96qf` (unbounded memory
+  allocation in W3C Baggage propagation, fixed in 2.8.0).
+
+  There is no bump to take: 2.3.4 is the newest published Fedify, and the
+  unreleased 2.4.0 dev line still carries the same exact pin. The fix is an
+  `overrides` entry — but on **`sdk-metrics`, not on `core`**. Overriding `core`
+  alone would put a 2.8+ core under a 2.7 SDK, which is precisely the mixture
+  the exact pin exists to prevent; overriding sdk-metrics moves the family as
+  the unit it is pinned as, and the tree collapses to a single deduped
+  `@opentelemetry/core@2.8.0` under every consumer. The 33 ActivityPub suites
+  (628 tests) pass unchanged.
+
+  **This does not travel to consumers.** npm honours `overrides` only in the
+  root of an install tree, so anything installing `@de-otio/trellis` still
+  resolves Fedify's exact pin and needs the same entry in its own root
+  `package.json` until Fedify relaxes it upstream.
 - **A human approval now promotes the bytes that were reviewed.** Approving a
   review-queue item performs the same version-pinned copy the automatic path
   performs, and refuses when that version can no longer be resolved. It never
