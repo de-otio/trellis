@@ -33,12 +33,23 @@ Do not repurpose `createdAt` as a rolling "last seen" field.
 
 ---
 
-## 2. Chronological-only feed ordering (`FEED_RANKING_VERSION`)
+## 2. Declared, versioned feed ordering (`FEED_RANKING_VERSION`)
 
-The feed is a **fixed, known treatment** for research purposes.
-Engagement-based or algorithmic ranking is prohibited by design to prevent
-dopamine-driven scroll patterns and to keep the research condition stable
-across cohorts and time periods.
+The feed is a **fixed, known treatment** for research purposes. The platform
+invariant is **no covert engagement ordering**: every feed order must be
+declared, versioned, and user-visible, and covert engagement-based ranking is
+prohibited to prevent dopamine-driven scroll patterns and to keep research
+conditions stable across cohorts and time periods.
+
+Version 1 — chronological-only — is the **permanent default** and today the
+only implemented ordering. It is the current mechanism, not a permanent
+foreclosure of ranking: alternative rankers may be introduced as declared,
+versioned, **user-chosen** treatments under the accountability contract in
+`plans/pluggable-ranking/` (doctrine revision 2026-08-20; decision log in
+`analysis/subtractive-filtering/06`). A future ranker must be deterministic
+per version, honest about its optimization target, opt-in per feed (never a
+silent default swap), legible to the user, and must not consume engagement
+signals it has not declared.
 
 The allowed sort field set is pinned in
 `apps/api/src/lib/feed-pagination.ts`:
@@ -60,7 +71,10 @@ A version change constitutes a new experimental condition.  It must be:
 
 - logged in the provenance manifest
   (`analysis/research-platform/` — doc 07),
-- signed off by the research lead before merging.
+- signed off by the research lead before merging,
+- compliant with the pluggable-ranking accountability contract
+  (`plans/pluggable-ranking/`): declared optimization target, deterministic
+  per version, user-chosen, legible, no undeclared engagement inputs.
 
 The companion test suite in
 `apps/api/test/unit/feed-pagination.test.ts` (the
