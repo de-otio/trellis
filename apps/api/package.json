@@ -109,7 +109,7 @@
     "node": ">=22"
   },
   "devDependencies": {
-    "@aws-sdk/client-lambda": "^3.1109.0",
+    "@aws-sdk/client-lambda": "^3.1111.0",
     "@de-otio/trellis-extension-testkit": "^0.1.0",
     "@prisma/client": "^7.9.1",
     "@types/aws-lambda": "^8.10.162",
@@ -122,7 +122,7 @@
     "esbuild": "^0.28.2",
     "fast-check": "^4.9.0",
     "form-data": "^4.0.1",
-    "js-yaml": "^5.2.3",
+    "js-yaml": "^5.3.0",
     "mailparser": "^3.9.15",
     "prettier": "^3.9.6",
     "prisma": "^7.9.1",
