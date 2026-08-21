@@ -77,6 +77,16 @@ jobs:
       - name: Build workspace packages
         run: npm run build -w @de-otio/trellis
 
+      # The worker image compiles the api sources under apps/worker's OWN
+      # tsconfig (no DOM lib), which is stricter about fetch/Response types
+      # than the api build. Nothing else on PR CI exercises that compile —
+      # scaleway-image-push.yml is workflow_dispatch-only — so without this
+      # gate a DOM-only idiom in api code breaks the worker Docker build
+      # weeks later (found 2026-08-21: threat-intel-service.ts TS2322 at
+      # v0.25.0-alpha.9). noEmit typecheck, a few seconds.
+      - name: Typecheck worker (no-DOM lib compile of api sources)
+        run: npx tsc -p apps/worker/tsconfig.json
+
       - name: Lint (TypeScript)
         run: npm run lint -w @de-otio/trellis
 
