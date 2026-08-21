@@ -78,6 +78,11 @@ export {
 // without giving that adapter storage credentials of its own.
 export { createMediaBytesAccess, MediaBytesTooLargeError } from "./lib/media/media-bytes-access.js";
 export type { MediaBytesAccess } from "./lib/media/media-bytes-access.js";
+// The first concrete provider: a generic OpenAI-compatible vision classifier
+// (Scaleway Generative APIs). A MECHANISM — taxonomy prompt, category tokens,
+// endpoint, key and thresholds are all operator config; no vocabulary here.
+export { ScalewayVisionModerationProvider } from "./lib/media/scaleway-vision-provider.js";
+export type { ScalewayVisionModerationConfig } from "./lib/media/scaleway-vision-provider.js";
 // The moderation seam's own contract, so an adapter can implement it against
 // published types rather than a deep import.
 export {
