@@ -54,6 +54,12 @@ const EXPECTED_EXPORTS = [
   // Provider self-identification: the resolver and the fallback it returns.
   "moderationProviderName",
   "UNKNOWN_PROVIDER_NAME",
+  // Concrete providers shipped from core: the generic Scaleway vision
+  // classifier and the two-signal cross-check that composes providers and
+  // returns the worst verdict (injection defence). Both are mechanisms —
+  // vocabulary/thresholds/secrets remain operator config.
+  "ScalewayVisionModerationProvider",
+  "CrossCheckModerationProvider",
 ].sort();
 
 describe("public API surface (@de-otio/trellis)", () => {

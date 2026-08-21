@@ -31,12 +31,32 @@
 
 import type { ModerationDecision } from "./media-lifecycle.js";
 
-/** Severity ladder. Higher is worse; the aggregate is the maximum. */
-const SEVERITY: Readonly<Record<ModerationDecision, number>> = {
+/**
+ * Severity ladder. Higher is worse; the aggregate is the maximum.
+ *
+ * Exported as the single source of truth for "approved < review < quarantine"
+ * so any other worst-wins combiner (e.g. the cross-check provider) ranks
+ * decisions against the same ladder rather than hard-coding a second copy that
+ * could drift if the decision union ever changes.
+ */
+export const SEVERITY: Readonly<Record<ModerationDecision, number>> = {
   approved: 0,
   review: 1,
   quarantine: 2,
 };
+
+/**
+ * The worse of two decisions on the {@link SEVERITY} ladder. `approved` survives
+ * only when BOTH inputs approved; any `quarantine` dominates. Used to combine
+ * independent signals conservatively — an escalation can never be lifted by a
+ * more lenient co-signal.
+ */
+export function worstDecision(
+  a: ModerationDecision,
+  b: ModerationDecision,
+): ModerationDecision {
+  return SEVERITY[a] >= SEVERITY[b] ? a : b;
+}
 
 /**
  * One frame's contribution. A frame that could not be classified carries

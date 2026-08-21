@@ -78,6 +78,18 @@ export {
 // without giving that adapter storage credentials of its own.
 export { createMediaBytesAccess, MediaBytesTooLargeError } from "./lib/media/media-bytes-access.js";
 export type { MediaBytesAccess } from "./lib/media/media-bytes-access.js";
+// The first concrete provider: a generic OpenAI-compatible vision classifier
+// (Scaleway Generative APIs). A MECHANISM — taxonomy prompt, category tokens,
+// endpoint, key and thresholds are all operator config; no vocabulary here.
+export { ScalewayVisionModerationProvider } from "./lib/media/scaleway-vision-provider.js";
+export type { ScalewayVisionModerationConfig } from "./lib/media/scaleway-vision-provider.js";
+// Two-signal cross-check: composes two providers and returns the WORST verdict,
+// so a single signal hijacked by image-borne prompt injection cannot approve on
+// its own. A pass requires both to pass. Wrap the category scorer + an
+// injection-resistant verdict gate; compose under the frame-sampling adapter
+// for video. A mechanism — each composed provider carries its own config.
+export { CrossCheckModerationProvider } from "./lib/media/cross-check-provider.js";
+export type { CrossCheckModerationConfig } from "./lib/media/cross-check-provider.js";
 // The moderation seam's own contract, so an adapter can implement it against
 // published types rather than a deep import.
 export {
