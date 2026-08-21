@@ -83,6 +83,13 @@ export type { MediaBytesAccess } from "./lib/media/media-bytes-access.js";
 // endpoint, key and thresholds are all operator config; no vocabulary here.
 export { ScalewayVisionModerationProvider } from "./lib/media/scaleway-vision-provider.js";
 export type { ScalewayVisionModerationConfig } from "./lib/media/scaleway-vision-provider.js";
+// The injection-resistant second signal: a coarse pass/block VERDICT gate. The
+// category scorer above is defeated by image-borne prompt injection (probe 16);
+// the verdict-enum shape held. Compose the two under CrossCheckModerationProvider
+// (worst-wins) so a hijacked scorer cannot approve on its own. Same mechanism
+// rules — prompt, endpoint, key, block decision are all operator config.
+export { ScalewayVerdictModerationProvider } from "./lib/media/scaleway-verdict-provider.js";
+export type { ScalewayVerdictModerationConfig } from "./lib/media/scaleway-verdict-provider.js";
 // Two-signal cross-check: composes two providers and returns the WORST verdict,
 // so a single signal hijacked by image-borne prompt injection cannot approve on
 // its own. A pass requires both to pass. Wrap the category scorer + an

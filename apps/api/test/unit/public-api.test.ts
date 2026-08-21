@@ -59,6 +59,7 @@ const EXPECTED_EXPORTS = [
   // returns the worst verdict (injection defence). Both are mechanisms —
   // vocabulary/thresholds/secrets remain operator config.
   "ScalewayVisionModerationProvider",
+  "ScalewayVerdictModerationProvider",
   "CrossCheckModerationProvider",
 ].sort();
 
