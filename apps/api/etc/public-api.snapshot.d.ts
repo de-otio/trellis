@@ -822,6 +822,8 @@ export { createMediaBytesAccess, MediaBytesTooLargeError } from "./lib/media/med
 export type { MediaBytesAccess } from "./lib/media/media-bytes-access.js";
 export { ScalewayVisionModerationProvider } from "./lib/media/scaleway-vision-provider.js";
 export type { ScalewayVisionModerationConfig } from "./lib/media/scaleway-vision-provider.js";
+export { ScalewayVerdictModerationProvider } from "./lib/media/scaleway-verdict-provider.js";
+export type { ScalewayVerdictModerationConfig } from "./lib/media/scaleway-verdict-provider.js";
 export { CrossCheckModerationProvider } from "./lib/media/cross-check-provider.js";
 export type { CrossCheckModerationConfig } from "./lib/media/cross-check-provider.js";
 export { ModerationProviderError, isModerationProviderError, NullModerationProvider, assertModerationProviderAllowed, moderationProviderName, UNKNOWN_PROVIDER_NAME, } from "./lib/media/moderation-provider.js";
@@ -3127,6 +3129,70 @@ export declare function getTextModerationProvider(): TextModerationProvider;
 /** Test-only: clear the injected provider so tests don't leak across cases. */
 export declare function __resetTextModerationProviderForTests(): void;
 
+// ===== lib/media/scaleway-verdict-provider.d.ts =====
+import { type ImageRef, type MediaModerationProvider, type ModerationCallOptions, type ModerationDecision, type ModerationVerdict, type S3Ref, type VideoModerationStart } from "./moderation-provider.js";
+import type { MediaBytesAccess } from "./media-bytes-access.js";
+/**
+ * Config for the verdict gate. The systemPrompt is a coarse "pass or block under
+ * this policy" instruction (operator-supplied, carrying the real policy text);
+ * this file never contains it.
+ */
+export interface ScalewayVerdictModerationConfig {
+    /** OpenAI-compatible base URL, `https://api.scaleway.ai/<project-id>/v1`. */
+    readonly baseUrl: string;
+    /** Model slug; sent as `model` and reported as {@link ModerationVerdict.modelVersion}. */
+    readonly model: string;
+    /** Bearer secret key. Held by the consuming app; core never persists it. */
+    readonly apiKey: string;
+    /**
+     * The verdict-style system prompt — a coarse pass/block instruction under the
+     * operator's policy. This is the shape that held under probe-16 injection;
+     * keep it a single-decision question, NOT a per-category scoring prompt.
+     */
+    readonly systemPrompt: string;
+    /** Credential-free byte reader (see media-bytes-access.ts). */
+    readonly bytes: MediaBytesAccess;
+    /** Per-image user message. Defaults to a pass/block question. */
+    readonly userPrompt?: string;
+    /** `max_tokens`. Defaults to 200 — the verdict object is tiny. */
+    readonly maxOutputTokens?: number;
+    /**
+     * The decision a `block` maps to. `quarantine` (default) treats a gate block
+     * as strongly as the scorer's own quarantine so worst-wins escalates; set
+     * `review` for a softer gate that only ever routes to human review.
+     */
+    readonly blockDecision?: Extract<ModerationDecision, "quarantine" | "review">;
+    /** The opaque label token emitted on a block. Defaults to "verdict_block". */
+    readonly blockCategory?: string;
+    /** Value put in {@link ModerationVerdict.provider}. Defaults to "scaleway-verdict". */
+    readonly providerName?: string;
+    /** Injectable for tests. Defaults to global `fetch`. */
+    readonly fetchImpl?: typeof fetch;
+}
+/**
+ * A coarse pass/block vision gate. On a well-formed `pass` it approves with no
+ * labels; on `block` it returns its {@link ScalewayVerdictModerationConfig.blockDecision}
+ * (default `quarantine`) with a single structural label. Any unusable answer —
+ * no content, unparseable JSON, a missing or unknown `verdict` — fails closed to
+ * `review`, never an approve. Image-only.
+ */
+export declare class ScalewayVerdictModerationProvider implements MediaModerationProvider {
+    readonly name: string;
+    private readonly config;
+    private readonly fetchImpl;
+    constructor(config: ScalewayVerdictModerationConfig);
+    moderateImage(input: ImageRef, options?: ModerationCallOptions): Promise<ModerationVerdict>;
+    startVideoModeration(_input: S3Ref, _options?: ModerationCallOptions): Promise<VideoModerationStart>;
+    getVideoModeration(_jobId: string, _options?: ModerationCallOptions): Promise<ModerationVerdict>;
+    private videoUnsupported;
+    /**
+     * Read the `verdict` field. Returns `"pass"` | `"block"`, or `null` for any
+     * unusable answer (no content, unparseable JSON, missing/unknown verdict) —
+     * the caller turns `null` into a fail-closed `review`. Never throws.
+     */
+    private parseVerdict;
+}
+
 // ===== lib/media/scaleway-vision-provider.d.ts =====
 import { type ImageRef, type MediaModerationProvider, type ModerationCallOptions, type ModerationVerdict, type S3Ref, type VideoModerationStart } from "./moderation-provider.js";
 import type { MediaBytesAccess } from "./media-bytes-access.js";
@@ -3192,11 +3258,11 @@ export interface ScalewayVisionModerationConfig {
     readonly fetchImpl?: typeof fetch;
 }
 /**
- * A generic OpenAI-compatible vision-moderation provider. Image-only: video is
- * served by wrapping this in {@link FrameSamplingVideoModerationAdapter}, whose
- * own video methods delegate `moderateImage` here — so this provider's video
- * methods are never called in correct wiring and throw a clear permanent error
- * if they are.
+ * A generic OpenAI-compatible vision-moderation provider (category scorer).
+ * Image-only: video is served by wrapping this in
+ * {@link FrameSamplingVideoModerationAdapter}, whose own video methods delegate
+ * `moderateImage` here — so this provider's video methods are never called in
+ * correct wiring and throw a clear permanent error if they are.
  */
 export declare class ScalewayVisionModerationProvider implements MediaModerationProvider {
     readonly name: string;
@@ -3208,9 +3274,6 @@ export declare class ScalewayVisionModerationProvider implements MediaModeration
     getVideoModeration(_jobId: string, _options?: ModerationCallOptions): Promise<ModerationVerdict>;
     private videoUnsupported;
     private reviewVerdict;
-    private readBytes;
-    private callEndpoint;
-    private httpError;
     /**
      * Extract per-category labels from the model's JSON content. Returns `null`
      * for any well-formed-HTTP-but-unusable answer (no content, unparseable JSON,
