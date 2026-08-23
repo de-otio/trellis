@@ -830,6 +830,8 @@ export { ScalewayVerdictModerationProvider } from "./lib/media/scaleway-verdict-
 export type { ScalewayVerdictModerationConfig } from "./lib/media/scaleway-verdict-provider.js";
 export { CrossCheckModerationProvider } from "./lib/media/cross-check-provider.js";
 export type { CrossCheckModerationConfig } from "./lib/media/cross-check-provider.js";
+export { MinimumContentGateModerationProvider } from "./lib/media/minimum-content-gate.js";
+export type { MinimumContentGateConfig, MinimumContentGateDecision, } from "./lib/media/minimum-content-gate.js";
 export { ModerationProviderError, isModerationProviderError, NullModerationProvider, assertModerationProviderAllowed, moderationProviderName, UNKNOWN_PROVIDER_NAME, } from "./lib/media/moderation-provider.js";
 export type { MediaModerationProvider, MediaPin, ImageRef, S3Ref, ModerationVerdict, ModerationLabel, ModerationCallOptions, VideoModerationStart, } from "./lib/media/moderation-provider.js";
 export { completionEnvelopeBody, parseCompletionEnvelope, } from "./lib/media/completion-envelope.js";
@@ -2927,6 +2929,76 @@ export declare class MediaReviewHandler {
         originalKey: string;
         mimeType: string;
     } | null>;
+}
+
+// ===== lib/media/minimum-content-gate.d.ts =====
+import { type ImageRef, type MediaModerationProvider, type ModerationCallOptions, type ModerationDecision, type ModerationVerdict, type S3Ref, type VideoModerationStart } from "./moderation-provider.js";
+import type { MediaBytesAccess } from "./media-bytes-access.js";
+/** The decisions a gated image may map to. `approved` is deliberately absent. */
+export type MinimumContentGateDecision = Extract<ModerationDecision, "review" | "quarantine">;
+/**
+ * Config for the minimum-content intake gate. The floors are OPERATOR POLICY —
+ * all three are required, and construction refuses when any is absent or
+ * malformed, because a silently-defaulted floor compiled into the public
+ * tarball would be a published threshold.
+ */
+export interface MinimumContentGateConfig {
+    /**
+     * The provider a non-degenerate image is passed to, untouched — typically
+     * the CrossCheckModerationProvider composing both vision signals, so the
+     * gate sits in front of BOTH.
+     */
+    readonly inner: MediaModerationProvider;
+    /** Credential-free byte reader (see media-bytes-access.ts). */
+    readonly bytes: MediaBytesAccess;
+    /** Minimum acceptable pixel width (inclusive: an image AT the floor passes). */
+    readonly minWidth: number;
+    /** Minimum acceptable pixel height (inclusive: an image AT the floor passes). */
+    readonly minHeight: number;
+    /**
+     * Minimum acceptable greyscale Shannon entropy in bits/pixel (0..8,
+     * inclusive floor: an image AT the floor passes). A solid colour measures
+     * exactly 0. Set `0` to run a dimensions-only gate — explicitly.
+     */
+    readonly minEntropy: number;
+    /**
+     * What a below-floor image becomes. Defaults to `review` (fail closed, a
+     * human decides). `approved` is not accepted — see the header.
+     */
+    readonly gateDecision?: MinimumContentGateDecision;
+    /** Opaque label token on a below-floor refusal. Default "structural_minimum_content". */
+    readonly gateCategory?: string;
+    /** Opaque label token on an undecodable-bytes refusal. Default "structural_undecodable". */
+    readonly undecodableCategory?: string;
+}
+/**
+ * A wrapping MediaModerationProvider that measures an image's structural
+ * content BEFORE any classifier runs. Below-floor images short-circuit to the
+ * configured decision with a structural label — the inner provider is never
+ * called, so a degenerate input can neither be confabulated over by a vision
+ * model nor spend a paid call. Everything else passes through untouched.
+ */
+export declare class MinimumContentGateModerationProvider implements MediaModerationProvider {
+    private readonly config;
+    constructor(config: MinimumContentGateConfig);
+    /**
+     * Wrapper rule: the inner classifier's name, passed through unchanged. The
+     * gate is not a classifier identity of its own for scored verdicts — only
+     * its REFUSALS carry {@link GATE_PROVIDER_NAME}, exactly like the
+     * frame-sampling adapter's refusal attribution.
+     */
+    get name(): string | undefined;
+    moderateImage(input: ImageRef, options?: ModerationCallOptions): Promise<ModerationVerdict>;
+    /** Video passes through untouched — gate frames by composing this provider
+     * UNDER the frame-sampling adapter (see the header). */
+    startVideoModeration(input: S3Ref, options?: ModerationCallOptions): Promise<VideoModerationStart>;
+    getVideoModeration(jobId: string, options?: ModerationCallOptions): Promise<ModerationVerdict>;
+    /**
+     * A gate refusal: the gate's own verdict (no classifier ran, so no
+     * `modelVersion` — refusals are never approvals, so the taxonomy pin has
+     * nothing to verify here). Confidence 1: the measurement is deterministic.
+     */
+    private refuse;
 }
 
 // ===== lib/media/moderation-deadline.d.ts =====

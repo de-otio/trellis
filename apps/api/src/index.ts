@@ -134,6 +134,16 @@ export type { ScalewayVerdictModerationConfig } from "./lib/media/scaleway-verdi
 // for video. A mechanism — each composed provider carries its own config.
 export { CrossCheckModerationProvider } from "./lib/media/cross-check-provider.js";
 export type { CrossCheckModerationConfig } from "./lib/media/cross-check-provider.js";
+// The minimum-content intake gate: a deterministic pre-model check that stops
+// degenerate images (below-floor dimensions, near-zero entropy) from reaching
+// any classifier at all — wrap it around the cross-check so it sits in front
+// of BOTH signals. A mechanism: the floors and the mapped decision are
+// operator config, and construction refuses when a floor is missing.
+export { MinimumContentGateModerationProvider } from "./lib/media/minimum-content-gate.js";
+export type {
+  MinimumContentGateConfig,
+  MinimumContentGateDecision,
+} from "./lib/media/minimum-content-gate.js";
 // The moderation seam's own contract, so an adapter can implement it against
 // published types rather than a deep import.
 export {
