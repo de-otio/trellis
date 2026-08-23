@@ -106,10 +106,27 @@ export function classifyHttpError(status: number): ModerationProviderError {
       unknownCause: true,
     });
   }
-  // 408/429 and 5xx: transient — retry within the existing bound.
+  // 408/429 and 5xx: transient — retry within the existing bound, AND report an
+  // infrastructure fault. Both, because they answer different questions: core
+  // decides what to do with THIS call, operators need to know the endpoint is
+  // refusing rather than the media being bad.
+  //
+  // 429 is the case this exists for. The endpoint has a tokens-per-minute
+  // ceiling, and without this the ceiling converted an upload burst into a
+  // review-queue spike with no alarm — a fail-closed verdict and an outage look
+  // identical from the review queue. Note 401/403 above already reason exactly
+  // this way ("must alert rather than silently review forever"); a sustained
+  // 429 is the same situation and used to get the opposite treatment, purely
+  // because the only route to the signal ran through `unknownCause`, which a
+  // 429 cannot honestly claim.
+  //
+  // This is a counter, not a page. One 429 that succeeds on retry is normal and
+  // is meant to be counted; the window and the alarm threshold are the
+  // operator's.
   if (status === 408 || status === 429 || status >= 500) {
     return new ModerationProviderError(`moderation endpoint transient error (${status})`, {
       retryable: true,
+      infraFault: true,
     });
   }
   // Other 4xx: the request was rejected for these bytes — permanent.

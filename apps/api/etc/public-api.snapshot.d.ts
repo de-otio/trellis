@@ -3365,14 +3365,53 @@ export declare function moderationProviderName(provider: Pick<MediaModerationPro
  * `review` *and* emits an infra-fault signal, because a fail-closed verdict
  * that silently absorbs an infrastructure outage is indistinguishable from
  * healthy caution — exactly the blindness that lets an outage run for days.
+ *
+ * ── WHY `infraFault` IS SEPARATE FROM `unknownCause` ───────────────────────
+ *
+ * The two used to be the same thing, and that made one whole class of outage
+ * unreportable. `unknownCause` answers "could the adapter attribute this?" and
+ * it is only ever consulted on the `retryable: false` branch. So a fault that
+ * is BOTH attributable AND transient — a **429 rate limit** being the case that
+ * matters — could not raise the signal by any combination of these flags:
+ * saying `unknownCause: true` would be a lie (a 429 is perfectly attributed),
+ * and saying `retryable: false` would throw away the retry that usually fixes
+ * it.
+ *
+ * The consequence was concrete and matched an observed symptom: a
+ * tokens-per-minute ceiling converted an upload burst into a review-queue
+ * spike **with no alarm**, because the alarm's input could not be produced.
+ * Meanwhile 401/403 — a credential fault — did raise it, with a comment saying
+ * such a fault "must alert rather than silently review forever". A sustained
+ * 429 is the same situation and was getting the opposite treatment.
+ *
+ * So `infraFault` now says the thing directly: **"the infrastructure failed,
+ * not the media"**, orthogonally to whether it is retryable and to whether the
+ * adapter could name it. `unknownCause: true` still implies it, so every
+ * existing adapter keeps its current behaviour with no change.
+ *
+ * It is a COUNTER, not an alarm. A single 429 that succeeds on retry is normal
+ * and should be counted; `ModerationMetrics` buckets by window, and the
+ * threshold at which a count becomes an alarm is operator config — which is
+ * also why counting a transient fault here is not noise.
  */
 export declare class ModerationProviderError extends Error {
     readonly retryable: boolean;
     /** The adapter could not attribute the cause — core alerts as well as fails closed. */
     readonly unknownCause: boolean;
+    /**
+     * The INFRASTRUCTURE failed, not the media. Independent of {@link retryable}:
+     * a throttle or a 5xx is both transient and an infrastructure fault, and
+     * operators need the second fact even though core handles the first.
+     *
+     * Implied by `unknownCause` — an unattributable fault is an infrastructure
+     * fault by definition — so adapters that only set `unknownCause` are
+     * unaffected.
+     */
+    readonly infraFault: boolean;
     constructor(message: string, options?: {
         retryable: boolean;
         unknownCause?: boolean;
+        infraFault?: boolean;
         cause?: unknown;
     });
 }

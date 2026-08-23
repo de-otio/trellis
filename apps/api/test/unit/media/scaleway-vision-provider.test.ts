@@ -239,17 +239,30 @@ describe("ScalewayVisionModerationProvider — error classification", () => {
     }
   });
 
-  it("429 and 5xx → retryable", async () => {
-    for (const status of [429, 500, 503]) {
+  it("429 and 5xx → retryable AND an infrastructure fault", async () => {
+    // Both, because they answer different questions: `retryable` is what core
+    // does with THIS call, `infraFault` is what operators are told. A 429 is
+    // the case that made the distinction necessary — the endpoint's
+    // tokens-per-minute ceiling used to turn an upload burst into a
+    // review-queue spike with no alarm, because the only route to the signal
+    // ran through `unknownCause`, which a 429 cannot honestly claim.
+    for (const status of [408, 429, 500, 503]) {
       const err = await moderateExpectingThrow(fetchReturning("", { status }).impl);
-      expect(err.retryable).toBe(true);
+      expect(err.retryable, `status ${status}`).toBe(true);
+      expect(err.infraFault, `status ${status}`).toBe(true);
+      // And it is still NOT claiming it could not attribute the cause — it can.
+      expect(err.unknownCause, `status ${status}`).toBe(false);
     }
   });
 
   it("other 4xx (e.g. 400) → permanent, not alerting", async () => {
+    // The negative control for the case above: a request rejected for THESE
+    // bytes is not an outage, and must not raise the fault. Without this, the
+    // 429 assertion would pass on an implementation that flags everything.
     const err = await moderateExpectingThrow(fetchReturning("", { status: 400 }).impl);
     expect(err.retryable).toBe(false);
     expect(err.unknownCause).toBe(false);
+    expect(err.infraFault).toBe(false);
   });
 
   it("a network throw → retryable + alerting", async () => {

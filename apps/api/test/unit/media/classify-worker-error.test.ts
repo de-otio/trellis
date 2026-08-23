@@ -560,3 +560,71 @@ describe("classifyWorkerErrorDetailed — a typed provider error wins", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// infraFault is orthogonal to retryable (the 429 gap)
+// ---------------------------------------------------------------------------
+
+describe("infraFault on the RETRYABLE branch — the 429 gap", () => {
+  it("a retryable provider error CAN now report an infrastructure fault", () => {
+    // This is the whole fix. `infraFault` used to be hard-coded false on the
+    // retryable branch, and `unknownCause` — the only other route to the signal
+    // — is read only on the permanent branch. So a fault that was transient AND
+    // attributable could not raise the alarm by ANY combination of flags. A 429
+    // is exactly that: perfectly attributable, and usually fixed by the retry.
+    const err = new ModerationProviderError("endpoint transient error (429)", {
+      retryable: true,
+      infraFault: true,
+    });
+    expect(classifyWorkerErrorDetailed(err)).toEqual({
+      klass: "retryable",
+      source: "typed",
+      infraFault: true,
+    });
+  });
+
+  it("NEGATIVE CONTROL: a retryable error WITHOUT the flag still reports none", () => {
+    // Without this, the assertion above would pass on an implementation that
+    // hard-codes `infraFault: true`, and every transient blip would raise a
+    // fault — which is how an alarm gets muted by its own noise.
+    const err = new ModerationProviderError("some transient thing", { retryable: true });
+    expect(classifyWorkerErrorDetailed(err)).toEqual({
+      klass: "retryable",
+      source: "typed",
+      infraFault: false,
+    });
+  });
+
+  it("`unknownCause` still implies it, so no existing adapter changes behaviour", () => {
+    const permanent = new ModerationProviderError("cannot say", {
+      retryable: false,
+      unknownCause: true,
+    });
+    expect(classifyWorkerErrorDetailed(permanent).infraFault).toBe(true);
+  });
+
+  it("an untyped error never reports an infrastructure fault", () => {
+    // The heuristic is guessing. A guess must not raise an outage alarm.
+    expect(classifyWorkerErrorDetailed(new Error("429 Too Many Requests")).infraFault).toBe(
+      false,
+    );
+  });
+
+  it("the classification's retry decision is UNCHANGED by the flag", () => {
+    // The fix must add observability without altering what core does with the
+    // call — a 429 that stops being retried would be a regression dressed as a
+    // fix.
+    for (const infraFault of [true, false]) {
+      expect(
+        classifyWorkerErrorDetailed(
+          new ModerationProviderError("t", { retryable: true, infraFault }),
+        ).klass,
+      ).toBe("retryable");
+      expect(
+        classifyWorkerErrorDetailed(
+          new ModerationProviderError("p", { retryable: false, infraFault }),
+        ).klass,
+      ).toBe("poison");
+    }
+  });
+});

@@ -895,14 +895,20 @@ export async function processObjectKey(
     // Single classification point: poison ⇒ REVIEW + ack; retryable ⇒ fail.
     const { klass, infraFault } = classifyWorkerErrorDetailed(err);
     if (infraFault) {
-      // The adapter reported a typed failure it could not attribute. Holding
-      // the media is right; holding it SILENTLY is not — a fail-closed verdict
-      // and an outage look identical from the review queue, so the fault is
-      // announced separately from the decision.
+      // The adapter reported that the INFRASTRUCTURE failed, not the media.
+      // Whatever core does about this call, holding media SILENTLY is wrong —
+      // a fail-closed verdict and an outage look identical from the review
+      // queue, so the fault is announced separately from the decision.
+      //
+      // This now fires on retryable faults too (a 429 rate limit, a 5xx, a
+      // socket failure), not only on unattributable permanent ones. That is
+      // deliberate: those are the faults that used to accumulate into a review
+      // spike with nothing counting them. The message no longer says
+      // "unattributable", because most of these are precisely attributable.
       emitInfraFaultMetric(deps);
       deps.logger.error(
-        "Moderation provider reported an unattributable fault — media held for review AND an infrastructure fault raised",
-        { key: triggeringKey, error: err },
+        "Moderation provider reported an infrastructure fault — the endpoint failed, not the media; an infrastructure fault is raised",
+        { key: triggeringKey, retryable: klass === "retryable", error: err },
       );
     }
     if (klass === "poison") {
