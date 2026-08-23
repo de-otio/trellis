@@ -107,6 +107,16 @@ pre-tag gate (versions match, lint+tests pass on `main`, lockfile updated).
 
 ### Node 22 (`ci.yml`) vs Node 24 (`publish.yml`) — why, and when to reconsider
 
+> **Scope note added 2026-08-23.** Everything in this section is about the **CI
+> and publish lanes**, and its recommendation still stands unchanged. It does
+> **not** cover the **runtime image**: `apps/api/Dockerfile` shipped on
+> `node:22-alpine` while two dependencies declared `engines.node >= 24`, which is
+> the one place those packages actually execute. That image moved to
+> `node:24-alpine` on 2026-08-23 — image only, with `ci.yml`, `.nvmrc`,
+> `engines.node` and the lockfile all deliberately untouched, per this section.
+> Rationale and the dependency audit behind it: `doc/evaluation/node-engine-skew.md`.
+
+
 `ci.yml`'s 7 jobs run Node 22 (matching `.nvmrc` and root `engines: >=22`);
 `publish.yml` runs Node 24. This is deliberate, not drift: npm Trusted
 Publishing requires npm ≥ 11.5.1, which Node 24 ships (npm 11) and Node 22
