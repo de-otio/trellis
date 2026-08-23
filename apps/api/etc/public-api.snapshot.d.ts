@@ -809,8 +809,12 @@ export { setPushTransportProvider } from "./lib/push/index.js";
 export type { PushTransport, PushDeviceTarget, PushSendOutcome, PushPlatformWire, } from "./lib/push/index.js";
 export { setMediaModerationProvider } from "./lib/media/request-moderation.js";
 export { setMediaLabelPolicy } from "./lib/media/request-moderation.js";
-export { createLabelPolicy, LabelPolicyConfigError } from "./lib/media/label-policy.js";
-export type { LabelPolicy, LabelPolicyConfig, LabelPolicyContext, CategoryPolicy, TaxonomyPinMode, } from "./lib/media/label-policy.js";
+export { createLabelPolicy, explainFromLabels, LabelPolicyConfigError, } from "./lib/media/label-policy.js";
+export type { LabelPolicy, LabelPolicyConfig, LabelPolicyContext, LabelPolicyExplanation, LabelPolicyGround, CategoryPolicy, TaxonomyPinMode, } from "./lib/media/label-policy.js";
+export { createCascadeRoute, routeOnConfidence, CascadeRouteConfigError, } from "./lib/media/cascade-route.js";
+export type { CascadeRoute, CascadeRouteConfig, CascadeRouter, EscalationCause, SettleReason, } from "./lib/media/cascade-route.js";
+export { clampEscalatedDecision, createDeferredLaneConfig, dispositionForDeadlineBreach, dispositionForError, DeferredLaneConfigError, DEFERRED_LANE_RETRIES, } from "./lib/media/deferred-lane.js";
+export type { DeferredLaneConfig, Disposition, ShedCause, } from "./lib/media/deferred-lane.js";
 export { setMediaReviewPromotion } from "./lib/media/media-review-handler.js";
 export type { ReviewPromotionPort, ReviewPromoteCoords } from "./lib/media/media-review-handler.js";
 export { ModerationMetrics } from "./lib/media/moderation-metrics.js";
@@ -1227,6 +1231,193 @@ export declare function getLogger(): Logger;
  */
 export declare function generateRequestId(): string;
 
+// ===== lib/media/cascade-route.d.ts =====
+/**
+ * cascade-route.ts — pure functional core: decide WHERE an axis-A verdict is
+ * settled, not what it says.
+ *
+ * The axis-A classifier is a two-stage cascade. A cheap scorer runs inline;
+ * where its confidence `q̂` clears an operator-set threshold `τ` the verdict
+ * settles there. Where it does not, today's only option is `REVIEW` — a queue
+ * nobody drains (Decision 10 removed the standing moderator), so "uncertain" is
+ * currently a content-LOSS path: the upload sits behind a "processing…"
+ * placeholder forever. The deferred lane (`axis-a-escalate`, plan 031) converts
+ * uncertain into a slower ANSWER, and this module is its trigger.
+ *
+ * THIS MODULE DECIDES NOTHING ABOUT THE CONTENT. It returns either "settle with
+ * the decision you already have" or "escalate" — never a verdict of its own,
+ * never a lifecycle write, never `REVIEW`. Plan 031 §2 is explicit that setting
+ * `REVIEW` at trigger time and upgrading later is both a user-visible state flap
+ * and a row in the un-drained queue for the whole escalation window.
+ *
+ * ── τ, AND WHY IT IS NOT IN THIS FILE ──────────────────────────────────────
+ *
+ * `moderation-deadline.ts` already states the rule for the neighbouring knob and
+ * the argument transfers without a word changed: a threshold compiled into a
+ * PUBLIC npm tarball is a PUBLISHED threshold. A published τ tells an adversary
+ * exactly how confident a cheap verdict must look to avoid the slow model — and,
+ * read the other way, exactly how much uncertain content to push to drive spend.
+ * So {@link createCascadeRoute} REFUSES to construct without an operator-supplied
+ * τ. Absence is a wiring error, not an invitation to invent one.
+ *
+ * WHICH DIRECTION τ POINTS. Escalation happens when `q̂ < τ`. So τ is "the
+ * confidence a cheap verdict must reach to be trusted on its own", and RAISING
+ * it escalates MORE, not less. That is the operator's cost dial, and it has two
+ * meaningful endpoints:
+ *
+ *   - `τ = 0` — nothing ever escalates. The lane is off by configuration and
+ *     every path degrades to today's behaviour. This is a supported posture, not
+ *     a broken one, and it is the safe value to ship before the slow-model
+ *     provider is chosen (plan 031 §7.1 — `axis-a-escalate` is still
+ *     `DECLARED-UNFILLED`).
+ *   - τ above every confidence the provider can report — every grey-band verdict
+ *     escalates. Bounded by the per-tenant rate limit and the daily spend cap,
+ *     not by this module.
+ *
+ * ── WHAT ESCALATES, AND WHAT DELIBERATELY DOES NOT ─────────────────────────
+ *
+ * `review` is not one situation, it is several wearing the same hat, and the
+ * expensive mistake is treating them alike. The ground comes from the policy
+ * itself ({@link explainFromLabels}) rather than being re-derived here, because
+ * two readings of one policy is how the two drift apart.
+ *
+ * ESCALATES — doubt about the CONTENT, which a better look can resolve:
+ *   - `over-review-bar` — a mapped label in the grey band. The real case.
+ *   - `unreadable-confidence` — the category matters and the degree is
+ *     unreadable. `q̂ = 0`: an unreadable confidence is not a low number, it is
+ *     the absence of one, and treating it as anything else invents information.
+ *   - `provider-floor` at `review` — the seam's fail-closed contract is
+ *     `{ decision: "review", labels: [] }`, so an internally-faulted cheap
+ *     scorer looks exactly like this. `q̂ = 0`. This is the case with the most
+ *     value in it: the cheap path produced nothing at all, and today that is
+ *     guaranteed content loss.
+ *
+ * DOES NOT ESCALATE — and each of these is a decision, not an omission:
+ *   - `taxonomy-pin-failed`. A configuration fault, and re-classifying does not
+ *     fix it. Worse, it CANNOT: see the pin trap below.
+ *   - `malformed-verdict`. Poison-shaped. Nothing about paying more to re-read
+ *     the same unusable bytes changes them.
+ *   - `unmapped-category` / `over-quarantine-bar` — already `quarantine`. The
+ *     lane cannot approve (plan 031 §7.2), so escalating a quarantine could only
+ *     ever confirm it: pure cost, no possible change in outcome.
+ *   - `clean` — `approved` is not a dead end, and the lane exists for dead ends.
+ *     Escalating approvals would catch UNDER-blocks, which is genuinely the
+ *     weakest side of the current calibration — but it would also put a
+ *     reasoning-model call behind every successful upload. Scoped out of v1
+ *     deliberately, and revisitable against the calibration's numbers rather
+ *     than against this comment.
+ *
+ * ⚠ THE PIN TRAP, which plan 031 does not cover and which decides whether this
+ * lane can work at all. Under `pinMode: "config"` the operator names the exact
+ * taxonomy version their category map was written for. The escalation runs a
+ * DIFFERENT model, which reports a DIFFERENT version — so if the deferred
+ * lane's verdict is interpreted by the INLINE lane's policy, it can never clear
+ * the pin, floors at `review`, and the entire lane resolves to the outcome it
+ * was built to avoid while reporting no errors at all. **The deferred lane needs
+ * its own {@link LabelPolicy} instance, pinned to the slow model's taxonomy.**
+ * That is a wiring requirement on whoever configures the lane; this module
+ * cannot enforce it, so it is stated here and asserted where the config is
+ * built.
+ *
+ * PURITY: no I/O, no clock, no randomness, and no numbers of its own.
+ */
+import type { ModerationDecision } from "./media-lifecycle.js";
+import type { ModerationVerdict } from "./moderation-provider.js";
+import { type LabelPolicyConfig, type LabelPolicyContext, type LabelPolicyExplanation } from "./label-policy.js";
+/**
+ * Why a verdict was escalated. Reported on every escalation so the lane's
+ * primary metric — plan 031 §6's shed rate, per cause — can be attributed
+ * without re-deriving anything.
+ */
+export type EscalationCause = 
+/** A mapped label in the grey band, below τ. The intended case. */
+"grey-band"
+/** A mapped category whose confidence could not be read. */
+ | "unreadable-confidence"
+/** The cheap scorer returned no usable signal — including its fail-closed shape. */
+ | "provider-abstained";
+/** Why a verdict was NOT escalated. Same purpose, opposite branch. */
+export type SettleReason = 
+/** `q̂ >= τ`: the cheap scorer is trusted on its own. */
+"confident"
+/** Already `approved` or `quarantine` — a decision, not a dead end. */
+ | "decided"
+/** The taxonomy pin failed. A config fault; escalation cannot fix it. */
+ | "taxonomy-unpinned"
+/** The verdict was unusable. Poison-shaped. */
+ | "malformed"
+/** τ is 0, or the lane is switched off. Degrades to today's behaviour. */
+ | "lane-closed";
+/**
+ * Where this verdict is settled.
+ *
+ * `settle` carries the decision the caller ALREADY has — this module never
+ * computes one. `escalate` carries no decision at all, because the escalation
+ * has not happened yet and the job must stay open (plan 031 §2).
+ */
+export type CascadeRoute = {
+    readonly kind: "settle";
+    readonly decision: ModerationDecision;
+    readonly reason: SettleReason;
+} | {
+    readonly kind: "escalate";
+    /** `q̂`, on the provider's own scale. Never rescaled. */
+    readonly confidence: number;
+    readonly cause: EscalationCause;
+};
+/** Thrown at wiring time when the route is unusable. Never thrown per-verdict. */
+export declare class CascadeRouteConfigError extends Error {
+    constructor(message: string);
+}
+/**
+ * The operator-supplied cascade config. Both values come from runtime config;
+ * neither has a default in this file.
+ */
+export interface CascadeRouteConfig {
+    /**
+     * τ — the confidence a cheap verdict must reach to settle inline, expressed
+     * on the SAME scale the provider reports confidences on and the category bars
+     * are written in. Core never rescales, because a rescale is a policy decision
+     * disguised as arithmetic.
+     *
+     * Must be a finite, non-negative number. `0` disables escalation entirely.
+     */
+    readonly tau: number;
+    /**
+     * The master switch. `false` routes everything to `settle` with
+     * `"lane-closed"` — the plan 031 §6 degradation row, reached by configuration
+     * rather than by deleting code.
+     */
+    readonly enabled: boolean;
+}
+export interface CascadeRouter {
+    /** Route one verdict. Total: never throws, for any verdict shape. */
+    route(verdict: ModerationVerdict, context?: LabelPolicyContext): CascadeRoute;
+    /** True when this route can never escalate, whatever arrives. */
+    readonly inert: boolean;
+}
+/**
+ * Build a cascade route, or refuse.
+ *
+ * Refuses when τ is absent, non-finite, or negative. It does NOT refuse τ = 0:
+ * that is a coherent operator posture (escalate nothing) and the one to ship
+ * with while the slow-model provider is undecided.
+ */
+export declare function createCascadeRoute(config: CascadeRouteConfig, policy: LabelPolicyConfig): CascadeRouter;
+/**
+ * The route function itself, over an explanation rather than a raw verdict, and
+ * exported for direct table-driven testing.
+ *
+ * Taking the EXPLANATION rather than the verdict is the point: this function
+ * cannot second-guess the policy, cannot reach a different decision from it,
+ * and cannot be handed a verdict the policy never saw.
+ *
+ * Total by construction: every {@link LabelPolicyGround} is handled, and the
+ * fallthrough settles rather than escalating — an unrecognised ground must
+ * never be able to start spending money.
+ */
+export declare function routeOnConfidence(explanation: LabelPolicyExplanation, config: CascadeRouteConfig): CascadeRoute;
+
 // ===== lib/media/completion-envelope.d.ts =====
 /**
  * completion-envelope.ts — the provider-neutral shape a moderation backend
@@ -1385,6 +1576,217 @@ export declare class CrossCheckModerationProvider implements MediaModerationProv
      * retryable + unknownCause (a transient-looking, unattributed fault). */
     private classify;
 }
+
+// ===== lib/media/deferred-lane.d.ts =====
+/**
+ * deferred-lane.ts — pure functional core: the deferred lane's config, its
+ * disposition protocol, and the one restriction it ships closed with.
+ *
+ * Plan 031 (`plans/031-deferred-lane-spec.md` in skybber) is the spec. This
+ * module holds the parts of it that must be TRUE rather than DOCUMENTED — the
+ * relationships a comment cannot enforce and a quarter of drift will otherwise
+ * quietly break. The workflow body itself lives in `apps/worker`, because
+ * `@de-otio/trellis` is published and must not gain an SDK dependency for an
+ * evaluation its consumers did not opt into.
+ *
+ * ⚠ EVALUATION SCAFFOLDING. Plan 030 decides *run the evaluation*, not *adopt
+ * Hatchet*. Nothing here is load-bearing: with `allowApprove` closed and τ at 0
+ * every path lands on today's behaviour, and if the kill criteria fire this
+ * module and its workflow are deleted together.
+ *
+ * PURITY: no I/O, no clock, no randomness. Every number is operator config.
+ */
+import type { ModerationDecision } from "./media-lifecycle.js";
+/** Thrown at wiring time when the lane is unusable. Never thrown per-job. */
+export declare class DeferredLaneConfigError extends Error {
+    constructor(message: string);
+}
+/**
+ * Retry count for the deferred workflow.
+ *
+ * NOT TUNABLE, and that is plan 031 §4.2's call: it mirrors the SQS
+ * `maxReceiveCount = 3` the rest of the media pipeline runs under. An unset
+ * engine default that differs from 3 silently changes poison-adjacent
+ * behaviour — cheap to get right, invisible when wrong. Exported so the
+ * workflow registration reads the same constant the test asserts on, rather
+ * than a `3` typed twice.
+ */
+export declare const DEFERRED_LANE_RETRIES = 3;
+/**
+ * The operator-supplied lane config. Every value is runtime config; none has a
+ * default here, for the reason `cascade-route.ts` sets out at length — this
+ * file ships in a public tarball, and a published rate limit tells an adversary
+ * exactly how much uncertain content per hour to push before the lane sheds to
+ * `REVIEW`, a queue they know nobody drains.
+ */
+export interface DeferredLaneConfig {
+    /**
+     * Per-workflow concurrency cap. Plan 031 §5 recommends starting at **2**:
+     * at 13–20 s per call that is ≈6–9 jobs/min, and the binding constraint is
+     * not CPU (Gate 0 measured 2200m free) but the `db-play2-pico` the engine
+     * shares with the app. Start at the smallest number that demonstrates the
+     * lane works and raise it against a measurement.
+     */
+    readonly concurrency: number;
+    /**
+     * Per-tenant rate limit, in escalations per {@link reviewRateWindowMs}'s
+     * window. Constrained from below — see {@link createDeferredLaneConfig}.
+     */
+    readonly perTenantRateLimit: number;
+    /**
+     * How long an escalation may stay open before the job ages out to `REVIEW`.
+     * Plan 031 §5 recommends **1 h**: long enough that a 20 s call plus queueing
+     * is not remotely tight, short enough that a stuck lane surfaces the same day
+     * rather than the same week.
+     */
+    readonly evictionWindowMs: number;
+    /**
+     * May an escalation resolve to `approved`?
+     *
+     * **SHIPS CLOSED.** Plan 031 §7.2, decided 2026-08-23: the review/quarantine
+     * floors on dev are provisional and never calibrated, and the calibration in
+     * flight defers the five hard categories. So a deferred verdict inherits a
+     * threshold that is evidence-based against OVER-blocks and judgement against
+     * UNDER-blocks — and an escalation that can downgrade to "approved" on the
+     * unmeasured side is the riskiest thing in the design.
+     *
+     * The restriction costs little: the lane's value is turning a dead end into
+     * an ANSWER, and `quarantine` is an answer. It is a flag rather than a
+     * compiled restriction so it can be revisited against evidence — but it is
+     * opened only when the calibration has produced real under-block numbers, not
+     * when the mechanism merely works.
+     */
+    readonly allowApprove: boolean;
+}
+/**
+ * Build a lane config, or refuse.
+ *
+ * `reviewRateCap` is not part of the config — it is the neighbouring operator
+ * value (`/skybber/{stage}/media/review-rate-cap`) this config must be
+ * consistent WITH, so it is passed in and checked rather than duplicated.
+ *
+ * ── THE ONE RELATIONSHIP THAT MUST HOLD ────────────────────────────────────
+ *
+ *   `perTenantRateLimit >= reviewRateCap`
+ *
+ * `review-rate-cap` is the per-tenant flagged-object cap over a 24 h window —
+ * the only thing bounding an un-drained `REVIEW` queue. The deferred lane exists
+ * to REDUCE the flow into that queue. If its per-tenant limit is TIGHTER than
+ * the review cap, the excess sheds straight back to `REVIEW`, and the lane makes
+ * the queue it was built to relieve no smaller while costing money to run.
+ *
+ * Set it lower and the lane is decorative. This is asserted rather than
+ * documented because it is exactly the kind of thing that is true on the day it
+ * is configured and quietly false a quarter later, with no symptom other than a
+ * lane that seems to work and achieves nothing.
+ */
+export declare function createDeferredLaneConfig(config: DeferredLaneConfig, reviewRateCap: number): DeferredLaneConfig;
+/**
+ * Clamp an escalated verdict against {@link DeferredLaneConfig.allowApprove}.
+ *
+ * With the flag closed, `approved` becomes `review` — the lane may only ever
+ * arrive at `review` or `quarantine`. Note the direction: this can only ever
+ * make a verdict MORE conservative, exactly like `label-policy.ts`'s rule 5, so
+ * there is no configuration of this function that releases content.
+ *
+ * C3's source scan asserts that no code path can emit `approved` from the lane
+ * while the flag is closed; this function is the single place that has to be
+ * right for that to hold.
+ */
+export declare function clampEscalatedDecision(decision: ModerationDecision, config: DeferredLaneConfig): ModerationDecision;
+/**
+ * Why a run was legitimately not done. Every `ack-drop` names one, because
+ * plan 031 §6 makes "how often did we shed to `REVIEW`, per cause?" the lane's
+ * PRIMARY metric rather than its error metric: a lane that runs cleanly and
+ * sheds 90% of its input has failed at its purpose while reporting no failures.
+ */
+export type ShedCause = 
+/** The inline lane settled the job while this run was queued. Not an error. */
+"already-resolved"
+/** The daily spend cap was reached. */
+ | "spend-capped"
+/** The tenant's per-tenant rate limit was reached. */
+ | "rate-limited"
+/** The input cannot succeed on retry — `classifyWorkerErrorDetailed` said poison. */
+ | "poison"
+/** The eviction window expired before the escalation returned. */
+ | "evicted";
+/**
+ * The three outcomes, and there is no fourth.
+ *
+ * The naming is the estate's — `ack-drop` appears throughout
+ * `workers/media-processing.ts` — and the shape is a TYPED RETURN rather than a
+ * convention, deliberately.
+ *
+ * **`ack-drop` must never be a swallowed exception.** A `catch` that returns
+ * normally is indistinguishable from success at the engine, and silently
+ * converts "this failed" into "this is done". In a moderation pipeline that
+ * means content released or lost without a verdict. Making the drop a value the
+ * caller must construct means the difference is visible in the source, which is
+ * what C3's scan can then check.
+ */
+export type Disposition = 
+/** The escalation ran and a completion was published. Normal return. */
+{
+    readonly kind: "ack";
+}
+/** Retryable — the caller THROWS this, letting the engine retry. */
+ | {
+    readonly kind: "fail";
+    readonly infraFault: boolean;
+}
+/** Legitimately not to be done. A typed no-op return, never a caught throw. */
+ | {
+    readonly kind: "ack-drop";
+    readonly cause: ShedCause;
+    readonly infraFault: boolean;
+};
+/**
+ * Map a thrown error onto a disposition.
+ *
+ * `classifyWorkerErrorDetailed` is MANDATORY here, not optional, and not the
+ * simple `classifyWorkerError`. The detailed form returns two things the simple
+ * one discards and this lane needs both:
+ *
+ *  - `source: "typed" | "heuristic"` — a typed provider error must win over the
+ *    name-matching heuristic, or a permanent rejection whose message happens to
+ *    contain "timeout" is retried until it dead-letters. Three retries of a
+ *    13–20 s reasoning call is the expensive way to learn that.
+ *  - `infraFault` — operators must be told the INFRASTRUCTURE, not the media,
+ *    failed. This matters more in the deferred lane than anywhere else: nothing
+ *    user-visible changes until a job ages out, so a lane quietly failing on
+ *    infrastructure looks exactly like a lane quietly working.
+ *
+ * `retryable` → `fail` (throw). `poison` → `ack-drop`, and let the job age out
+ * to `REVIEW` rather than retry-storming the expensive model.
+ *
+ * ⚠ `infraFault` RIDES THE `ack-drop`, and that is not an oversight to tidy up.
+ * `classifyWorkerErrorDetailed` sets the flag on exactly one classification —
+ * a TYPED PERMANENT error whose cause the adapter could not attribute — and
+ * that classification is `poison`, which maps here to `ack-drop`. So the branch
+ * that carries the flag is the one that does NOT throw. Dropping it on that
+ * branch (the obvious shape: put `infraFault` only on `fail`) would mean the
+ * alert can never fire, on any input, while the code still reads as though it
+ * announces outages. It is carried on both variants so the caller cannot
+ * observe one and miss the other.
+ */
+export declare function dispositionForError(err: unknown): Disposition;
+/**
+ * Map a DEADLINE breach onto a disposition.
+ *
+ * Separate from {@link dispositionForError} on purpose. `moderation-deadline.ts`
+ * throws `retryable: true` on a breach, reasoning that "a deadline says
+ * something about the moment, not about the media" — which is right for a
+ * tens-of-milliseconds inline call and wrong here. In the deferred lane a breach
+ * means a 13–20 s reasoning call was abandoned, and retrying it three times
+ * costs three more of them against the daily spend cap.
+ *
+ * Plan 031 §4.4 requires this to be CHOSEN rather than inherited. The choice is
+ * **ack-drop → age out to `REVIEW`**: the lane's whole degradation story already
+ * lands on `REVIEW`, so a breach costs one call and reaches today's behaviour,
+ * where a retry costs four and reaches the same place.
+ */
+export declare function dispositionForDeadlineBreach(): Disposition;
 
 // ===== lib/media/frame-sampling-adapter.d.ts =====
 /**
@@ -1656,6 +2058,22 @@ export interface LabelPolicy {
     /** Interpret one verdict. Total: never throws, for any verdict shape. */
     decide(verdict: ModerationVerdict, context?: LabelPolicyContext): ModerationDecision;
     /**
+     * The same interpretation, with the ground it rests on. `review` collapses
+     * several distinct situations and only some of them are worth escalating to
+     * the deferred lane; this is how a caller tells them apart. See
+     * {@link explainFromLabels}.
+     *
+     * OPTIONAL, and deliberately so. `LabelPolicy` is exported from the package
+     * index and injected through the public `setMediaLabelPolicy` seam, so a
+     * consuming app may be passing a hand-rolled object. A required method here
+     * would break every such implementation on upgrade, for a capability none of
+     * them asked for. `createLabelPolicy` always provides it, and the cascade
+     * route calls {@link explainFromLabels} directly rather than depending on
+     * this — so a policy without it degrades to "no escalation", never to a
+     * crash.
+     */
+    explain?(verdict: ModerationVerdict, context?: LabelPolicyContext): LabelPolicyExplanation;
+    /**
      * True when this policy runs WITHOUT a taxonomy pin. A standing flag for the
      * operations surface, not a one-shot log line.
      */
@@ -1679,6 +2097,67 @@ export declare function createLabelPolicy(config: LabelPolicyConfig): LabelPolic
  * with a non-numeric confidence) yields at worst `review`, never `approved`.
  */
 export declare function decideFromLabels(verdict: ModerationVerdict, config: LabelPolicyConfig, context?: LabelPolicyContext): ModerationDecision;
+/**
+ * WHY a verdict decided the way it did.
+ *
+ * `decide` collapses several distinct situations onto the same `review`, and
+ * for the cascade route (`cascade-route.ts`) that collapse is exactly the
+ * information it needs back: "the scorer saw a weak signal" and "the taxonomy
+ * pin failed" are both `review`, and only the first is worth paying a
+ * reasoning-model call to resolve. Rather than re-deriving the reason from the
+ * labels at the call site — two readings of one policy is how they drift apart
+ * — the policy reports it.
+ *
+ * `"provider-floor"` means the provider's own verdict dominated, which under
+ * the seam's fail-closed contract (`{ decision: "review", labels: [] }`) is
+ * also how an internally-faulted provider reports. It is not distinguishable
+ * from a deliberate provider `review`, and the cascade route treats both the
+ * same way, deliberately.
+ */
+export type LabelPolicyGround = 
+/** Nothing fired: approved on the merits. */
+"clean"
+/** A label the policy has no rule for (rule 2). Always `quarantine`. */
+ | "unmapped-category"
+/** A mapped label at or above its quarantine bar. */
+ | "over-quarantine-bar"
+/** A mapped label in the grey band — at/above `review`, below `quarantine`. */
+ | "over-review-bar"
+/** A mapped label whose confidence was not a usable number. */
+ | "unreadable-confidence"
+/** The taxonomy pin did not verify, so the decision was floored at `review`. */
+ | "taxonomy-pin-failed"
+/** The provider's own decision dominated everything the labels said. */
+ | "provider-floor"
+/** The verdict was not a usable object, or carried no label array. */
+ | "malformed-verdict";
+/** A decision plus the ground it rests on. */
+export interface LabelPolicyExplanation {
+    readonly decision: ModerationDecision;
+    readonly ground: LabelPolicyGround;
+    /**
+     * The confidence of the label that produced `ground`, on the PROVIDER's own
+     * scale — never rescaled, for the reason {@link LabelPolicyConfig} gives.
+     * `null` when no single label drove the result (a pin failure, a malformed
+     * verdict, a provider floor, an unreadable confidence — which is precisely
+     * the absence of a usable number).
+     */
+    readonly drivingConfidence: number | null;
+}
+/**
+ * The decision function, with its reasoning. {@link decideFromLabels} is this
+ * function with the reasoning discarded — one implementation, so the reason a
+ * caller acts on is always the reason the decision was actually made.
+ *
+ * GROUND PRECEDENCE, where several apply to one `review`, is ordered by what a
+ * caller must not spend money on: `taxonomy-pin-failed` first, because a policy
+ * whose map may no longer mean what it says is a configuration fault and no
+ * amount of re-classification fixes it. Then the label-derived grounds, then
+ * the provider floor.
+ *
+ * Total: never throws, for any verdict shape.
+ */
+export declare function explainFromLabels(verdict: ModerationVerdict, config: LabelPolicyConfig, context?: LabelPolicyContext): LabelPolicyExplanation;
 
 // ===== lib/media/media-bytes-access.d.ts =====
 /**
