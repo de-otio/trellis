@@ -43,14 +43,51 @@ export { setMediaModerationProvider } from "./lib/media/request-moderation.js";
 // provider's own decision. Optional — without one the provider's decision
 // stands — and it can only ever degrade a verdict, never loosen it.
 export { setMediaLabelPolicy } from "./lib/media/request-moderation.js";
-export { createLabelPolicy, LabelPolicyConfigError } from "./lib/media/label-policy.js";
+export {
+  createLabelPolicy,
+  explainFromLabels,
+  LabelPolicyConfigError,
+} from "./lib/media/label-policy.js";
 export type {
   LabelPolicy,
   LabelPolicyConfig,
   LabelPolicyContext,
+  LabelPolicyExplanation,
+  LabelPolicyGround,
   CategoryPolicy,
   TaxonomyPinMode,
 } from "./lib/media/label-policy.js";
+// The deferred moderation lane (plan 030 / plan 031) — EVALUATION SCAFFOLDING.
+// Exported because the consuming app owns the wiring: it supplies τ, the lane's
+// operator config, and the slow-model provider. All of it is inert by default —
+// τ = 0 and `enabled: false` route every verdict to today's behaviour, and the
+// approval flag ships closed. The Hatchet workflow that consumes these lives in
+// the worker app; nothing here imports an SDK.
+export {
+  createCascadeRoute,
+  routeOnConfidence,
+  CascadeRouteConfigError,
+} from "./lib/media/cascade-route.js";
+export type {
+  CascadeRoute,
+  CascadeRouteConfig,
+  CascadeRouter,
+  EscalationCause,
+  SettleReason,
+} from "./lib/media/cascade-route.js";
+export {
+  clampEscalatedDecision,
+  createDeferredLaneConfig,
+  dispositionForDeadlineBreach,
+  dispositionForError,
+  DeferredLaneConfigError,
+  DEFERRED_LANE_RETRIES,
+} from "./lib/media/deferred-lane.js";
+export type {
+  DeferredLaneConfig,
+  Disposition,
+  ShedCause,
+} from "./lib/media/deferred-lane.js";
 // Human-review promotion: wiring this is what makes a moderator's approval
 // actually copy the reviewed bytes to the serve prefix. Without it, approval
 // applies the lifecycle transition and promotes nothing — and says so.
