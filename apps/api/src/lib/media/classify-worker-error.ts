@@ -257,16 +257,19 @@ export function classifyWorkerErrorDetailed(
   err: unknown,
 ): WorkerErrorClassification {
   if (isModerationProviderError(err)) {
+    // `infraFault` is read on BOTH branches, and that is the fix rather than a
+    // tidy-up. It used to be hard-coded `false` here, which meant a fault that
+    // was transient AND attributable — a 429 rate limit — could not raise the
+    // signal by any combination of the adapter's flags. The tokens-per-minute
+    // ceiling therefore turned an upload burst into a silent review-queue
+    // spike: the alarm existed, its input could not be produced.
+    const infraFault = err.infraFault === true || err.unknownCause === true;
     if (err.retryable) {
-      return { klass: "retryable", source: "typed", infraFault: false };
+      return { klass: "retryable", source: "typed", infraFault };
     }
     // Permanent for these bytes: stop retrying, hold the media. An
     // unattributed cause additionally owes operators an alert.
-    return {
-      klass: "poison",
-      source: "typed",
-      infraFault: err.unknownCause === true,
-    };
+    return { klass: "poison", source: "typed", infraFault };
   }
   return {
     klass: classifyByHeuristic(err),
