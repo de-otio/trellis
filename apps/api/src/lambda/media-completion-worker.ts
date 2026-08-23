@@ -25,6 +25,12 @@ export type {
   VisualVerdictReinterpreter,
   CompletionDeps,
   RecordOutcome,
+  // Plan 031 C1 — the deferred lane's call-site seams.
+  EscalationJobSpec,
+  CreatedEscalationJob,
+  DeferredEscalationRequest,
+  EscalationResultPort,
+  CompletionCascade,
 } from "../lib/workers/media-completion.js";
 
 /**

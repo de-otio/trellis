@@ -92,6 +92,14 @@ import type { Track } from "../../../api/src/lib/media/track-verdict.js";
  * to be the same string, not two computations that agree today.
  */
 export type EscalationInput = {
+  /**
+   * The ESCALATION job row's own jobId — never the parent interactive row's.
+   * The completion dedupe key is SHA-256(contentHash, jobId, track); carrying
+   * the parent's jobId here would make the re-entry derive the key the inline
+   * completion already claimed, and the escalated verdict would be silently
+   * discarded as a duplicate (plan 031 §status). The call site
+   * (processCompletion, plan 031 C1) creates the row and passes its id.
+   */
   readonly jobId: string;
   readonly mediaId: string;
   readonly tenantId: string;
@@ -106,7 +114,12 @@ export type EscalationInput = {
 
 /** The job state the admission step needs, and nothing more. */
 export interface EscalationJobState {
-  /** True once the inline lane (or anything else) has settled this job. */
+  /**
+   * True once this escalation is moot: the ESCALATION row (input.jobId) already
+   * has a persisted decision, or the media's track has otherwise settled (the
+   * media object left its processing lifecycle). The port implements that
+   * disjunction; this body only needs the boolean.
+   */
   readonly resolved: boolean;
   /** Media duration, for the cost estimate. */
   readonly durationSeconds: number;
@@ -128,6 +141,15 @@ export interface EscalationDeps {
   reportCapExceeded(): Promise<void>;
   /** The slow-model call. */
   escalate(input: EscalationInput): Promise<ModerationDecision>;
+  /**
+   * Persist the CLAMPED decision where the completion worker's
+   * EscalationResultPort re-fetches it (plan 031 C1). MUST complete before the
+   * completion is published: the envelope is an untrusted pointer, so a
+   * published completion with no persisted result re-fetches `null` and the
+   * escalation resolves errored → review — the paid-for verdict discarded.
+   * A failure here must throw (→ retry) so publish is never reached first.
+   */
+  persistResult(jobId: string, decision: ModerationDecision): Promise<void>;
   /** Publish onto the media-completion queue. */
   publishCompletion(body: string): Promise<void>;
   /** Structured observation. Never receives media bytes or a secret. */
@@ -194,10 +216,19 @@ export async function runEscalation(
     // whether or not the verdict was useful.
     await deps.recordSpendUsd(estimateEscalationCostUsd(job.durationSeconds, spend));
 
+    // --- 3b. Persist the result where the re-fetch will look ----------------
+    // BEFORE the publish, strictly: the envelope below is an untrusted pointer
+    // and the completion worker re-fetches from the EscalationResultPort. A
+    // publish that beats the persist re-fetches null → errored → review, which
+    // is the lane's failure outcome bought at the lane's full price. A throw
+    // here retries the whole run; the spend guard's already-recorded estimate
+    // stays recorded (conservative: the call WAS made).
+    await deps.persistResult(input.jobId, decision);
+
     // --- 4. Publish the completion -----------------------------------------
     // The ONLY way a verdict re-enters. The envelope deliberately carries no
-    // verdict: the completion worker re-fetches authoritative state, and this
-    // module's `decision` exists only to be observed.
+    // verdict: the completion worker re-fetches authoritative state from the
+    // result persisted above.
     const envelope: ModerationCompletionEnvelope = {
       track: input.track,
       jobId: input.jobId,

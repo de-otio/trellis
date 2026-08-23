@@ -65,6 +65,7 @@ interface Harness {
   readonly published: string[];
   readonly recorded: number[];
   readonly observed: EscalationObservation[];
+  readonly persisted: { jobId: string; decision: ModerationDecision }[];
 }
 
 function harness(
@@ -75,12 +76,14 @@ function harness(
     escalateThrows?: unknown;
     readSpendThrows?: unknown;
     publishThrows?: unknown;
+    persistResultThrows?: unknown;
   } = {},
 ): Harness {
   const calls: string[] = [];
   const published: string[] = [];
   const recorded: number[] = [];
   const observed: EscalationObservation[] = [];
+  const persisted: { jobId: string; decision: ModerationDecision }[] = [];
 
   const deps: EscalationDeps = {
     async readJob() {
@@ -104,6 +107,11 @@ function harness(
       if (over.escalateThrows !== undefined) throw over.escalateThrows;
       return over.decision ?? "quarantine";
     },
+    async persistResult(jobId, decision) {
+      calls.push("persistResult");
+      if (over.persistResultThrows !== undefined) throw over.persistResultThrows;
+      persisted.push({ jobId, decision });
+    },
     async publishCompletion(body) {
       calls.push("publishCompletion");
       if (over.publishThrows !== undefined) throw over.publishThrows;
@@ -114,7 +122,7 @@ function harness(
     },
   };
 
-  return { deps, calls, published, recorded, observed };
+  return { deps, calls, published, recorded, observed, persisted };
 }
 
 // ---------------------------------------------------------------------------
@@ -138,7 +146,10 @@ describe("runEscalation — the happy path", () => {
     expect(Object.keys(parsed).sort()).toEqual(["jobId", "track"]);
   });
 
-  it("checks admission BEFORE reading spend, and spend BEFORE the provider call", async () => {
+  it("checks admission BEFORE reading spend, spend BEFORE the provider call, and PERSISTS the result BEFORE publishing", async () => {
+    // persistResult strictly before publishCompletion: the envelope is an
+    // untrusted pointer, so a publish that beats the persist re-fetches null
+    // and the paid-for verdict resolves errored → review (plan 031 C1).
     const h = harness();
     await runEscalation(INPUT, CONFIG, SPEND, h.deps);
     expect(h.calls).toEqual([
@@ -146,6 +157,7 @@ describe("runEscalation — the happy path", () => {
       "getTodaySpendUsd",
       "escalate",
       "recordSpendUsd",
+      "persistResult",
       "publishCompletion",
     ]);
   });
@@ -154,6 +166,26 @@ describe("runEscalation — the happy path", () => {
     const h = harness();
     await runEscalation(INPUT, CONFIG, SPEND, h.deps);
     expect(h.recorded).toEqual([estimateEscalationCostUsd(60, SPEND)]);
+  });
+
+  it("persists the CLAMPED decision under the escalation's own jobId", async () => {
+    // CONFIG ships allowApprove: false, so an approved verdict must already be
+    // review by the time it reaches the result store — the completion worker's
+    // re-clamp is the second belt, not the only one.
+    const h = harness({ decision: "approved" });
+    await runEscalation(INPUT, CONFIG, SPEND, h.deps);
+    expect(h.persisted).toEqual([{ jobId: "mock-job-1", decision: "review" }]);
+  });
+
+  it("a persistResult failure retries WITHOUT publishing — never a pointer to nothing", async () => {
+    const h = harness({
+      persistResultThrows: new ModerationProviderError("store down", {
+        retryable: true,
+      }),
+    });
+    const d = await runEscalation(INPUT, CONFIG, SPEND, h.deps);
+    expect(d.kind).toBe("fail");
+    expect(h.published).toEqual([]);
   });
 });
 
