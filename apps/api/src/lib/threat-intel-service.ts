@@ -202,7 +202,13 @@ export class ThreatIntelService {
         });
       }
 
-      const data: SafeBrowsingResponse = await response.json();
+      // Explicit assertion: under the api tsconfig (DOM lib) `json()` is
+      // `Promise<any>` and the annotation alone suffices, but the worker image
+      // compiles this same source WITHOUT the DOM lib (apps/worker/tsconfig:
+      // lib ["ES2022"] + @types/node), where undici's `json()` returns
+      // `Promise<unknown>` — the bare annotation is then a TS2322 that breaks
+      // the worker Docker build.
+      const data = (await response.json()) as SafeBrowsingResponse;
       const hasThreats = data.matches && data.matches.length > 0;
       const threats = hasThreats
         ? data.matches!.map((m) => m.threatType)

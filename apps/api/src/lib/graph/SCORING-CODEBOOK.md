@@ -313,18 +313,24 @@ is part of the definition of version 1, not a bump from an uncapped predecessor
 
 This section names where engagement-derived scores actually influence what a
 user sees. It exists because the platform's central invariant —
-**engagement signals never order the feed** — is easy to misread as "engagement
-never affects exposure". It does, through one specific mechanism. Documentation
-only; no behaviour change.
+**engagement signals never order the feed covertly** — is easy to misread as
+"engagement never affects exposure". It does, through one specific mechanism.
+Documentation only; no behaviour change.
 
-### 11a. The feed is never engagement-ordered
+### 11a. The feed is never covertly engagement-ordered
 
 `ALLOWED_SORT_FIELDS = ["createdAt"]` (`feed-pagination.ts`). The feed is
-strictly chronological. The scoring engine's heaviest entity weights —
-`engagement` (0.35, depth of engagement) and `frequency` (0.25, interaction
-count) — **never** appear in a sort key. No amount of engagement reorders the
-timeline. `FEED_RANKING_VERSION` pins this; changing it is a new experimental
-condition (Section on feed ranking in `feed-pagination.ts`).
+strictly chronological under ranking version 1 — the permanent default and
+today the only implemented ordering. The scoring engine's heaviest entity
+weights — `engagement` (0.35, depth of engagement) and `frequency` (0.25,
+interaction count) — **never** appear in a sort key. No amount of engagement
+reorders the timeline. `FEED_RANKING_VERSION` pins this; changing it is a new
+experimental condition (Section on feed ranking in `feed-pagination.ts`).
+Since the 2026-08-20 doctrine revision (`plans/pluggable-ranking/`), the
+invariant is scoped precisely: declared, versioned, user-chosen alternative
+rankers are permitted in principle; what stays prohibited is any ordering the
+user did not choose or cannot see, and any engagement input a ranker has not
+declared.
 
 ### 11b. The one engagement-driven exposure mechanism: tier assignment gates composition
 

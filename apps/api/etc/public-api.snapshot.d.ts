@@ -820,6 +820,12 @@ export type { FrameSamplingConfig, FrameSamplingDeps } from "./lib/media/frame-s
 export { withModerationDeadline, ModerationDeadlineConfigError, } from "./lib/media/moderation-deadline.js";
 export { createMediaBytesAccess, MediaBytesTooLargeError } from "./lib/media/media-bytes-access.js";
 export type { MediaBytesAccess } from "./lib/media/media-bytes-access.js";
+export { ScalewayVisionModerationProvider } from "./lib/media/scaleway-vision-provider.js";
+export type { ScalewayVisionModerationConfig } from "./lib/media/scaleway-vision-provider.js";
+export { ScalewayVerdictModerationProvider } from "./lib/media/scaleway-verdict-provider.js";
+export type { ScalewayVerdictModerationConfig } from "./lib/media/scaleway-verdict-provider.js";
+export { CrossCheckModerationProvider } from "./lib/media/cross-check-provider.js";
+export type { CrossCheckModerationConfig } from "./lib/media/cross-check-provider.js";
 export { ModerationProviderError, isModerationProviderError, NullModerationProvider, assertModerationProviderAllowed, moderationProviderName, UNKNOWN_PROVIDER_NAME, } from "./lib/media/moderation-provider.js";
 export type { MediaModerationProvider, MediaPin, ImageRef, S3Ref, ModerationVerdict, ModerationLabel, ModerationCallOptions, VideoModerationStart, } from "./lib/media/moderation-provider.js";
 export { completionEnvelopeBody, parseCompletionEnvelope, } from "./lib/media/completion-envelope.js";
@@ -1292,6 +1298,93 @@ export declare function parseCompletionEnvelope(body: string): ModerationComplet
  * so core's own tests round-trip against the same producer the docs point at.
  */
 export declare function completionEnvelopeBody(envelope: ModerationCompletionEnvelope): string;
+
+// ===== lib/media/cross-check-provider.d.ts =====
+import { type ImageRef, type MediaModerationProvider, type ModerationCallOptions, type ModerationVerdict, type S3Ref, type VideoModerationStart } from "./moderation-provider.js";
+/**
+ * Two independent moderation signals to combine. Both are called for every
+ * image; the returned verdict is the worse of the two.
+ *
+ * The names `primary`/`crossCheck` describe intended ROLES, not a difference in
+ * how their verdicts are weighed — the combination is worst-wins and symmetric.
+ * `primary` is the signal whose taxonomy the operator's label policy keys on
+ * (the rich category scorer); its name and `modelVersion` are what the combined
+ * verdict reports, so attribution and taxonomy-pin checks see one stable
+ * identity rather than splitting the moment a cross-check is wired in.
+ * `crossCheck` is the guard whose only job is to refuse to be fooled where the
+ * primary can be — a coarse verdict gate, or (later) a non-generative scorer.
+ */
+export interface CrossCheckModerationConfig {
+    /** The rich classifier the label policy keys on. Owns the reported identity. */
+    readonly primary: MediaModerationProvider;
+    /** The independent guard signal. A pass requires this to pass too. */
+    readonly crossCheck: MediaModerationProvider;
+}
+/**
+ * A `MediaModerationProvider` that returns the worst verdict of two independent
+ * classifiers, so a single fooled signal cannot approve on its own.
+ *
+ * Reconciliation, image path:
+ *   - BOTH resolve → decision = worst(primary, crossCheck); labels = the union
+ *     of both (so a downstream label policy still sees every signal); identity
+ *     (`provider`, `modelVersion`) passed through from `primary`.
+ *   - ONE resolves to review/quarantine, the OTHER throws → return the
+ *     resolved verdict. It is already at least `review`, i.e. conservative;
+ *     losing the co-signal cannot make a block less of a block.
+ *   - ONE resolves to `approved`, the OTHER throws → this is the dangerous case:
+ *     an un-cross-checked clean pass, exactly the state the guard exists to
+ *     prevent. RE-THROW the error rather than trust the pass, preserving its
+ *     `retryable`/`unknownCause` so core retries a transient fault and alerts on
+ *     an unattributed one — instead of silently committing an unguarded approve.
+ *   - BOTH throw → throw a combined error: retryable only if BOTH are (a
+ *     permanent failure on either side is permanent for these bytes);
+ *     unknownCause if EITHER is (any unattributed fault must still alert).
+ */
+export declare class CrossCheckModerationProvider implements MediaModerationProvider {
+    private readonly primary;
+    private readonly crossCheck;
+    constructor(config: CrossCheckModerationConfig);
+    /**
+     * Wrapper-rule attribution: report the PRIMARY classifier's name, never a name
+     * of our own. Cross-checking does not change "whose classifier produced this",
+     * and substituting a new identity would split the primary's counters and cache
+     * entries the moment an operator wires the guard in.
+     */
+    get name(): string;
+    moderateImage(input: ImageRef, options?: ModerationCallOptions): Promise<ModerationVerdict>;
+    /**
+     * Video is not this provider's job. It composes two IMAGE classifiers; a video
+     * track becomes cross-checked by wrapping this provider in the frame-sampling
+     * adapter, which calls `moderateImage` per sampled frame.
+     */
+    startVideoModeration(_input: S3Ref, _options?: ModerationCallOptions): Promise<VideoModerationStart>;
+    getVideoModeration(_jobId: string, _options?: ModerationCallOptions): Promise<ModerationVerdict>;
+    /** Both signals resolved: worst decision, union of labels, primary identity. */
+    private combine;
+    /**
+     * One signal resolved, the other threw. A resolved review/quarantine is
+     * already conservative and stands; a resolved `approved` is an unguarded pass
+     * and must not be trusted — re-throw the surviving error so core fails closed
+     * AND keeps the retryable/alert signal.
+     */
+    private reconcileOneSided;
+    /**
+     * Coerce a caught rejection into a ModerationProviderError. A typed error is
+     * re-wrapped so its `retryable`/`unknownCause` survive (the classification the
+     * adapter made is the trustworthy one); an untyped throw is an unattributed
+     * fault — retryable so a transient blip is retried, unknownCause so it alerts.
+     */
+    private asProviderError;
+    /**
+     * Both signals threw. Retry only if BOTH could succeed later — a permanent
+     * failure on either side is permanent for these bytes. Alert if EITHER is
+     * unattributed.
+     */
+    private combineErrors;
+    /** A caught rejection's error classification, defaulting an untyped throw to
+     * retryable + unknownCause (a transient-looking, unattributed fault). */
+    private classify;
+}
 
 // ===== lib/media/frame-sampling-adapter.d.ts =====
 /**
@@ -3035,6 +3128,168 @@ export declare function setTextModerationProvider(provider: TextModerationProvid
 export declare function getTextModerationProvider(): TextModerationProvider;
 /** Test-only: clear the injected provider so tests don't leak across cases. */
 export declare function __resetTextModerationProviderForTests(): void;
+
+// ===== lib/media/scaleway-verdict-provider.d.ts =====
+import { type ImageRef, type MediaModerationProvider, type ModerationCallOptions, type ModerationDecision, type ModerationVerdict, type S3Ref, type VideoModerationStart } from "./moderation-provider.js";
+import type { MediaBytesAccess } from "./media-bytes-access.js";
+/**
+ * Config for the verdict gate. The systemPrompt is a coarse "pass or block under
+ * this policy" instruction (operator-supplied, carrying the real policy text);
+ * this file never contains it.
+ */
+export interface ScalewayVerdictModerationConfig {
+    /** OpenAI-compatible base URL, `https://api.scaleway.ai/<project-id>/v1`. */
+    readonly baseUrl: string;
+    /** Model slug; sent as `model` and reported as {@link ModerationVerdict.modelVersion}. */
+    readonly model: string;
+    /** Bearer secret key. Held by the consuming app; core never persists it. */
+    readonly apiKey: string;
+    /**
+     * The verdict-style system prompt — a coarse pass/block instruction under the
+     * operator's policy. This is the shape that held under probe-16 injection;
+     * keep it a single-decision question, NOT a per-category scoring prompt.
+     */
+    readonly systemPrompt: string;
+    /** Credential-free byte reader (see media-bytes-access.ts). */
+    readonly bytes: MediaBytesAccess;
+    /** Per-image user message. Defaults to a pass/block question. */
+    readonly userPrompt?: string;
+    /** `max_tokens`. Defaults to 200 — the verdict object is tiny. */
+    readonly maxOutputTokens?: number;
+    /**
+     * The decision a `block` maps to. `quarantine` (default) treats a gate block
+     * as strongly as the scorer's own quarantine so worst-wins escalates; set
+     * `review` for a softer gate that only ever routes to human review.
+     */
+    readonly blockDecision?: Extract<ModerationDecision, "quarantine" | "review">;
+    /** The opaque label token emitted on a block. Defaults to "verdict_block". */
+    readonly blockCategory?: string;
+    /** Value put in {@link ModerationVerdict.provider}. Defaults to "scaleway-verdict". */
+    readonly providerName?: string;
+    /** Injectable for tests. Defaults to global `fetch`. */
+    readonly fetchImpl?: typeof fetch;
+}
+/**
+ * A coarse pass/block vision gate. On a well-formed `pass` it approves with no
+ * labels; on `block` it returns its {@link ScalewayVerdictModerationConfig.blockDecision}
+ * (default `quarantine`) with a single structural label. Any unusable answer —
+ * no content, unparseable JSON, a missing or unknown `verdict` — fails closed to
+ * `review`, never an approve. Image-only.
+ */
+export declare class ScalewayVerdictModerationProvider implements MediaModerationProvider {
+    readonly name: string;
+    private readonly config;
+    private readonly fetchImpl;
+    constructor(config: ScalewayVerdictModerationConfig);
+    moderateImage(input: ImageRef, options?: ModerationCallOptions): Promise<ModerationVerdict>;
+    startVideoModeration(_input: S3Ref, _options?: ModerationCallOptions): Promise<VideoModerationStart>;
+    getVideoModeration(_jobId: string, _options?: ModerationCallOptions): Promise<ModerationVerdict>;
+    private videoUnsupported;
+    /**
+     * Read the `verdict` field. Returns `"pass"` | `"block"`, or `null` for any
+     * unusable answer (no content, unparseable JSON, missing/unknown verdict) —
+     * the caller turns `null` into a fail-closed `review`. Never throws.
+     */
+    private parseVerdict;
+}
+
+// ===== lib/media/scaleway-vision-provider.d.ts =====
+import { type ImageRef, type MediaModerationProvider, type ModerationCallOptions, type ModerationVerdict, type S3Ref, type VideoModerationStart } from "./moderation-provider.js";
+import type { MediaBytesAccess } from "./media-bytes-access.js";
+/**
+ * Everything the consuming app must supply. All policy — the taxonomy prompt,
+ * the category tokens, the decision floors — lives HERE, injected, never in
+ * core code.
+ */
+export interface ScalewayVisionModerationConfig {
+    /**
+     * The OpenAI-compatible base URL, e.g.
+     * `https://api.scaleway.ai/<project-id>/v1`. `/chat/completions` is appended.
+     * The project-scoped path is preferred over the bare `/v1` so the endpoint
+     * does not depend on the key's default project.
+     */
+    readonly baseUrl: string;
+    /**
+     * The model slug, e.g. `pixtral-12b-2409`. Sent as `model` AND reported as
+     * {@link ModerationVerdict.modelVersion}, so an operator's config-mode
+     * taxonomy pin has something to compare against. A reasoning-mode model must
+     * NOT be used here — those run 13–20 s and blow the moderation deadline
+     * (probe 3 / 15-research-update); re-run the latency probe before any swap.
+     */
+    readonly model: string;
+    /** The bearer secret key. Held by the consuming app; core never persists it. */
+    readonly apiKey: string;
+    /**
+     * The opaque category tokens the model is asked to score, in the order they
+     * appear in the prompt/schema. Core treats these as opaque strings and relays
+     * them into {@link ModerationLabel.category} unchanged — it never inspects or
+     * interprets them, so no real-category vocabulary enters this file.
+     */
+    readonly categories: ReadonlyArray<string>;
+    /**
+     * The system prompt that defines the taxonomy and elicits the JSON. Supplied
+     * by the operator because it carries the real-category definitions this file
+     * must not contain. The prompt's identity is the operator's to version.
+     */
+    readonly systemPrompt: string;
+    /** The credential-free byte reader (see media-bytes-access.ts). */
+    readonly bytes: MediaBytesAccess;
+    /** The per-image user message. Defaults to "Classify this image.". */
+    readonly userPrompt?: string;
+    /** `max_tokens`. Defaults to 300 — ample for the JSON object (probe 3). */
+    readonly maxOutputTokens?: number;
+    /**
+     * The baseline decision floors applied to the single highest confidence, for
+     * the case where NO operator label policy is injected. Both optional:
+     *   - highest confidence ≥ quarantineFloor → `quarantine`
+     *   - highest confidence ≥ reviewFloor     → `review`
+     *   - otherwise                            → `approved`
+     * When neither floor is set, a well-formed classification's baseline is
+     * `approved` and the operator's injected label policy is expected to do the
+     * real thresholding (it can only ever degrade this baseline, never lift it).
+     * Malformed output and faults never reach this path — they fail closed to
+     * `review` regardless.
+     */
+    readonly reviewFloor?: number;
+    readonly quarantineFloor?: number;
+    /** The value put in {@link ModerationVerdict.provider}. Defaults to "scaleway-vision". */
+    readonly providerName?: string;
+    /** Injectable for tests. Defaults to global `fetch`. */
+    readonly fetchImpl?: typeof fetch;
+}
+/**
+ * A generic OpenAI-compatible vision-moderation provider (category scorer).
+ * Image-only: video is served by wrapping this in
+ * {@link FrameSamplingVideoModerationAdapter}, whose own video methods delegate
+ * `moderateImage` here — so this provider's video methods are never called in
+ * correct wiring and throw a clear permanent error if they are.
+ */
+export declare class ScalewayVisionModerationProvider implements MediaModerationProvider {
+    readonly name: string;
+    private readonly config;
+    private readonly fetchImpl;
+    constructor(config: ScalewayVisionModerationConfig);
+    moderateImage(input: ImageRef, options?: ModerationCallOptions): Promise<ModerationVerdict>;
+    startVideoModeration(_input: S3Ref, _options?: ModerationCallOptions): Promise<VideoModerationStart>;
+    getVideoModeration(_jobId: string, _options?: ModerationCallOptions): Promise<ModerationVerdict>;
+    private videoUnsupported;
+    private reviewVerdict;
+    /**
+     * Extract per-category labels from the model's JSON content. Returns `null`
+     * for any well-formed-HTTP-but-unusable answer (no content, unparseable JSON,
+     * missing `categories`, a category absent or not a finite number in [0,1]) —
+     * the caller turns `null` into a fail-closed `review`. Never throws.
+     */
+    private parseLabels;
+    /**
+     * The provider's own decision, used only when no operator label policy is
+     * injected (the policy, when present, is authoritative and can only degrade
+     * this). Applies the operator-supplied floors to the single highest
+     * confidence; with no floors, a well-formed classification is `approved` and
+     * the label policy is expected to do the thresholding.
+     */
+    private baselineDecision;
+}
 
 // ===== lib/media/text-moderation.d.ts =====
 import type { ModerationVerdict } from "./moderation-provider.js";
