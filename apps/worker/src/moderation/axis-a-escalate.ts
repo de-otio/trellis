@@ -41,7 +41,6 @@
 
 import { HatchetClient } from "@hatchet-dev/typescript-sdk/v1/index.js";
 import { ConcurrencyLimitStrategy } from "@hatchet-dev/typescript-sdk/v1/task.js";
-import { Or } from "@hatchet-dev/typescript-sdk/v1/conditions/index.js";
 import type { DurableContext } from "@hatchet-dev/typescript-sdk/v1/client/worker/context.js";
 
 import {
@@ -58,13 +57,6 @@ import {
 
 /** The workflow's name, in one place. Used by the trigger and by the tests. */
 export const AXIS_A_ESCALATE = "axis-a-escalate";
-
-/**
- * The event the escalation publishes when it is done, and the one the durable
- * wait listens for. Scoped per job so one escalation's completion cannot
- * release another's wait.
- */
-export const ESCALATION_DONE_EVENT = "media:axis-a-escalate:done";
 
 /**
  * What the workflow returns. `ack-drop` is a VALUE here, never a swallowed
@@ -169,35 +161,62 @@ export function registerAxisAEscalate(
       input: EscalationInput,
       ctx: DurableContext<EscalationInput>,
     ): Promise<EscalationOutput> => {
-      // ── C4: the durable wait ───────────────────────────────────────────
+      // ── C4: the eviction bound ─────────────────────────────────────────
       //
-      // `Or(sleepFor, event)` — whichever comes first. The event is the
-      // escalation completing; the sleep is the eviction deadline, and on
-      // expiry the job ages out to `REVIEW`: today's behaviour, reached
+      // The escalation RACES a durable sleep. Whichever finishes first decides:
+      // the escalation's own disposition, or — if the window expires — an
+      // ack-drop that ages the job out to `REVIEW`. Today's behaviour, reached
       // deliberately and after a real attempt, rather than immediately and by
       // default.
       //
-      // `considerEventsSince` is the LOOKBACK WINDOW, and it is not optional
-      // decoration. The escalation can finish before the wait is established
-      // (a fast provider, a slow scheduler), and an event pushed before the
-      // wait exists is an event the wait never sees — the estate's
-      // event-before-registration gotcha, in miniature. The lookback makes the
-      // wait consider events that predate it.
-      const started = await ctx.now();
-      const settled = await ctx.waitFor(
-        Or(
-          { sleepFor: evictionWindow },
-          {
-            eventKey: ESCALATION_DONE_EVENT,
-            scope: input.dedupeKey,
-            considerEventsSince: started.toISOString(),
-          },
-        ),
-      );
+      // ⚠ THIS IS NOT `Or(sleepFor, event)`, WHICH IS WHAT PLAN 031 §4.4 ASKS
+      // FOR, and the divergence is deliberate rather than an oversight.
+      //
+      // `waitFor(Or(sleep, event))` is the right shape for an escalation that
+      // completes ASYNCHRONOUSLY and notifies. This lane's escalation is a
+      // DIRECT 13–20 s call (§4.1 step 3). Written literally as the spec says,
+      // the body waits for a "done" event that only the escalation could emit
+      // — and the escalation has not been started, because the body is waiting.
+      // It is a deadlock by construction that always evicts, and it looks
+      // exactly like a correctly-configured lane with nothing to escalate.
+      //
+      // That is not a deduction. It was BUILT that way, run against the local
+      // engine, and returned `{"outcome":"ack-drop","shedCause":"evicted"}` with
+      // the injected dependencies recording ZERO calls. The unit tests could not
+      // have caught it: they exercise `runEscalation`, and the bug was that
+      // `runEscalation` was never reached.
+      //
+      // The event arm belongs to the async-provider case and to spike S5. When
+      // a provider that notifies is wired, this is where `Or` comes back, with
+      // `considerEventsSince` as the lookback — an event pushed before the wait
+      // is established is an event the wait never sees, which is the estate's
+      // event-before-registration gotcha in miniature.
+      //
+      // ON REPLAY, what is KNOWN and what is not. `runEscalation` is not
+      // checkpointed, so the obvious worry is that a replay re-runs the
+      // expensive call. Measured against the local engine on 2026-08-23 by
+      // running three shapes side by side — this race, a durable task with no
+      // sleep, and a plain task — and counting provider calls: **all three
+      // called it exactly once**. So the normal path does not double-spend.
+      //
+      // What that does NOT establish is behaviour under an actual recovery — a
+      // killed worker mid-run, which the probe did not exercise. If a replay
+      // does re-enter the body, `ctx.sleepFor` resolves from the durable log
+      // and the race settles as evicted, which is the SAFE direction: it lands
+      // on `REVIEW`, never on a release. Worth a deliberate kill-the-worker
+      // test in Phase 2 (it is adjacent to spike S4's upgrade rehearsal);
+      // not worth a more intricate construct before there is evidence.
+      const outcome = await Promise.race([
+        runEscalation(input, config, spend, deps).then((d) => ({
+          disposition: d,
+          evicted: false,
+        })),
+        ctx
+          .sleepFor(evictionWindow)
+          .then(() => ({ disposition: dispositionForDeadlineBreach(), evicted: true })),
+      ]);
 
-      const disposition = evictedBeforeCompletion(settled)
-        ? dispositionForDeadlineBreach()
-        : await runEscalation(input, config, spend, deps);
+      const disposition = outcome.disposition;
 
       switch (disposition.kind) {
         case "ack":
@@ -232,23 +251,3 @@ export class EscalationRetryableError extends Error {
   }
 }
 
-/**
- * Did the wait end because the eviction window expired, rather than because the
- * escalation reported in?
- *
- * FAIL-CLOSED ON AN UNREADABLE RESULT. `waitFor` returns an untyped
- * `Record<string, any>` keyed by the conditions' readable keys, so the honest
- * position is that this shape is not guaranteed. An unrecognised result is
- * treated as EVICTED — the outcome that costs one call and lands on today's
- * behaviour — rather than as completion, which would publish a completion for
- * an escalation that may not have run.
- */
-export function evictedBeforeCompletion(settled: unknown): boolean {
-  if (settled === null || typeof settled !== "object") return true;
-  const keys = Object.keys(settled as Record<string, unknown>);
-  if (keys.length === 0) return true;
-  // The event's readable key defaults to its event key. If it is present, the
-  // escalation reported in; anything else (the sleep key, an unknown key) is
-  // not evidence that it did.
-  return !keys.some((k) => k.includes(ESCALATION_DONE_EVENT));
-}

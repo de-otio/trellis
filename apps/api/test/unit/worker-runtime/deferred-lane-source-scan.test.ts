@@ -115,12 +115,27 @@ describe("C3 — no task body swallows an error", () => {
     expect(catchBlocks(stripComments(registration!.source))).toEqual([]);
   });
 
-  it("the one catch that does exist consults the classifier", () => {
+  it("the one catch in the body consults the classifier", () => {
     const body = laneSources().find((s) => s.file === "escalation-run.ts");
     expect(body).toBeDefined();
     const blocks = catchBlocks(stripComments(body!.source));
     expect(blocks).toHaveLength(1);
     expect(blocks[0]).toMatch(/dispositionForError\s*\(/);
+  });
+
+  it("the trigger's catch RETHROWS everything but the one named error", () => {
+    // The trigger is allowed to swallow exactly one class —
+    // `IdempotencyCollisionError`, which means the escalation is already
+    // running and is therefore a success. A catch here that returned on any
+    // other error would silently stop escalating while reporting nothing, and
+    // a lane that escalates nothing looks exactly like a lane with nothing to
+    // escalate.
+    const trigger = laneSources().find((s) => s.file === "escalation-trigger.ts");
+    expect(trigger).toBeDefined();
+    const blocks = catchBlocks(stripComments(trigger!.source));
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toMatch(/\bthrow\b/);
+    expect(blocks[0]).toMatch(/isIdempotencyCollision\s*\(/);
   });
 
   it("NEGATIVE CONTROL: a bare swallow is flagged", () => {
@@ -218,7 +233,11 @@ describe("C3 — the scan is not vacuous", () => {
     // A scan over an empty directory passes every assertion above. If the lane
     // is ever moved or renamed, this fails rather than silently going quiet.
     const files = laneSources().map((s) => s.file).sort();
-    expect(files).toEqual(["axis-a-escalate.ts", "escalation-run.ts"]);
+    expect(files).toEqual([
+      "axis-a-escalate.ts",
+      "escalation-run.ts",
+      "escalation-trigger.ts",
+    ]);
   });
 
   it("the sources are non-trivial", () => {

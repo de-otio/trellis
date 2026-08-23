@@ -133,6 +133,80 @@ Note the **result envelope**: `runWorkflow(...).result()` returns output **keyed
 by task name**, not the bare task output. A caller reading `output.echoed`
 gets `undefined` and no error.
 
+## Lane C against the engine (2026-08-23) — four measurements
+
+`axis-a-escalate` was registered and driven against this engine. Type-checking
+proves the SDK's `.d.ts` accepts an options object; it proves nothing about
+whether the ENGINE accepts the resulting `PutWorkflow`, which is where a wrong
+concurrency strategy or an unsupported idempotency shape actually surfaces.
+
+1. **The engine accepts the registration** — `retries: 3`, a constant-expression
+   concurrency cap with `GROUP_ROUND_ROBIN`, a `dynamicKey: "input.tenantId"`
+   rate limit, and `idempotency: { strategy: "status", expression:
+   "input.dedupeKey" }`. All accepted; the worker connects and runs.
+2. **The happy path runs end to end.** Injected deps recorded
+   `readJob → spend → escalate → record → publish → observe`, and the published
+   body was exactly `{"track":"VISUAL","jobId":"…"}`.
+3. **The eviction arm fires.** A 2 s window against a deliberately-slow 5 s
+   provider returned `{"outcome":"ack-drop","shedCause":"evicted"}` with the
+   escalation started and no completion published.
+4. **A repeat does NOT double-spend.** Three triggers with one derived key
+   produced one provider call.
+
+### ⚠ The idempotent repeat THROWS. It is not a no-op.
+
+Plan 031 §2 states that a repeated trigger with the derived key "is a **no-op at
+the engine**, which is the property being relied on". Measured, it is not:
+
+```
+IdempotencyCollisionError: idempotency key collision:
+existing run cb13c3b3-… already exists
+```
+
+This matters because the cascade route runs **inside the inline lane, under its
+5000 ms deadline**, and the inline lane retries. An uncaught throw there fails
+closed to `REVIEW` — the un-drained queue — so trusting the spec and writing
+
+```ts
+if (route.kind === "escalate") await workflow.runNoWait(input);
+```
+
+turns every retry of the inline lane into the exact silent content loss the
+deferred lane exists to prevent, on the path least likely to be exercised in
+testing. `escalation-trigger.ts` absorbs `IdempotencyCollisionError` and
+**nothing else**.
+
+The spec asked for precisely this to be checked rather than assumed. It was, and
+the assumption was wrong.
+
+### ⚠ Beware leftover runs when re-running a probe
+
+A probe killed with `process.exit()` mid-run leaves that run assigned. The next
+worker registering the **same workflow name** picks it up, and its side effects
+land in the next probe's counters. A "2 provider calls for 1 job" reading was
+this, not a defect — confirmed by re-running with the job id recorded in each
+call. **Attribute counted side effects to their input**, or a contaminated
+measurement reads as a bug and gets "fixed".
+
+### On `Or(sleepFor, event)` — the shape in plan 031 §4.4 does not fit
+
+`waitFor(Or(sleep, event))` is right for an escalation that completes
+ASYNCHRONOUSLY and notifies. This lane's escalation is a **direct 13–20 s call**.
+Written literally, the body waits for a "done" event only the escalation could
+emit, while the escalation has not started because the body is waiting — a
+deadlock by construction that always evicts, and looks exactly like a correctly
+configured lane with nothing to escalate. Built that way, it returned
+`{"outcome":"ack-drop","shedCause":"evicted"}` with **zero** dependency calls.
+The shipped body races `runEscalation` against `ctx.sleepFor` instead; the event
+arm returns when a notifying provider does.
+
+### Replay: measured once, not settled
+
+Three shapes side by side — the sleep race, a durable task with no sleep, and a
+plain task — each called the provider **exactly once**. That rules out
+double-spend on the normal path. It does **not** cover a real recovery (a killed
+worker mid-run), which is worth a deliberate test alongside spike S4.
+
 ## Teardown
 
 ```bash
