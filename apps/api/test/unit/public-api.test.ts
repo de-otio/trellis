@@ -61,6 +61,10 @@ const EXPECTED_EXPORTS = [
   "ScalewayVisionModerationProvider",
   "ScalewayVerdictModerationProvider",
   "CrossCheckModerationProvider",
+  // The minimum-content intake gate: deterministic pre-model refusal of
+  // degenerate images (tiny dimensions / near-zero entropy), composed in
+  // front of both vision signals by the consuming app.
+  "MinimumContentGateModerationProvider",
   // The deferred moderation lane (plan 030 / plan 031) — EVALUATION
   // SCAFFOLDING, and published for one reason: the CONSUMING APP owns the
   // wiring. It supplies τ, the lane's operator config, and the slow-model
