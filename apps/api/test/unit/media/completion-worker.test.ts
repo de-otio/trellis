@@ -166,6 +166,7 @@ function harness(opts: {
           mediaId,
           track: opts.track,
           thresholdSnapshot: opts.thresholdSnapshot ?? { v: 1 },
+          priority: "interactive",
         },
       ],
     ]),

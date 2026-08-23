@@ -946,6 +946,15 @@ enum ModerationTrack {
   AUDIO
 }
 
+// Scheduling intent for a moderation job (plan 031). `interactive` is an
+// upload someone is waiting on; `deferred` is an escalation row the deferred
+// lane resolves later. Mirrors the ModerationJobPriority type in
+// lib/workers/media-processing.ts.
+enum ModerationJobPriority {
+  interactive
+  deferred
+}
+
 // One row per (media, track) moderation job submitted to an external provider.
 // decision is String (not an enum) so the schema stays decoupled from
 // ModerationDecision evolution; app code validates the value on read.
@@ -961,7 +970,22 @@ model MediaModerationJob {
   // decision: resolved ModerationDecision value, or null while the job is in flight.
   decision          String?
   // thresholdSnapshot: a copy of env.media.thresholds at submission time (JSON).
+  // For a `deferred` row this is the DEFERRED lane's own policy snapshot —
+  // the escalation runs a different model reporting a different taxonomy, so
+  // interpreting its verdict through the inline snapshot would floor every
+  // deferred verdict at `review` via the pin (plan 031 §status).
   thresholdSnapshot Json            @map("threshold_snapshot")
+  // priority: `interactive` for provider-submitted jobs, `deferred` for an
+  // escalation row spawned by the cascade route (plan 031). The completion
+  // worker re-fetches `deferred` rows from the escalation-result port instead
+  // of the media provider.
+  priority          ModerationJobPriority @default(interactive)
+  // parentJobId: for a `deferred` row, the jobId of the interactive row whose
+  // uncertain verdict spawned it. UNIQUE — at most one escalation per parent —
+  // which is what makes creating the escalation row idempotent (a retried
+  // trigger finds the existing row instead of minting a second jobId, so the
+  // engine's idempotency key stays stable).
+  parentJobId       String?         @unique @map("parent_job_id")
   createdAt         DateTime        @default(now()) @map("created_at")
   updatedAt         DateTime        @updatedAt @map("updated_at")
 

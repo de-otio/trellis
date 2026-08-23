@@ -57,6 +57,14 @@
 
 import { decidePromotion } from "../media/promote-decision.js";
 import {
+  routeOnConfidence,
+  type CascadeRouteConfig,
+  type EscalationCause,
+} from "../media/cascade-route.js";
+import type { DeferredLaneConfig } from "../media/deferred-lane.js";
+import type { LabelPolicyExplanation } from "../media/label-policy.js";
+import type { ModerationJobPriority } from "./media-processing.js";
+import {
   resolvePromoteSource,
   promotePinned,
 } from "../media/promote-staging.js";
@@ -88,8 +96,20 @@ import type {
 export interface ModerationJobRow {
   readonly mediaId: string;
   readonly track: Track;
-  /** Threshold snapshot captured at submission time (opaque JSON). */
+  /**
+   * Threshold snapshot captured at submission time (opaque JSON). For a
+   * `deferred` row this is the DEFERRED lane's own policy snapshot, captured at
+   * trigger time — the escalation runs a different model under a different
+   * taxonomy, and interpreting it through the inline snapshot would floor every
+   * deferred verdict at `review` via the taxonomy pin (plan 031 §status).
+   */
   readonly thresholdSnapshot: unknown;
+  /**
+   * Scheduling intent (plan 031). `interactive` rows re-fetch from the media
+   * provider; `deferred` rows are escalation rows and re-fetch from the
+   * {@link EscalationResultPort}.
+   */
+  readonly priority: ModerationJobPriority;
 }
 
 /**
@@ -118,11 +138,31 @@ export interface CompletionStore {
    * Read the sibling track's resolved decision for a media object. Returns the
    * decision if the other track's job exists AND has resolved; otherwise the
    * `state` distinguishes a job that exists-but-unresolved from no-such-job.
+   *
+   * MULTIPLE ROWS PER TRACK (plan 031): when a track has more than one job row
+   * — an `interactive` row plus the `deferred` escalation row it spawned — the
+   * LATEST row (by creation) is authoritative for that track's state. An
+   * escalation row is a strictly later, strictly more deliberate attempt at the
+   * same question; the interactive row it supersedes stays open (its decision
+   * null) and must not be read as "pending" once the escalation has decided.
    */
   readOtherTrack(
     mediaId: string,
     thisTrack: Track,
   ): Promise<OtherTrackState>;
+
+  /**
+   * Create (or re-find) the escalation job row for `parentJobId` (plan 031 C1).
+   * MUST be idempotent on the parent: `parent_job_id` is unique, so a retried
+   * trigger re-finds the existing row and returns ITS jobId rather than minting
+   * a second one — that stability is what keeps the derived dedupe key and the
+   * engine's idempotency key the same string across retries. Implemented with
+   * INSERT ... ON CONFLICT (parent_job_id) DO NOTHING + re-select.
+   *
+   * OPTIONAL because only deployments that wire the cascade need it; the shell
+   * throws (→ retry, visible) if a cascade is configured without it.
+   */
+  createEscalationJob?(spec: EscalationJobSpec): Promise<CreatedEscalationJob>;
 
   /** Read the media object's current persisted lifecycle + CAS coords. */
   findMedia(mediaId: string): Promise<MediaCoords | null>;
@@ -144,6 +184,76 @@ export type OtherTrackState =
   | { readonly state: "decided"; readonly decision: ModerationDecision }
   | { readonly state: "pending" }
   | { readonly state: "absent" };
+
+// ---------------------------------------------------------------------------
+// The deferred-lane call site's seams (plan 031 C1). All OPTIONAL on
+// CompletionDeps: a deployment that wires none of them gets the exact
+// pre-cascade behaviour.
+// ---------------------------------------------------------------------------
+
+/** What {@link CompletionStore.createEscalationJob} persists. */
+export interface EscalationJobSpec {
+  readonly mediaId: string;
+  readonly track: Track;
+  /** The interactive row whose uncertain verdict spawned this escalation. */
+  readonly parentJobId: string;
+  /** The DEFERRED lane's own policy snapshot (see ModerationJobRow docs). */
+  readonly thresholdSnapshot: unknown;
+}
+
+/** The escalation row's identity — its jobId is the dedupe-key ingredient. */
+export interface CreatedEscalationJob {
+  readonly jobId: string;
+}
+
+/**
+ * What the trigger receives. Structurally identical to the worker host's
+ * `EscalationInput` (apps/worker/src/moderation/escalation-run.ts) — declared
+ * here too because the dependency arrow runs worker → api, never back.
+ *
+ * `jobId` is the ESCALATION row's own jobId, never the parent's: the
+ * completion dedupe key is SHA-256(contentHash, jobId, track), and re-entering
+ * under the parent's jobId would re-derive the key the inline completion
+ * already claimed, silently discarding the escalated verdict (plan 031
+ * §status).
+ */
+export interface DeferredEscalationRequest {
+  readonly jobId: string;
+  readonly mediaId: string;
+  readonly tenantId: string;
+  readonly track: Track;
+  readonly contentHash: string;
+  readonly dedupeKey: string;
+  readonly cause: EscalationCause;
+  readonly confidence: number;
+}
+
+/**
+ * Where a `deferred` row's verdict is re-fetched from. The deferred lane
+ * persists its clamped decision here BEFORE publishing its completion
+ * envelope; the envelope stays an untrusted pointer, exactly like the
+ * provider-backed tracks. `null` = no result recorded (fail closed: the row's
+ * outcome is `errored`, never `approved`).
+ */
+export interface EscalationResultPort {
+  get(jobId: string): Promise<ModerationDecision | null>;
+}
+
+/** The cascade wiring, present only where the deferred lane is deployed. */
+export interface CompletionCascade {
+  /** Operator route config (τ). Refused-at-construction upstream. */
+  readonly config: CascadeRouteConfig;
+  /** The lane config — read here for `allowApprove` (ships false, plan 031 §7.2). */
+  readonly lane: DeferredLaneConfig;
+  /** Captured onto every escalation row it creates. */
+  readonly deferredThresholdSnapshot: unknown;
+  /**
+   * Fire the deferred workflow. MUST absorb the engine's idempotency
+   * collision and nothing else (the worker host's `triggerEscalation` does
+   * exactly this); every other failure must throw so the delivery retries.
+   */
+  readonly trigger: (req: DeferredEscalationRequest) => Promise<void>;
+}
 
 /**
  * The media coordinates the shell needs to gate promotion and build keys. The
@@ -210,6 +320,20 @@ export interface CompletionDeps {
     warn?: (msg: string, data?: unknown) => void;
     error?: (msg: string, data?: unknown) => void;
   };
+  /**
+   * Explain a visual verdict against the job's snapshot (plan 031 C1) — the
+   * explanation, not just the decision, because `routeOnConfidence` needs the
+   * GROUND (a taxonomy-pin failure must settle, never escalate). Absent ⇒ the
+   * cascade never routes and behaviour is exactly pre-cascade.
+   */
+  readonly explainVisual?: (
+    verdict: ModerationVerdict,
+    thresholdSnapshot: unknown,
+  ) => LabelPolicyExplanation;
+  /** The deferred lane's call-site wiring. Absent ⇒ no escalation, ever. */
+  readonly cascade?: CompletionCascade;
+  /** Where `deferred` rows re-fetch their verdict from. Absent ⇒ errored. */
+  readonly escalationResults?: EscalationResultPort;
 }
 
 /**
@@ -222,7 +346,10 @@ export type RecordOutcome =
   | { readonly kind: "unroutable" } // no jobId / unknown job — fail-closed drop
   | { readonly kind: "illegal-transition" } // replay on terminal — ack-drop, no DLQ
   | { readonly kind: "applied"; readonly status: MediaLifecycle }
-  | { readonly kind: "retry"; readonly reason: string }; // transient I/O — return to queue
+  | { readonly kind: "retry"; readonly reason: string } // transient I/O — return to queue
+  // Routed to the deferred lane (plan 031 C1): no verdict written, the job
+  // stays open, the escalation row + workflow own the rest. An ack.
+  | { readonly kind: "escalated"; readonly escalationJobId: string };
 
 // ---------------------------------------------------------------------------
 // Body parsing — extract ONLY the job id from an untrusted pointer.
@@ -376,9 +503,99 @@ export async function processCompletion(
     return { kind: "unroutable" };
   }
 
+  // 1c. Pre-claim routing (plan 031 C1). Two cases obtain THIS track's
+  //     decision BEFORE the dedupe claim — deliberately, because their
+  //     re-fetches are read-only and the escalate branch must NEVER burn the
+  //     claim slot: a claim followed by a crash in the trigger would make the
+  //     redelivery a "duplicate" and silently lose the escalation. The
+  //     escalate branch's own side effects are each idempotent by their own
+  //     keys instead (unique parent_job_id; the engine's idempotency key).
+  //
+  //     `undefined` = not precomputed (the plain path re-fetches after the
+  //     claim, exactly as before); `null` = precomputed as errored.
+  let preDecision: ModerationDecision | null | undefined;
+
+  if (job.priority === "deferred") {
+    // A deferred row's provider IS the deferred lane: re-fetch from the
+    // escalation-result port. Missing port, missing result, or an unknown
+    // value all fail closed to an errored outcome — never approved.
+    const got =
+      deps.escalationResults === undefined
+        ? null
+        : await deps.escalationResults.get(pointer.jobId);
+    const norm = normalizeDecision(got);
+    // Re-clamp on the way back in (belt and braces on plan 031 §7.2's "the
+    // lane ships unable to approve"): approve survives only when the lane
+    // config explicitly allows it. Same law as clampEscalatedDecision.
+    const allowApprove = deps.cascade?.lane.allowApprove === true;
+    preDecision =
+      norm === "approved" && !allowApprove ? "review" : norm;
+  } else if (
+    pointer.track === "VISUAL" &&
+    deps.cascade !== undefined &&
+    deps.explainVisual !== undefined
+  ) {
+    const verdict = await deps.moderation.getVideoModeration(pointer.jobId);
+    if (verdict == null || typeof verdict !== "object") {
+      // Provider unreadable — errored; falls through to the settle path,
+      // which fails closed exactly as it always has.
+      preDecision = null;
+    } else {
+      const explanation = deps.explainVisual(verdict, job.thresholdSnapshot);
+      const route = routeOnConfidence(explanation, deps.cascade.config);
+      if (route.kind === "escalate") {
+        if (deps.store.createEscalationJob === undefined) {
+          // Wiring bug, not a data condition: a cascade without a store that
+          // can create escalation rows must surface, not settle silently.
+          throw new Error(
+            "completion: cascade configured but store.createEscalationJob is missing",
+          );
+        }
+        // Idempotent by construction: parent_job_id is unique, so a retried
+        // delivery re-finds the SAME escalation row and jobId — which keeps
+        // the derived dedupe key and the engine's idempotency key stable.
+        const esc = await deps.store.createEscalationJob({
+          mediaId: job.mediaId,
+          track: pointer.track,
+          parentJobId: pointer.jobId,
+          thresholdSnapshot: deps.cascade.deferredThresholdSnapshot,
+        });
+        const escalationDedupeKey = deriveDedupeKey({
+          contentHash: media.contentHash,
+          jobId: esc.jobId,
+          track: pointer.track,
+        });
+        // A trigger failure THROWS (→ retry): the route recomputes and the
+        // trigger re-fires idempotently on the next delivery, because the
+        // original claim slot below was never touched.
+        await deps.cascade.trigger({
+          jobId: esc.jobId,
+          mediaId: job.mediaId,
+          tenantId: media.tenantId,
+          track: pointer.track,
+          contentHash: media.contentHash,
+          dedupeKey: escalationDedupeKey,
+          cause: route.cause,
+          confidence: route.confidence,
+        });
+        // No verdict written, no status persisted, no claim burned: the job
+        // stays open and the deferred lane owns the rest (plan 031 §2).
+        deps.log?.info?.("completion: escalated to the deferred lane", {
+          jobId: pointer.jobId,
+          escalationJobId: esc.jobId,
+          cause: route.cause,
+        });
+        return { kind: "escalated", escalationJobId: esc.jobId };
+      }
+      preDecision = normalizeDecision(route.decision);
+    }
+  }
+
   // 2. DEDUPE FIRST — before any side effect. The dedupe key binds the content
   //    hash, the jobId, and the track so the two tracks of the same bytes never
-  //    collide and a redelivery of the SAME completion is a no-op.
+  //    collide and a redelivery of the SAME completion is a no-op. (The
+  //    escalate branch above returns without claiming — its side effects carry
+  //    their own idempotency; this claim guards the SETTLE path's.)
   const dedupeKey = deriveDedupeKey({
     contentHash: media.contentHash,
     jobId: pointer.jobId,
@@ -393,7 +610,12 @@ export async function processCompletion(
   }
 
   // 3. RE-FETCH authoritative state for THIS track (body verdict ignored).
-  const thisDecision = await refetchTrackDecision(pointer, job, deps);
+  //    Skipped when 1c already obtained it (deferred row / routed-to-settle):
+  //    re-fetching twice would double the provider read for no new evidence.
+  const thisDecision =
+    preDecision !== undefined
+      ? preDecision
+      : await refetchTrackDecision(pointer, job, deps);
 
   // Persist this track's decision (the side effect we just earned the right to
   // perform). An errored re-fetch persists nothing on the row (decision stays

@@ -153,6 +153,10 @@ export function buildDispatchTable(
           return "fail";
         case "applied":
           return "ack";
+        case "escalated":
+          // Routed to the deferred lane (plan 031 C1): the escalation row +
+          // workflow own the rest; this delivery's work is done.
+          return "ack";
         case "duplicate":
         case "unroutable":
         case "illegal-transition":
