@@ -1,4 +1,4 @@
--- Plan 031, C1 (the deferred moderation lane's call site).
+-- Plan 031, C1 (the deferred moderation lane's call site) — part 1 of 2.
 --
 -- An escalation is ITS OWN MediaModerationJob row. Two reasons, both
 -- load-bearing (plan 031 §status, "the dedupe key is already claimed"):
@@ -13,19 +13,27 @@
 --     taxonomy; its row carries the deferred lane's own threshold snapshot so
 --     re-interpretation does not floor at `review` via the inline taxonomy pin.
 --
--- `parent_job_id` is UNIQUE: at most one escalation per interactive job. That
--- uniqueness is what makes the trigger idempotent end to end — a retried
--- delivery re-finds the same escalation row, re-derives the same dedupe key,
--- and the engine absorbs the idempotency collision.
+-- Additive only. The unique index on parent_job_id is created CONCURRENTLY in
+-- the NEXT migration file — Prisma applies each file transactionally unless it
+-- must not, and `CREATE INDEX CONCURRENTLY` cannot share a transaction with
+-- these ALTERs, so the split follows the M7a/M7b precedent.
 --
--- Additive only: a new enum, two nullable-or-defaulted columns, one unique
--- index. No rewrite of existing rows beyond the DEFAULT fill.
+-- House style (M7b): timeout prologue so a lock queue fails fast instead of
+-- stalling the app; robust (re-runnable) statements throughout.
 
-CREATE TYPE "ModerationJobPriority" AS ENUM ('interactive', 'deferred');
+SET lock_timeout = '1s';
+SET statement_timeout = '5s';
+
+-- CREATE TYPE has no IF NOT EXISTS; the guard makes the file re-runnable.
+DO $$ BEGIN
+  CREATE TYPE "ModerationJobPriority" AS ENUM ('interactive', 'deferred');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+-- NOT NULL with a constant DEFAULT is a catalog-only change on PostgreSQL 11+
+-- (no table rewrite); this estate runs PostgreSQL 17.
+ALTER TABLE "media_moderation_jobs"
+  ADD COLUMN IF NOT EXISTS "priority" "ModerationJobPriority" NOT NULL DEFAULT 'interactive';
 
 ALTER TABLE "media_moderation_jobs"
-  ADD COLUMN "priority" "ModerationJobPriority" NOT NULL DEFAULT 'interactive',
-  ADD COLUMN "parent_job_id" TEXT;
-
-CREATE UNIQUE INDEX "media_moderation_jobs_parent_job_id_key"
-  ON "media_moderation_jobs"("parent_job_id");
+  ADD COLUMN IF NOT EXISTS "parent_job_id" TEXT;
