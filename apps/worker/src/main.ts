@@ -43,6 +43,7 @@ import { CronScheduler } from "./scheduler.js";
 import { buildCronJobs, type WorkerProfile } from "./cron-jobs.js";
 import { startHealthServer } from "./health.js";
 import { closeDefaultResources, installShutdownHandlers } from "./shutdown.js";
+import { startHatchetHost } from "./hatchet.js";
 
 const stage = process.env.STAGE || "dev";
 
@@ -272,13 +273,35 @@ async function main(): Promise<void> {
     logger,
   });
 
+  // ── Hatchet evaluation host (plan 030, Lane B). Returns null unless
+  // HATCHET_ENABLED === "true", so this line is inert on every deployment that
+  // has not opted in. It is started AFTER the real pollers and scheduler so a
+  // failure here can never delay them, and it is deliberately not awaited into
+  // the startup gate: the evaluation must not be able to crash-loop the worker.
+  const hatchetHost = await startHatchetHost(logger).catch((err) => {
+    logger.error("hatchet evaluation host failed to start — continuing without it", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  });
+  if (hatchetHost) void hatchetHost.worker.start();
+
   // ── Graceful drain (T7c, §3.5): scheduler → pollers (bounded) → pools.
   installShutdownHandlers({
     scheduler,
     pollers,
     drainTimeoutMs: Number(process.env.WORKER_DRAIN_TIMEOUT_MS || 25_000),
     logger,
-    closeResources: () => closeDefaultResources(logger),
+    closeResources: async () => {
+      // Stop the evaluation worker first — it is the least important thing
+      // running and the most likely to be wedged.
+      if (hatchetHost) {
+        await hatchetHost.worker.stop().catch(() => {
+          logger.warn("hatchet evaluation host did not stop cleanly — ignoring");
+        });
+      }
+      await closeDefaultResources(logger);
+    },
   });
 
   logger.info("worker runtime started", {
