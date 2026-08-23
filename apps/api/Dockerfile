@@ -1,5 +1,5 @@
 # Stage 1: Build
-FROM node:22-alpine AS builder
+FROM node:24-alpine AS builder
 WORKDIR /app
 
 # Copy workspace root files
@@ -29,7 +29,7 @@ RUN npm run prisma:generate
 RUN npx tsc --build --force tsconfig.build.json
 
 # Stage 2: Production runner
-FROM node:22-alpine AS runner
+FROM node:24-alpine AS runner
 RUN apk add --no-cache curl dumb-init
 
 # Create non-root user
