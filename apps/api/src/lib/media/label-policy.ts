@@ -127,6 +127,25 @@ export interface LabelPolicy {
     context?: LabelPolicyContext,
   ): ModerationDecision;
   /**
+   * The same interpretation, with the ground it rests on. `review` collapses
+   * several distinct situations and only some of them are worth escalating to
+   * the deferred lane; this is how a caller tells them apart. See
+   * {@link explainFromLabels}.
+   *
+   * OPTIONAL, and deliberately so. `LabelPolicy` is exported from the package
+   * index and injected through the public `setMediaLabelPolicy` seam, so a
+   * consuming app may be passing a hand-rolled object. A required method here
+   * would break every such implementation on upgrade, for a capability none of
+   * them asked for. `createLabelPolicy` always provides it, and the cascade
+   * route calls {@link explainFromLabels} directly rather than depending on
+   * this — so a policy without it degrades to "no escalation", never to a
+   * crash.
+   */
+  explain?(
+    verdict: ModerationVerdict,
+    context?: LabelPolicyContext,
+  ): LabelPolicyExplanation;
+  /**
    * True when this policy runs WITHOUT a taxonomy pin. A standing flag for the
    * operations surface, not a one-shot log line.
    */
@@ -194,6 +213,9 @@ export function createLabelPolicy(config: LabelPolicyConfig): LabelPolicy {
     decide(verdict, context) {
       return decideFromLabels(verdict, frozen, context);
     },
+    explain(verdict, context) {
+      return explainFromLabels(verdict, frozen, context);
+    },
   };
 }
 
@@ -208,10 +230,82 @@ export function decideFromLabels(
   config: LabelPolicyConfig,
   context?: LabelPolicyContext,
 ): ModerationDecision {
+  return explainFromLabels(verdict, config, context).decision;
+}
+
+/**
+ * WHY a verdict decided the way it did.
+ *
+ * `decide` collapses several distinct situations onto the same `review`, and
+ * for the cascade route (`cascade-route.ts`) that collapse is exactly the
+ * information it needs back: "the scorer saw a weak signal" and "the taxonomy
+ * pin failed" are both `review`, and only the first is worth paying a
+ * reasoning-model call to resolve. Rather than re-deriving the reason from the
+ * labels at the call site — two readings of one policy is how they drift apart
+ * — the policy reports it.
+ *
+ * `"provider-floor"` means the provider's own verdict dominated, which under
+ * the seam's fail-closed contract (`{ decision: "review", labels: [] }`) is
+ * also how an internally-faulted provider reports. It is not distinguishable
+ * from a deliberate provider `review`, and the cascade route treats both the
+ * same way, deliberately.
+ */
+export type LabelPolicyGround =
+  /** Nothing fired: approved on the merits. */
+  | "clean"
+  /** A label the policy has no rule for (rule 2). Always `quarantine`. */
+  | "unmapped-category"
+  /** A mapped label at or above its quarantine bar. */
+  | "over-quarantine-bar"
+  /** A mapped label in the grey band — at/above `review`, below `quarantine`. */
+  | "over-review-bar"
+  /** A mapped label whose confidence was not a usable number. */
+  | "unreadable-confidence"
+  /** The taxonomy pin did not verify, so the decision was floored at `review`. */
+  | "taxonomy-pin-failed"
+  /** The provider's own decision dominated everything the labels said. */
+  | "provider-floor"
+  /** The verdict was not a usable object, or carried no label array. */
+  | "malformed-verdict";
+
+/** A decision plus the ground it rests on. */
+export interface LabelPolicyExplanation {
+  readonly decision: ModerationDecision;
+  readonly ground: LabelPolicyGround;
+  /**
+   * The confidence of the label that produced `ground`, on the PROVIDER's own
+   * scale — never rescaled, for the reason {@link LabelPolicyConfig} gives.
+   * `null` when no single label drove the result (a pin failure, a malformed
+   * verdict, a provider floor, an unreadable confidence — which is precisely
+   * the absence of a usable number).
+   */
+  readonly drivingConfidence: number | null;
+}
+
+/**
+ * The decision function, with its reasoning. {@link decideFromLabels} is this
+ * function with the reasoning discarded — one implementation, so the reason a
+ * caller acts on is always the reason the decision was actually made.
+ *
+ * GROUND PRECEDENCE, where several apply to one `review`, is ordered by what a
+ * caller must not spend money on: `taxonomy-pin-failed` first, because a policy
+ * whose map may no longer mean what it says is a configuration fault and no
+ * amount of re-classification fixes it. Then the label-derived grounds, then
+ * the provider floor.
+ *
+ * Total: never throws, for any verdict shape.
+ */
+export function explainFromLabels(
+  verdict: ModerationVerdict,
+  config: LabelPolicyConfig,
+  context?: LabelPolicyContext,
+): LabelPolicyExplanation {
   const pinOk = verifyTaxonomyPin(verdict, config, context);
   const floor: ModerationDecision = pinOk ? "approved" : "review";
 
-  if (verdict === null || typeof verdict !== "object") return "review";
+  if (verdict === null || typeof verdict !== "object") {
+    return { decision: "review", ground: "malformed-verdict", drivingConfidence: null };
+  }
 
   // Rule 5: the provider's own decision is a FLOOR, never a starting point to
   // be overwritten. An unrecognised decision reads as `review` — this function
@@ -226,10 +320,22 @@ export function decideFromLabels(
   const labels = Array.isArray(verdict.labels) ? verdict.labels : null;
   if (labels === null) {
     // A verdict that does not even carry a label array tells us nothing.
-    return worse("review", providerFloor);
+    const decision = worse("review", providerFloor);
+    return {
+      decision,
+      // A quarantine here came from the provider; a review came from the
+      // missing array, which is the more specific fault of the two.
+      ground: decision === "quarantine" ? "provider-floor" : "malformed-verdict",
+      drivingConfidence: null,
+    };
   }
 
   let decision: ModerationDecision = "approved";
+  // The strongest grey-band signal seen, and whether any mapped label came
+  // with a confidence we could not read. Both are only consulted if the final
+  // result is `review`; a `quarantine` returns early from inside the loop.
+  let greyBandMax: number | null = null;
+  let sawUnreadable = false;
   for (const label of labels) {
     const category =
       label !== null && typeof label === "object" && typeof label.category === "string"
@@ -237,7 +343,11 @@ export function decideFromLabels(
         : null;
     if (category === null) {
       // A label we cannot even name is an unmapped label.
-      return "quarantine";
+      return {
+        decision: "quarantine",
+        ground: "unmapped-category",
+        drivingConfidence: null,
+      };
     }
     const policy = Object.prototype.hasOwnProperty.call(
       config.categories,
@@ -247,7 +357,11 @@ export function decideFromLabels(
       : undefined;
     if (policy === undefined) {
       // Rule 2: unmapped dominates, whatever else is in the array.
-      return "quarantine";
+      return {
+        decision: "quarantine",
+        ground: "unmapped-category",
+        drivingConfidence: null,
+      };
     }
     const confidence =
       typeof label.confidence === "number" && Number.isFinite(label.confidence)
@@ -257,13 +371,46 @@ export function decideFromLabels(
       // Mapped category, unusable confidence: we know the category matters and
       // cannot tell how much. That is doubt, and doubt reviews.
       decision = worse(decision, "review");
+      sawUnreadable = true;
       continue;
     }
-    if (confidence >= policy.quarantine) return "quarantine";
-    if (confidence >= policy.review) decision = worse(decision, "review");
+    if (confidence >= policy.quarantine) {
+      return {
+        decision: "quarantine",
+        ground: "over-quarantine-bar",
+        drivingConfidence: confidence,
+      };
+    }
+    if (confidence >= policy.review) {
+      decision = worse(decision, "review");
+      greyBandMax = greyBandMax === null || confidence > greyBandMax ? confidence : greyBandMax;
+    }
   }
 
-  return worse(worse(decision, floor), providerFloor);
+  const result = worse(worse(decision, floor), providerFloor);
+
+  if (result === "approved") {
+    return { decision: result, ground: "clean", drivingConfidence: null };
+  }
+  if (result === "quarantine") {
+    // Nothing in the loop reached a quarantine bar (those return early) and
+    // the pin floor only ever reaches `review`, so this is the provider's.
+    return { decision: result, ground: "provider-floor", drivingConfidence: null };
+  }
+
+  // A `review`, and possibly several grounds at once. Precedence per the
+  // doc comment: the configuration fault first, then what the labels said,
+  // then the provider.
+  if (!pinOk) {
+    return { decision: result, ground: "taxonomy-pin-failed", drivingConfidence: null };
+  }
+  if (greyBandMax !== null) {
+    return { decision: result, ground: "over-review-bar", drivingConfidence: greyBandMax };
+  }
+  if (sawUnreadable) {
+    return { decision: result, ground: "unreadable-confidence", drivingConfidence: null };
+  }
+  return { decision: result, ground: "provider-floor", drivingConfidence: null };
 }
 
 /**

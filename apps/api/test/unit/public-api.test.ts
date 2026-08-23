@@ -61,6 +61,31 @@ const EXPECTED_EXPORTS = [
   "ScalewayVisionModerationProvider",
   "ScalewayVerdictModerationProvider",
   "CrossCheckModerationProvider",
+  // The deferred moderation lane (plan 030 / plan 031) — EVALUATION
+  // SCAFFOLDING, and published for one reason: the CONSUMING APP owns the
+  // wiring. It supplies τ, the lane's operator config, and the slow-model
+  // provider, so the names it wires against have to be package-root names
+  // rather than deep paths into dist/.
+  //
+  // All of it is inert unless deliberately configured: τ = 0 and
+  // `enabled: false` route every verdict to today's behaviour, and the
+  // approval flag ships closed. The Hatchet workflow that consumes these lives
+  // in the worker app — nothing reachable from here imports an SDK, which is
+  // the constraint that keeps consumers out of an evaluation they did not opt
+  // into.
+  //
+  // If the evaluation's kill criteria fire, these names go, and their removal
+  // failing HERE first is exactly what this list is for.
+  "explainFromLabels",
+  "createCascadeRoute",
+  "routeOnConfidence",
+  "CascadeRouteConfigError",
+  "createDeferredLaneConfig",
+  "clampEscalatedDecision",
+  "dispositionForError",
+  "dispositionForDeadlineBreach",
+  "DeferredLaneConfigError",
+  "DEFERRED_LANE_RETRIES",
 ].sort();
 
 describe("public API surface (@de-otio/trellis)", () => {
