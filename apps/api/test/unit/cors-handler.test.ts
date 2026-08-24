@@ -94,6 +94,28 @@ describe("CorsHandler", () => {
       expect(origin).toBe("https://example.com");
     });
 
+    it("should match a bare-host APP_DOMAIN (no scheme) against a real Origin", () => {
+      // Deployed as a bare host by OpenTofu (infra-scaleway/app/locals.tf's
+      // `local.app_domain`, e.g. "app.dev.skybber.com") — a browser's Origin
+      // header always carries a scheme, so this must still match.
+      const env = { APP_DOMAIN: "app.dev.skybber.com" } as Env;
+      mockRequest = new Request("https://api.dev.skybber.com/test", {
+        method: "GET",
+        headers: { Origin: "https://app.dev.skybber.com" },
+      });
+      const origin = CorsHandler.getAllowedOrigin(mockRequest, env);
+      expect(origin).toBe("https://app.dev.skybber.com");
+    });
+
+    it("should return a scheme-qualified APP_DOMAIN when no Origin header and APP_DOMAIN is bare", () => {
+      const env = { APP_DOMAIN: "app.dev.skybber.com" } as Env;
+      mockRequest = new Request("https://api.dev.skybber.com/test", {
+        method: "GET",
+      });
+      const origin = CorsHandler.getAllowedOrigin(mockRequest, env);
+      expect(origin).toBe("https://app.dev.skybber.com");
+    });
+
     it("should normalize trailing slashes", () => {
       mockRequest = new Request("https://api.example.com/test", {
         method: "GET",
