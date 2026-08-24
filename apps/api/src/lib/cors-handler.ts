@@ -46,6 +46,15 @@ export function isLoopbackOrigin(origin: string): boolean {
   return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
 }
 
+/**
+ * Prefix a bare host with `https://` if it has no scheme yet. `undefined`
+ * passes through as `undefined` so callers can chain `?.` / `||` unchanged.
+ */
+function withScheme(host: string | undefined): string | undefined {
+  if (!host) return host;
+  return /^https?:\/\//.test(host) ? host : `https://${host}`;
+}
+
 export class CorsHandler {
   /**
    * Get allowed CORS origin based on request origin and configured allowed origins
@@ -56,7 +65,7 @@ export class CorsHandler {
     if (!requestOrigin) {
       // No origin header (e.g., same-origin request or non-browser client)
       // CORS doesn't apply to same-origin requests, but we return APP_DOMAIN for safety
-      return env.APP_DOMAIN?.replace(/\/$/, "") || null;
+      return withScheme(env.APP_DOMAIN?.replace(/\/$/, "")) || null;
     }
 
     // Build list of allowed origins
@@ -72,7 +81,12 @@ export class CorsHandler {
 
     // Add APP_DOMAIN and its www/non-www variations
     if (env.APP_DOMAIN) {
-      const appDomain = env.APP_DOMAIN.replace(/\/$/, "");
+      // APP_DOMAIN is deployed as a bare host (OpenTofu's `local.app_domain`,
+      // e.g. "app.dev.skybber.com" — no scheme). A browser's Origin header
+      // always carries one, so without normalizing here this entry could
+      // never match and the operator's own APP_DOMAIN would be silently
+      // treated as not-allowed rather than as the origin it names.
+      const appDomain = withScheme(env.APP_DOMAIN.replace(/\/$/, ""))!;
       allowedOrigins.push(appDomain);
 
       // Also allow www and non-www variations
