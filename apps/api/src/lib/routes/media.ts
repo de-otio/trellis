@@ -22,6 +22,7 @@ import {
   reviewRateWindowStart,
 } from "../media/review-rate-cap.js";
 import { quotaUsageWhere } from "../media/storage-accounting.js";
+import { describeError } from "../media/describe-error.js";
 import { decisionToStatus } from "../media/media-lifecycle.js";
 import type { MediaLifecycle } from "../media/media-lifecycle.js";
 import {
@@ -1113,7 +1114,7 @@ export const mediaRoutes: Route[] = [
             mimeType,
             errorType: metaError?.name,
             code: metaError?.code,
-            error: metaError?.message,
+            error: describeError(metaError),
           });
         }
 
@@ -1186,7 +1187,7 @@ export const mediaRoutes: Route[] = [
         } catch (stageError: any) {
           logger.error("[Media Upload] Staging write failed", {
             userId: session.userId,
-            error: stageError?.message,
+            error: describeError(stageError),
           });
           const errorResponse = securityHeaders.createSecureResponse(
             JSON.stringify({ error: "Upload failed" }),
@@ -1224,7 +1225,7 @@ export const mediaRoutes: Route[] = [
             "[Media Upload] Image moderation failed — failing closed to REVIEW",
             {
               userId: session.userId,
-              error: moderationError?.message,
+              error: describeError(moderationError),
             },
           );
           decision = "REVIEW";
@@ -1245,7 +1246,7 @@ export const mediaRoutes: Route[] = [
             // rather than recording an APPROVED row with no servable cas/ object.
             logger.error("[Media Upload] CAS promotion failed", {
               userId: session.userId,
-              error: promoteError?.message,
+              error: describeError(promoteError),
             });
             const errorResponse = securityHeaders.createSecureResponse(
               JSON.stringify({ error: "Upload failed" }),
@@ -1260,7 +1261,7 @@ export const mediaRoutes: Route[] = [
           } catch (deleteError: any) {
             logger.warn("[Media Upload] Staging delete tolerated", {
               userId: session.userId,
-              error: deleteError?.message,
+              error: describeError(deleteError),
             });
           }
         }
@@ -1358,7 +1359,7 @@ export const mediaRoutes: Route[] = [
               // a weaker (never a wrong-direction) label on shared bytes.
               logger.warn("provenance.raise_failed", {
                 contentHash,
-                error: provError?.message,
+                error: describeError(provError),
               });
             }
           }
