@@ -68,7 +68,7 @@
     "extension-api:version-check": "node scripts/check-extension-api-version.mjs"
   },
   "dependencies": {
-    "@aws-lambda-powertools/logger": "^2.34.0",
+    "@aws-lambda-powertools/logger": "^2.35.0",
     "@aws-lambda-powertools/metrics": "^2.34.0",
     "@aws-lambda-powertools/parameters": "^2.34.0",
     "@aws-sdk/client-bedrock-agent-runtime": "^3.1111.0",
