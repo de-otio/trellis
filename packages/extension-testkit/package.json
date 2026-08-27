@@ -48,10 +48,10 @@
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
-    "@types/pg": "^8.21.0",
+    "@types/pg": "^8.23.1",
     "prettier": "^3.9.6",
     "typescript": "^7.0.2",
-    "vitest": "^4.0.0"
+    "vitest": "^4.1.11"
   },
   "repository": {
     "type": "git",
