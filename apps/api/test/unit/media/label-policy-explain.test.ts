@@ -370,13 +370,36 @@ const arbConfig = fc.oneof(
   ),
 );
 
+/**
+ * The one input the negative control actually needs, stated instead of hoped
+ * for. `examples` is tried BEFORE the random draws, so every property below
+ * exercises this shape on every run.
+ *
+ * Why it must be pinned: the mutation only shows through a verdict that
+ * reaches the unreadable-confidence branch AND is otherwise clean — an
+ * `approved` provider decision, a satisfied pin, and a mapped category whose
+ * confidence never crosses a bar. `arbVerdict` draws each of those
+ * independently, so the combination is rare; the control was left to find it
+ * by chance in 2000 runs and, on 2026-08-27, did not. It failed as "expected
+ * false to be true" on an unrelated dependency PR and blocked the merge queue,
+ * which is the characteristic shape of an unseeded property test: a red build
+ * that says nothing about the change under review.
+ *
+ * The random search is kept — it is what catches regressions nobody predicted.
+ * This only guarantees the floor.
+ */
+const DIVERGENT_EXAMPLE: [ModerationVerdict, LabelPolicyConfig] = [
+  verdict({ labels: [{ category: MOCK_CATEGORY_A, confidence: Number.NaN }] }),
+  config(),
+];
+
 describe("explainFromLabels — behaviour comparison with the pre-refactor decision", () => {
   it("agrees with the reference implementation on arbitrary verdicts", () => {
     fc.assert(
       fc.property(arbVerdict, arbConfig, (v, cfg) => {
         expect(explainFromLabels(v, cfg).decision).toBe(referenceDecide(v, cfg));
       }),
-      { numRuns: 2000 },
+      { numRuns: 2000, examples: [DIVERGENT_EXAMPLE] },
     );
   });
 
@@ -385,8 +408,19 @@ describe("explainFromLabels — behaviour comparison with the pre-refactor decis
       fc.property(arbVerdict, arbConfig, (v, cfg) => {
         expect(decideFromLabels(v, cfg)).toBe(referenceDecide(v, cfg));
       }),
-      { numRuns: 2000 },
+      { numRuns: 2000, examples: [DIVERGENT_EXAMPLE] },
     );
+  });
+
+  // The example above is only load-bearing if it really does separate the two
+  // implementations. Assert that directly, so a future edit to `arbVerdict`,
+  // to `config()`, or to the mutation cannot quietly turn the control back
+  // into a coin flip without a test saying so.
+  it("the pinned example does diverge — the control has something to find", () => {
+    const [v, cfg] = DIVERGENT_EXAMPLE;
+    expect(explainFromLabels(v, cfg).decision).toBe("review");
+    expect(referenceDecide(v, cfg)).toBe("review");
+    expect(referenceDecide(v, cfg, { breakIt: true })).toBe("approved");
   });
 
   it("NEGATIVE CONTROL: a broken reference makes the comparison fail", () => {
@@ -400,7 +434,7 @@ describe("explainFromLabels — behaviour comparison with the pre-refactor decis
             referenceDecide(v, cfg, { breakIt: true }),
           );
         }),
-        { numRuns: 2000 },
+        { numRuns: 2000, examples: [DIVERGENT_EXAMPLE] },
       );
     } catch {
       disagreed = true;
