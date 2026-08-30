@@ -6,6 +6,7 @@ import {
   GraphConflictError,
   GraphAuthorizationError,
   GraphTimeoutError,
+  sanitizeGraphErrorMessage,
 } from "../../../src/lib/graph/errors.js";
 
 describe("GraphError sanitize()", () => {
@@ -102,6 +103,61 @@ describe("GraphError sanitize()", () => {
       const err = new GraphAuthorizationError("login error: pwd:mypassword");
       expect(err.message).toContain("pwd=[redacted]");
       expect(err.message).not.toContain("mypassword");
+    });
+  });
+
+  describe("Postgres/Prisma redaction (the live backend)", () => {
+    it("redacts a postgresql:// DSN with inline credentials", () => {
+      const err = new GraphConnectionError(
+        "connect ECONNREFUSED postgresql://app_user:s3cretpw@db.internal.example:5432/trellis",
+      );
+      expect(err.message).toContain("[pg-uri-redacted]");
+      expect(err.message).not.toContain("s3cretpw");
+      expect(err.message).not.toContain("app_user");
+      expect(err.message).not.toContain("db.internal.example");
+    });
+
+    it("redacts a postgres:// (short-scheme) DSN", () => {
+      const err = new GraphConnectionError(
+        "could not connect: postgres://u:pw@10.0.0.5/db",
+      );
+      expect(err.message).toContain("[pg-uri-redacted]");
+      expect(err.message).not.toContain("10.0.0.5");
+      expect(err.message).not.toContain("pw@");
+    });
+
+    it("redacts Prisma's backtick-quoted host (P1001 shape)", () => {
+      const err = new GraphConnectionError(
+        "Can't reach database server at `db.internal.example`:`5432`",
+      );
+      expect(err.message).toContain("[db-host-redacted]");
+      expect(err.message).not.toContain("db.internal.example");
+      expect(err.message).not.toContain("5432");
+    });
+
+    it("redacts Prisma's single-backtick host:port variant", () => {
+      const err = new GraphConnectionError(
+        "Can't reach database server at `db.internal.example:5432`",
+      );
+      expect(err.message).toContain("[db-host-redacted]");
+      expect(err.message).not.toContain("db.internal.example");
+    });
+
+    it("redacts libpq's quoted host + ip + port shape", () => {
+      const err = new GraphConnectionError(
+        'connection to server at "db.internal.example" (10.0.0.5), port 5432 failed: timeout',
+      );
+      expect(err.message).toContain("[db-host-redacted]");
+      expect(err.message).not.toContain("db.internal.example");
+      expect(err.message).not.toContain("10.0.0.5");
+    });
+
+    it("sanitizeGraphErrorMessage covers the non-GraphError path (healthCheck)", () => {
+      const out = sanitizeGraphErrorMessage(
+        "probe failed: postgresql://u:leakedpw@host.example/db (password=leakedpw)",
+      );
+      expect(out).not.toContain("leakedpw");
+      expect(out).not.toContain("host.example");
     });
   });
 

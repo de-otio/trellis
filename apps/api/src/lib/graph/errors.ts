@@ -17,13 +17,33 @@ const NEO4J_HOST = /\b[a-z0-9]+\.databases\.neo4j\.io(?::\d+)?/gi;
 const NEPTUNE_HOST = /\b[a-z0-9.-]+\.neptune\.amazonaws\.com(?::\d+)?/gi;
 // Password-like tokens in driver error messages (e.g., "authentication failure (user=neo4j password=...)").
 const PASSWORD_TOKEN = /\b(password|passwd|pwd)\s*[=:]\s*\S+/gi;
+// Postgres is the live backend (Neo4j/Neptune retired); its driver errors leak
+// differently: a full DSN with inline credentials (pg's ECONNREFUSED echoes the
+// connection string), Prisma's backtick-quoted host in P1000/P1001 messages
+// ("Can't reach database server at `host`:`5432`"), and libpq's
+// 'connection to server at "host" (ip), port 5432 failed'.
+const PG_URI = /postgres(?:ql)?:\/\/[^\s"']+/gi;
+const PRISMA_DB_HOST = /\bat\s+`[^`\s]+`(?:\s*:\s*`?\d+`?)?/gi;
+const LIBPQ_HOST = /\bat\s+"[^"\s]+"(?:\s*\([0-9a-fA-F:.]+\))?(?:,\s*port\s+\d+)?/gi;
 
 function sanitize(msg: string): string {
   return msg
     .replace(BOLT_URI, "[bolt-uri-redacted]")
     .replace(NEO4J_HOST, "[aura-host-redacted]")
     .replace(NEPTUNE_HOST, "[neptune-host-redacted]")
+    .replace(PG_URI, "[pg-uri-redacted]")
+    .replace(PRISMA_DB_HOST, "at [db-host-redacted]")
+    .replace(LIBPQ_HOST, "at [db-host-redacted]")
     .replace(PASSWORD_TOKEN, "$1=[redacted]");
+}
+
+/**
+ * Sanitize a raw driver error message WITHOUT wrapping it in a GraphError —
+ * for paths that surface `error.message` in a response body directly (the
+ * health check is pre-auth reachable, and pg/Prisma errors can embed the DSN).
+ */
+export function sanitizeGraphErrorMessage(msg: string): string {
+  return sanitize(msg);
 }
 
 /**
