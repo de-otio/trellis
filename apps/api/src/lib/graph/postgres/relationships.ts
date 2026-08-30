@@ -219,6 +219,18 @@ export class RelationshipOps {
       input;
     const tenantId = requireAmbientTenantId("RelationshipOps.createRelationship");
 
+    // Self-edges are rejected: `reciprocated` is the consent bit of the
+    // audience model, and a user→user edge to oneself would satisfy its own
+    // "reverse edge" lookup on any later re-derivation — a self-consenting
+    // row. Nothing downstream expects self-loops in the relationship graph
+    // (traversals seeded from this table assume source ≠ target), so refuse
+    // loudly instead of leaving the precondition implicit.
+    if (targetType === "user" && targetId === userId) {
+      throw new GraphConflictError(
+        "Cannot create a relationship from a user to themself",
+      );
+    }
+
     // Initial score by connection method (from scoring engine constants).
     const initialScore = CONNECTION_BONUSES[connectionMethod] ?? 0.3;
 

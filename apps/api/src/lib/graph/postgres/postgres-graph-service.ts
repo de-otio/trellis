@@ -17,6 +17,7 @@ import type {
   OrgCategoryFeedFilter,
 } from "../graph-service.js";
 import type { EntityGeoLookup } from "../../geo/entity-geo-repository.js";
+import { sanitizeGraphErrorMessage } from "../errors.js";
 import type {
   CircleTier,
   CreateEntityRelationshipInput,
@@ -93,11 +94,16 @@ export class PostgresGraphService implements GraphService, GraphConnection {
       await this.prisma.$queryRaw`SELECT 1`;
       return { healthy: true, latencyMs: Date.now() - start, backend: "postgres" };
     } catch (error) {
+      // The health status is surfaced on a pre-auth-reachable path, and a raw
+      // pg/Prisma failure message can embed the DSN (credentials included) —
+      // never return it unsanitized.
       return {
         healthy: false,
         latencyMs: Date.now() - start,
         backend: "postgres",
-        error: error instanceof Error ? error.message : String(error),
+        error: sanitizeGraphErrorMessage(
+          error instanceof Error ? error.message : String(error),
+        ),
       };
     }
   }

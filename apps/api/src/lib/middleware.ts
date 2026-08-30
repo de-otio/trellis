@@ -55,46 +55,24 @@ export function composeMiddleware(middlewares: Middleware[]): Middleware {
 export function corsMiddleware(): Middleware {
   return async (context, next) => {
     const { request, env } = context;
-    const { CorsHandler, CORS_ALLOWED_REQUEST_HEADERS } = await import(
-      "./cors-handler.js"
-    );
+    const { CorsHandler } = await import("./cors-handler.js");
 
     // Handle OPTIONS requests
     if (request.method === "OPTIONS") {
-      const allowedOrigin = CorsHandler.getAllowedOrigin(request, env);
-      const headers: Record<string, string> = {
-        "Access-Control-Allow-Methods":
-          "GET, POST, PUT, DELETE, PATCH, OPTIONS",
-        "Access-Control-Allow-Headers": CORS_ALLOWED_REQUEST_HEADERS,
-        "Access-Control-Allow-Credentials": "true",
-      };
-
-      if (allowedOrigin) {
-        headers["Access-Control-Allow-Origin"] = allowedOrigin;
-      }
-
       return new Response(null, {
         status: 204,
-        headers,
+        headers: CorsHandler.getCorsHeaders(request, env),
       });
     }
 
     const response = await next();
 
-    // Add CORS headers to response
-    const allowedOrigin = CorsHandler.getAllowedOrigin(request, env);
-    if (allowedOrigin) {
-      response.headers.set("Access-Control-Allow-Origin", allowedOrigin);
+    // Add CORS headers to response — same origin-gated set as the preflight.
+    for (const [key, value] of Object.entries(
+      CorsHandler.getCorsHeaders(request, env),
+    )) {
+      response.headers.set(key, value);
     }
-    response.headers.set(
-      "Access-Control-Allow-Methods",
-      "GET, POST, PUT, DELETE, PATCH, OPTIONS",
-    );
-    response.headers.set(
-      "Access-Control-Allow-Headers",
-      CORS_ALLOWED_REQUEST_HEADERS,
-    );
-    response.headers.set("Access-Control-Allow-Credentials", "true");
 
     return response;
   };

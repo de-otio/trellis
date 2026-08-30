@@ -73,26 +73,69 @@ export class SessionConfigManager {
 
     // Fall back to individual env vars, then defaults
     return {
-      userSessionTimeoutDays:
-        config.userSessionTimeoutDays ??
-        parseInt(env.SESSION_USER_TIMEOUT_DAYS || "90", 10),
+      userSessionTimeoutDays: this.resolveTimeout(
+        "userSessionTimeoutDays",
+        config.userSessionTimeoutDays ?? env.SESSION_USER_TIMEOUT_DAYS,
+        90,
+      ),
 
-      ssoSessionTimeoutDays:
-        config.ssoSessionTimeoutDays ??
-        parseInt(env.SESSION_SSO_TIMEOUT_DAYS || "7", 10),
+      ssoSessionTimeoutDays: this.resolveTimeout(
+        "ssoSessionTimeoutDays",
+        config.ssoSessionTimeoutDays ?? env.SESSION_SSO_TIMEOUT_DAYS,
+        7,
+      ),
 
-      dashboardSessionTimeoutHours:
+      dashboardSessionTimeoutHours: this.resolveTimeout(
+        "dashboardSessionTimeoutHours",
         config.dashboardSessionTimeoutHours ??
-        parseInt(env.SESSION_DASHBOARD_TIMEOUT_HOURS || "24", 10),
+          env.SESSION_DASHBOARD_TIMEOUT_HOURS,
+        24,
+      ),
 
-      refreshThresholdHours:
-        config.refreshThresholdHours ??
-        parseInt(env.SESSION_REFRESH_THRESHOLD_HOURS || "1", 10),
+      refreshThresholdHours: this.resolveTimeout(
+        "refreshThresholdHours",
+        config.refreshThresholdHours ?? env.SESSION_REFRESH_THRESHOLD_HOURS,
+        1,
+      ),
 
-      inactivityTimeoutMinutes:
-        config.inactivityTimeoutMinutes ??
-        parseInt(env.SESSION_INACTIVITY_TIMEOUT_MINUTES || "60", 10),
+      inactivityTimeoutMinutes: this.resolveTimeout(
+        "inactivityTimeoutMinutes",
+        config.inactivityTimeoutMinutes ?? env.SESSION_INACTIVITY_TIMEOUT_MINUTES,
+        60,
+        { allowZero: true }, // 0 disables the inactivity timeout
+      ),
     };
+  }
+
+  /**
+   * Resolve one timeout value, failing CLOSED on garbage.
+   *
+   * The old code fed env values straight into `parseInt`, so a malformed
+   * value became `NaN` — and every comparison against `NaN` is false, which
+   * made `isSessionExpired` silently answer "not expired" forever. A config
+   * typo must degrade to the safe default (loudly), never to unbounded
+   * sessions.
+   */
+  private resolveTimeout(
+    name: string,
+    raw: unknown,
+    fallback: number,
+    opts: { allowZero?: boolean } = {},
+  ): number {
+    if (raw === undefined || raw === null || raw === "") {
+      return fallback;
+    }
+    const value = typeof raw === "number" ? raw : parseInt(String(raw), 10);
+    const valid =
+      Number.isFinite(value) && (opts.allowZero ? value >= 0 : value > 0);
+    if (!valid) {
+      this.logger.warn(
+        `[SessionConfig] Invalid ${name} value; using default ${fallback}`,
+        { rawValue: String(raw) },
+      );
+      return fallback;
+    }
+    return value;
   }
 
   /**

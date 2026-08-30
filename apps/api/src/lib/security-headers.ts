@@ -15,6 +15,18 @@ export interface SecurityHeadersEnv {
   CSP_STYLE_SRC?: string; // Override for CSP style-src
 }
 
+// The header set is a pure function of the three CSP env inputs, but
+// `new SecurityHeaders(env)` runs inside nearly every route handler — so the
+// CSP string was being re-joined on every request. Cache the built set per
+// input tuple at module level (same pattern as session-cookie.ts's
+// moduleCookieCache); entries are frozen because instances share them.
+const moduleHeaderCache = new Map<string, Record<string, string>>();
+
+/** Test hook: reset the module-level header cache. */
+export function clearSecurityHeadersCache(): void {
+  moduleHeaderCache.clear();
+}
+
 /**
  * Security Headers manager class
  */
@@ -22,6 +34,18 @@ export class SecurityHeaders {
   private headers: Record<string, string>;
 
   constructor(env?: SecurityHeadersEnv) {
+    const cacheKey = [
+      env?.CSP_CONNECT_SRC ?? "",
+      env?.CSP_SCRIPT_SRC ?? "",
+      env?.CSP_STYLE_SRC ?? "",
+    ].join("\u0000");
+
+    const cached = moduleHeaderCache.get(cacheKey);
+    if (cached) {
+      this.headers = cached;
+      return;
+    }
+
     // Build CSP policy based on environment
     const cspConnectSrc = this.buildCSPConnectSrc(env);
     const cspScriptSrc =
@@ -45,7 +69,7 @@ export class SecurityHeaders {
       "base-uri 'self'",
     ].join("; ");
 
-    this.headers = {
+    this.headers = Object.freeze({
       "X-Content-Type-Options": "nosniff",
       "X-Frame-Options": "DENY",
       "X-XSS-Protection": "1; mode=block",
@@ -53,7 +77,8 @@ export class SecurityHeaders {
       "Strict-Transport-Security":
         "max-age=31536000; includeSubDomains; preload",
       "Content-Security-Policy": csp,
-    };
+    });
+    moduleHeaderCache.set(cacheKey, this.headers);
   }
 
   /**

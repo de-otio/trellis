@@ -132,6 +132,45 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 
 describe("createRelationship", () => {
+  it("rejects a user→user self-edge (source === target)", async () => {
+    // A self-edge would satisfy its own reverse-edge lookup on any later
+    // re-derivation of `reciprocated` — the consent bit must never be
+    // self-granted, and traversals seeded from this table assume no loops.
+    await expect(
+      withTenant(() =>
+        ops.createRelationship({
+          userId: "user-1",
+          targetType: "user",
+          targetId: "user-1",
+        }),
+      ),
+    ).rejects.toThrow(GraphConflictError);
+
+    // Refused before any row was touched.
+    expect(relationship.findUnique).not.toHaveBeenCalled();
+    expect(relationship.create).not.toHaveBeenCalled();
+  });
+
+  it("allows matching ids across DIFFERENT id spaces (user→entity)", async () => {
+    // Only user→user self-edges are loops; a user and an entity sharing an id
+    // value are distinct nodes.
+    relationship.findUnique.mockResolvedValueOnce(null);
+    relationship.create.mockResolvedValueOnce(
+      makeRow({ userId: "same-id", targetType: "entity", targetId: "same-id" }),
+    );
+
+    const rel = await withTenant(() =>
+      ops.createRelationship({
+        userId: "same-id",
+        targetType: "entity",
+        targetId: "same-id",
+      }),
+    );
+
+    expect(rel.targetId).toBe("same-id");
+    expect(relationship.create).toHaveBeenCalledTimes(1);
+  });
+
   it("creates a user->entity edge with the 'import' initial score (0.5, tier 1)", async () => {
     relationship.findUnique.mockResolvedValueOnce(null); // no existing edge
     relationship.create.mockResolvedValueOnce(
