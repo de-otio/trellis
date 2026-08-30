@@ -200,23 +200,15 @@ export class CorsHandler {
     requestContext?: { region: string },
   ): Promise<Response> {
     try {
-      const allowedOrigin = CorsHandler.getAllowedOrigin(request, env);
-      const corsHeaders: Record<string, string> = {
-        "Access-Control-Allow-Methods":
-          "GET, POST, PUT, DELETE, PATCH, OPTIONS",
-        "Access-Control-Allow-Headers": CORS_ALLOWED_REQUEST_HEADERS,
-        "Access-Control-Allow-Credentials": "true",
-      };
-      if (allowedOrigin) {
-        corsHeaders["Access-Control-Allow-Origin"] = allowedOrigin;
-      } else {
-        // Log when origin is not allowed for debugging
+      const corsHeaders = CorsHandler.getCorsHeaders(request, env);
+      if (!corsHeaders["Access-Control-Allow-Origin"]) {
+        // Log when origin is not allowed for debugging. The remaining CORS
+        // headers are still added even without an allowed origin — the
+        // browser will reject it, but at least we tried.
         const requestOrigin = request.headers.get("Origin");
         getLogger().info(
           `[CORS] No allowed origin found. Request origin: ${requestOrigin}, APP_DOMAIN: ${env.APP_DOMAIN}, ALLOWED_ORIGINS: ${env.ALLOWED_ORIGINS}`,
         );
-        // Still add other CORS headers even if origin is not allowed
-        // The browser will reject it, but at least we tried
       }
 
       // CRITICAL: For binary responses (images, files), we must NOT read as text
@@ -305,16 +297,7 @@ export class CorsHandler {
     } catch (error: any) {
       // If adding CORS headers fails, at least return a response with CORS headers
       getLogger().error("[CORS] Error adding CORS headers:", error);
-      const allowedOrigin = CorsHandler.getAllowedOrigin(request, env);
-      const corsHeaders: Record<string, string> = {
-        "Access-Control-Allow-Methods":
-          "GET, POST, PUT, DELETE, PATCH, OPTIONS",
-        "Access-Control-Allow-Headers": CORS_ALLOWED_REQUEST_HEADERS,
-        "Access-Control-Allow-Credentials": "true",
-      };
-      if (allowedOrigin) {
-        corsHeaders["Access-Control-Allow-Origin"] = allowedOrigin;
-      }
+      const corsHeaders = CorsHandler.getCorsHeaders(request, env);
       // Return error response with CORS headers
       // Note: requestContext not available in error handler, so region headers won't be added
       return new Response(
