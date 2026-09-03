@@ -40,7 +40,7 @@
     "@aws-sdk/client-dynamodb": "^3.1121.0",
     "@de-otio/trellis-extension-api": "^0.9.2",
     "pg": "^8.23.0",
-    "prisma": "^7.9.1",
+    "prisma": "^7.10.0",
     "zod": "^4.5.4"
   },
   "peerDependencies": {
