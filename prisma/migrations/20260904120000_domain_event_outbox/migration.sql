@@ -39,10 +39,19 @@ CREATE TABLE IF NOT EXISTS "domain_events" (
 );
 
 -- CreateIndex
--- Per-tenant replay, newest-first. Not CONCURRENTLY: the table is created in
--- this same file, so there is nothing to lock and no rows to scan.
+-- Per-tenant replay, newest-first.
+--
+-- CONCURRENTLY is neither possible nor needed here: Prisma applies a
+-- migration file inside a transaction (which forbids it), and the table is
+-- created a few statements up — there is nothing to lock and no row to scan.
+-- The rule cannot see that, so the exception is stated here rather than
+-- silenced globally in .squawk.toml.
+-- squawk-ignore require-concurrent-index-creation
 CREATE INDEX IF NOT EXISTS "domain_events_tenant_id_occurred_at_idx" ON "domain_events"("tenant_id", "occurred_at");
 
 -- CreateIndex
 -- The predicate a future dispatcher sweeps on (delivered_at IS NULL).
+--
+-- Same reason as the index above: empty table, created in this file.
+-- squawk-ignore require-concurrent-index-creation
 CREATE INDEX IF NOT EXISTS "domain_events_delivered_at_idx" ON "domain_events"("delivered_at");
