@@ -279,6 +279,18 @@ describe("agent-sessions revoke route via Hono (H7)", () => {
   });
 });
 
+describe("blocks route via Hono (H4)", () => {
+  it("routes GET /api/blocks to the handler (unauthenticated → 401)", async () => {
+    const app = buildHonoApp();
+    const res = await app.fetch(new Request("http://localhost/api/blocks"), {
+      trellisEnv: env,
+    });
+    // No auth → handler returns 401 (not a 404), proving Hono matched the
+    // mounted blockRoutes and reached the handler.
+    expect(res.status).toBe(401);
+  });
+});
+
 describe("Hono precedence is registration-order, not specificity (H10)", () => {
   it("a specific route registered BEFORE a covering wildcard wins; the wildcard handles the rest", async () => {
     // Hono runs matching handlers in registration order (first to return wins),
