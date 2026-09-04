@@ -17,15 +17,20 @@
 // Exit codes: 0 = clean or additive-only (with a "snapshot is stale" notice);
 // 1 = at least one BREAKING finding, or no snapshot exists yet for `check`.
 //
-// KNOWN LIMITATION: see the header comment in openapi-additivity-core.mjs —
-// against the real generator, only the path/method/parameter rules can fire
-// today; the schema-shape rules are exercised only in unit tests against
-// synthetic fixtures.
+// All eight classifier rules are live against real generator output for any
+// route that has adopted `requestSchema`/`responseSchema`/`scopes` — see the
+// header comment in openapi-additivity-core.mjs. No route in this repo has
+// adopted them yet (lane A/G's job), so the schema- and scope-shape rules
+// currently have nothing real to fire against; they're proven end-to-end,
+// with the real generator (not hand-written fixtures), in
+// test/unit/openapi/additivity-gate.test.ts.
 //
 // PROVISIONAL SNAPSHOT NOTICE: the `openapi.snapshot.json` committed by this
-// task is provisional (fan-out race rule, plan §2.3). T-INT regenerates the
-// canonical snapshot at the integration barrier after all sibling route
-// changes land.
+// task is provisional (fan-out race rule, plan §2.3) — and, as of lane B,
+// near-empty: `generateOpenApiDoc` omits any route whose `scopes` is still
+// undeclared (plan 034 lane B / B.2), which today is every real route.
+// T-INT regenerates the canonical snapshot at the integration barrier after
+// all sibling route changes (lanes A/G annotating real routes) land.
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";

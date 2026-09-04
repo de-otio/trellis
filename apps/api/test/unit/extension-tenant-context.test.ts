@@ -131,6 +131,31 @@ describe("extension tenant context — Part A (session layer)", () => {
       expect(parsed.activeTenantId).toBeUndefined();
     });
 
+    it("encryptSession strips the principal too — a grant must not outlive its revocation", async () => {
+      // Plan 034 lane A: `scopes` and `clientId` joined SEAL_FORBIDDEN_FIELDS
+      // on `activeTenantId`'s own argument. Freshness is a security property
+      // for scope-shaped data: a sealed scope set would keep working for up to
+      // the 90-day cookie lifetime after the grant was revoked, and a sealed
+      // `clientId` would let a decrypted payload claim to be a third party.
+      const withPrincipal = {
+        userId: USER_ID,
+        email: "user@example.com",
+        expiresAt: Date.now() + 3_600_000,
+        profileContext: "primary" as const,
+        activeTenantId: VALID_TENANT,
+        clientId: "client_abc",
+        scopes: ["posts:write"],
+      };
+
+      const sealed = await sm.encryptSession(JSON.stringify(withPrincipal), secret, salt);
+      const parsed = JSON.parse((await sm.decryptSession(sealed, secret, salt))!);
+
+      expect(parsed.userId).toBe(USER_ID);
+      expect(parsed.activeTenantId).toBeUndefined();
+      expect(parsed.clientId).toBeUndefined();
+      expect(parsed.scopes).toBeUndefined();
+    });
+
     it("re-sealing a JWT-derived session (CSRF/MFA path) does not persist the tenant", async () => {
       // Mirrors routes/health.ts + routes/mfa.ts: a session that carries a
       // verified activeTenantId is fed back into sealed material. The strip
@@ -204,6 +229,36 @@ describe("extension tenant context — Part A (session layer)", () => {
 
       expect(session?.userId).toBe(USER_ID);
       expect(session?.activeTenantId).toBeUndefined();
+    });
+
+    it("a sealed payload can neither supply a clientId nor widen its own scopes", async () => {
+      // The attacker-shaped case for plan 034 lane A: a legacy/forged sealed
+      // payload carrying a principal. Both fields are stripped on unseal and
+      // re-stamped as unscoped first-party — the payload's own claim is never
+      // what the request runs as.
+      const token = await sealRaw({
+        userId: USER_ID,
+        email: "user@example.com",
+        expiresAt: Date.now() + 3_600_000,
+        profileContext: "primary",
+        clientId: "client_abc",
+        scopes: ["posts:write", "entities:write"],
+      });
+
+      for (const headers of [
+        { Cookie: `trellis_session=${token}` },
+        { Authorization: `Bearer ${token}` },
+      ]) {
+        const session = await sm.getSession(
+          new Request("https://example.com/api/ext/dog/x", { headers }),
+          secret,
+          env,
+        );
+
+        expect(session?.userId).toBe(USER_ID);
+        expect(session?.clientId).toBeUndefined();
+        expect(session?.scopes).toBe("*");
+      }
     });
   });
 });

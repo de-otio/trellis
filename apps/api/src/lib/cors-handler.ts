@@ -22,7 +22,20 @@ import { getLogger, Logger } from "./logger.js";
  * silently ignored) in credentialed mode.
  */
 export const CORS_ALLOWED_REQUEST_HEADERS =
-  "Content-Type, Authorization, X-CSRF-Token, X-Retry-Count, X-Client-Version, X-Client-Platform";
+  "Content-Type, Authorization, X-CSRF-Token, X-Retry-Count, X-Client-Version, X-Client-Platform, Idempotency-Key";
+
+/**
+ * Headers a browser-based client is allowed to *read* off a cross-origin
+ * response (`Access-Control-Expose-Headers`). Browsers only expose a small
+ * CORS-safelisted set by default; anything else is invisible to
+ * `fetch().headers.get(...)` unless listed here.
+ *
+ * `Idempotency-Replay` (see `lib/middleware/idempotency.ts`) tells the caller
+ * whether a write was executed or replayed from cache. Without exposing it, a
+ * web client that retries a POST after a timeout cannot tell a fresh write
+ * from a replay and will double-count.
+ */
+export const CORS_EXPOSED_RESPONSE_HEADERS = "Idempotency-Replay";
 
 /**
  * SEC M4 — is this origin a loopback (local development) origin?
@@ -325,6 +338,7 @@ export class CorsHandler {
       "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, PATCH, OPTIONS",
       "Access-Control-Allow-Headers": CORS_ALLOWED_REQUEST_HEADERS,
       "Access-Control-Allow-Credentials": "true",
+      "Access-Control-Expose-Headers": CORS_EXPOSED_RESPONSE_HEADERS,
     };
     if (allowedOrigin) {
       corsHeaders["Access-Control-Allow-Origin"] = allowedOrigin;

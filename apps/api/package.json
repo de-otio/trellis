@@ -89,7 +89,7 @@
     "@aws-sdk/s3-request-presigner": "^3.1121.0",
     "@aws-sdk/util-dynamodb": "^3.996.9",
     "@de-otio/saas-foundation": "^0.4.3",
-    "@de-otio/trellis-extension-api": "^0.9.0",
+    "@de-otio/trellis-extension-api": "^0.10.0",
     "@de-otio/vestibulum": "^0.5.0",
     "@fedify/fedify": "2.3.6",
     "@js-temporal/polyfill": "^0.5.1",

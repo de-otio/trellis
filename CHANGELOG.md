@@ -100,6 +100,94 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ### Added
 
+- **`@de-otio/trellis-extension-api` 0.10.0 — the scoped-surface contract, and
+  the code that reads it.** An extension written against `0.9.2` compiles and
+  behaves identically: every field this bump adds is optional and defaults to
+  the pre-existing behaviour. The minor moved because a `0.x` minor is the
+  breaking unit and several pieces of work each needed to add a field to the
+  same published file.
+
+  The contract landed first as a declaration nothing read; by the time it
+  publishes, core reads most of it. `scopes` is enforced (by the extension-route
+  wrapper and by the `/api/v1` dispatcher), `requestSchema` is validated on both
+  paths, `publicSpec` + `scopes` publishes a route into `/openapi.json` and
+  mounts it under `/api/v1`, and `ctx.events.emit` writes an outbox row. The one
+  field still inert is `clientId`, which stays `undefined` until an authorization
+  server exists to populate it.
+
+  `ExtensionRouteDefinition` gains `scopes`, `publicSpec`, `requestSchema`,
+  `responseSchema`, `idempotent`, `operationId` and `stability`, mirroring the
+  same additions to core's `Route` one-for-one so an extension route can enter
+  the published spec on the same terms as a core route. `TrellisExtension`
+  gains `scopes` (id + the consent copy a person reads before granting it) and
+  `events` (type + payload schema): core owns the mechanism and cannot invent a
+  vertical's words, so both have to come from the extension.
+  `ExtensionSession` gains `clientId?` (absent means first-party) and
+  `scopes?`, added to the whitelist it is built from — which stays a whitelist,
+  so no token internals came with them. `ExtensionContext` gains
+  **`events.emit(type, payload)` — required, not optional**: core is the only
+  real constructor of an `ExtensionContext` and always supplies it, so
+  `ctx.events.emit(…)` is correct at the call site and an author never has to
+  reason about whether the seam is there. (It was declared `events?` while the
+  contract was inert; requiring it broke no constructor, because every other one
+  in this repo and in the first consuming vertical is a test double behind an
+  `as unknown as` cast.) New exported types: `ExtensionEventEmitter`,
+  `ExtensionScopeDeclaration`, `ExtensionEventDeclaration`.
+
+  One limit on `emit`, stated because the type does not: the emitter is bound to
+  the tenant core resolved for the caller, and on the extension-route path that
+  tenant comes from the **ambient tenant context**, which `lib/app.ts`
+  establishes only when `TENANT_SCOPE_MODE` is not `"off"`. On a deployment that
+  leaves it at the default, an extension's `emit` throws rather than writing a
+  row scoped to nothing. Core's own emission points are unaffected — they pass
+  the tenant explicitly.
+
+  Schema fields are typed `ZodType` — Zod v4's base type — not the v3
+  `ZodSchema` name that `metadataSchema` still uses. Both packages already
+  depend on `zod@^4.4.3`, so turning these into JSON Schema later needs no new
+  dependency.
+
+  Declaring a field that does nothing is the same shape as the seven dead
+  extension points removed in `0.9.0`, and the reference doc now carries a
+  [Declared but not yet read](docs/reference/extension-api.md) section saying
+  where the difference lies and what it is safe to conclude. The short version:
+  those seven were declared as working features and were not; these are
+  declared as a contract to build against, and every table row says so.
+
+- **Core scope catalog and `hasScope` (`apps/api/src/lib/auth/scopes.ts`).**
+  `CORE_SCOPES` maps seven scope ids to their consent copy — `profile:read`,
+  `entities:read`, `entities:write`, `posts:read`, `posts:write`,
+  `tenant:read`, `events:subscribe` — keeping the sentence a user reads beside
+  the id it grants, rather than leaving a consent page to invent it later.
+  `hasScope(granted, needed)` is the single place set-inclusion is decided:
+  `"*"` passes everything, an empty requirement is satisfied by anything, and
+  otherwise every needed scope must match exactly. No prefix rule, no
+  per-scope wildcard, no separator normalisation.
+
+  Scopes are a **different authorization axis** from capabilities
+  (`auth/capabilities.ts`), which are role-derived and tenant-scoped. Scope
+  strings are `<resource>:<verb>`, capabilities `<resource>.<verb>`, and
+  neither implies the other. The differing separators are a reading aid only —
+  the capability catalog already contains one colon-separated legacy value, so
+  exact matching is what actually keeps the two apart, and the test suite
+  asserts that no capability satisfies any core scope.
+
+  `AuthContext` gains `clientId?` and `scopes?`. An absent `scopes` is
+  equivalent to `"*"`: every context built before scopes existed is a
+  first-party session, which is what makes the addition break none of its
+  construction sites. Readers must normalise explicitly (`auth.scopes ?? "*"`)
+  so the permissive default stays visible where it is applied rather than
+  hidden in the predicate.
+
+- **Route self-description (`apps/api/src/lib/routes/types.ts`).** `Route`
+  gains `scopes`, `tags`, `requestSchema`, `responseSchema`, `operationId`,
+  `idempotent` and `stability`, all optional and none yet read by the
+  dispatcher. Three distinct states for `scopes` and the difference matters:
+  absent is first-party only, `[]` is any authenticated caller, non-empty
+  requires every listed scope. The pre-existing, unread `version` field is
+  documented as reserved for the public-mount rule rather than allowed to grow
+  a second versioning concept beside it.
+
 - **`@de-otio/trellis-extension-testkit` (new package, 0.1.0).** An extension
   author could typecheck against the contract and do nothing else: the server
   boot, the docker stack, the migrations and the feature-toggle seeding all

@@ -2,17 +2,45 @@
  * OpenAPI 3.1 Document Generator
  *
  * Introspects the trellis route registry to emit a valid OpenAPI 3.1 document.
- * Coverage priority: federation endpoints (T3–T8) plus the discovery surface.
- * For routes whose Zod schemas aren't directly accessible, minimal `{}` schemas
- * are emitted — validity over richness.
+ *
+ * Progressive adoption (plan 034, lane B): every field below is optional on
+ * `Route`, and a route that declares none of them keeps emitting exactly as
+ * it always has — an empty `{}` request-body schema, no `security`, a
+ * derived `operationId`. A route earns richer output by opting in:
+ *
+ *  - `requestSchema` / `responseSchema` (Zod) → a real, `$ref`-ed JSON Schema
+ *    in `components.schemas`, named `<operationId>Request`/`Response`.
+ *  - `scopes` → per-operation `security`. Three states, and the difference
+ *    is load-bearing: **absent** omits the operation from this document
+ *    entirely (first-party only; lane G enforces the same rule at mount
+ *    time — this is only a preview of it); **`[]`** marks it
+ *    authenticated-no-particular-scope (the bearer scheme); a **non-empty**
+ *    list marks it oauth2-scoped, and every scope so referenced is also
+ *    *defined* in the oauth2 scheme — core's from `CORE_SCOPES`, an
+ *    extension's from its own `TrellisExtension.scopes` consent copy.
+ *  - `tags`, `operationId`, `stability` → carried through as declared,
+ *    falling back to the existing derivation when absent.
+ *
+ * Because no real route in this repo sets `scopes` yet (lane A/G's job),
+ * regenerating `openapi.snapshot.json` today yields a near-empty document —
+ * expected and already flagged PROVISIONAL by
+ * `scripts/check-openapi-additivity.mjs`. The document repopulates as real
+ * routes adopt the fields above.
  */
 
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
+import { z, type ZodType } from "zod";
 import type { Route } from "../routes/types.js";
+import { CORE_SCOPES } from "../auth/scopes.js";
+import { getExtensions } from "../../extensions.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export interface OpenApiDocument {
   openapi: "3.1.0";
+  jsonSchemaDialect?: string;
   info: {
     title: string;
     version: string;
@@ -21,6 +49,7 @@ export interface OpenApiDocument {
   paths: Record<string, OpenApiPathItem>;
   components?: {
     schemas?: Record<string, unknown>;
+    securitySchemes?: Record<string, unknown>;
   };
 }
 
@@ -39,6 +68,10 @@ interface OpenApiOperation {
   };
   responses: Record<string, { description: string; content?: Record<string, { schema: unknown }> }>;
   tags?: string[];
+  /** Present only when the operation is reachable at all — see module doc. */
+  security?: Array<Record<string, string[]>>;
+  /** Non-standard but harmless: carries `Route.stability` through verbatim. */
+  "x-stability"?: "stable" | "beta";
 }
 
 interface OpenApiParameter {
@@ -52,12 +85,20 @@ interface OpenApiParameter {
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const API_TITLE = "Trellis API";
-const API_VERSION = "0.7.0";
+const API_VERSION_FALLBACK = "0.0.0";
 const API_DESCRIPTION =
   "Social-network core API. Discovery surfaces, federation management (T3–T8), and entity/social graph endpoints.";
+const JSON_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema";
+
+/** Security scheme names emitted in `components.securitySchemes`. */
+const OAUTH2_SCHEME = "oauth2";
+const BEARER_SCHEME = "bearerAuth";
 
 /** Methods that support a request body */
 const BODY_METHODS = new Set(["post", "put", "patch"]);
+
+/** Matches a still-positional path parameter placeholder, e.g. `{param0}`. */
+const POSITIONAL_PARAM_RE = /\{param\d+\}/;
 
 // Tags derived from path prefix for grouping
 const FEDERATION_PREFIXES: [RegExp, string][] = [
@@ -72,11 +113,31 @@ const FEDERATION_PREFIXES: [RegExp, string][] = [
   [/^\/health/, "health"],
 ];
 
-function deriveTag(path: string): string {
+function deriveTag(path_: string): string {
   for (const [pattern, tag] of FEDERATION_PREFIXES) {
-    if (pattern.test(path)) return tag;
+    if (pattern.test(path_)) return tag;
   }
   return "other";
+}
+
+// ── info.version ─────────────────────────────────────────────────────────────
+
+/**
+ * `apps/api/package.json` sits three directories above this module in both
+ * layouts this file ships in: `src/lib/openapi/generator.ts` (tsx/vitest,
+ * run directly against source) and `dist/lib/openapi/generator.js` (the
+ * published tarball). Falls back to a placeholder rather than throwing —
+ * a missing/unreadable package.json must not take `/openapi.json` down.
+ */
+function getPackageVersion(): string {
+  try {
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    const pkgPath = path.join(here, "..", "..", "..", "package.json");
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { version?: string };
+    return pkg.version ?? API_VERSION_FALLBACK;
+  } catch {
+    return API_VERSION_FALLBACK;
+  }
 }
 
 // ── Path normalisation ─────────────────────────────────────────────────────────
@@ -87,8 +148,11 @@ function deriveTag(path: string): string {
  * Supports:
  *  - Exact strings: "/health" → "/health"
  *  - Express-style params: "/api/tenants/:id" → "/api/tenants/{id}"
- *  - Simple named-group regex: /^\/api\/tenants\/([^/]+)\/domains$/ →
- *    "/api/tenants/{param0}/domains"
+ *  - Named-capture regex: /^\/api\/tenants\/(?<id>[^/]+)$/ →
+ *    "/api/tenants/{id}"
+ *  - Simple unnamed-capture regex: /^\/api\/tenants\/([^/]+)\/domains$/ →
+ *    "/api/tenants/{param0}/domains" (kept for routes that don't need named
+ *    params — see B.3's public-route enforcement in `generateOpenApiDoc`)
  *  - Wildcards and complex regex are skipped (returns null)
  */
 export function routePatternToPath(pattern: Route["path"]): string | null {
@@ -109,14 +173,16 @@ export function routePatternToPath(pattern: Route["path"]): string | null {
     // Unescape forward slashes
     s = s.replace(/\\\//g, "/");
 
-    // Replace capture groups with positional placeholders.
+    // Replace capture groups with named or positional placeholders.
     // We walk character-by-character to correctly handle character classes
-    // like `([^/]+)` which contain `]` that would fool a naive regex.
+    // like `([^/]+)` which contain `]` that would fool a naive regex, and to
+    // recognise a native JS named-capture prefix `(?<name>`.
     let paramIndex = 0;
     let result = "";
     let i = 0;
     while (i < s.length) {
       if (s[i] === "(") {
+        const namedMatch = /^\(\?<([A-Za-z_$][\w$]*)>/.exec(s.slice(i));
         // Scan to the matching closing paren, skipping over [...] classes
         let depth = 1;
         i++;
@@ -136,7 +202,7 @@ export function routePatternToPath(pattern: Route["path"]): string | null {
             i++;
           }
         }
-        result += `{param${paramIndex++}}`;
+        result += namedMatch ? `{${namedMatch[1]}}` : `{param${paramIndex++}}`;
       } else {
         result += s[i];
         i++;
@@ -145,9 +211,10 @@ export function routePatternToPath(pattern: Route["path"]): string | null {
     s = result;
 
     // Bail out if any remaining regex metacharacters.
-    // Note: {param0} placeholders are intentional OpenAPI path parameters, so
-    // we only reject metacharacters that appear outside of {...} placeholders.
-    const withoutPlaceholders = s.replace(/\{param\d+\}/g, "");
+    // Note: {param0}/{name} placeholders are intentional OpenAPI path
+    // parameters, so we only reject metacharacters that appear outside of
+    // {...} placeholders.
+    const withoutPlaceholders = s.replace(/\{[^}]+\}/g, "");
     if (/[.*+?^${}()|[\]\\]/.test(withoutPlaceholders)) return null;
 
     return s || null;
@@ -173,36 +240,205 @@ function extractPathParams(openApiPath: string): OpenApiParameter[] {
   return params;
 }
 
+// ── operationId ─────────────────────────────────────────────────────────────
+
+function deriveOperationId(method: string, openApiPath: string): string {
+  return `${method}_${openApiPath.replace(/[^a-zA-Z0-9]/g, "_")}`;
+}
+
+// ── Zod → JSON Schema ────────────────────────────────────────────────────────
+
+/**
+ * `z.toJSONSchema` stamps a top-level `$schema` on every schema it produces.
+ * That's correct for a standalone document but redundant (and slightly
+ * unconventional) repeated on every entry of `components.schemas` — the
+ * document already declares its dialect once via `jsonSchemaDialect`. Strip
+ * it per component; everything else (including any `.meta({ example })`
+ * the route declared) passes through untouched.
+ */
+function toComponentSchema(schema: ZodType): Record<string, unknown> {
+  const jsonSchema = z.toJSONSchema(schema, { target: "draft-2020-12" }) as Record<string, unknown>;
+  const { $schema: _drop, ...rest } = jsonSchema;
+  return rest;
+}
+
+// ── Security ─────────────────────────────────────────────────────────────────
+
+/**
+ * Consent copy for the scopes the *registered extensions* define, keyed by id.
+ *
+ * Read from the live registry (`src/extensions.ts`) rather than captured at
+ * module load: `registerExtension` is called by the consuming application
+ * **after** this module is imported, and `/openapi.json` generates lazily on
+ * first request (`routes/agent-surface.ts` caches behind a getter), so by the
+ * time this runs the registry is populated. The route list stays a parameter
+ * for the opposite reason — the module-level aggregate in `lib/routes/index.ts`
+ * *is* evaluated at import time.
+ *
+ * A caller that generates a document before registration (a unit test building
+ * routes by hand, a build-time script) simply sees no extension copy and gets
+ * the id-as-description fallback below. That is a degraded description, never
+ * an invalid document.
+ */
+function registeredExtensionScopeCopy(): Record<string, string> {
+  const copy: Record<string, string> = {};
+  for (const ext of getExtensions()) {
+    for (const decl of ext.scopes ?? []) {
+      copy[decl.id] = decl.description;
+    }
+  }
+  return copy;
+}
+
+/**
+ * The `oauth2` scheme, whose `scopes` map must **define every scope any
+ * operation in this document references** (OpenAPI 3.1 §4.8.29.2). An
+ * operation asking for a scope the scheme never declares is an invalid
+ * document, and a consent screen generated from the scheme could not offer
+ * the scope the operation demands.
+ *
+ * So the map is `CORE_SCOPES` ∪ every scope a published operation declared —
+ * core's catalog is the floor, and an extension route published under
+ * `/api/v1` adds its own vocabulary on top. Extras are appended in sorted
+ * order so the emitted document is deterministic (the additivity gate diffs
+ * it byte-for-byte).
+ *
+ * @param usedScopes every scope referenced by an emitted operation's `security`.
+ */
+function buildSecuritySchemes(usedScopes: ReadonlySet<string>): Record<string, unknown> {
+  const extensionCopy = registeredExtensionScopeCopy();
+  const scopes: Record<string, string> = { ...CORE_SCOPES };
+  for (const id of [...usedScopes].sort()) {
+    if (id in scopes) continue;
+    // Fallback is the id verbatim, deliberately: core has no way to describe a
+    // vertical's scope and must not invent consent copy for one (see
+    // `TrellisExtension.scopes`). A scope reaching this branch is declared on a
+    // route but missing from its extension's `scopes` catalog, or generated
+    // before that extension registered. The document stays valid either way,
+    // and the placeholder is visibly an id rather than a sentence nobody wrote.
+    scopes[id] = extensionCopy[id] ?? id;
+  }
+
+  return {
+    [OAUTH2_SCHEME]: {
+      type: "oauth2",
+      description:
+        "Third-party client access via the device authorization grant (RFC 8628): " +
+        "POST /oauth2/device_authorization, the user approves at /agents/authorize, " +
+        "the client polls POST /oauth2/token.",
+      flows: {
+        // OpenAPI 3.1's fixed oauth2 flow vocabulary (implicit, password,
+        // clientCredentials, authorizationCode) has no native "device code"
+        // entry for RFC 8628. `authorizationCode` is the closest fit —
+        // `authorizationUrl` is where a human grants consent either way.
+        authorizationCode: {
+          authorizationUrl: "/agents/authorize",
+          tokenUrl: "/oauth2/token",
+          // Imported, not restated: `auth/scopes.ts` is the single source
+          // of truth for the core scope catalog and its consent copy. Every
+          // core entry appears here verbatim; extension scopes are unioned on.
+          scopes,
+        },
+      },
+    },
+    [BEARER_SCHEME]: {
+      type: "http",
+      scheme: "bearer",
+      description: "First-party session bearer token.",
+    },
+  };
+}
+
+/**
+ * Derive per-operation `security` from `route.scopes`. Only called for
+ * routes that have already passed the `scopes !== undefined` filter in
+ * `generateOpenApiDoc` — an absent `scopes` omits the operation from the
+ * document entirely rather than reaching this function.
+ */
+function buildSecurity(scopes: readonly string[]): Array<Record<string, string[]>> {
+  if (scopes.length === 0) return [{ [BEARER_SCHEME]: [] }];
+  return [{ [OAUTH2_SCHEME]: [...scopes] }];
+}
+
+// ── Request / response bodies ───────────────────────────────────────────────
+
+function buildRequestBody(
+  route: Route,
+  operationId: string,
+  schemas: Record<string, unknown>,
+): OpenApiOperation["requestBody"] {
+  if (route.requestSchema) {
+    const schemaName = `${operationId}Request`;
+    schemas[schemaName] = toComponentSchema(route.requestSchema);
+    return {
+      required: true,
+      content: {
+        "application/json": { schema: { $ref: `#/components/schemas/${schemaName}` } },
+      },
+    };
+  }
+  return {
+    required: false,
+    content: {
+      "application/json": { schema: {} },
+    },
+  };
+}
+
+function buildResponses(
+  route: Route,
+  operationId: string,
+  schemas: Record<string, unknown>,
+): OpenApiOperation["responses"] {
+  const responses: OpenApiOperation["responses"] = {
+    "200": { description: "Success" },
+    "400": { description: "Bad request" },
+    "401": { description: "Unauthorized" },
+    "500": { description: "Internal server error" },
+  };
+
+  if (route.responseSchema) {
+    const schemaName = `${operationId}Response`;
+    schemas[schemaName] = toComponentSchema(route.responseSchema);
+    responses["200"] = {
+      description: "Success",
+      content: {
+        "application/json": { schema: { $ref: `#/components/schemas/${schemaName}` } },
+      },
+    };
+  }
+
+  return responses;
+}
+
 // ── Operation builder ─────────────────────────────────────────────────────────
 
 function buildOperation(
   route: Route,
   method: string,
   openApiPath: string,
+  operationId: string,
+  scopes: readonly string[],
+  schemas: Record<string, unknown>,
 ): OpenApiOperation {
   const params = extractPathParams(openApiPath);
-  const tag = deriveTag(openApiPath);
+  const tags = route.tags && route.tags.length > 0 ? route.tags : [deriveTag(openApiPath)];
 
   const op: OpenApiOperation = {
     summary: route.description ?? `${method.toUpperCase()} ${openApiPath}`,
-    operationId: `${method}_${openApiPath.replace(/[^a-zA-Z0-9]/g, "_")}`,
-    tags: [tag],
+    operationId,
+    tags,
     parameters: params.length > 0 ? params : undefined,
-    responses: {
-      "200": { description: "Success" },
-      "400": { description: "Bad request" },
-      "401": { description: "Unauthorized" },
-      "500": { description: "Internal server error" },
-    },
+    responses: buildResponses(route, operationId, schemas),
+    security: buildSecurity(scopes),
   };
 
+  if (route.stability) {
+    op["x-stability"] = route.stability;
+  }
+
   if (BODY_METHODS.has(method)) {
-    op.requestBody = {
-      required: false,
-      content: {
-        "application/json": { schema: {} },
-      },
-    };
+    op.requestBody = buildRequestBody(route, operationId, schemas);
   }
 
   return op;
@@ -213,23 +449,49 @@ function buildOperation(
 /**
  * Generate an OpenAPI 3.1 document from the trellis route registry.
  *
- * Hardening (G4 MEDIUM-3): the generator emits ONLY routes flagged
- * `publicSpec: true`. Routes without the flag (posts, comments, media,
- * ActivityPub, extension-defined routes, etc.) are excluded so the
- * public spec is a curated agent-integration surface rather than a
- * reflection of every registered handler.
+ * A route appears in the document only if it passes every filter, in order:
  *
- * Routes that cannot be represented as OpenAPI paths (wildcard handlers,
- * complex regex) are silently skipped.
+ * 1. `publicSpec === true` (G4 MEDIUM-3) — the curated agent-integration
+ *    surface, not every registered handler.
+ * 2. `scopes !== undefined` (plan 034 lane B / B.2) — a route that hasn't
+ *    declared its scopes yet is first-party only and stays out of the
+ *    public document. `[]` (authenticated, no particular scope) and any
+ *    non-empty scope list both pass.
+ * 3. The path pattern must convert to a representable OpenAPI path (wildcard
+ *    handlers and complex regex are silently skipped, as before).
+ *
+ * A route that passes all three but still resolves to a *positional*
+ * `{paramN}` placeholder (an unnamed regex capture group) fails the build —
+ * see B.3: a route publish-worthy enough to reach the public document must
+ * name its path parameters. Every `operationId` in the emitted document
+ * (declared or derived) must also be unique; a collision fails the build too.
  */
 export function generateOpenApiDoc(routes: Route[]): OpenApiDocument {
   const paths: Record<string, OpenApiPathItem> = {};
+  const schemas: Record<string, unknown> = {};
+  const seenOperationIds = new Map<string, string>();
+  // Every scope an emitted operation ends up referencing. Collected while
+  // walking, not from `routes`, so the scheme defines exactly the vocabulary
+  // the document uses — a route filtered out above contributes nothing.
+  const usedScopes = new Set<string>();
 
   for (const route of routes) {
     if (route.publicSpec !== true) continue;
+    if (route.scopes === undefined) continue;
+
     const openApiPath = routePatternToPath(route.path);
     if (!openApiPath) continue;
 
+    if (POSITIONAL_PARAM_RE.test(openApiPath)) {
+      throw new Error(
+        `Public OpenAPI route "${openApiPath}" resolves a path parameter from an ` +
+          `unnamed regex capture group ({param0}-style). Routes in the public document ` +
+          `must name their path parameters — convert the capture group to a named one ` +
+          `(e.g. "(?<id>[^/]+)") in the route module that registers this path.`,
+      );
+    }
+
+    const scopes = route.scopes;
     const rawMethods = route.method ?? "GET";
     const methods = Array.isArray(rawMethods) ? rawMethods : [rawMethods];
 
@@ -237,24 +499,38 @@ export function generateOpenApiDoc(routes: Route[]): OpenApiDocument {
       if (rawMethod === "*") continue;
       const method = rawMethod.toLowerCase();
 
+      const operationId = route.operationId ?? deriveOperationId(method, openApiPath);
+      const collidesWith = seenOperationIds.get(operationId);
+      if (collidesWith) {
+        throw new Error(
+          `Duplicate OpenAPI operationId "${operationId}": already emitted for ` +
+            `${collidesWith}, also produced by ${method.toUpperCase()} ${openApiPath}. ` +
+            `Set an explicit, unique \`operationId\` on one of these routes.`,
+        );
+      }
+      seenOperationIds.set(operationId, `${method.toUpperCase()} ${openApiPath}`);
+
       if (!paths[openApiPath]) {
         paths[openApiPath] = {} as OpenApiPathItem;
       }
 
-      paths[openApiPath][method] = buildOperation(route, method, openApiPath);
+      paths[openApiPath][method] = buildOperation(route, method, openApiPath, operationId, scopes, schemas);
+      for (const scope of scopes) usedScopes.add(scope);
     }
   }
 
   return {
     openapi: "3.1.0",
+    jsonSchemaDialect: JSON_SCHEMA_DIALECT,
     info: {
       title: API_TITLE,
-      version: API_VERSION,
+      version: getPackageVersion(),
       description: API_DESCRIPTION,
     },
     paths,
     components: {
-      schemas: {},
+      schemas,
+      securitySchemes: buildSecuritySchemes(usedScopes),
     },
   };
 }

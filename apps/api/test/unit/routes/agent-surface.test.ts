@@ -1,14 +1,20 @@
 /**
- * Unit Tests: Agent Surface Routes (T9b-a)
+ * Unit Tests: Agent Surface Routes (T9b-a, plan 034 "agent words" lane)
  *
  * Tests:
- *   - GET /llms.txt   — content-type, body anchors
+ *   - GET /llms.txt     — default content-type/anchors, absence of retired
+ *     false claims, and consumer-configured override served verbatim
  *   - GET /openapi.json — content-type, valid OpenAPI 3.1 structure
- *   - GET /security.txt — RFC 9116 compliance, Contact field, RFC 3339 Expires
+ *   - GET /security.txt — 404 with the standard error envelope when
+ *     unconfigured, consumer-configured body served verbatim when set
  */
 
 import { beforeEach, describe, expect, it } from "vitest";
-import { agentSurfaceRoutes, buildAgentSurfaceRoutes } from "../../../src/lib/routes/agent-surface.js";
+import {
+  agentSurfaceRoutes,
+  buildAgentSurfaceRoutes,
+  type AgentSurfaceContent,
+} from "../../../src/lib/routes/agent-surface.js";
 import type { Route } from "../../../src/lib/routes/types.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -21,6 +27,10 @@ function findRoute(routes: Route[], path: string): Route {
 
 const mockEnv = {} as any;
 
+function envWith(agentSurface: AgentSurfaceContent): any {
+  return { agentSurface };
+}
+
 function makeCtx(overrides: Record<string, unknown> = {}) {
   return {
     url: new URL("https://api.example.com/"),
@@ -32,7 +42,7 @@ function makeCtx(overrides: Record<string, unknown> = {}) {
 
 // ── /llms.txt ─────────────────────────────────────────────────────────────────
 
-describe("GET /llms.txt", () => {
+describe("GET /llms.txt (default, unconfigured)", () => {
   const route = findRoute(agentSurfaceRoutes, "/llms.txt");
 
   it("responds with 200", async () => {
@@ -61,11 +71,19 @@ describe("GET /llms.txt", () => {
     expect(body).toContain("/openapi.json");
   });
 
-  it("body contains compliance.json endpoint anchor", async () => {
+  it("body contains the real (not /.well-known/) compliance.json endpoint anchor", async () => {
     const req = new Request("https://api.example.com/llms.txt");
     const res = await route.handler(req, mockEnv, makeCtx());
     const body = await res.text();
-    expect(body).toContain("/.well-known/compliance.json");
+    expect(body).toContain("/api/tenants/{id}/compliance.json");
+  });
+
+  it("body contains the device-authorization grant endpoints", async () => {
+    const req = new Request("https://api.example.com/llms.txt");
+    const res = await route.handler(req, mockEnv, makeCtx());
+    const body = await res.text();
+    expect(body).toContain("/oauth2/device_authorization");
+    expect(body).toContain("/oauth2/token");
   });
 
   it("body contains identity-provider endpoint anchor", async () => {
@@ -89,19 +107,59 @@ describe("GET /llms.txt", () => {
     expect(body).toContain("/api/tenants/{id}/role-mappings");
   });
 
-  it("body describes the persona scenario", async () => {
-    const req = new Request("https://api.example.com/llms.txt");
-    const res = await route.handler(req, mockEnv, makeCtx());
-    const body = await res.text();
-    // The agent-friendly onboarding persona scenario
-    expect(body).toContain("Persona scenario");
-  });
-
   it("body contains error format documentation", async () => {
     const req = new Request("https://api.example.com/llms.txt");
     const res = await route.handler(req, mockEnv, makeCtx());
     const body = await res.text();
     expect(body).toContain("Error format");
+  });
+
+  it("body does not name any product other than Trellis", async () => {
+    const req = new Request("https://api.example.com/llms.txt");
+    const res = await route.handler(req, mockEnv, makeCtx());
+    const body = await res.text();
+    expect(body).not.toContain("dog");
+    expect(body).not.toContain("Persona scenario");
+    expect(body).not.toContain("Microsoft Graph");
+    expect(body).not.toContain("Entra");
+  });
+
+  it("does NOT claim /.well-known/compliance.json (retired false claim)", async () => {
+    const req = new Request("https://api.example.com/llms.txt");
+    const res = await route.handler(req, mockEnv, makeCtx());
+    const body = await res.text();
+    expect(body).not.toContain("/.well-known/compliance.json");
+  });
+
+  it("does NOT claim a PKCE endpoint under an example.com auth host (retired false claim)", async () => {
+    const req = new Request("https://api.example.com/llms.txt");
+    const res = await route.handler(req, mockEnv, makeCtx());
+    const body = await res.text();
+    expect(body).not.toContain("auth.example.com");
+  });
+
+  it("does NOT claim identity-provider/test-sign-in (retired: no such route exists)", async () => {
+    const req = new Request("https://api.example.com/llms.txt");
+    const res = await route.handler(req, mockEnv, makeCtx());
+    const body = await res.text();
+    expect(body).not.toContain("test-sign-in");
+  });
+
+  it("does NOT claim refresh tokens are single-use and rotated (retired false claim)", async () => {
+    const req = new Request("https://api.example.com/llms.txt");
+    const res = await route.handler(req, mockEnv, makeCtx());
+    const body = await res.text();
+    expect(body).not.toContain("Refresh tokens are single-use and rotated");
+  });
+
+  it("does NOT claim domain.*/idp.*/role_mapping.* scopes (retired false claim)", async () => {
+    const req = new Request("https://api.example.com/llms.txt");
+    const res = await route.handler(req, mockEnv, makeCtx());
+    const body = await res.text();
+    expect(body).not.toContain("domain.*, idp.*, role_mapping.*");
+    expect(body).not.toContain("domain.*");
+    expect(body).not.toContain("idp.*");
+    expect(body).not.toContain("role_mapping.*");
   });
 
   it("has CORS middleware configured", () => {
@@ -111,6 +169,33 @@ describe("GET /llms.txt", () => {
 
   it("has a description", () => {
     expect(route.description).toBeTruthy();
+  });
+});
+
+describe("GET /llms.txt (consumer-configured)", () => {
+  const route = findRoute(agentSurfaceRoutes, "/llms.txt");
+
+  it("serves the configured body verbatim instead of the default", async () => {
+    const configured = "# Acme — Agent Setup Contract\n\nCustom content.\n";
+    const req = new Request("https://api.example.com/llms.txt");
+    const res = await route.handler(
+      req,
+      envWith({ llmsTxt: configured }),
+      makeCtx(),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toBe(configured);
+  });
+
+  it("keeps the text/plain content-type for configured content", async () => {
+    const req = new Request("https://api.example.com/llms.txt");
+    const res = await route.handler(
+      req,
+      envWith({ llmsTxt: "custom" }),
+      makeCtx(),
+    );
+    expect(res.headers.get("content-type")).toMatch(/text\/plain/);
   });
 });
 
@@ -181,6 +266,11 @@ describe("GET /openapi.json", () => {
         description: "List tenants",
         // G4 MEDIUM-3: only routes flagged publicSpec land in /openapi.json.
         publicSpec: true,
+        // Plan 034 lane B/G: `publicSpec` alone is no longer sufficient — a
+        // route also has to say what a third-party principal must hold. `[]`
+        // is "authenticated, no particular scope", the weakest declaration
+        // that publishes. Without it the generator omits the operation.
+        scopes: [],
       },
     ];
     const routes = buildAgentSurfaceRoutes(() => injectedRoutes);
@@ -194,8 +284,10 @@ describe("GET /openapi.json", () => {
 
   it("each path operation has a responses field", async () => {
     const injectedRoutes: Route[] = [
-      { path: "/health", method: "GET", handler: async () => new Response("ok"), publicSpec: true },
-      { path: "/api/tenants", method: "POST", handler: async () => new Response("ok"), publicSpec: true },
+      // `scopes: []` alongside `publicSpec` — see the note above; without it
+      // the generator emits no operations and this loop asserts nothing.
+      { path: "/health", method: "GET", handler: async () => new Response("ok"), publicSpec: true, scopes: [] },
+      { path: "/api/tenants", method: "POST", handler: async () => new Response("ok"), publicSpec: true, scopes: [] },
     ];
     const routes = buildAgentSurfaceRoutes(() => injectedRoutes);
     const route = findRoute(routes, "/openapi.json");
@@ -225,98 +317,37 @@ describe("GET /openapi.json", () => {
 
 // ── /security.txt ─────────────────────────────────────────────────────────────
 
-describe("GET /security.txt", () => {
+describe("GET /security.txt (unconfigured)", () => {
   const route = findRoute(agentSurfaceRoutes, "/security.txt");
 
-  it("responds with 200", async () => {
+  it("responds with 404 rather than a placeholder contact", async () => {
     const req = new Request("https://api.example.com/security.txt");
     const res = await route.handler(req, mockEnv, makeCtx());
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(404);
   });
 
-  it("content-type is text/plain", async () => {
+  it("body is the standard structured error envelope", async () => {
     const req = new Request("https://api.example.com/security.txt");
     const res = await route.handler(req, mockEnv, makeCtx());
-    expect(res.headers.get("content-type")).toMatch(/text\/plain/);
+    expect(res.headers.get("content-type")).toMatch(/application\/json/);
+    const body = await res.json();
+    expect(body.error).toBe("NOT_FOUND");
+    expect(body.message).toBeTruthy();
+    expect(body.remediation).toBeTruthy();
   });
 
-  it("body contains Contact field", async () => {
+  it("remediation tells the operator to configure agentSurface.securityTxt", async () => {
+    const req = new Request("https://api.example.com/security.txt");
+    const res = await route.handler(req, mockEnv, makeCtx());
+    const body = await res.json();
+    expect(body.remediation).toContain("agentSurface.securityTxt");
+  });
+
+  it("does NOT serve the retired example.com placeholder contact", async () => {
     const req = new Request("https://api.example.com/security.txt");
     const res = await route.handler(req, mockEnv, makeCtx());
     const body = await res.text();
-    expect(body).toContain("Contact: ");
-  });
-
-  it("Contact field has mailto: URI", async () => {
-    const req = new Request("https://api.example.com/security.txt");
-    const res = await route.handler(req, mockEnv, makeCtx());
-    const body = await res.text();
-    const contactLine = body.split("\n").find((l) => l.startsWith("Contact:"));
-    expect(contactLine).toBeDefined();
-    expect(contactLine).toContain("mailto:");
-  });
-
-  it("body contains Expires field", async () => {
-    const req = new Request("https://api.example.com/security.txt");
-    const res = await route.handler(req, mockEnv, makeCtx());
-    const body = await res.text();
-    expect(body).toContain("Expires: ");
-  });
-
-  it("Expires value is a valid RFC 3339 datetime", async () => {
-    const req = new Request("https://api.example.com/security.txt");
-    const res = await route.handler(req, mockEnv, makeCtx());
-    const body = await res.text();
-    const expiresLine = body.split("\n").find((l) => l.startsWith("Expires:"));
-    expect(expiresLine).toBeDefined();
-    const value = expiresLine!.replace("Expires: ", "").trim();
-    // ISO 8601 / RFC 3339: parseable by Date
-    const parsed = new Date(value);
-    expect(parsed.getTime()).not.toBeNaN();
-    // Should be approximately 1 year in the future
-    const oneYearMs = 365 * 24 * 60 * 60 * 1000;
-    const diff = parsed.getTime() - Date.now();
-    expect(diff).toBeGreaterThan(oneYearMs - 60_000);
-    expect(diff).toBeLessThan(oneYearMs + 60_000);
-  });
-
-  it("body contains Preferred-Languages field", async () => {
-    const req = new Request("https://api.example.com/security.txt");
-    const res = await route.handler(req, mockEnv, makeCtx());
-    const body = await res.text();
-    expect(body).toContain("Preferred-Languages: ");
-  });
-
-  it("body contains Canonical field", async () => {
-    const req = new Request("https://api.example.com/security.txt");
-    const res = await route.handler(req, mockEnv, makeCtx());
-    const body = await res.text();
-    expect(body).toContain("Canonical: ");
-  });
-
-  it("body contains Policy field", async () => {
-    const req = new Request("https://api.example.com/security.txt");
-    const res = await route.handler(req, mockEnv, makeCtx());
-    const body = await res.text();
-    expect(body).toContain("Policy: ");
-  });
-
-  it("lines use key: value format (RFC 9116)", async () => {
-    const req = new Request("https://api.example.com/security.txt");
-    const res = await route.handler(req, mockEnv, makeCtx());
-    const body = await res.text();
-    const lines = body.split("\n").filter((l) => l.trim().length > 0);
-    for (const line of lines) {
-      // Each non-empty line should be "Key: value"
-      expect(line).toMatch(/^[A-Za-z-]+: .+/);
-    }
-  });
-
-  it("body ends with a trailing newline", async () => {
-    const req = new Request("https://api.example.com/security.txt");
-    const res = await route.handler(req, mockEnv, makeCtx());
-    const body = await res.text();
-    expect(body.endsWith("\n")).toBe(true);
+    expect(body).not.toContain("security@example.com");
   });
 
   it("has CORS middleware configured", () => {
@@ -326,6 +357,40 @@ describe("GET /security.txt", () => {
 
   it("has a description", () => {
     expect(route.description).toBeTruthy();
+  });
+});
+
+describe("GET /security.txt (consumer-configured)", () => {
+  const route = findRoute(agentSurfaceRoutes, "/security.txt");
+
+  const configured = [
+    "Contact: mailto:security@acme.example",
+    "Expires: 2027-01-01T00:00:00.000Z",
+    "Preferred-Languages: en",
+    "Canonical: https://api.acme.example/security.txt",
+    "",
+  ].join("\n");
+
+  it("responds with 200 and the configured body verbatim", async () => {
+    const req = new Request("https://api.example.com/security.txt");
+    const res = await route.handler(
+      req,
+      envWith({ securityTxt: configured }),
+      makeCtx(),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toBe(configured);
+  });
+
+  it("content-type is text/plain", async () => {
+    const req = new Request("https://api.example.com/security.txt");
+    const res = await route.handler(
+      req,
+      envWith({ securityTxt: configured }),
+      makeCtx(),
+    );
+    expect(res.headers.get("content-type")).toMatch(/text\/plain/);
   });
 });
 

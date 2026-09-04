@@ -19,6 +19,11 @@ import {
   type RawPrismaLike,
 } from "./extension-scoped-db.js";
 import { createDiscoverDb } from "./extension-discover-db.js";
+import {
+  createExtensionEventEmitter,
+  type TransactionRunner,
+} from "./events/extension-emitter.js";
+import type { TenantId as CoreTenantId } from "./mint-tenant-id.js";
 import { getCurrentTenantId } from "@de-otio/saas-foundation/tenant";
 import type { GraphService } from "./graph/index.js";
 import type {
@@ -111,6 +116,14 @@ function createReadOnlyGraphService(graph: GraphService): ExtensionGraphService 
  * @param env - The full application environment (secrets stay here)
  * @param prisma - The full Prisma client (scoped down to safe tables)
  * @param graph - The full GraphService (scoped to read-only methods)
+ * @param callerRegion - The caller's verified data region (discover()'s floor)
+ * @param tenantId - The tenant core resolved for this request, when it has
+ *   one. Optional and additive: today's only production caller (the extension
+ *   route wrapper) resolves its tenant after building the context, so the
+ *   event emitter falls back to the ambient tenant context when this is
+ *   omitted. The parameter exists so that threading the resolved tenant
+ *   through later is a one-line change at the call site rather than a
+ *   redesign here.
  */
 export function createExtensionContext(
   ext: TrellisExtension,
@@ -118,6 +131,7 @@ export function createExtensionContext(
   prisma: unknown,
   graph?: GraphService,
   callerRegion?: string,
+  tenantId?: CoreTenantId,
 ): ExtensionContext {
   // Metadata for the tenant-carrying core delegates + composed ext_* models,
   // assembled once per context. The `tenant(tid)` proxy is the ONLY data surface
@@ -144,6 +158,15 @@ export function createExtensionContext(
     appUrl: env.APP_URL ?? "",
     stage: env.STAGE ?? "dev",
     config: extractExtensionConfig(ext),
+    // The event seam. Tenant-bound by construction: the published signature is
+    // `emit(type, payload)`, so an extension has no way to name a tenant, and
+    // the branded `TenantId` the outbox writer demands has a core-private
+    // constructor it cannot reach. See lib/events/extension-emitter.ts.
+    events: createExtensionEventEmitter(
+      ext.id,
+      rawPrisma as unknown as TransactionRunner,
+      tenantId,
+    ),
   };
 }
 

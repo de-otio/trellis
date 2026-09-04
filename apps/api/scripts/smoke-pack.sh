@@ -565,7 +565,13 @@ npm init -y >/dev/null
 echo "==> installing the testkit with NO core present"
 # --legacy-peer-deps unconditionally here: the point of this project is that
 # the peer is absent, which is the state being tested.
-npm install "${TESTKIT_TARBALL}" --no-fund --no-audit --silent --legacy-peer-deps
+#
+# The extension-api tarball comes along, as in the consumer install above:
+# it is a regular dependency of the testkit, not the peer under test, and in
+# a coupled release the version the testkit names is not on the registry yet
+# — resolving it there fails the install before the missing-core path is
+# ever reached.
+npm install "${EXTAPI_TARBALL}" "${TESTKIT_TARBALL}" --no-fund --no-audit --silent --legacy-peer-deps
 
 node --input-type=module -e "
 const example = await import('@de-otio/trellis-extension-testkit/example');

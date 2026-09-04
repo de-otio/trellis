@@ -1,1188 +1,136 @@
 {
   "openapi": "3.1.0",
+  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
   "info": {
     "title": "Trellis API",
-    "version": "0.7.0",
+    "version": "0.25.0-alpha.14",
     "description": "Social-network core API. Discovery surfaces, federation management (T3–T8), and entity/social graph endpoints."
   },
   "paths": {
-    "/api/app/version-policy": {
-      "get": {
-        "summary": "Client version policy: minimum/recommended app version and store URLs (all nullable when unset)",
-        "operationId": "get__api_app_version_policy",
-        "tags": [
-          "other"
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        }
-      }
-    },
-    "/llms.txt": {
-      "get": {
-        "summary": "Agent setup contract (llmstxt.org convention)",
-        "operationId": "get__llms_txt",
-        "tags": [
-          "discovery"
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        }
-      }
-    },
-    "/openapi.json": {
-      "get": {
-        "summary": "OpenAPI 3.1 document (auto-generated from route registry)",
-        "operationId": "get__openapi_json",
-        "tags": [
-          "discovery"
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        }
-      }
-    },
-    "/security.txt": {
-      "get": {
-        "summary": "RFC 9116 security contact",
-        "operationId": "get__security_txt",
-        "tags": [
-          "discovery"
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        }
-      }
-    },
-    "/api/auth/discover": {
-      "post": {
-        "summary": "Sign-in discovery: returns idp redirect or password fallback",
-        "operationId": "post__api_auth_discover",
-        "tags": [
-          "auth-discover"
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        },
-        "requestBody": {
-          "required": false,
-          "content": {
-            "application/json": {
-              "schema": {}
-            }
-          }
-        }
-      }
-    },
-    "/api/users/me": {
-      "get": {
-        "summary": "Get the caller's resolved identity",
-        "operationId": "get__api_users_me",
-        "tags": [
-          "other"
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        }
-      }
-    },
-    "/api/tenants": {
-      "post": {
-        "summary": "Create organization tenant",
-        "operationId": "post__api_tenants",
-        "tags": [
-          "tenants"
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        },
-        "requestBody": {
-          "required": false,
-          "content": {
-            "application/json": {
-              "schema": {}
-            }
-          }
-        }
-      }
-    },
-    "/api/tenants/{param0}": {
-      "get": {
-        "summary": "Get tenant by ID",
-        "operationId": "get__api_tenants__param0_",
-        "tags": [
-          "tenants"
-        ],
-        "parameters": [
-          {
-            "name": "param0",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        }
-      },
-      "patch": {
-        "summary": "Update tenant displayName",
-        "operationId": "patch__api_tenants__param0_",
-        "tags": [
-          "tenants"
-        ],
-        "parameters": [
-          {
-            "name": "param0",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        },
-        "requestBody": {
-          "required": false,
-          "content": {
-            "application/json": {
-              "schema": {}
-            }
-          }
-        }
-      }
-    },
-    "/api/tenants/{param0}/transfer-ownership": {
-      "post": {
-        "summary": "Transfer tenant ownership",
-        "operationId": "post__api_tenants__param0__transfer_ownership",
-        "tags": [
-          "tenants"
-        ],
-        "parameters": [
-          {
-            "name": "param0",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        },
-        "requestBody": {
-          "required": false,
-          "content": {
-            "application/json": {
-              "schema": {}
-            }
-          }
-        }
-      }
-    },
-    "/api/users/me/tenants": {
+    "/api/v1/users/me/tenants": {
       "get": {
         "summary": "List caller's tenant memberships",
-        "operationId": "get__api_users_me_tenants",
-        "tags": [
-          "other"
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        }
-      }
-    },
-    "/api/auth/switch-tenant": {
-      "post": {
-        "summary": "Switch active tenant",
-        "operationId": "post__api_auth_switch_tenant",
-        "tags": [
-          "other"
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        },
-        "requestBody": {
-          "required": false,
-          "content": {
-            "application/json": {
-              "schema": {}
-            }
-          }
-        }
-      }
-    },
-    "/api/tenants/{param0}/domains": {
-      "post": {
-        "summary": "Claim a domain for tenant verification",
-        "operationId": "post__api_tenants__param0__domains",
-        "tags": [
-          "tenant-domains"
-        ],
-        "parameters": [
-          {
-            "name": "param0",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        },
-        "requestBody": {
-          "required": false,
-          "content": {
-            "application/json": {
-              "schema": {}
-            }
-          }
-        }
-      },
-      "get": {
-        "summary": "List tenant domains",
-        "operationId": "get__api_tenants__param0__domains",
-        "tags": [
-          "tenant-domains"
-        ],
-        "parameters": [
-          {
-            "name": "param0",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        }
-      }
-    },
-    "/api/tenants/{param0}/domains/{param1}": {
-      "delete": {
-        "summary": "Remove a tenant domain",
-        "operationId": "delete__api_tenants__param0__domains__param1_",
-        "tags": [
-          "tenant-domains"
-        ],
-        "parameters": [
-          {
-            "name": "param0",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "param1",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        }
-      }
-    },
-    "/api/tenants/{param0}/domains/{param1}/verify": {
-      "post": {
-        "summary": "Verify tenant domain via DNS TXT",
-        "operationId": "post__api_tenants__param0__domains__param1__verify",
-        "tags": [
-          "tenant-domains"
-        ],
-        "parameters": [
-          {
-            "name": "param0",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "param1",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        },
-        "requestBody": {
-          "required": false,
-          "content": {
-            "application/json": {
-              "schema": {}
-            }
-          }
-        }
-      }
-    },
-    "/api/tenants/{param0}/identity-provider": {
-      "post": {
-        "summary": "Connect a tenant identity provider (OIDC)",
-        "operationId": "post__api_tenants__param0__identity_provider",
-        "tags": [
-          "tenant-idp"
-        ],
-        "parameters": [
-          {
-            "name": "param0",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        },
-        "requestBody": {
-          "required": false,
-          "content": {
-            "application/json": {
-              "schema": {}
-            }
-          }
-        }
-      },
-      "get": {
-        "summary": "Read a tenant identity provider",
-        "operationId": "get__api_tenants__param0__identity_provider",
-        "tags": [
-          "tenant-idp"
-        ],
-        "parameters": [
-          {
-            "name": "param0",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        }
-      },
-      "patch": {
-        "summary": "Update or toggle a tenant identity provider",
-        "operationId": "patch__api_tenants__param0__identity_provider",
-        "tags": [
-          "tenant-idp"
-        ],
-        "parameters": [
-          {
-            "name": "param0",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        },
-        "requestBody": {
-          "required": false,
-          "content": {
-            "application/json": {
-              "schema": {}
-            }
-          }
-        }
-      },
-      "delete": {
-        "summary": "Disconnect a tenant identity provider",
-        "operationId": "delete__api_tenants__param0__identity_provider",
-        "tags": [
-          "tenant-idp"
-        ],
-        "parameters": [
-          {
-            "name": "param0",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        }
-      }
-    },
-    "/api/tenants/{param0}/members": {
-      "get": {
-        "summary": "List tenant members (paginated)",
-        "operationId": "get__api_tenants__param0__members",
-        "tags": [
-          "tenant-members"
-        ],
-        "parameters": [
-          {
-            "name": "param0",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        }
-      }
-    },
-    "/api/tenants/{param0}/members/{param1}": {
-      "patch": {
-        "summary": "Change a member's role",
-        "operationId": "patch__api_tenants__param0__members__param1_",
-        "tags": [
-          "tenant-members"
-        ],
-        "parameters": [
-          {
-            "name": "param0",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "param1",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        },
-        "requestBody": {
-          "required": false,
-          "content": {
-            "application/json": {
-              "schema": {}
-            }
-          }
-        }
-      },
-      "delete": {
-        "summary": "Remove a member (soft-delete + global sign-out)",
-        "operationId": "delete__api_tenants__param0__members__param1_",
-        "tags": [
-          "tenant-members"
-        ],
-        "parameters": [
-          {
-            "name": "param0",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "param1",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        }
-      }
-    },
-    "/api/tenants/{param0}/role-mappings": {
-      "get": {
-        "summary": "List tenant role mappings",
-        "operationId": "get__api_tenants__param0__role_mappings",
-        "tags": [
-          "tenant-role-mappings"
-        ],
-        "parameters": [
-          {
-            "name": "param0",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        }
-      },
-      "post": {
-        "summary": "Create a tenant role mapping",
-        "operationId": "post__api_tenants__param0__role_mappings",
-        "tags": [
-          "tenant-role-mappings"
-        ],
-        "parameters": [
-          {
-            "name": "param0",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        },
-        "requestBody": {
-          "required": false,
-          "content": {
-            "application/json": {
-              "schema": {}
-            }
-          }
-        }
-      }
-    },
-    "/api/tenants/{param0}/role-mappings/{param1}": {
-      "patch": {
-        "summary": "Update a tenant role mapping",
-        "operationId": "patch__api_tenants__param0__role_mappings__param1_",
-        "tags": [
-          "tenant-role-mappings"
-        ],
-        "parameters": [
-          {
-            "name": "param0",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "param1",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        },
-        "requestBody": {
-          "required": false,
-          "content": {
-            "application/json": {
-              "schema": {}
-            }
-          }
-        }
-      },
-      "delete": {
-        "summary": "Delete a tenant role mapping",
-        "operationId": "delete__api_tenants__param0__role_mappings__param1_",
-        "tags": [
-          "tenant-role-mappings"
-        ],
-        "parameters": [
-          {
-            "name": "param0",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "param1",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        }
-      }
-    },
-    "/api/tenants/{param0}/audit": {
-      "get": {
-        "summary": "Get tenant audit log (paginated, filterable, CSV-exportable)",
-        "operationId": "get__api_tenants__param0__audit",
-        "tags": [
-          "tenant-audit"
-        ],
-        "parameters": [
-          {
-            "name": "param0",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        }
-      }
-    },
-    "/api/tenants/{param0}/setup-status": {
-      "get": {
-        "summary": "Get tenant setup-status (machine-friendly onboarding progress)",
-        "operationId": "get__api_tenants__param0__setup_status",
+        "operationId": "listMyTenants",
         "tags": [
           "tenants"
         ],
-        "parameters": [
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/listMyTenantsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": [
           {
-            "name": "param0",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "oauth2": [
+              "tenant:read"
+            ]
           }
         ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        }
-      }
-    },
-    "/oauth2/device_authorization": {
-      "post": {
-        "summary": "RFC 8628 device authorization request",
-        "operationId": "post__oauth2_device_authorization",
-        "tags": [
-          "other"
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        },
-        "requestBody": {
-          "required": false,
-          "content": {
-            "application/json": {
-              "schema": {}
-            }
-          }
-        }
-      }
-    },
-    "/oauth2/token": {
-      "post": {
-        "summary": "RFC 8628 device-code token poll",
-        "operationId": "post__oauth2_token",
-        "tags": [
-          "other"
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        },
-        "requestBody": {
-          "required": false,
-          "content": {
-            "application/json": {
-              "schema": {}
-            }
-          }
-        }
-      }
-    },
-    "/agents/authorize": {
-      "get": {
-        "summary": "Render the agent-approval page",
-        "operationId": "get__agents_authorize",
-        "tags": [
-          "other"
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        }
-      }
-    },
-    "/agents/authorize/approve": {
-      "post": {
-        "summary": "Approve a pending agent session",
-        "operationId": "post__agents_authorize_approve",
-        "tags": [
-          "other"
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        },
-        "requestBody": {
-          "required": false,
-          "content": {
-            "application/json": {
-              "schema": {}
-            }
-          }
-        }
-      }
-    },
-    "/api/users/me/agent-sessions": {
-      "get": {
-        "summary": "List active agent sessions for the current user",
-        "operationId": "get__api_users_me_agent_sessions",
-        "tags": [
-          "other"
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        }
-      }
-    },
-    "/api/users/me/agent-sessions/{param0}/revoke": {
-      "post": {
-        "summary": "Revoke an agent session",
-        "operationId": "post__api_users_me_agent_sessions__param0__revoke",
-        "tags": [
-          "other"
-        ],
-        "parameters": [
-          {
-            "name": "param0",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        },
-        "requestBody": {
-          "required": false,
-          "content": {
-            "application/json": {
-              "schema": {}
-            }
-          }
-        }
+        "x-stability": "beta"
       }
     }
   },
   "components": {
-    "schemas": {}
+    "schemas": {
+      "listMyTenantsResponse": {
+        "type": "object",
+        "properties": {
+          "memberships": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "tenantId": {
+                  "type": "string"
+                },
+                "role": {
+                  "type": "string"
+                },
+                "tenant": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "slug": {
+                      "type": "string"
+                    },
+                    "displayName": {
+                      "type": "string"
+                    },
+                    "type": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "slug",
+                    "displayName",
+                    "type",
+                    "status"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "tenantId",
+                "role",
+                "tenant"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "memberships"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "securitySchemes": {
+      "oauth2": {
+        "type": "oauth2",
+        "description": "Third-party client access via the device authorization grant (RFC 8628): POST /oauth2/device_authorization, the user approves at /agents/authorize, the client polls POST /oauth2/token.",
+        "flows": {
+          "authorizationCode": {
+            "authorizationUrl": "/agents/authorize",
+            "tokenUrl": "/oauth2/token",
+            "scopes": {
+              "profile:read": "Read your name, handle and avatar",
+              "entities:read": "Read the profiles you can see",
+              "entities:write": "Create and update profiles you own",
+              "posts:read": "Read posts you can see",
+              "posts:write": "Post on your behalf",
+              "tenant:read": "Read which space you are in",
+              "events:subscribe": "Receive notifications about your data"
+            }
+          }
+        }
+      },
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "First-party session bearer token."
+      }
+    }
   }
 }

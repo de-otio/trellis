@@ -13,8 +13,10 @@ import {
   QueryTimeoutPresets,
   withQueryTimeoutAndRetry,
 } from "../db-query-helper.js";
+import { emitDomainEvent } from "../events/emit.js";
 import { getIPAddress } from "../ip-scrubber.js";
 import { getLogger, Logger } from "../logger.js";
+import { mintTenantId } from "../mint-tenant-id.js";
 import { corsMiddleware, csrfMiddleware } from "../middleware.js";
 import { detectRegionSync, isValidRegion } from "../region-detection.js";
 import { SecurityHeaders } from "../security-headers.js";
@@ -396,7 +398,11 @@ export const userRoutes: Route[] = [
           async (db) => {
             return db.user.findUnique({
               where: { id: session.userId },
-              select: { dataRegion: true },
+              // `personalTenantId` rides along on a read that already
+              // happens — it is the fallback tenant for the domain event
+              // below, mirroring the extension route wrapper's
+              // `resolveTenantId`. No extra query.
+              select: { dataRegion: true, personalTenantId: true },
             });
           },
           QueryTimeoutPresets.USER_FACING,
@@ -432,6 +438,27 @@ export const userRoutes: Route[] = [
         const ipAddress = getIPAddress(request);
         const userAgent = request.headers.get("User-Agent") || undefined;
         const now = new Date();
+
+        // The tenant this compliance event belongs to. Same two sources, same
+        // order, as the extension route wrapper's `resolveTenantId`: the
+        // verified JWT claim, else the user's server-side personal tenant.
+        // Minted here so an invalid id is rejected before the transaction
+        // opens. `personalTenantId` is nullable for legacy rows, so absence is
+        // possible: in that case the consent is still recorded and the EVENT is
+        // skipped with a warning. Writing an event scoped to no tenant — or
+        // guessing one — is the worse failure; a missing event is recoverable
+        // from the append-only consent history, a misattributed one is not.
+        const rawEventTenantId =
+          session.activeTenantId ?? user.personalTenantId ?? null;
+        const consentTenantId = rawEventTenantId
+          ? mintTenantId(rawEventTenantId, "session")
+          : null;
+        if (!consentTenantId) {
+          logger.warn(
+            "[USER] consent change has no resolvable tenant; domain event skipped",
+            { userId: session.userId },
+          );
+        }
 
         const { consent, previousConsented } = (await withQueryTimeoutAndRetry(
           dbManager,
@@ -478,6 +505,37 @@ export const userRoutes: Route[] = [
                   active: true,
                 },
               });
+
+              // Domain event, IN THIS TRANSACTION (plan 034 lane E). A
+              // consent record and the event announcing it must not be able
+              // to disagree: if the insert above rolls back, so does this.
+              //
+              // Payload is ids and changed field names only — no regions, no
+              // IP, no user agent, none of the row's content. A subscriber
+              // that needs the decision fetches the consent with a scoped
+              // token, where the normal access controls apply.
+              if (consentTenantId) {
+                await emitDomainEvent(tx, {
+                  type: body.consented
+                    ? "consent.granted"
+                    : "consent.withdrawn",
+                  tenantId: consentTenantId,
+                  subjectKind: "consent",
+                  subjectId: created.id,
+                  payload: {
+                    consentId: created.id,
+                    userId: session.userId,
+                    purpose: "CROSS_REGION",
+                    supersededConsentId: prior?.id ?? null,
+                    fields: [
+                      "consented",
+                      "consentedAt",
+                      "withdrawnAt",
+                      "active",
+                    ],
+                  },
+                });
+              }
 
               return {
                 consent: created,

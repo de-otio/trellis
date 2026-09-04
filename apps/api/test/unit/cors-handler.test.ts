@@ -9,7 +9,15 @@ import type { Env } from "../../src/env.js";
 import {
   CorsHandler,
   CORS_ALLOWED_REQUEST_HEADERS,
+  CORS_EXPOSED_RESPONSE_HEADERS,
 } from "../../src/lib/cors-handler.js";
+import { composeMiddleware, corsMiddleware } from "../../src/lib/middleware.js";
+import { idempotencyMiddleware } from "../../src/lib/middleware/idempotency.js";
+import type {
+  IdempotencyStoreInterface,
+  StoredRecord,
+  IdempotencyRecord,
+} from "../../src/lib/middleware/idempotency-store.js";
 
 describe("CorsHandler", () => {
   let mockEnv: Env;
@@ -880,4 +888,136 @@ describe("CorsHandler", () => {
       );
     });
   });
+
+  // Plan 034 lane C.1 — Idempotency reachable from a browser.
+  describe("Idempotency-Key CORS reachability (plan 034 C.1)", () => {
+    it("advertises Idempotency-Key in Access-Control-Allow-Headers", () => {
+      expect(CORS_ALLOWED_REQUEST_HEADERS).toContain("Idempotency-Key");
+    });
+
+    it("getCorsHeaders exposes Idempotency-Replay via Access-Control-Expose-Headers", () => {
+      mockRequest = new Request("https://api.example.com/test", {
+        method: "POST",
+        headers: { Origin: "https://example.com" },
+      });
+      const headers = CorsHandler.getCorsHeaders(mockRequest, mockEnv);
+      expect(headers["Access-Control-Expose-Headers"]).toContain(
+        "Idempotency-Replay",
+      );
+      expect(CORS_EXPOSED_RESPONSE_HEADERS).toBe("Idempotency-Replay");
+    });
+
+    it("a preflight (OPTIONS) response advertises both Idempotency-Key and Idempotency-Replay", async () => {
+      const middleware = corsMiddleware();
+      const context = {
+        request: new Request("https://api.example.com/api/tenants", {
+          method: "OPTIONS",
+          headers: {
+            Origin: "https://example.com",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "Content-Type, Idempotency-Key",
+          },
+        }),
+        env: mockEnv,
+        url: new URL("https://api.example.com/api/tenants"),
+        pathname: "/api/tenants",
+        method: "OPTIONS",
+      };
+      const response = await middleware(context, async () => new Response("unreachable"));
+
+      expect(response.status).toBe(204);
+      expect(response.headers.get("Access-Control-Allow-Headers")).toContain(
+        "Idempotency-Key",
+      );
+      expect(response.headers.get("Access-Control-Expose-Headers")).toContain(
+        "Idempotency-Replay",
+      );
+    });
+
+    /**
+     * Round-trip: a real POST through corsMiddleware + idempotencyMiddleware
+     * composed together (the shape a route's `middleware: [...]` array takes
+     * in production), twice with the same key and body. Before C.1,
+     * `Access-Control-Expose-Headers` was never set at all, so a browser-based
+     * client could never read `Idempotency-Replay` off either response — it
+     * could not tell the fresh write from the replay.
+     */
+    it("exposes Idempotency-Replay on both the fresh write and the replay", async () => {
+      const store = new InMemoryIdempotencyStore();
+      const middleware = composeMiddleware([
+        corsMiddleware(),
+        idempotencyMiddleware(store),
+      ]);
+
+      const requestBody = '{"name":"acme"}';
+      const idempotencyKey = "550e8400-e29b-41d4-a716-446655440000";
+
+      const makeContext = () => ({
+        request: new Request("https://api.example.com/api/tenants", {
+          method: "POST",
+          headers: {
+            Origin: "https://example.com",
+            "content-type": "application/json",
+            "Idempotency-Key": idempotencyKey,
+          },
+          body: requestBody,
+        }),
+        env: mockEnv,
+        url: new URL("https://api.example.com/api/tenants"),
+        pathname: "/api/tenants",
+        method: "POST",
+      });
+
+      const handler = vi.fn(
+        async () =>
+          new Response('{"id":"t_1"}', {
+            status: 201,
+            headers: { "content-type": "application/json" },
+          }),
+      );
+
+      const first = await middleware(makeContext(), handler);
+      expect(first.headers.get("Idempotency-Replay")).toBe("false");
+      expect(first.headers.get("Access-Control-Expose-Headers")).toContain(
+        "Idempotency-Replay",
+      );
+      expect(handler).toHaveBeenCalledTimes(1);
+
+      const second = await middleware(makeContext(), handler);
+      expect(second.headers.get("Idempotency-Replay")).toBe("true");
+      expect(second.headers.get("Access-Control-Expose-Headers")).toContain(
+        "Idempotency-Replay",
+      );
+      // Replay must not re-invoke the handler.
+      expect(handler).toHaveBeenCalledTimes(1);
+    });
+  });
 });
+
+/**
+ * Minimal real (non-mocked) in-memory `IdempotencyStoreInterface` — the
+ * round-trip test above needs actual claim → resolve → replay state to
+ * carry across two separate middleware invocations, which a `vi.fn()` stub
+ * cannot express.
+ */
+class InMemoryIdempotencyStore implements IdempotencyStoreInterface {
+  private records = new Map<string, StoredRecord>();
+
+  async get(pk: string): Promise<StoredRecord | null> {
+    return this.records.get(pk) ?? null;
+  }
+
+  async putIfAbsent(record: StoredRecord): Promise<boolean> {
+    if (this.records.has(record.pk)) return false;
+    this.records.set(record.pk, record);
+    return true;
+  }
+
+  async resolve(record: IdempotencyRecord): Promise<void> {
+    this.records.set(record.pk, record);
+  }
+
+  async delete(pk: string): Promise<void> {
+    this.records.delete(pk);
+  }
+}
