@@ -13,10 +13,10 @@
     "migrate:deploy": "node dist/apps/worker/src/migrate.js"
   },
   "dependencies": {
-    "@aws-sdk/client-sqs": "^3.1116.0",
+    "@aws-sdk/client-sqs": "^3.1121.0",
     "@de-otio/saas-foundation": "^0.4.3",
     "@de-otio/trellis-extension-api": "^0.10.0",
     "@de-otio/vestibulum": "^0.5.0",
-    "@hatchet-dev/typescript-sdk": "1.28.2"
+    "@hatchet-dev/typescript-sdk": "1.29.2"
   }
 }
