@@ -66,33 +66,78 @@ describe("parental-controls routes: registration", () => {
   });
 });
 
+/**
+ * A route whose description carries the quarantine marker (see
+ * `gateWhileMinorsUnsupported` in ../../../src/lib/routes/parental-controls.ts)
+ * answers 410 unconditionally — session or no session — because minor
+ * accounts don't exist and the endpoint holds no data to gate. Any route
+ * without that marker is a live, session-backed endpoint and must still
+ * refuse an unauthenticated caller with 401.
+ */
+function isGone(route: (typeof parentalControlRoutes)[number]): boolean {
+  return (route.description ?? "").includes("GONE");
+}
+
+async function invoke(
+  route: (typeof parentalControlRoutes)[number],
+  method: string,
+) {
+  const pathname = "/api/parental/children/child-123/settings";
+  const init: RequestInit = { method };
+  if (method !== "GET" && method !== "HEAD") {
+    init.body = JSON.stringify({});
+    init.headers = { "content-type": "application/json" };
+  }
+  const request = new Request(`https://api.example.com${pathname}`, init);
+  return route.handler(request, mockEnv, ctxFor(pathname) as any);
+}
+
 describe("parental-controls routes: auth gating", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     getSessionMock.mockResolvedValue(null); // unauthenticated
   });
 
-  it("every route returns 401 when there is no session", async () => {
+  it("every non-GONE route returns 401 when there is no session; every GONE route returns 410 regardless", async () => {
+    let liveRouteCount = 0;
+
     for (const route of parentalControlRoutes) {
       const method = Array.isArray(route.method) ? route.method[0] : route.method!;
-      const pathname = "/api/parental/children/child-123/settings";
-      const init: RequestInit = { method };
-      if (method !== "GET" && method !== "HEAD") {
-        init.body = JSON.stringify({});
-        init.headers = { "content-type": "application/json" };
+      const res = await invoke(route, method);
+
+      if (isGone(route)) {
+        expect(
+          res.status,
+          `route "${route.description}" (${method}) is quarantined and must answer 410 regardless of session`,
+        ).toBe(410);
+      } else {
+        liveRouteCount++;
+        expect(
+          res.status,
+          `route "${route.description}" (${method}) must gate unauthenticated access`,
+        ).toBe(401);
+        const body = await res.json();
+        expect(body.error).toBe("Unauthorized");
       }
-      const request = new Request(`https://api.example.com${pathname}`, init);
+    }
+    // Sanity: the unauthenticated check actually ran for every live route.
+    expect(getSessionMock).toHaveBeenCalledTimes(liveRouteCount);
+  });
 
-      const res = await route.handler(request, mockEnv, ctxFor(pathname) as any);
+  it("every GONE route also returns 410 for an authenticated caller", async () => {
+    getSessionMock.mockResolvedValue({
+      userId: "guardian1",
+      email: "guardian@example.com",
+      expiresAt: Date.now() + 3600000,
+    });
 
+    for (const route of parentalControlRoutes.filter(isGone)) {
+      const method = Array.isArray(route.method) ? route.method[0] : route.method!;
+      const res = await invoke(route, method);
       expect(
         res.status,
-        `route "${route.description}" (${method}) must gate unauthenticated access`,
-      ).toBe(401);
-      const body = await res.json();
-      expect(body.error).toBe("Unauthorized");
+        `route "${route.description}" (${method}) must stay 410 even for an authenticated caller`,
+      ).toBe(410);
     }
-    // Sanity: the unauthenticated check actually ran for every route.
-    expect(getSessionMock).toHaveBeenCalledTimes(parentalControlRoutes.length);
   });
 });

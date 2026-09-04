@@ -6,6 +6,7 @@
  */
 
 import { ageGateMiddleware } from "../age-gate-middleware.js";
+import { resolveSessionAgeTier } from "../age-gate.js";
 import { authMiddleware } from "../auth/auth-middleware.js";
 import { getLogger, Logger } from "../logger.js";
 import {
@@ -241,7 +242,11 @@ export const notificationsRoutes: Route[] = [
       }
 
       try {
-        const ageTier = session.ageTier || "ADULT";
+        // Unread counts are redacted to a boolean for minors. The tier
+        // resolves to ADULT for every session (age-gate.ts
+        // MINOR_TIERS_SUPPORTED), so the exact count is always returned —
+        // by construction, not because the claim happens to be absent.
+        const ageTier = resolveSessionAgeTier(session.ageTier);
         const result = await handler.getUnreadCount(
           session.userId,
           ageTier,
@@ -340,7 +345,10 @@ export const notificationsRoutes: Route[] = [
 
       try {
         const body = await request.json();
-        const ageTier = session.ageTier || "ADULT";
+        // Notification preferences are locked for CHILD accounts. The tier
+        // resolves to ADULT for every session (age-gate.ts
+        // MINOR_TIERS_SUPPORTED), so the lock never engages.
+        const ageTier = resolveSessionAgeTier(session.ageTier);
 
         const response = await prefsHandler.updatePreferences(
           session.userId,

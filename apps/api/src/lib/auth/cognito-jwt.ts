@@ -235,10 +235,27 @@ export const verifyCognitoJwt = verifyJwt;
  *
  * @deprecated Kept ONLY for `session-cookie.ts`, whose cookie-session path
  * depends on the exact `narrowClaims` read semantics: it reads `custom:role`
- * specifically (not the folded `globalRole`) and relies on unknown claims like
- * `custom:ageTier` being **dropped** (so `ageTier` deterministically defaults).
- * Routing that path through the neutral {@link TrellisClaims} would silently
- * change those values. WS-3.3 migrates session-cookie onto `TrellisClaims`.
+ * specifically (not the folded `globalRole`). Routing that path through the
+ * neutral {@link TrellisClaims} would silently change those values. WS-3.3
+ * migrates session-cookie onto `TrellisClaims`.
+ *
+ * ## `custom:ageTier` is dropped, and that is now the intended behaviour
+ *
+ * This interface omits `custom:ageTier`, so `narrowClaims` discards it and
+ * `session-cookie.ts` falls back to `"ADULT"`. That was previously described
+ * here as `ageTier` "deterministically defaulting", which understated it: the
+ * claim never survived the narrowing on the Cognito path, and the neutral
+ * `TrellisClaims` interface has no `ageTier` field at all, so the Keycloak
+ * path structurally cannot carry one either. `session.ageTier` was therefore
+ * ADULT-or-absent in every deployment, and every feature branching on a minor
+ * tier was dead code.
+ *
+ * Since the 18+ minimum-age decision that is the correct outcome rather than a
+ * gap: minor accounts cannot be created (`lib/age-gate.ts`,
+ * `MINIMUM_SIGNUP_AGE_YEARS`), and session tier resolution is ADULT by
+ * construction (`resolveSessionAgeTier`, gated on `MINOR_TIERS_SUPPORTED`).
+ * Adding the claim back here would not by itself re-enable minor gating, and
+ * must not be done without reading the quarantine notes in `age-gate.ts`.
  */
 export interface CognitoJwtClaims {
   sub: string;

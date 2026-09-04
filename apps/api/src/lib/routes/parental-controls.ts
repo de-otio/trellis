@@ -2,8 +2,28 @@
  * Parental Controls Routes
  *
  * Routes for guardian management of linked child accounts.
+ *
+ * ## Quarantined — these endpoints return 410 Gone
+ *
+ * Minor accounts are not a supported account type: the platform enforces an
+ * 18+ minimum age server-side (see `lib/age-gate.ts`,
+ * `MINIMUM_SIGNUP_AGE_YEARS` / `MINOR_TIERS_SUPPORTED`). No CHILD account can
+ * exist, so there is nothing for a guardian to manage.
+ *
+ * The routes are still registered and still return 410 rather than being
+ * unregistered and returning 404. A 404 says "no such path", which is a lie a
+ * caller will retry against; 410 says "this existed and the capability is
+ * withdrawn", which is the truth and terminal. The handler implementations
+ * below are left intact behind the flag — `gateWhileMinorsUnsupported` is the
+ * only thing standing between them and traffic, so restoring minor support is
+ * a flag flip plus the token-path work described in `age-gate.ts`, not a
+ * rewrite.
  */
 
+import {
+  MINOR_TIERS_SUPPORTED,
+  MINOR_TIERS_UNSUPPORTED_ERROR,
+} from "../age-gate.js";
 import { getLogger, Logger } from "../logger.js";
 import { corsMiddleware, csrfMiddleware, rateLimitMiddleware } from "../middleware.js";
 import { ParentalControlHandler } from "../parental-control-handler.js";
@@ -13,6 +33,39 @@ import { validateRequest } from "../validate-request.js";
 import { Validator } from "../validation.js";
 import type { Route } from "./types.js";
 import { z } from "zod";
+
+/**
+ * One shared CSRF middleware instance so `gateWhileMinorsUnsupported` can
+ * identify and drop it by reference.
+ */
+const CSRF_MIDDLEWARE = csrfMiddleware();
+
+/**
+ * Replace every route's handler with a 410 while minor tiers are unsupported.
+ *
+ * CSRF middleware is dropped from the gated form: the response changes no
+ * state, and leaving it on would answer a state-changing call with a 403 that
+ * misdescribes why it failed. CORS and the rate limit stay.
+ */
+function gateWhileMinorsUnsupported(routes: Route[]): Route[] {
+  if (MINOR_TIERS_SUPPORTED) return routes;
+
+  return routes.map((route) => ({
+    ...route,
+    handler: async (_request: Request, env: import("../../env.js").Env) => {
+      const securityHeaders = new SecurityHeaders(env);
+      return securityHeaders.createSecureResponse(
+        JSON.stringify(MINOR_TIERS_UNSUPPORTED_ERROR),
+        { status: 410, headers: { "content-type": "application/json" } },
+      );
+    },
+    middleware: (route.middleware ?? []).filter(
+      (middleware) => middleware !== CSRF_MIDDLEWARE,
+    ),
+    description: `${route.description ?? "Parental control"} — GONE (minor accounts are not supported)`,
+    publicSpec: false,
+  }));
+}
 
 const updateSettingsSchema = z.object({
   stealthMode: z.boolean().optional(),
@@ -39,7 +92,12 @@ const profileVisibilitySchema = z.object({
   profileVisibility: z.enum(["PUBLIC", "CONNECTIONS", "PRIVATE"]),
 });
 
-export const parentalControlRoutes: Route[] = [
+/**
+ * The real guardian endpoints. Reachable only when MINOR_TIERS_SUPPORTED
+ * flips to true; until then `gateWhileMinorsUnsupported` replaces every
+ * handler with a 410.
+ */
+const liveParentalControlRoutes: Route[] = [
   {
     path: /^\/api\/parental\/children$/,
     method: "GET",
@@ -181,7 +239,7 @@ export const parentalControlRoutes: Route[] = [
     },
     middleware: [
       corsMiddleware(),
-      csrfMiddleware(),
+      CSRF_MIDDLEWARE,
       rateLimitMiddleware({ maxRequests: 20, windowMs: 60000 }),
     ],
     description: "Update child settings",
@@ -241,7 +299,7 @@ export const parentalControlRoutes: Route[] = [
     },
     middleware: [
       corsMiddleware(),
-      csrfMiddleware(),
+      CSRF_MIDDLEWARE,
       rateLimitMiddleware({ maxRequests: 20, windowMs: 60000 }),
     ],
     description: "Set child quiet hours",
@@ -300,7 +358,7 @@ export const parentalControlRoutes: Route[] = [
     },
     middleware: [
       corsMiddleware(),
-      csrfMiddleware(),
+      CSRF_MIDDLEWARE,
       rateLimitMiddleware({ maxRequests: 20, windowMs: 60000 }),
     ],
     description: "Set child DM access",
@@ -359,7 +417,7 @@ export const parentalControlRoutes: Route[] = [
     },
     middleware: [
       corsMiddleware(),
-      csrfMiddleware(),
+      CSRF_MIDDLEWARE,
       rateLimitMiddleware({ maxRequests: 20, windowMs: 60000 }),
     ],
     description: "Set child profile visibility",
@@ -408,9 +466,12 @@ export const parentalControlRoutes: Route[] = [
     },
     middleware: [
       corsMiddleware(),
-      csrfMiddleware(),
+      CSRF_MIDDLEWARE,
       rateLimitMiddleware({ maxRequests: 10, windowMs: 60000 }),
     ],
     description: "Remove parental link",
   },
 ];
+
+export const parentalControlRoutes: Route[] =
+  gateWhileMinorsUnsupported(liveParentalControlRoutes);

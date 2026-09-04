@@ -343,6 +343,48 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ### Changed
 
+- **Accounts are 18+, enforced server-side; the CHILD/TEEN machinery is
+  quarantined — BREAKING for the parental-control endpoints.** `session.ageTier`
+  was never populated in production: the Cognito claim narrowing dropped
+  `custom:ageTier` and the neutral `TrellisClaims` has no such field, so a
+  Keycloak deployment structurally could not carry one either. Everything
+  branching on a minor tier — feed page caps, session nudges, sentiment display
+  gating, unread-count redaction, notification-preference locks, parental links
+  — resolved to ADULT and ran for nobody, while its unit tests passed because
+  each hand-built a session object.
+
+  A minimum age of **18** is now enforced at every point a date of birth enters
+  the system: `POST /auth/register` returns `403 {"error":
+  "AGE_REQUIREMENT_NOT_MET", "message", "remediation", "field"}`, and JIT
+  provisioning (both the Cognito PostConfirmation trigger and the Keycloak
+  first-sign-in path) refuses before writing a row — the trigger fails, the JIT
+  path yields no claims and the request 401s.
+
+  **The seven `/api/parental/children/*` endpoints now return `410 Gone`**
+  with `{"error": "MINOR_ACCOUNTS_NOT_SUPPORTED", …}`. They stay registered
+  rather than being removed: a 404 says "no such path", which a client retries;
+  410 says the capability is withdrawn. Session tier resolution goes through a
+  single `resolveSessionAgeTier`, which returns ADULT even for a session
+  explicitly claiming CHILD, so the guarantee is a tested property rather than a
+  side-effect of the token plumbing. One constant, `MINOR_TIERS_SUPPORTED` in
+  `lib/age-gate.ts`, records the decision and gates the machinery.
+
+  **No schema change.** The `AgeTier` enum, `User.ageTier`, `ParentalLink`, the
+  tier→policy tables and the nightly age-tier transition job all stay, and tiers
+  read from the *database* (notification delivery floors, recap) remain a live
+  floor over stored data.
+
+- **`computeAgeTier` had three implementations, and the one the nightly job ran
+  used the wrong clock.** `age-tier-transition.ts` read both operands with the
+  local-time date accessors while the copies in `age-gate.ts` and
+  `identity/provision-confirmed-user.ts` read UTC. Dates of birth are stored at
+  UTC midnight, so on any host not running in UTC the job placed users one
+  calendar day either side of a birthday and could disagree with provisioning
+  about the same user's tier — in a zone behind UTC, ageing a 17-year-old up to
+  ADULT for 24 hours. There is now one implementation, in `lib/age-gate.ts`,
+  UTC on both operands, with an injectable `now` so a batch pass pins one
+  instant.
+
 - **`@de-otio/trellis` declares an `exports` map — the unwired voting crypto is
   no longer importable.** `apps/api/src/lib/crypto/voting/` is real ElGamal /
   hybrid / post-quantum code with unit tests and no production consumer. It was
@@ -433,6 +475,15 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   construction.
 
 ### Removed
+
+- **Two internal modules that no code reached: `ParentalLinkHandler` and
+  `sentiment-display`.** `ParentalLinkHandler` was 300 lines implementing
+  create/confirm/revoke/list for guardian links, with 380 lines of tests, and
+  no route mounted it — nothing in the repository imported it outside its own
+  test. `sentiment-display` mapped an age tier to a display mode and existed
+  only for the CHILD/TEEN cases; its single caller (the feed's sentiment
+  gating) went with the age-tier quarantine above. Neither was in the published
+  API surface, so this is not a breaking change for consumers.
 
 - **`@de-otio/trellis-extension-api` 0.9.0 — BREAKING: seven declared
   extension points that core never invoked are gone.** `hooks` (all five
