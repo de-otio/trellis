@@ -17,6 +17,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "../../../src/env.js";
 import { isAppealable } from "../../../src/lib/compliance/block-class.js";
+import { PLACEHOLDER_EVIDENCE_BUCKET } from "../../../src/lib/media/compliance-seams.js";
 
 const mockPreserve = vi.fn();
 const mockSubmit = vi.fn();
@@ -234,6 +235,59 @@ describe("ILLEGAL_PRIORITY carve-out — failure modes must be LOUD, not silent"
     expect(alarms.map((a) => a.kind)).toContain(
       "illegal-priority-seam-not-configured",
     );
+  });
+
+  it("V2 FINDING G: unresolvable evidence copy-source refuses BEFORE preserving", async () => {
+    const alarms: Array<{ kind: string }> = [];
+    setComplianceAlarmHook(async (a) => {
+      alarms.push(a);
+    });
+    // MEDIA_BUCKET_NAME unset — the exact mis-wiring that would otherwise
+    // preserve a manifest with no bytes behind it and look successful.
+    const envNoBucket = {
+      DEFAULT_REGION: "EU",
+      COMPLIANCE_JURISDICTION: "XX",
+    } as unknown as Env;
+    const db = makeDb();
+
+    const result = await applyIllegalPriorityCarveOut(
+      db,
+      { reportId: "rep-1", resourceType: "media", resourceId: "media-1" },
+      envNoBucket,
+      "EU" as any,
+    );
+
+    expect(result.applied).toBe(false);
+    expect(result.failure).toBe("evidence-source-unresolved");
+    expect(mockPreserve).not.toHaveBeenCalled();
+    expect(db.mediaFile.update).not.toHaveBeenCalled();
+    expect(db.authorityReport.create).not.toHaveBeenCalled();
+    expect(alarms.map((a) => a.kind)).toContain(
+      "illegal-priority-evidence-source-unresolved",
+    );
+  });
+
+  it("V2 FINDING G: the literal CAS prefix is never accepted as a bucket", async () => {
+    const alarms: Array<{ kind: string }> = [];
+    setComplianceAlarmHook(async (a) => {
+      alarms.push(a);
+    });
+    const envPlaceholder = {
+      DEFAULT_REGION: "EU",
+      // "processing" is a key PREFIX, not a bucket — CopyObject would 404.
+      MEDIA_BUCKET_NAME: PLACEHOLDER_EVIDENCE_BUCKET,
+      COMPLIANCE_JURISDICTION: "XX",
+    } as unknown as Env;
+
+    const result = await applyIllegalPriorityCarveOut(
+      makeDb(),
+      { reportId: "rep-1", resourceType: "media", resourceId: "media-1" },
+      envPlaceholder,
+      "EU" as any,
+    );
+
+    expect(result.failure).toBe("evidence-source-unresolved");
+    expect(mockPreserve).not.toHaveBeenCalled();
   });
 
   it("unresolvable owner: alarms and does not mutate", async () => {

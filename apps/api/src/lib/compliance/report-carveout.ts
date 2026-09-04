@@ -31,6 +31,7 @@ import { processingKey, isCasKeyError } from "../media/cas-keys.js";
 import {
   isEvidencePreservationConfigured,
   ComplianceSeamNotConfiguredError,
+  PLACEHOLDER_EVIDENCE_BUCKET,
 } from "../media/compliance-seams.js";
 import {
   restrictContent,
@@ -83,7 +84,11 @@ export interface CarveOutResult {
   statementId?: string;
   authorityReportId?: string;
   /** Set when the carve-out could not run; the report row still exists. */
-  failure?: "owner-unresolved" | "seam-not-configured" | "error";
+  failure?:
+    | "owner-unresolved"
+    | "seam-not-configured"
+    | "evidence-source-unresolved"
+    | "error";
 }
 
 /**
@@ -169,6 +174,24 @@ export async function applyIllegalPriorityCarveOut(
     // precisely this reason.
     if (!isEvidencePreservationConfigured()) {
       throw new ComplianceSeamNotConfiguredError("EvidencePreservationStore");
+    }
+
+    // Also fail-fast (V2 Finding G, same rule as the moderation-feedback illegal
+    // path): illegal MEDIA must have a REAL, resolvable evidence copy-source
+    // before anything is preserved. Without it the store copies no bytes and
+    // writes a manifest that LOOKS like preserved evidence — the failure mode
+    // this whole path exists to prevent. Refuse before mutating rather than
+    // half-preserve. Text has no stored bytes, so the guard is media-only.
+    if (owner.isMedia) {
+      const loc = owner.bytesLocation;
+      if (!loc || !loc.bucket || loc.bucket === PLACEHOLDER_EVIDENCE_BUCKET) {
+        await alarm(
+          "illegal-priority-evidence-source-unresolved",
+          `report:${input.reportId}`,
+          { bucket: loc?.bucket ?? "<none>" },
+        );
+        return { applied: false, failure: "evidence-source-unresolved" };
+      }
     }
 
     const restricted = await restrictContent(

@@ -35,6 +35,7 @@ import {
   getModerationFeedbackSink,
   isEvidencePreservationConfigured,
   ComplianceSeamNotConfiguredError,
+  PLACEHOLDER_EVIDENCE_BUCKET,
   type EvidenceBundle,
 } from "../media/compliance-seams.js";
 import { deriveBlockClass } from "./block-class.js";
@@ -46,15 +47,6 @@ import {
 } from "./authority-report.js";
 
 const JSON_HEADERS = { "content-type": "application/json" } as const;
-
-/**
- * The literal placeholder that MUST NEVER be used as an evidence copy-source
- * bucket. `"processing"` is a CAS key PREFIX inside the media bucket (see
- * cas-keys.ts), not a bucket name — handing it to the evidence store's
- * `CopyObject` as the source bucket fails `NoSuchBucket` and the WORM criminal-
- * evidence bytes silently fail to preserve (V2 Finding G).
- */
-const PLACEHOLDER_EVIDENCE_BUCKET = "processing";
 
 /**
  * Thrown when the evidence copy-source cannot be resolved to a REAL configured

@@ -50,6 +50,18 @@ export type BlockClass = "lawful-flagged" | "illegal-suspected";
  * Field shapes are intentionally loose (`string`/`Json`-ish) at the Lane A stub
  * stage; Lane A2 tightens them alongside the `restrictContent` orchestration.
  */
+/**
+ * The literal that MUST NEVER be used as an evidence copy-source bucket.
+ * `"processing"` is a CAS key PREFIX inside the media bucket (see cas-keys.ts),
+ * not a bucket name — handing it to a store's `CopyObject` as the source bucket
+ * fails `NoSuchBucket`, and the WORM evidence then holds a manifest with no
+ * bytes behind it while looking preserved (V2 Finding G).
+ *
+ * Lives here, next to {@link EvidenceBundle}, so every path that builds a
+ * `bytesLocation` checks the SAME literal rather than each keeping its own copy.
+ */
+export const PLACEHOLDER_EVIDENCE_BUCKET = "processing";
+
 export interface EvidenceBundle {
   /** Opaque content reference (e.g. `${resourceType}:${resourceId}`). */
   readonly contentRef: string;
