@@ -11,6 +11,23 @@ import type { PrismaClient } from "@prisma/client";
 import { DataRouter } from "./data-router.js";
 import type { Env } from "../env.js";
 
+/**
+ * Personalization is a FILTER, not a score. The no-covert-engagement-ordering
+ * invariant (see apps/api/src/lib/REPRODUCIBILITY.md, Section 2, and
+ * feed-pagination.ts's ALLOWED_SORT_FIELDS) forbids any option here that
+ * would rank or weight posts by a relevance/match score — the feed's only
+ * ordering is `createdAt DESC` under FEED_RANKING_VERSION. Personalization
+ * may narrow *which* posts appear (via a taxonomy WHERE filter — see
+ * feed-handler.ts's `taxonomyFilter`) but must never change the *order* of
+ * the posts it returns.
+ *
+ * Do not add a scoring-shaped option (weight, boost, score, rank, relevance)
+ * to this interface. A previous version declared `boostByMatchCount` and
+ * `taxonomyWeight`; neither was ever implemented in feed-handler.ts (which
+ * only builds a filter), and both were removed as dead surface that
+ * contradicted the invariant they sat next to. See
+ * feed-personalization-options.test.ts for the guard test.
+ */
 export interface PersonalizationOptions {
   /**
    * Whether to enable personalization (default: true)
@@ -22,17 +39,33 @@ export interface PersonalizationOptions {
    * (default: 1)
    */
   minMatchingTags?: number;
-
-  /**
-   * Whether to boost posts with more matching tags (default: true)
-   */
-  boostByMatchCount?: boolean;
-
-  /**
-   * Weight for taxonomy tag matching in relevance scoring (default: 0.3)
-   */
-  taxonomyWeight?: number;
 }
+
+/**
+ * Runtime mirror of `keyof PersonalizationOptions`, used only so
+ * feed-personalization-options.test.ts can check the option names for a
+ * scoring shape at runtime (a TS `interface` has no runtime representation
+ * to inspect). The `satisfies` clause below fails the build if this array
+ * ever drifts from the interface it mirrors — add/remove a field in both
+ * places together.
+ */
+export const PERSONALIZATION_OPTION_KEYS = [
+  "enabled",
+  "minMatchingTags",
+] as const satisfies readonly (keyof PersonalizationOptions)[];
+
+// Compile-time completeness check, the other direction from `satisfies`
+// above: every key the interface DOES declare must appear in the array.
+// `npm run lint` (`tsc --build`) fails this line if a field is added to
+// PersonalizationOptions without being added here too.
+type _MissingFromKeyList = Exclude<
+  keyof PersonalizationOptions,
+  (typeof PERSONALIZATION_OPTION_KEYS)[number]
+>;
+const _assertNoMissingKeys: _MissingFromKeyList extends never
+  ? true
+  : ["PERSONALIZATION_OPTION_KEYS is missing a key — see feed-personalization.ts"] = true;
+void _assertNoMissingKeys;
 
 export interface PersonalizedFeedOptions {
   /**
@@ -120,6 +153,13 @@ export class FeedPersonalization {
     return Array.from(allTaxonIds);
   }
 
-  // Pure scoring functions (calculateTaxonomyRelevance, buildPersonalizedTaxonomyFilter)
-  // are provided by extensions via FeedStrategy.personalize(). See extensions/dogs/src/feed-strategy.ts.
+  // NOTE: an earlier design routed taxonomy *scoring* (relevance weighting,
+  // match-count boosting) through an extension-provided `FeedStrategy`. That
+  // extension point was removed in the feed redesign and nothing replaced
+  // it — the extension-api surface wired today (see AGENTS.md's "What core
+  // actually invokes") has no `feedStrategy` field. `getEntityTaxonomyTags`
+  // above is the only thing this class does: it returns tag IDs for a
+  // caller to use as a WHERE filter (see feed-handler.ts's `taxonomyFilter`
+  // and content-discovery.ts). No scoring function belongs in this file —
+  // see the invariant note on `PersonalizationOptions` above.
 }
