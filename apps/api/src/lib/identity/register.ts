@@ -19,10 +19,12 @@
  * 2. **Create the user with the signup attributes.** They are what the
  *    application provisions from on first sign-in (`jit-claims.ts` →
  *    `provision-confirmed-user.ts`): `invitationCode` drives the invite
- *    consumption, `dateOfBirth` drives the age tier, `guardianEmail` links a
- *    CHILD to a guardian. A registration that omits them does not fail — it
- *    produces an un-gated adult account, which is why they are validated here
- *    rather than trusted later.
+ *    consumption and `dateOfBirth` drives the age tier. A registration that
+ *    omits them does not fail — it produces an un-gated adult account, which
+ *    is why they are validated here rather than trusted later. `guardianEmail`
+ *    is still accepted and stored on the realm user, but nothing consumes it:
+ *    minor accounts are unsupported (`age-gate.ts` MINOR_TIERS_SUPPORTED) and
+ *    the minimum-age check below refuses anyone who would need a guardian.
  *
  * It deliberately stops there: registration does NOT send the sign-in link.
  * That mirrors the Cognito contract exactly (`Amplify.Auth.signUp` returns and
@@ -47,6 +49,7 @@
  */
 
 import type { Env } from "../../env.js";
+import { isUnderMinimumAge, UNDER_MINIMUM_AGE_ERROR } from "../age-gate.js";
 import {
   IdentityProviderError,
   type IdentityProviderPort,
@@ -205,9 +208,21 @@ export async function handleRegister(
       corsHeaders,
     );
   }
-  const dateOfBirth = parseDateOfBirth(dobRaw, new Date(now()));
+  const nowDate = new Date(now());
+  const dateOfBirth = parseDateOfBirth(dobRaw, nowDate);
   if (!dateOfBirth) {
     return jsonResponse(400, { error: "Invalid date of birth" }, corsHeaders);
+  }
+
+  // Minimum-age floor. The client refuses an under-18 date of birth before it
+  // gets here; this endpoint is a public HTTP surface, so it re-checks. Placed
+  // BEFORE the invitation gate deliberately: an under-age attempt must not
+  // burn a rate-limit-scarce invitation lookup, and — more importantly — must
+  // not create a realm user that a sign-in link could then be sent to.
+  // Structured envelope (code + message + remediation) so the client can
+  // distinguish this from a malformed date and say something useful.
+  if (isUnderMinimumAge(dateOfBirth, nowDate)) {
+    return jsonResponse(403, UNDER_MINIMUM_AGE_ERROR, corsHeaders);
   }
 
   const guardianEmail = str(body.guardianEmail, MAX_EMAIL_LENGTH)?.toLowerCase();
