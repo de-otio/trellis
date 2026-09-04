@@ -23,6 +23,7 @@
 
 import * as crypto from "node:crypto";
 import type { Middleware } from "../middleware.js";
+import type { Route } from "../routes/types.js";
 import {
   createIdempotencyStoreFromEnv,
   buildPk,
@@ -34,6 +35,65 @@ import {
   type IdempotencyRecord,
   type StoredRecord,
 } from "./idempotency-store.js";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Metadata-driven application (plan 034, lane C.2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * HTTP methods this rule treats as writes. The middleware itself currently
+ * only *honours* the `Idempotency-Key` header on POST (see the header
+ * comment above) — that is a separate, narrower fact about today's
+ * implementation. This list is the broader "mutating method" concept the
+ * metadata rule is defined over, so a future PUT/PATCH/DELETE idempotency
+ * story does not need a second rule.
+ */
+const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+function isMutatingMethod(method: Route["method"]): boolean {
+  // No restriction, or an explicit "any method" marker — treat as
+  // potentially mutating. Opt-out is the deliberate escape hatch (see
+  // `routeNeedsIdempotency`), so leaning toward "needs it" here is the
+  // safer default direction.
+  if (method === undefined || method === "*") return true;
+  const methods = Array.isArray(method) ? method : [method];
+  return methods.some((m) => MUTATING_METHODS.has(m.toUpperCase()));
+}
+
+/**
+ * The subset of `Route` metadata this rule reads. Pass an actual `Route`
+ * object — this is a structural subset, not a separate shape to construct.
+ */
+export type IdempotencyRouteMeta = Pick<Route, "idempotent" | "publicSpec" | "method">;
+
+/**
+ * Decide whether a route needs the idempotency middleware applied, from its
+ * declared metadata alone. This is **the rule**; lanes A and G each own the
+ * call site that applies `idempotencyMiddleware()` when this returns `true`
+ * (the extension-route wrapper and the core dispatcher, respectively) — this
+ * function does not itself wire the middleware onto anything.
+ *
+ * Precedence, in order:
+ * 1. `idempotent === false` — explicit opt-out. Always wins, regardless of
+ *    `publicSpec` or method. A route author who has decided idempotency is
+ *    wrong for this route (e.g. it is intentionally non-idempotent, or
+ *    de-duplication is handled elsewhere) must not be overridden by the
+ *    default.
+ * 2. `idempotent === true` — explicit opt-in. Honoured regardless of
+ *    `publicSpec` or method, so a private route can opt in deliberately.
+ * 3. Default: `publicSpec === true` AND the method is a mutating one
+ *    (`isMutatingMethod`). This is the "public + mutating ⇒ idempotent"
+ *    rule from the lane spec — opt-out is the right default direction
+ *    because forgetting to opt in is a data bug (a client retry silently
+ *    double-writes) and forgetting to opt out is only a performance
+ *    footnote (an unnecessary dedup check on a route that didn't need one).
+ * 4. Otherwise `false`.
+ */
+export function routeNeedsIdempotency(route: IdempotencyRouteMeta): boolean {
+  if (route.idempotent === false) return false;
+  if (route.idempotent === true) return true;
+  return route.publicSpec === true && isMutatingMethod(route.method);
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants
