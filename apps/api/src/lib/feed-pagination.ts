@@ -104,6 +104,30 @@ export type AllowedSortField = (typeof ALLOWED_SORT_FIELDS)[number];
 export const FEED_RANKING_VERSION = 1 as const;
 
 /**
+ * Feed ranker identity — a human-legible name for the ordering behind
+ * FEED_RANKING_VERSION, in `{name}@{version}` form.
+ *
+ * This exists so "how is my feed ordered" has one canonical, citable answer
+ * (see docs/concepts/feed-ordering.md) instead of only a bare version
+ * integer. It carries no information FEED_RANKING_VERSION doesn't already
+ * have — the two are kept in lockstep deliberately, not two independent
+ * facts to reconcile.
+ *
+ * Bump discipline is IDENTICAL to FEED_RANKING_VERSION (see above and
+ * REPRODUCIBILITY.md Section 2): the `@N` suffix here must equal
+ * FEED_RANKING_VERSION, and both change together, for the same reasons,
+ * under the same sign-off. `name` changes only when the ranking mechanism
+ * itself changes (e.g. a future opt-in ranker introduced under
+ * plans/pluggable-ranking/ would ship as `"<its-name>@1"`, not as a bump to
+ * this constant — chronological@1 remains the permanent default).
+ *
+ * Not currently exposed on the feed HTTP response: `FeedResponse`
+ * (feed-handler.ts) has no ranking-metadata field today. If one is added,
+ * this is the value it should carry.
+ */
+export const FEED_RANKER_ID = "chronological@1" as const;
+
+/**
  * Returns true only if the field is an allowed sort field.
  */
 export function validateSortField(field: string): field is AllowedSortField {
