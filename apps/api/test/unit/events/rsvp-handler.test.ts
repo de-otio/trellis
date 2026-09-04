@@ -86,6 +86,13 @@ function buildDb(state: RawState) {
         Promise.resolve(makeRsvp({ id: where.id, ...data })),
       ),
     },
+    // Outbox writer (plan 034 lane E) — `rsvp.updated` is emitted inside this
+    // same transaction, so the tx double needs the delegate.
+    domainEvent: {
+      create: vi.fn(({ data }: { data: Record<string, unknown> }) =>
+        Promise.resolve({ id: "de_1", ...data }),
+      ),
+    },
     $executeRaw: vi.fn((strings: TemplateStringsArray) => {
       const sql = sqlText(strings);
       if (sql.includes("rsvp_count = rsvp_count +")) {

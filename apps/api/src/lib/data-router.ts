@@ -1001,6 +1001,31 @@ export class DataRouter {
           );
         }
 
+        // Domain event, IN THIS TRANSACTION (plan 034 lane E). Emitted HERE
+        // — straight after the post row exists and before the tagging and
+        // media writes below — rather than at the end of the callback, so
+        // that a failure in any of them aborts the event with the post. An
+        // outbox row for a post that does not exist is worse than no row, so
+        // unlike the audit log further down this is NOT best-effort: it
+        // throws, and the throw is the point.
+        //
+        // Payload is ids and changed field names only: `fields` lists the
+        // columns this create set, never their values, so the post's text
+        // never reaches the outbox.
+        await emitDomainEvent(tx, {
+          type: "post.published",
+          tenantId: eventTenantId,
+          subjectKind: "post",
+          subjectId: post.id,
+          payload: {
+            postId: post.id,
+            authorId: String(sanitizedPostData.authorId),
+            fields: Object.keys(createData).sort(),
+            entityIds: entityRefs.map((id) => String(id)),
+            mediaIds: media.map((m) => String(m.id)),
+          },
+        });
+
         // Create PostEntity records if entities are tagged
         if (entityRefs.length > 0) {
           await tx.postEntity.createMany({
@@ -1048,29 +1073,6 @@ export class DataRouter {
             },
           });
         }
-
-        // Domain event, IN THIS TRANSACTION (plan 034 lane E). If anything
-        // after this throws — the region check above already can — the post
-        // and the event roll back together. Unlike the audit log below, this
-        // is NOT best-effort: an outbox row for a post that does not exist is
-        // worse than no row, so a failure here must take the post with it.
-        //
-        // Payload is ids and changed field names only: `fields` lists the
-        // columns this create set, never their values, so the post's text
-        // never reaches the outbox.
-        await emitDomainEvent(tx, {
-          type: "post.published",
-          tenantId: eventTenantId,
-          subjectKind: "post",
-          subjectId: post.id,
-          payload: {
-            postId: post.id,
-            authorId: String(sanitizedPostData.authorId),
-            fields: Object.keys(createData).sort(),
-            entityIds: entityRefs.map((id) => String(id)),
-            mediaIds: media.map((m) => String(m.id)),
-          },
-        });
 
         return post;
       },
