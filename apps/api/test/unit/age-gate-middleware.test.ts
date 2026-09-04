@@ -1,12 +1,20 @@
 /**
  * Unit Tests: Age Gate Middleware
  *
- * Tests that the age gate middleware correctly injects featureAccess
- * into the request context based on the session's ageTier.
+ * The middleware's job is now a quarantine guarantee, so that is what these
+ * tests assert: whatever tier a session carries, the injected `featureAccess`
+ * is the ADULT one. Minor accounts are not a supported account type (see
+ * `src/lib/age-gate.ts`, MINOR_TIERS_SUPPORTED).
+ *
+ * The old suite asserted the opposite — that a CHILD session got CHILD caps —
+ * and passed, while in production no token path ever populated `ageTier` and
+ * the CHILD branch never ran for anyone. A test that green-lights a code path
+ * nothing reaches is worse than no test: it reports the feature as working.
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ageGateMiddleware } from "../../src/lib/age-gate-middleware.js";
+import { getFeatureAccess } from "../../src/lib/age-gate.js";
 import type { MiddlewareContext } from "../../src/lib/middleware.js";
 import type { TrellisRequestContext } from "../../src/lib/request-context.js";
 
@@ -38,32 +46,44 @@ describe("ageGateMiddleware", () => {
     };
   }
 
-  it("should inject CHILD featureAccess for authenticated CHILD user", async () => {
-    const requestContext: Partial<TrellisRequestContext> = {
-      region: "US" as any,
-      config: {} as any,
-      session: {
-        userId: "child-1",
-        email: "child@example.com",
-        expiresAt: Date.now() + 3600000,
-        dataRegion: "US",
-        profileContext: "primary",
-        ageTier: "CHILD",
-      },
-    };
+  // The quarantine assertion. A session that explicitly claims a minor tier
+  // must still be served ADULT access — the resolution ignores the claim
+  // rather than merely never seeing it.
+  it.each(["CHILD", "TEEN"] as const)(
+    "resolves a %s session to ADULT featureAccess (minor tiers quarantined)",
+    async (claimedTier) => {
+      const requestContext: Partial<TrellisRequestContext> = {
+        region: "US" as any,
+        config: {} as any,
+        session: {
+          userId: "minor-1",
+          email: "minor@example.com",
+          expiresAt: Date.now() + 3600000,
+          dataRegion: "US",
+          profileContext: "primary",
+          ageTier: claimedTier,
+        },
+      };
 
-    const context = createContext(requestContext);
-    const response = await middleware(context, mockNext);
+      const context = createContext(requestContext);
+      const response = await middleware(context, mockNext);
 
-    expect(mockNext).toHaveBeenCalledOnce();
-    expect(response).toBe(mockResponse);
-    expect(context.requestContext?.featureAccess).toBeDefined();
-    expect(context.requestContext?.featureAccess?.maxFeedPages).toBe(5);
-    expect(context.requestContext?.featureAccess?.dmAccess).toBe("nobody");
-    expect(context.requestContext?.featureAccess?.sentimentDisplay).toBe(
-      "hidden",
-    );
-  });
+      expect(mockNext).toHaveBeenCalledOnce();
+      expect(response).toBe(mockResponse);
+
+      const access = context.requestContext?.featureAccess;
+      expect(access).toBeDefined();
+      // Byte-for-byte the ADULT table — no cap, no redaction, no lock.
+      expect(access).toEqual(getFeatureAccess("ADULT"));
+      // Spelled out too, so a change to the ADULT table cannot quietly make
+      // the equality above pass against a restricted config.
+      expect(access?.maxFeedPages).toBeNull();
+      expect(access?.dmAccess).toBe("connections");
+      expect(access?.sentimentDisplay).toBe("full");
+      expect(access?.showUnreadCount).toBe(true);
+      expect(access?.canEditNotificationPreferences).toBe(true);
+    },
+  );
 
   it("should inject ADULT featureAccess for authenticated ADULT user", async () => {
     const requestContext: Partial<TrellisRequestContext> = {

@@ -751,11 +751,49 @@ describe("Sentiments Routes", () => {
       expect(args[7]).toBe(TENANT);
     });
 
-    // The TEEN branch rewrites the handler's body. Applied unconditionally it
-    // parses a 404 refusal as if it were a user list and re-emits it as a 200 —
-    // laundering the deny into a success for exactly the accounts the platform
-    // is most careful with.
-    it("does not launder a refusal into a 200 for a TEEN session", async () => {
+    // ── Age-tier quarantine ────────────────────────────────────────────────
+    //
+    // This endpoint used to 403 a CHILD session and rewrite the body for a
+    // TEEN one, stripping identities down to a bare list of sentiment types.
+    // Minor accounts are not a supported account type (18+ minimum age; see
+    // `src/lib/age-gate.ts`, MINOR_TIERS_SUPPORTED), so no session can carry
+    // either tier and both branches were removed.
+    //
+    // The tests below replace ones that hand-built those sessions and asserted
+    // the gating worked. They now assert the opposite property — that the tier
+    // on a session has no effect at all — which is what stops a stale claim,
+    // a fixture, or a future token mapper from silently re-activating gating
+    // nobody has reviewed.
+    it.each(["CHILD", "TEEN"] as const)(
+      "ignores a %s tier on the session and serves the adult response",
+      async (claimedTier) => {
+        mockGetSession.mockResolvedValue({ ...mockSession, ageTier: claimedTier });
+        mockGetPostSentimentUsers.mockResolvedValue(
+          new Response(
+            JSON.stringify({
+              users: [{ userId: "user-456", handle: "someone", sentiment: "joy" }],
+            }),
+            { status: 200 },
+          ),
+        );
+
+        const response = await call();
+
+        expect(response.status).toBe(200);
+        const body = await response.text();
+        // Full identities, not the stripped `sentimentTypes` shape.
+        expect(body).toContain("user-456");
+        expect(JSON.parse(body).sentimentTypes).toBeUndefined();
+      },
+    );
+
+    // Kept from the removed TEEN block, because it is the failure that block
+    // taught: its rewrite parsed the handler's body without checking
+    // `response.ok`, so a 404 refusal came back out as a 200 carrying an empty
+    // list — a deny laundered into a success. Nothing rewrites the body now,
+    // so a refusal must pass through untouched; if a body rewrite is ever
+    // reintroduced, this is the test that catches the same mistake.
+    it("passes a handler refusal straight through instead of rewriting it", async () => {
       mockGetSession.mockResolvedValue({ ...mockSession, ageTier: "TEEN" });
       const deny = new Response(
         JSON.stringify({ title: "Post Not Found", status: 404 }),
@@ -766,25 +804,7 @@ describe("Sentiments Routes", () => {
       const response = await call();
 
       expect(response.status).toBe(404);
-    });
-
-    it("still strips identities for a TEEN on a permitted read", async () => {
-      mockGetSession.mockResolvedValue({ ...mockSession, ageTier: "TEEN" });
-      mockGetPostSentimentUsers.mockResolvedValue(
-        new Response(
-          JSON.stringify({
-            users: [{ userId: "user-456", handle: "someone", sentiment: "joy" }],
-          }),
-          { status: 200 },
-        ),
-      );
-
-      const response = await call();
-
-      expect(response.status).toBe(200);
-      const body = await response.text();
-      expect(body).not.toContain("user-456");
-      expect(JSON.parse(body).sentimentTypes).toEqual(["joy"]);
+      expect(JSON.parse(await response.text()).title).toBe("Post Not Found");
     });
   });
 });
