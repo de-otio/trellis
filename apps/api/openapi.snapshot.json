@@ -6,9 +6,106 @@
     "version": "0.25.0-alpha.14",
     "description": "Social-network core API. Discovery surfaces, federation management (T3–T8), and entity/social graph endpoints."
   },
-  "paths": {},
+  "paths": {
+    "/api/v1/users/me/tenants": {
+      "get": {
+        "summary": "List caller's tenant memberships",
+        "operationId": "listMyTenants",
+        "tags": [
+          "tenants"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/listMyTenantsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "oauth2": [
+              "tenant:read"
+            ]
+          }
+        ],
+        "x-stability": "beta"
+      }
+    }
+  },
   "components": {
-    "schemas": {},
+    "schemas": {
+      "listMyTenantsResponse": {
+        "type": "object",
+        "properties": {
+          "memberships": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "tenantId": {
+                  "type": "string"
+                },
+                "role": {
+                  "type": "string"
+                },
+                "tenant": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "slug": {
+                      "type": "string"
+                    },
+                    "displayName": {
+                      "type": "string"
+                    },
+                    "type": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "slug",
+                    "displayName",
+                    "type",
+                    "status"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "tenantId",
+                "role",
+                "tenant"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "memberships"
+        ],
+        "additionalProperties": false
+      }
+    },
     "securitySchemes": {
       "oauth2": {
         "type": "oauth2",
