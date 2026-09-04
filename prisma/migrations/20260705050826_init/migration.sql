@@ -1949,6 +1949,13 @@ ALTER TABLE "blocked_users" ADD CONSTRAINT "blocked_users_blocked_id_fkey" FOREI
 -- ============================================================================
 -- Hand-written SQL (not expressible in schema.prisma). Every block below must
 -- be preserved if this migration is ever regenerated.
+--
+-- LATER MIGRATIONS ADD TO THIS SET. The drift guard's allowlist
+-- (apps/api/scripts/check-schema-drift.sh) is the authoritative list; the
+-- hand-written objects that do NOT live in this file are:
+--   consent_third_party_sharing_key          partial unique, NULLS NOT DISTINCT
+--   consent_third_party_sharing_shape_check  CHECK constraint (row shape)
+-- both in 20260904130100_consent_third_party_columns_and_key.
 -- ============================================================================
 
 -- Consent: active-row uniqueness for CROSS_REGION rows. The Prisma

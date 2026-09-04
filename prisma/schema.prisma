@@ -436,10 +436,21 @@ model PushDevice {
 //   RESEARCH_OBSERVATION   — opt-in to observational research (no per-study
 //                            intervention; studyId set).
 //   RESEARCH_PARTICIPATION — opt-in to active study participation (studyId set).
+//   THIRD_PARTY_DATA_SHARING — a USER permits a named external client to read
+//                            one of their resources (grantee/scope/expiry
+//                            columns set; studyId and the region pair NULL).
+//
+// NOT ADDED HERE, DELIBERATELY: `CROSS_TENANT_DATA_PROCESSING`, which is
+// reserved for an ORG ADMIN acknowledging a controller relationship when
+// accepting a tenant→tenant grant. That is a different principal pair, a
+// different subject and a different lawful basis; collapsing the two into one
+// enum member would give a single value two lawful bases — exactly the record
+// a regulator asks to see kept separate.
 enum ConsentPurpose {
   CROSS_REGION
   RESEARCH_OBSERVATION
   RESEARCH_PARTICIPATION
+  THIRD_PARTY_DATA_SHARING
 }
 
 // Purpose-tagged consent (generalised from the old CrossRegionConsent).
@@ -464,6 +475,23 @@ enum ConsentPurpose {
 //           WHERE purpose = 'CROSS_REGION' AND active;
 //       This preserves the pre-existing @@unique([userId, dataRegion,
 //       accessRegion]) guarantee for the active cross-region row.
+//     - THIRD_PARTY_DATA_SHARING rows: a second RAW partial unique index:
+//         CREATE UNIQUE INDEX consent_third_party_sharing_key
+//           ON consent (user_id, grantee_client_id, subject_entity_id)
+//           NULLS NOT DISTINCT
+//           WHERE purpose = 'THIRD_PARTY_DATA_SHARING' AND active;
+//       plus the shape CHECK consent_third_party_sharing_shape_check, which
+//       makes grantee/issuer/scopes/expiry mandatory for sharing rows AT THE
+//       DATABASE — the invariant does not rest on an application boundary.
+//
+//   ERASURE NOTE (owner gate G5.6): services/user-data-deletion.ts currently
+//   HARD-DELETES every consent row on account deletion and the User FK
+//   cascades. That is correct for CROSS_REGION and wrong for a disclosure
+//   record, which is both the Art. 5(2)/7(1) accountability evidence after the
+//   subject is gone and the Art. 19 recipient list. The decided remedy — a
+//   pseudonymised retention record written before the cascade — is a follow-up
+//   lane on the deletion service, deliberately NOT smuggled into this schema
+//   change. Nothing in this repo writes a THIRD_PARTY_DATA_SHARING row yet.
 model Consent {
   id           String         @id @default(cuid())
   userId       String         @map("user_id")
@@ -473,16 +501,65 @@ model Consent {
   // Cross-region consents only. NULL for research rows.
   dataRegion   String?        @map("data_region") // Where data is stored (e.g., "EU")
   accessRegion String?        @map("access_region") // Region user is accessing from (e.g., "US")
-  consented    Boolean        @default(false)
-  consentedAt  DateTime?      @map("consented_at")
-  withdrawnAt  DateTime?      @map("withdrawn_at")
-  ipAddress    String?        @map("ip_address")
-  userAgent    String?        @map("user_agent")
+
+  // ── Third-party sharing consents only. NULL/empty for every other purpose.
+  // The shape invariant (grantee id, issuer, at least one scope, an expiry) is
+  // enforced by the CHECK constraint consent_third_party_sharing_shape_check in
+  // migration 20260904130100 — NOT only at the Zod boundary in
+  // lib/consent/third-party-grant.ts. A future writer inherits the invariant
+  // from the database rather than discovering it.
+  //
+  // NO `revokedAt` COLUMN IS ADDED. The model already expresses withdrawal
+  // three ways (withdrawnAt + active + supersededAt); a fourth would let two
+  // columns disagree about whether a grant is live. Withdrawal is a NEW row
+  // with consented = false, withdrawnAt = now(), the prior row superseded —
+  // identical to the cross-region path.
+  //
+  // granteeClientId / granteeIssuer are NEVER taken from a request body. Both
+  // are populated only from the VERIFIED `client_id`/`azp` and `iss` claims of
+  // the token presented in the authorization flow that creates the row. A
+  // client id is issuer-scoped: two clients spelled the same at two issuers are
+  // different principals, and the identity stack is mid-migration — so the
+  // issuer is not optional in practice, only nullable because the other
+  // purposes share the column. The CHECK makes it mandatory for sharing rows.
+  granteeClientId String?   @map("grantee_client_id") // external OAuth client id (verified claim)
+  granteeIssuer   String?   @map("grantee_issuer") // the `iss` that vouches for it (verified claim)
+  // A property of the grant, never a key part: btree compares text[]
+  // element-wise, so {a} vs {a,b} and {a,b} vs {b,a} would each be a separate
+  // key and two active grants could coexist. Replaced wholesale on re-grant and
+  // stored SORTED ASCENDING + DE-DUPLICATED (the transform in
+  // lib/consent/third-party-grant.ts) so two orderings are one value. Its
+  // future vocabulary lives in lib/auth/scopes.ts; nothing validates against it
+  // here.
+  grantedScopes   String[]  @default([]) @map("granted_scopes")
+  // Which passport profile this grant releases. The profile is a GRANT column,
+  // not a third scope segment — the scope regex forbids `dogs:share:boarding`
+  // precisely so a profile cannot smuggle itself into a scope string (owner
+  // gate G2.3). Adding a profile later is then not a new scope string every
+  // existing client must re-request.
+  grantProfile    String?   @map("grant_profile")
+  // The resource released. NULL means "every resource this user owns", which is
+  // discouraged and which the consent screen must say out loud. This dimension
+  // is in the key NOW rather than later because Consent has no tenantId,
+  // tenants are multi-member and dogs are co-owned: an unbound grant spans
+  // every tenant the user has a resource in and can release a row whose GDPR
+  // erasure subject is a different keeper. Adding the dimension later is a
+  // re-key of live evidence rows.
+  subjectEntityId String?   @map("subject_entity_id")
+  // Required for sharing rows by CHECK. A NULL expiry on a sharing row is a
+  // DEFECT, never "indefinite" — isGrantActive() reads it as inactive.
+  expiresAt       DateTime? @map("expires_at")
+
+  consented    Boolean   @default(false)
+  consentedAt  DateTime? @map("consented_at")
+  withdrawnAt  DateTime? @map("withdrawn_at")
+  ipAddress    String?   @map("ip_address")
+  userAgent    String?   @map("user_agent")
   // Append-only history discriminators.
-  active       Boolean        @default(true)
-  supersededAt DateTime?      @map("superseded_at")
-  createdAt    DateTime       @default(now()) @map("created_at")
-  updatedAt    DateTime       @updatedAt @map("updated_at")
+  active       Boolean   @default(true)
+  supersededAt DateTime? @map("superseded_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
