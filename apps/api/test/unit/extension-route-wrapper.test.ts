@@ -379,7 +379,14 @@ describe("wrapExtensionRoute — scopes and request schemas", () => {
       const response = await call(scopedRoute(handler), post('{"name":"Rex"}'));
 
       expect(response.status).toBe(403);
-      expect(await response.json()).toEqual({
+      const body = await response.json();
+      // `request_id` is lane C's addition to every `structuredError` envelope —
+      // a fresh correlator per response, asserted for presence and then set
+      // aside before the value comparison.
+      expect(typeof body.request_id).toBe("string");
+      expect(body.request_id.length).toBeGreaterThan(0);
+      const { request_id: _correlator, ...rest } = body;
+      expect(rest).toEqual({
         error: "INSUFFICIENT_SCOPE",
         message:
           "This operation requires the `posts:write` scope, which this credential was not granted.",
