@@ -12,7 +12,13 @@ import {
   withQueryTimeoutAndRetry,
 } from "../db-query-helper.js";
 import { getLogger, Logger } from "../logger.js";
-import { casKey, isCasKeyError, processingKey, validateContentHash } from "../media/cas-keys.js";
+import {
+  c2paSidecarKey,
+  casKey,
+  isCasKeyError,
+  processingKey,
+  validateContentHash,
+} from "../media/cas-keys.js";
 import { buildMediaUpsertArgs } from "../media/media-upsert.js";
 import { checkUploadQuota } from "../media/quota-check.js";
 import { resolveQuotaLimits, type TenantQuotaOverride } from "../media/quota-resolution.js";
@@ -1033,19 +1039,32 @@ export const mediaRoutes: Route[] = [
         // Buffer (a Uint8Array subclass) is structurally compatible at runtime
         // with all consumers (crypto.subtle.digest, R2 put, etc.).
         // --- Art. 50 provenance: READ BEFORE THE STRIP ------------------------
-        // This MUST stay above reencodeImage. The re-encode drops EXIF/IPTC/XMP
-        // and any C2PA manifest — which is where the AI marking lives — and
-        // `assertNoExif` enforces that it did. Empirically verified: a JPEG
-        // carrying Iptc4xmpExt:DigitalSourceType loses it entirely after
-        // sharp(...).jpeg().
+        // This MUST stay above reencodeImage — BOTH reads below do. The
+        // re-encode drops EXIF/IPTC/XMP and any C2PA manifest — which is where
+        // the AI marking lives — and `assertNoExif` enforces that it did.
+        // Empirically verified: a JPEG carrying Iptc4xmpExt:DigitalSourceType
+        // loses it entirely after sharp(...).jpeg().
         //
-        // Reads the ORIGINAL buffer, returns ONE enum's worth of provenance, and
-        // discards everything else. Never throws — provenance is a disclosure,
-        // not a safety gate, so it can never fail an upload. The strip itself is
-        // unchanged; we just look first.
+        // TWO SEPARATE READS OF THE ORIGINAL, deliberately not merged:
+        //
+        //  1. `readProvenance` returns ONE enum's worth of provenance and
+        //     discards everything else. Its narrow return type is the privacy
+        //     control (it cannot carry GPS, so it cannot leak GPS) and must not
+        //     widen to carry manifest bytes.
+        //  2. `extractC2pa` copies the raw C2PA manifest store out verbatim, to
+        //     be kept as a SIDECAR object beside the media — never merged back
+        //     into the served pixels. Without it the manifest is destroyed for
+        //     good and no viewer can ever check a Content Credentials claim
+        //     about these bytes. The sidecar is written further down, once the
+        //     content hash (and therefore the key) is known.
+        //
+        // Neither throws — provenance is a disclosure, not a safety gate, so it
+        // can never fail an upload. The strip itself is unchanged; we look first.
         const { readProvenance } = await import(
           "../metadata/provenance-reader.js"
         );
+        const { extractC2pa } = await import("../metadata/c2pa-extractor.js");
+        const c2paScan = extractC2pa(new Uint8Array(fileBuffer));
         const provenance = await readProvenance(
           new Uint8Array(fileBuffer),
           mimeType,
@@ -1360,6 +1379,85 @@ export const mediaRoutes: Route[] = [
               logger.warn("provenance.raise_failed", {
                 contentHash,
                 error: describeError(provError),
+              });
+            }
+          }
+
+          // --- C2PA manifest sidecar ------------------------------------------
+          // Persist the manifest store read out of the ORIGINAL above, beside
+          // the media object at `cas/{tenant}/{hash}.c2pa`, and summarise it on
+          // the row. The served pixels stay metadata-free; the evidence a viewer
+          // would need to check a Content Credentials claim survives the strip.
+          //
+          // NON-FATAL, like the provenance raise: the upload and its verdict
+          // stand either way. Claim-then-write, guarded on the row's slot being
+          // unset — dedup collapses two different originals onto this one row,
+          // so the first manifest recorded wins and a later upload never
+          // overwrites bytes the row does not describe (see media/c2pa-sidecar.ts).
+          //
+          // NOT a verification of anything. No signature is checked.
+          if (c2paScan.kind !== "absent") {
+            const sidecarKey = c2paSidecarKey(tenantId, contentHash);
+            if (isCasKeyError(sidecarKey)) {
+              logger.warn("c2pa.sidecar_key_invalid", {
+                kind: sidecarKey.kind,
+              });
+            } else {
+              const { recordC2paSidecar } = await import(
+                "../media/c2pa-sidecar.js"
+              );
+              const writeSidecarColumns = async (
+                where: Record<string, unknown>,
+                data: Record<string, unknown>,
+              ): Promise<number> =>
+                (
+                  await withQueryTimeoutAndRetry(
+                    sharedDatabaseConnectionManager,
+                    uploadRegion,
+                    env as any,
+                    async (db) =>
+                      await (db as any).mediaFile.updateMany({
+                        where: { tenantId, contentHash, ...where },
+                        data,
+                      }),
+                    {
+                      ...QueryTimeoutPresets.USER_FACING,
+                      maxRetries: 1,
+                      context: {
+                        operation: "mediaUpload_c2paSidecar",
+                        userId: session.userId,
+                      },
+                    },
+                  )
+                ).count;
+
+              const outcome = await recordC2paSidecar(c2paScan, sidecarKey, {
+                // Guarded on `c2paManifestPresent: null` — the atomic claim.
+                claim: (columns) =>
+                  writeSidecarColumns({ c2paManifestPresent: null }, { ...columns }),
+                release: async () => {
+                  await writeSidecarColumns(
+                    { c2paSidecarKey: sidecarKey },
+                    {
+                      c2paManifestPresent: null,
+                      c2paContainer: null,
+                      c2paSidecarKey: null,
+                      c2paSidecarBytes: null,
+                      c2paSidecarSha256: null,
+                    },
+                  );
+                },
+                put: async (key, bytes) => {
+                  await mediaBucket.put(key, bytes, {
+                    httpMetadata: { contentType: "application/c2pa" },
+                  });
+                },
+                onEvent: (event, detail) => logger.info(event, detail),
+              });
+              logger.info("c2pa.sidecar_outcome", {
+                outcome,
+                container: c2paScan.container,
+                contentHash,
               });
             }
           }

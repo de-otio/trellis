@@ -43,6 +43,7 @@ export async function cleanupStaleMedia(env: any): Promise<{
         id: true,
         contentHash: true,
         originalKey: true,
+        c2paSidecarKey: true,
         lifecycle: true,
         createdAt: true,
       },
@@ -60,16 +61,24 @@ export async function cleanupStaleMedia(env: any): Promise<{
     // Delete staged objects from R2 in parallel. Async-pending rows are born
     // with a NULL originalKey (the processing worker fills it post-transcode)
     // — skip those; there is no object to delete.
-    const withKey = staleRecords.filter((r: any) => r.originalKey != null);
+    // A C2PA manifest sidecar goes with the object it describes. The reap scope
+    // is non-verdict lifecycles, which the sync-image path (the only writer of a
+    // sidecar today) never produces — so this is empty in practice and covered
+    // deliberately, so a future writer cannot silently strand manifest bytes.
+    const staleKeys = staleRecords.flatMap((r: any) =>
+      [r.originalKey, r.c2paSidecarKey].filter(
+        (k: unknown): k is string => typeof k === "string",
+      ),
+    );
     const r2Results = await Promise.allSettled(
-      withKey.map((record: any) => r2Bucket.delete(record.originalKey)),
+      staleKeys.map((key: string) => r2Bucket.delete(key)),
     );
 
     const r2Errors = r2Results.filter((r) => r.status === "rejected").length;
     if (r2Errors > 0) {
       logger.warn("[MediaCleanup] Some R2 deletions failed", {
         failedCount: r2Errors,
-        totalCount: withKey.length,
+        totalCount: staleKeys.length,
       });
     }
 

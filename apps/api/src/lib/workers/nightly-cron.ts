@@ -77,9 +77,20 @@ export async function runNightlyCron(
         const deletionCutoff = new Date(ctx.clock());
         deletionCutoff.setDate(deletionCutoff.getDate() - 7);
 
+        // c2paSidecarKey belongs in this select for the same reason the other
+        // three do: it names bytes derived from the user's original upload, and
+        // a manifest is MORE personal than the pixels (camera serial numbers,
+        // capture times, an identity claim). An erasure that left it behind
+        // would leave the most identifying part of the file in the store.
         const mediaToDelete = await db.mediaFile.findMany({
           where: { deletedAt: { lte: deletionCutoff } },
-          select: { id: true, originalKey: true, thumbnailKey: true, optimizedKey: true },
+          select: {
+            id: true,
+            originalKey: true,
+            thumbnailKey: true,
+            optimizedKey: true,
+            c2paSidecarKey: true,
+          },
           take: 200,
         });
 
@@ -93,7 +104,12 @@ export async function runNightlyCron(
           // `lte: cutoff` window, and is retried on the next run.
           const ownerOf = new Map<string, string>();
           for (const m of mediaToDelete) {
-            for (const k of [m.originalKey, m.thumbnailKey, m.optimizedKey]) {
+            for (const k of [
+              m.originalKey,
+              m.thumbnailKey,
+              m.optimizedKey,
+              m.c2paSidecarKey,
+            ]) {
               if (k) ownerOf.set(k, m.id);
             }
           }

@@ -131,6 +131,7 @@ export class MediaCleanupHandler {
             originalKey: true,
             thumbnailKey: true,
             optimizedKey: true,
+            c2paSidecarKey: true,
             deletedAt: true,
           },
           take: 100, // Process in batches
@@ -195,6 +196,7 @@ export class MediaCleanupHandler {
       originalKey: string;
       thumbnailKey: string | null;
       optimizedKey: string | null;
+      c2paSidecarKey?: string | null;
     },
     r2Bucket: R2Bucket,
   ): Promise<number> {
@@ -227,6 +229,21 @@ export class MediaCleanupHandler {
     if (media.optimizedKey) {
       try {
         await r2Bucket.delete(media.optimizedKey);
+        deletedCount++;
+      } catch (error: any) {
+        if (!error.message?.includes("No such key")) {
+          throw error;
+        }
+      }
+    }
+
+    // Delete the C2PA manifest sidecar if one was kept. A manifest is MORE
+    // personal than the pixels it describes — camera serial numbers, capture
+    // times, an identity claim — so an erasure that skipped it would leave the
+    // most identifying part of the upload behind.
+    if (media.c2paSidecarKey) {
+      try {
+        await r2Bucket.delete(media.c2paSidecarKey);
         deletedCount++;
       } catch (error: any) {
         if (!error.message?.includes("No such key")) {
