@@ -31,7 +31,9 @@
 
 import type { Prisma, PrismaClient, RsvpStatus } from "@prisma/client";
 import type { Env } from "../../env.js";
+import { emitDomainEvent } from "./emit.js";
 import { getLogger, type Logger } from "../logger.js";
+import { mintTenantId } from "../mint-tenant-id.js";
 import type { TrellisRequestContext } from "../request-context.js";
 import type { Session } from "../session-cookie.js";
 
@@ -162,15 +164,48 @@ export class RsvpHandler {
 
       let result: RsvpTxResult;
       try {
-        result = await this.db.$transaction((tx) =>
-          this.applyRsvp(tx, {
+        // Minted before the transaction opens: an invalid tenant id should be
+        // rejected without costing a transaction, and only plain values cross
+        // into the callback.
+        const eventTenantId = mintTenantId(activeTenantId, "session");
+        result = await this.db.$transaction(async (tx) => {
+          const applied = await this.applyRsvp(tx, {
             eventId,
             tenantId: activeTenantId,
             userId,
             newStatus,
             newGuests,
-          }),
-        );
+          });
+
+          // Domain event, IN THIS TRANSACTION (plan 034 lane E) — the update
+          // shape, standing in for `entity.updated`, which does not run in a
+          // transaction today (see the lane report). Only a real transition
+          // is announced: `unchanged` and `capacity-rejected` changed no row,
+          // and an event for them would be a lie a subscriber acts on.
+          //
+          // Inside the transaction, so the P2002 path below — a concurrent
+          // duplicate RSVP whose losing transaction rolls back — takes the
+          // event with it rather than leaving a row for a seat nobody holds.
+          //
+          // Payload is ids and changed field names only; the RSVP's status and
+          // party size are the row's content and stay in the row.
+          if (applied.kind === "updated") {
+            await emitDomainEvent(tx, {
+              type: "rsvp.updated",
+              tenantId: eventTenantId,
+              subjectKind: "rsvp",
+              subjectId: applied.rsvp.id,
+              payload: {
+                rsvpId: applied.rsvp.id,
+                eventId,
+                userId,
+                fields: ["status", "guests"],
+              },
+            });
+          }
+
+          return applied;
+        });
       } catch (error) {
         // Double-RSVP idempotency (§4.3): a concurrent create for the same
         // (eventId,userId) hits @@unique([eventId,userId]) → the losing tx

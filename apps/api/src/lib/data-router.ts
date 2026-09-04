@@ -15,8 +15,10 @@ import {
 } from "./audit-composer.js";
 import type { DatabaseWrapperEnv } from "./database-wrapper.js";
 import { getWrappedDatabase } from "./database-wrapper-helper.js";
+import { emitDomainEvent } from "./events/emit.js";
 import { getIPAddress } from "./ip-scrubber.js";
 import { getLogger, Logger } from "./logger.js";
+import { mintTenantId } from "./mint-tenant-id.js";
 import { deriveUniqueHandle } from "./user/derive-handle.js";
 import { isValidRegion, type Region } from "./region-detection.js";
 
@@ -915,6 +917,13 @@ export class DataRouter {
       );
     }
 
+    // Brand the authoring tenant for the outbox write below. Minted HERE,
+    // outside the transaction callback, for the same reason the org-category
+    // lookup above is: only plain values may cross into the callback, and
+    // minting is the one place an invalid tenant id is rejected — better to
+    // fail before opening a transaction than to abort one.
+    const eventTenantId = mintTenantId(String(postData.tenantId), "session");
+
     // Use transaction to ensure atomicity
     const result = await db.$transaction(
       async (tx: any) => {
@@ -1039,6 +1048,29 @@ export class DataRouter {
             },
           });
         }
+
+        // Domain event, IN THIS TRANSACTION (plan 034 lane E). If anything
+        // after this throws — the region check above already can — the post
+        // and the event roll back together. Unlike the audit log below, this
+        // is NOT best-effort: an outbox row for a post that does not exist is
+        // worse than no row, so a failure here must take the post with it.
+        //
+        // Payload is ids and changed field names only: `fields` lists the
+        // columns this create set, never their values, so the post's text
+        // never reaches the outbox.
+        await emitDomainEvent(tx, {
+          type: "post.published",
+          tenantId: eventTenantId,
+          subjectKind: "post",
+          subjectId: post.id,
+          payload: {
+            postId: post.id,
+            authorId: String(sanitizedPostData.authorId),
+            fields: Object.keys(createData).sort(),
+            entityIds: entityRefs.map((id) => String(id)),
+            mediaIds: media.map((m) => String(m.id)),
+          },
+        });
 
         return post;
       },
