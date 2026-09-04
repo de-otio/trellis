@@ -214,6 +214,142 @@ export class ReportHandler {
   }
 
   /**
+   * GET /api/reports/:id — the reporter's status poll for ONE of their reports.
+   *
+   * This is the Art. 16 loop made observable to the person who filed it. It
+   * returns, in one document:
+   *   - `receipt`     — Art. 16(4) confirmation of receipt (always present; the
+   *                     row's own existence IS the receipt, so a lost email
+   *                     never costs the reporter their confirmation);
+   *   - `decision`    — Art. 16(5) outcome, once decided;
+   *   - `statementOfReasons` — the FACT and the kind of restriction applied,
+   *                     once decided and actioned;
+   *   - `remedies`    — Art. 16(5) redress information, once decided.
+   *
+   * Reporter-scoped: a report belonging to someone else 404s exactly as a
+   * non-existent one does, so this cannot be used to enumerate report ids.
+   *
+   * ANTI-TIP-OFF: a SUPPRESSED statement of reasons is never surfaced here. The
+   * suppression exists so the affected user is not warned; echoing it to the
+   * reporter would leak the same fact through a second door, and a reporter is
+   * not necessarily a disinterested party.
+   */
+  async handleStatus(
+    reportId: string,
+    session: Session,
+    env: Env,
+    requestContext: TrellisRequestContext,
+  ): Promise<Response> {
+    const logger = getLogger();
+    const region = requestContext?.region || env.DEFAULT_REGION || "EU";
+    const db = DataRouter.getDatabaseForRegion(region, env);
+
+    try {
+      const report = await db.report.findFirst({
+        where: { id: reportId, reporterUserId: session.userId },
+        select: {
+          id: true,
+          reportType: true,
+          resourceType: true,
+          resourceId: true,
+          categoryKey: true,
+          status: true,
+          resolution: true,
+          resolvedAt: true,
+          createdAt: true,
+        },
+      });
+      if (!report) {
+        // Identical to "not yours" — no oracle.
+        return json(404, {
+          error: "NOT_FOUND",
+          message: "Report not found.",
+        });
+      }
+
+      const { REPORT_TEMPLATE_KEYS, resolveReportTemplate } = await import(
+        "./report-templates.js"
+      );
+      const params = { reportId: report.id };
+
+      const decided = report.status === "decided" && report.resolution != null;
+      const actioned = decided && report.resolution === "actioned";
+
+      // Art. 17 statement: only the fact + restriction, only when one was
+      // actually delivered (suppressed => invisible), only once actioned.
+      let statementOfReasons: {
+        restriction: string;
+        issuedAt: string;
+      } | null = null;
+      if (actioned) {
+        const statement = await db.statementOfReasons.findFirst({
+          where: {
+            resourceType: report.resourceType,
+            resourceId: report.resourceId,
+            suppressed: false,
+          },
+          orderBy: { createdAt: "desc" },
+          select: { restriction: true, createdAt: true },
+        });
+        if (statement) {
+          statementOfReasons = {
+            restriction: statement.restriction,
+            issuedAt: statement.createdAt.toISOString(),
+          };
+        }
+      }
+
+      const receiptCopy = resolveReportTemplate(
+        REPORT_TEMPLATE_KEYS.RECEIPT,
+        params,
+      );
+
+      return json(200, {
+        report: {
+          id: report.id,
+          reportType: report.reportType,
+          resourceType: report.resourceType,
+          resourceId: report.resourceId,
+          categoryKey: report.categoryKey,
+          status: report.status,
+          createdAt: report.createdAt.toISOString(),
+        },
+        // Art. 16(4).
+        receipt: {
+          confirmed: true,
+          receivedAt: report.createdAt.toISOString(),
+          title: receiptCopy.title,
+          body: receiptCopy.body,
+        },
+        // Art. 16(5).
+        decision: decided
+          ? {
+              outcome: report.resolution,
+              decidedAt: report.resolvedAt?.toISOString() ?? null,
+              ...resolveReportTemplate(
+                report.resolution === "actioned"
+                  ? REPORT_TEMPLATE_KEYS.DECISION_ACTIONED
+                  : REPORT_TEMPLATE_KEYS.DECISION_REJECTED,
+                params,
+              ),
+            }
+          : null,
+        // Art. 17, as far as it concerns the reporter: that a restriction was
+        // applied and of what kind. Never the affected user, never the template
+        // key, never the params.
+        statementOfReasons,
+        // Art. 16(5) redress information — travels with the decision.
+        remedies: decided
+          ? resolveReportTemplate(REPORT_TEMPLATE_KEYS.REDRESS, params)
+          : null,
+      });
+    } catch (error) {
+      logger.error("[Reports] error reading report status", error);
+      return json(500, { error: "Internal server error" });
+    }
+  }
+
+  /**
    * GET /api/reports/mine — the reporter's own notices + statuses (all report
    * types, newest first). Cursor pagination on `createdAt`.
    */

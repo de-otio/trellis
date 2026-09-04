@@ -18,6 +18,14 @@ export const REPORT_TEMPLATE_KEYS = {
   DECISION_ACTIONED: "report.decision.actioned",
   /** Art. 16(5) — terminal outcome: the report was rejected/closed no-action. */
   DECISION_REJECTED: "report.decision.rejected",
+  /**
+   * Art. 16(5) — the redress information that must accompany a decision
+   * ("information on the possibilities for redress"). Kept a SEPARATE key from
+   * the two decision notices because the redress routes are identical whatever
+   * the outcome, and because it is the part counsel is most likely to redline
+   * on its own.
+   */
+  REDRESS: "report.redress",
 } as const;
 
 export type ReportTemplateKey =
@@ -55,6 +63,18 @@ const NEUTRAL_FALLBACKS: ReportTemplateMap = {
     body:
       "We've reviewed your report (reference {reportId}). We didn't find a " +
       "rule violation this time, so no action was taken. Thanks for letting us know.",
+  },
+  [REPORT_TEMPLATE_KEYS.REDRESS]: {
+    title: "If you disagree with this outcome",
+    // Deliberately NOT legal text and deliberately NOT jurisdiction-specific:
+    // core cannot know which redress routes (internal complaint handling,
+    // out-of-court settlement, courts) a given deployment actually offers, and
+    // naming one it does not is worse than naming none. A deployment overrides
+    // this key with counsel-approved copy before enabling reporting.
+    body:
+      "You can ask us to look at your report (reference {reportId}) again. " +
+      "Depending on where you live you may also have other ways to challenge " +
+      "this outcome; our terms explain which apply to you.",
   },
 };
 

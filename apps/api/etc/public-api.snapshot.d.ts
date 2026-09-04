@@ -5398,6 +5398,14 @@ export declare const REPORT_TEMPLATE_KEYS: {
     readonly DECISION_ACTIONED: "report.decision.actioned";
     /** Art. 16(5) — terminal outcome: the report was rejected/closed no-action. */
     readonly DECISION_REJECTED: "report.decision.rejected";
+    /**
+     * Art. 16(5) — the redress information that must accompany a decision
+     * ("information on the possibilities for redress"). Kept a SEPARATE key from
+     * the two decision notices because the redress routes are identical whatever
+     * the outcome, and because it is the part counsel is most likely to redline
+     * on its own.
+     */
+    readonly REDRESS: "report.redress";
 };
 export type ReportTemplateKey = (typeof REPORT_TEMPLATE_KEYS)[keyof typeof REPORT_TEMPLATE_KEYS];
 /** A single localized template. `body` may contain `{param}` placeholders. */
