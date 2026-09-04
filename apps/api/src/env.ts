@@ -48,6 +48,7 @@ import {
 } from "./lib/provenance/posture.js";
 import { validateEmailEnv } from "./lib/email-provider.js";
 import { buildSqsUrl } from "./lib/sqs-url.js";
+import type { AgentSurfaceContent } from "./lib/routes/agent-surface.js";
 
 const stage = process.env.STAGE || "dev";
 
@@ -159,6 +160,16 @@ export interface Env {
   APP_DOMAIN?: string;
   APP_URL?: string;
   ALLOWED_ORIGINS?: string;
+  /**
+   * Consumer-supplied content for the agent-surface text routes (GET
+   * /llms.txt, GET /security.txt) — plan 034 lane "agent words". Same
+   * app-configuration path as APP_DOMAIN/ALLOWED_ORIGINS above: sourced from
+   * AGENT_SURFACE_LLMS_TXT / AGENT_SURFACE_SECURITY_TXT env vars, additive and
+   * optional. `llmsTxt` absent falls back to core's generic, truthful default
+   * (see agent-surface.ts); `securityTxt` absent makes GET /security.txt 404
+   * rather than serve a placeholder contact — see agent-surface.ts for why.
+   */
+  agentSurface?: AgentSurfaceContent;
   ACTIVITYPUB_BASE_URL?: string;
   /**
    * Master switch for ActivityPub federation. Defaults to `false`. When false,
@@ -1563,6 +1574,16 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     });
   };
 
+  // Startup warning (not a boot failure — a missing security.txt is honest,
+  // unlike the example.com placeholder it replaced): logged once, here,
+  // because buildEnv() itself runs exactly once at boot (see server.ts).
+  if (!process.env.AGENT_SURFACE_SECURITY_TXT) {
+    console.warn(
+      "[agent-surface] AGENT_SURFACE_SECURITY_TXT is not set — GET /security.txt will return 404. " +
+        "Configure agentSurface.securityTxt (env var AGENT_SURFACE_SECURITY_TXT) to serve a real security contact.",
+    );
+  }
+
   return {
     // Realtime transport seam: resolveRealtimeEnv() reads the REALTIME_* vars
     // and selects the default (poll/noop) transport; Skybber overrides via
@@ -1655,6 +1676,10 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     APP_DOMAIN: process.env.APP_DOMAIN,
     APP_URL: process.env.APP_URL,
     ALLOWED_ORIGINS: process.env.ALLOWED_ORIGINS,
+    agentSurface: {
+      llmsTxt: process.env.AGENT_SURFACE_LLMS_TXT,
+      securityTxt: process.env.AGENT_SURFACE_SECURITY_TXT,
+    },
     ACTIVITYPUB_BASE_URL: process.env.ACTIVITYPUB_BASE_URL,
     // Federation master switch — fail closed: anything other than the exact
     // string "true" leaves federation disabled.
