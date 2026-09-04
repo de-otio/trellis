@@ -163,6 +163,36 @@ export class ReactionHandler {
         });
       }
 
+      // WRITE GUARD (M2): a block in either direction forbids reacting to the
+      // other party's post. The tenant comes from the POST row (this method has
+      // no `activeTenantId` parameter, and the upsert below already takes the
+      // post's tenant for the same reason) — the block edge and the post must
+      // be read in the same tenant or the guard checks the wrong scope.
+      {
+        const { blockedWriteResponse, isBlockedEitherWay } = await import(
+          "./block-visibility.js"
+        );
+        const postTenantId = (post as any).tenantId as string | undefined;
+        const postAuthorId = (post as any).authorId as string | undefined;
+        if (
+          postTenantId &&
+          postAuthorId &&
+          (await isBlockedEitherWay(
+            DataRouter.getDatabaseForRegion(
+              region,
+              env as any,
+              undefined,
+              session.userId,
+            ) as any,
+            postTenantId,
+            session.userId,
+            postAuthorId,
+          ))
+        ) {
+          return blockedWriteResponse();
+        }
+      }
+
       // Upsert sentiment reaction (sentiments inherit region from post) - with timeout/retry
       await withQueryTimeoutAndRetry(
         sharedDatabaseConnectionManager,
@@ -549,6 +579,42 @@ export class ReactionHandler {
           status: 404,
           headers: { "content-type": "application/json" },
         });
+      }
+
+      // WRITE GUARD (M2): a block in either direction forbids reacting to the
+      // other party's comment. Checked against BOTH the comment's author and
+      // the post's author — a block with the post owner already hides the whole
+      // thread on the read path, so allowing a reaction to survive there would
+      // be the one way back in.
+      {
+        const { blockedWriteResponse, isBlockedEitherWay } = await import(
+          "./block-visibility.js"
+        );
+        const tenantId = (comment as any).tenantId as string | undefined;
+        const db = DataRouter.getDatabaseForRegion(
+          region,
+          env as any,
+          undefined,
+          session.userId,
+        ) as any;
+        const counterparties = [
+          (comment as any).authorId as string | undefined,
+          (comment.post as any).authorId as string | undefined,
+        ].filter((id): id is string => Boolean(id));
+        if (tenantId) {
+          for (const counterparty of counterparties) {
+            if (
+              await isBlockedEitherWay(
+                db,
+                tenantId,
+                session.userId,
+                counterparty,
+              )
+            ) {
+              return blockedWriteResponse();
+            }
+          }
+        }
       }
 
       // Upsert sentiment reaction - with timeout/retry

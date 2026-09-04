@@ -18,6 +18,7 @@ import prismaPkg from "@prisma/client";
 const { PostRadius } = prismaPkg;
 import { getLogger } from "./logger.js";
 
+import { resolveMutualBlockIds } from "./block-visibility.js";
 import { DataRouter } from "./data-router.js";
 import { getFriendUserIds } from "./friend-ids.js";
 import {
@@ -192,14 +193,28 @@ function encodeFeedCursor(createdAt: Date, postId: string): string {
  * task P1.4 — at which point this function and its three call sites go away
  * together. Thread the resolver into those three; do not add a fourth.
  *
+ * M2 added the block exclusion here rather than at each call site for the same
+ * reason the audience `OR` lives here: three readers that disagree about who is
+ * invisible have no block at all. It is a conjunct, not another `OR` arm — a
+ * block OVERRIDES every way a post could otherwise be visible, including
+ * `SHOUT`. (It cannot hide the viewer's own posts: a self-block is refused at
+ * the write path, so `viewerUserId` is never in the set.)
+ *
  * @param viewerUserId the cuid of the viewing user (never an OIDC `sub`)
  * @param friendUserIds ids this viewer is connected to, resolved by the caller
+ * @param blockedUserIds ids mutually invisible to this viewer (both
+ *   directions), resolved by the caller via `resolveMutualBlockIds`. Empty is
+ *   the no-op: the key is omitted entirely rather than emitting a `NOT IN ()`.
  */
 export function buildPostAudienceFilter(
   viewerUserId: string,
   friendUserIds: string[],
+  blockedUserIds: string[] = [],
 ) {
   return {
+    ...(blockedUserIds.length > 0
+      ? { authorId: { notIn: blockedUserIds } }
+      : {}),
     OR: [
       { radius: PostRadius.SHOUT },
       { authorId: viewerUserId }, // Own posts
@@ -355,12 +370,25 @@ export class FeedHandler {
         activeTenantId,
       );
 
+      // Block exclusion (M2): ONE batched query for both directions, applied
+      // below as a `WHERE authorId NOT IN (…)` inside the SAME query that
+      // paginates. Deliberately not a post-filter over the returned page: the
+      // keyset cursor is built from the LAST row of the page and `hasMore` from
+      // `take: limit + 1`, so dropping rows afterwards would both shorten pages
+      // and let the cursor skip unblocked posts that fell past the boundary.
+      const blockedIds = await resolveMutualBlockIds(
+        db as any,
+        activeTenantId,
+        session.userId,
+      );
+
       // Build visibility filter (shared with getPost — see
       // buildPostAudienceFilter; the two paths must not diverge).
       // Note: This OR condition is at the top level, not nested
       const visibilityFilter = buildPostAudienceFilter(
         session.userId,
         friendIds,
+        blockedIds,
       );
 
       // Build entity filter for multi-entity tagging
@@ -753,6 +781,18 @@ export class FeedHandler {
       activeTenantId,
     );
 
+    // Block exclusion (M2) — same set, same reason, as the home feed.
+    const blockedIds = await resolveMutualBlockIds(
+      DataRouter.getDatabaseForRegion(
+        region,
+        env,
+        undefined,
+        session.userId,
+      ) as any,
+      activeTenantId,
+      session.userId,
+    );
+
     const post = await withQueryTimeoutAndRetry(
       sharedDatabaseConnectionManager,
       region,
@@ -767,7 +807,7 @@ export class FeedHandler {
             // predicate, so any authenticated caller could read any post —
             // including WHISPER — by id. Both are now required.
             tenantId: activeTenantId,
-            ...buildPostAudienceFilter(session.userId, friendIds),
+            ...buildPostAudienceFilter(session.userId, friendIds, blockedIds),
           },
           include: {
             author: {

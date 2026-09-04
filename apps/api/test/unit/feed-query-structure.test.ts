@@ -26,6 +26,11 @@ vi.mock("../../src/lib/data-router", () => {
         post: {
           findMany: vi.fn().mockResolvedValue([]),
         },
+        // M2: the block seam reads through this delegate. Default = no blocks.
+        blockedUser: {
+          findUnique: vi.fn().mockResolvedValue(null),
+          findMany: vi.fn().mockResolvedValue([]),
+        },
       }),
     },
   };
@@ -112,6 +117,10 @@ describe("Feed Query Structure", () => {
     const { DataRouter } = await import("../../src/lib/data-router.js");
     (DataRouter.getDatabaseForRegion as any).mockReturnValue({
       post: {
+        findMany: vi.fn().mockResolvedValue([]),
+      },
+      blockedUser: {
+        findUnique: vi.fn().mockResolvedValue(null),
         findMany: vi.fn().mockResolvedValue([]),
       },
     });

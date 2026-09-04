@@ -85,6 +85,12 @@ describe("FeedHandler", () => {
     handler = new FeedHandler();
 
     mockDb = {
+      // M2: the block seam reads through this delegate. Default = no blocks,
+      // so these tests keep asserting the unblocked behaviour.
+      blockedUser: {
+        findUnique: vi.fn().mockResolvedValue(null),
+        findMany: vi.fn().mockResolvedValue([]),
+      },
       post: {
         findMany: vi.fn(),
       },

@@ -166,6 +166,11 @@ describe("moderation toggle is fail-closed on the moderated write path (F1)", ()
     vi.clearAllMocks();
 
     mockDb = {
+      // M2: the block seam reads through this delegate. Default = no blocks.
+      blockedUser: {
+        findUnique: vi.fn().mockResolvedValue(null),
+        findMany: vi.fn().mockResolvedValue([]),
+      },
       featureToggle: {
         // Default: row missing (unseeded database).
         findFirst: vi.fn().mockResolvedValue(null),

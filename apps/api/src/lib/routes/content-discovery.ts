@@ -27,6 +27,19 @@ async function getTenantId(request: Request, env: Env): Promise<string | null> {
   return auth.activeTenantId;
 }
 
+/**
+ * Resolve the caller's tenant AND user id. The related-content route needs the
+ * user id as well, to exclude blocked accounts in both directions (M2).
+ */
+async function getTenantAndUser(
+  request: Request,
+  env: Env,
+): Promise<{ tenantId: string; userId: string } | null> {
+  const auth = await authMiddleware(request, env);
+  if (!auth || !auth.activeTenantId || !auth.userId) return null;
+  return { tenantId: auth.activeTenantId, userId: auth.userId };
+}
+
 function unauthorizedResponse(): Response {
   return new Response(
     JSON.stringify({ error: "Unauthorized" }),
@@ -41,8 +54,9 @@ export const contentDiscoveryRoutes: Route[] = [
     method: "GET",
     handler: async (request, env, { pathname }) => {
       try {
-        const tenantId = await getTenantId(request, env);
-        if (!tenantId) return unauthorizedResponse();
+        const caller = await getTenantAndUser(request, env);
+        if (!caller) return unauthorizedResponse();
+        const { tenantId, userId } = caller;
 
         const postId = pathname.split("/api/posts/")[1].split("/related")[0];
 
@@ -71,6 +85,7 @@ export const contentDiscoveryRoutes: Route[] = [
             limit: Math.min(limit, 20),
             minMatchingTags,
             includeSameAuthor,
+            viewerUserId: userId,
           },
         );
 
