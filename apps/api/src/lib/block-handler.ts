@@ -66,6 +66,24 @@ function decodeBlockCursor(raw?: string | null): BlockCursor | null {
   return null;
 }
 
+/**
+ * Bump the feed cache version so a block or unblock takes effect on the next
+ * request instead of after the TTL. Dynamic import: `FeedHandler` imports the
+ * audience filter this feature threads through, so a static import here would
+ * make the cycle real rather than lazy.
+ */
+async function invalidateFeedCache(env: Env): Promise<void> {
+  try {
+    const { FeedHandler } = await import("./feed-handler.js");
+    await FeedHandler.invalidateFeedCache(env as any);
+  } catch (error) {
+    // Never fail the write on a cache-invalidation problem: the block row is
+    // committed, and the stale window closes on its own at the TTL.
+    const { getLogger } = await import("./logger.js");
+    getLogger().warn("[BlockHandler] Feed cache invalidation failed:", error);
+  }
+}
+
 function validationError(message: string): Response {
   return new Response(
     JSON.stringify({ error: "VALIDATION_ERROR", message }),
@@ -205,6 +223,12 @@ export class BlockHandler {
         throw txError;
       }
 
+      // The home feed is cached per viewer and the block is a visibility
+      // change, so a feed computed a moment ago would keep serving the blocked
+      // account's posts for the whole TTL. Bump the cache version — the same
+      // invalidation the reaction path uses.
+      await invalidateFeedCache(env);
+
       return new Response(
         JSON.stringify({
           blockedUserId: blockedId,
@@ -257,6 +281,10 @@ export class BlockHandler {
           blockedId,
         },
       });
+
+      // Unblocking makes content visible again; the cached feed still has it
+      // filtered out. Same bump as the block path.
+      await invalidateFeedCache(env);
 
       return new Response(null, { status: 204 });
     } catch (error: any) {

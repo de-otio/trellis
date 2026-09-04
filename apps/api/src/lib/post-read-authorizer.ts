@@ -35,6 +35,7 @@
  * four. The note in feed-handler.ts has been updated to say so.
  */
 
+import { resolveMutualBlockIds } from "./block-visibility.js";
 import { DataRouter } from "./data-router.js";
 import type { DataRouterEnv } from "./data-router.js";
 import { sharedDatabaseConnectionManager } from "./database-connection-manager.js";
@@ -94,6 +95,18 @@ export async function canReadPost(args: CanReadPostArgs): Promise<boolean> {
     tenantId,
   );
 
+  // Block exclusion (M2), threaded through the SAME predicate the feed and the
+  // single-post read use. This is the choke point that makes a block hold for
+  // everything HANGING OFF a post as well as the post itself — the comment
+  // thread, the sentiment counts, the who-reacted list all gate on this
+  // function, so none of them can become a way to read a blocked account's
+  // content or to learn that its post exists.
+  const blockedIds = await resolveMutualBlockIds(
+    DataRouter.getDatabaseForRegion(region, env, undefined, viewerUserId) as any,
+    tenantId,
+    viewerUserId,
+  );
+
   const row = await withQueryTimeoutAndRetry(
     sharedDatabaseConnectionManager,
     region,
@@ -108,7 +121,7 @@ export async function canReadPost(args: CanReadPostArgs): Promise<boolean> {
           deletedAt: null,
           hiddenByAuthor: false,
           tenantId,
-          ...buildPostAudienceFilter(viewerUserId, friendIds),
+          ...buildPostAudienceFilter(viewerUserId, friendIds, blockedIds),
         },
         select: { id: true },
       });

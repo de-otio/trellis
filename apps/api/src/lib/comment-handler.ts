@@ -8,6 +8,11 @@ import type { KVNamespace, R2Bucket, CloudflareQueue } from "../types/cloudflare
  */
 
 
+import {
+  blockedWriteResponse,
+  isBlockedEitherWay,
+  resolveMutualBlockIds,
+} from "./block-visibility.js";
 import { DataRouter } from "./data-router.js";
 import { FeedHandler } from "./feed-handler.js";
 import { getLogger, Logger, generateRequestId } from "./logger.js";
@@ -192,6 +197,32 @@ export class CommentHandler {
           status: 404,
           headers: { "content-type": "application/json" },
         });
+      }
+
+      // WRITE GUARD (M2): a block in EITHER direction forbids commenting on the
+      // other party's post. Placed before moderation and link-checking so a
+      // refused write costs two indexed lookups rather than a model call.
+      //
+      // 403, not 404: the caller can already see this post exists — it is the
+      // blocker who is hidden from the blocked account's READ paths, and a post
+      // it reached before the block (or an author it blocked itself) is not a
+      // secret. A 404 here would also be indistinguishable from the deleted-post
+      // branch above and give the client nothing to say to the user.
+      if (
+        (post as any).authorId &&
+        (await isBlockedEitherWay(
+          DataRouter.getDatabaseForRegion(
+            region,
+            env as any,
+            undefined,
+            session.userId,
+          ) as any,
+          activeTenantId,
+          session.userId,
+          (post as any).authorId,
+        ))
+      ) {
+        return blockedWriteResponse();
       }
 
       // Check if content moderation is enabled via feature toggle
@@ -631,7 +662,7 @@ export class CommentHandler {
         async (db) => {
           return await db.postComment.findFirst({
             where: { id: parentCommentId, tenantId: activeTenantId },
-            select: { postId: true, deletedAt: true },
+            select: { postId: true, deletedAt: true, authorId: true },
           });
         },
         {
@@ -658,6 +689,27 @@ export class CommentHandler {
           JSON.stringify({ error: "Cannot reply to deleted comment" }),
           { status: 400, headers: { "content-type": "application/json" } },
         );
+      }
+
+      // WRITE GUARD (M2), parent-comment arm. `createComment` below guards the
+      // POST's author; this guards the person being replied TO, which the post
+      // author check misses when both are commenting under a third party's
+      // post.
+      if (
+        parentComment.authorId &&
+        (await isBlockedEitherWay(
+          DataRouter.getDatabaseForRegion(
+            region,
+            env as any,
+            undefined,
+            session.userId,
+          ) as any,
+          activeTenantId,
+          session.userId,
+          parentComment.authorId,
+        ))
+      ) {
+        return blockedWriteResponse();
       }
 
       // Delegate to createComment() with parentCommentId
@@ -748,6 +800,28 @@ export class CommentHandler {
         "./db-query-helper.js"
       );
 
+      // Block exclusion (M2). `canReadPost` above already applied the block to
+      // the POST — a blocked author's post, and therefore its whole thread, is
+      // gone. This second application covers the other case: a blocked account
+      // commenting under a THIRD party's post, which the post-level gate cannot
+      // see. One batched, bidirectional lookup for the whole page.
+      //
+      // Applied as a `WHERE authorId NOT IN (…)` in the paginating query, not
+      // as a post-filter: the thread cursor is the last row's `createdAt` and
+      // `hasMore` comes from `take: limit + 1`, so filtering after the fact
+      // would shorten pages and let the next cursor step over unblocked
+      // comments.
+      const blockedIds = await resolveMutualBlockIds(
+        DataRouter.getDatabaseForRegion(
+          region,
+          env as any,
+          undefined,
+          session.userId,
+        ) as any,
+        activeTenantId,
+        session.userId,
+      );
+
       const comments = await withQueryTimeoutAndRetry(
         sharedDatabaseConnectionManager,
         region,
@@ -759,6 +833,9 @@ export class CommentHandler {
               tenantId: activeTenantId,
               hiddenByPostOwner: false,
               deletedAt: null, // Filter out soft-deleted comments
+              ...(blockedIds.length > 0
+                ? { authorId: { notIn: blockedIds } }
+                : {}),
               ...(cursor && { createdAt: { lt: cursor } }),
             },
             orderBy: { createdAt: "desc" },
