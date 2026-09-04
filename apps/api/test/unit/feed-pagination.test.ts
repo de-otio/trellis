@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   ALLOWED_SORT_FIELDS,
+  FEED_RANKER_ID,
   FEED_RANKING_VERSION,
   computePaginationMetadata,
   getPaginationConfig,
@@ -118,5 +119,14 @@ describe("feed sort-field reproducibility invariant", () => {
     // never a replacement: bump the version, update the provenance manifest
     // in analysis/research-platform/, and satisfy plans/pluggable-ranking/.
     expect(FEED_RANKING_VERSION).toBe(1);
+  });
+
+  it("FEED_RANKER_ID names the current ranker and stays in lockstep with FEED_RANKING_VERSION", () => {
+    // FEED_RANKER_ID carries no fact independent of FEED_RANKING_VERSION —
+    // its `@N` suffix must equal the version constant, always. If this test
+    // fails because the two were bumped independently, that is the bug to
+    // fix, not the test.
+    expect(FEED_RANKER_ID).toBe("chronological@1");
+    expect(FEED_RANKER_ID).toBe(`chronological@${FEED_RANKING_VERSION}`);
   });
 });

@@ -122,6 +122,82 @@ A tenant may require declarations. Two errors, both 400:
 The distinction is deliberate: the first means *you* did not ask, the second means
 the *user* declined. Handle them differently.
 
+## C2PA manifests on media
+
+The ingest pipeline re-encodes every uploaded image and drops all metadata,
+including any C2PA manifest — that strip is a privacy control and it stays (a
+manifest carries camera model and serial number, capture times, edit history,
+often an identity claim). But the strip is irreversible: once the original bytes
+are gone, nobody can ever check a Content Credentials claim about that image
+again.
+
+So the manifest store is **copied out of the original before the strip** and kept
+as a sidecar object beside the media. The media-detail response reports it inside
+the same `provenance` object:
+
+```json
+{
+  "sourceType": "UNKNOWN",
+  "basis": null,
+  "disclosureRequired": false,
+  "labelKey": "provenance.unknown",
+  "labelDetailKey": "provenance.unknown.detail",
+  "c2pa": {
+    "present": true,
+    "container": "jpeg-app11",
+    "sidecarKey": "cas/<tenant>/<hash>.c2pa",
+    "byteLength": 41203,
+    "sha256": "…",
+    "verified": false
+  }
+}
+```
+
+`c2pa` is `null` when the file carried no manifest, and appears only on media —
+text has no container to carry one.
+
+| Field | Meaning |
+|---|---|
+| `present` | Always `true` when the object exists; absence is `c2pa: null` |
+| `container` | `jpeg-app11`, `png-cabx`, or `unidentified` |
+| `sidecarKey` | Storage key of the kept bytes, or `null` — see "presence only" below |
+| `byteLength` | Size of the kept bytes |
+| `sha256` | Digest of **our copy**, so a reader can confirm it got what we stored. Not a signature check |
+| `verified` | **Always `false`.** See below |
+
+### `verified` is always false, and that is not a placeholder
+
+Trellis extracts the manifest. It does not check the signature, walk the
+certificate chain, or read a single assertion out of it. There is no stored
+column behind `verified` — the API emits a constant — so no configuration and no
+future data state can make it true without someone first implementing
+verification.
+
+**Do not render "Content Credentials verified" from this object.** The honest
+rendering is either nothing at all, or something like "this file arrived carrying
+Content Credentials, which we have kept but not checked". A badge that implies
+verification publishes a claim the platform never made — the same failure mode
+as rendering `UNKNOWN` as "human-made".
+
+### Full extraction vs presence only
+
+| Container | Behaviour |
+|---|---|
+| JPEG (APP11 JUMBF) | Bytes extracted and stored. Multi-segment boxes are reassembled and the reassembly is checked (packet sequence, `LBox`); anything irregular degrades to presence only rather than storing a partial manifest |
+| PNG (`caBX` chunk) | Bytes extracted and stored |
+| Everything else (WebP, GIF, video/audio) | **Presence only** — `present: true`, `container: "unidentified"`, no bytes. The embedding is real but this codebase does not locate it, and guessing a byte range would be worse than saying so |
+
+Detection dispatches on the file's magic bytes, not on the declared MIME type.
+
+### Erasure
+
+The sidecar is a first-class part of the media object for deletion: every
+object-deletion path (the nightly soft-deleted-media purge that GDPR Art. 17
+erasure routes through, the cleanup handler, the orphan sweep, the stale reap)
+deletes it alongside `originalKey` / `thumbnailKey` / `optimizedKey`. Every
+sidecar object that exists is named by a live `MediaFile` row, so none can be
+stranded where no deletion path would find it.
+
 ## Correcting a mistake
 
 A wrong declaration cannot be fixed by the author — that is what monotonicity
@@ -138,8 +214,10 @@ Stated plainly so nothing here is read as broader than it is:
 
 - **No AI detection.** `UNKNOWN` on a synthetic image means nobody declared it and
   no marking survived, not that the platform checked.
-- **C2PA manifests are detected, not validated.** A present manifest yields
-  `UNKNOWN` with the container noted; its claims are never honoured.
+- **C2PA manifests are kept, not validated.** A present manifest yields
+  `UNKNOWN` with the container noted; its claims are never honoured. The bytes
+  are extracted and stored (see below) so that someone else can check them one
+  day — Trellis itself checks nothing.
 - **Unsigned claims of human origin are refused.** A file asserting "digital
   capture" does not produce `HUMAN_CREATED`, because that assertion is plain text
   anyone can write.

@@ -41,6 +41,7 @@ import { exportRoutes } from "./export.js";
 import { featureFlagsRoutes } from "./feature-flags.js";
 import { feedsRoutes } from "./feeds.js";
 import { relationshipRoutes } from "./relationships.js";
+import { blockRoutes } from "./blocks.js";
 import { emailSubscriptionRoutes } from "./email-subscriptions.js";
 import { curatedCollectionRoutes } from "./collections.js";
 import { eventsRoutes } from "./events.js";
@@ -282,6 +283,9 @@ const coreRoutes: Route[] = [
   // KV-backed friends endpoints, which were removed in the pre-launch
   // schema end-state pass; see lib/friend-ids.ts)
   ...relationshipRoutes,
+
+  // User blocks (the user-side remedy — see lib/block-visibility.ts)
+  ...blockRoutes,
 
   // Circles (content views)
   ...circleRoutes,

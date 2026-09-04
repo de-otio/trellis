@@ -12,7 +12,13 @@
  * - `.rotate()` bakes EXIF orientation into pixels (so the tag becomes stale
  *   and can safely be dropped — no `.withMetadata()` call).
  * - NO `.withMetadata()` — metadata is intentionally dropped by the re-encode
- *   (T6 owns the post-encode assertion that it is gone).
+ *   (T6 owns the post-encode assertion that it is gone). Two things are read
+ *   out of the ORIGINAL before this runs and kept elsewhere, never put back
+ *   into the pixels: the Art. 50 provenance marking
+ *   (lib/metadata/provenance-reader.ts) and the C2PA manifest store, which is
+ *   copied to a sidecar object (lib/metadata/c2pa-extractor.ts) because
+ *   destroying it is irreversible and it is the only thing anyone could later
+ *   check a Content Credentials claim against. Neither weakens the strip.
  * - Runs BEFORE the SHA-256 hash so the CAS hash is of the cleaned bytes.
  * - Accepted MIME types MUST equal the set sharp can write (HEIC/HEIF and SVG
  *   are excluded — HEIC write is not supported without the optional libheif

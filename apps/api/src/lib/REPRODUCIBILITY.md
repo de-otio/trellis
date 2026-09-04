@@ -59,7 +59,18 @@ The allowed sort field set is pinned in
 export const ALLOWED_SORT_FIELDS = ["createdAt"] as const;
 
 export const FEED_RANKING_VERSION = 1 as const;
+
+export const FEED_RANKER_ID = "chronological@1" as const;
 ```
+
+`FEED_RANKER_ID` is a human-legible name for the same fact
+`FEED_RANKING_VERSION` carries as a bare integer — `{name}@{version}`. It
+follows identical bump discipline: the `@N` suffix must always equal
+`FEED_RANKING_VERSION`, and both change together, under the same sign-off.
+It is not currently exposed on the feed HTTP response (`FeedResponse` in
+`feed-handler.ts` has no ranking-metadata field today); see
+[`docs/concepts/feed-ordering.md`](../../../../docs/concepts/feed-ordering.md)
+for the user-facing explanation of how the feed is ordered.
 
 `FEED_RANKING_VERSION` must be bumped whenever:
 

@@ -24,6 +24,14 @@ export interface RelatedContentOptions {
   minMatchingTags?: number;
 
   /**
+   * The viewing user's id, when the caller is authenticated. Used only to
+   * exclude blocked accounts in both directions (M2). Omitted, no block
+   * exclusion is applied — which is correct for an anonymous caller and wrong
+   * for an authenticated one, so route handlers must pass it.
+   */
+  viewerUserId?: string;
+
+  /**
    * Whether to include posts from the same author
    */
   includeSameAuthor?: boolean;
@@ -115,6 +123,14 @@ export class ContentDiscovery {
       return [];
     }
 
+    // Block exclusion (M2). The viewer is optional on this call — an
+    // unauthenticated caller cannot have blocks — but when it is present the
+    // same bidirectional set the feed uses applies here too.
+    const { resolveMutualBlockIds } = await import("./block-visibility.js");
+    const blockedIds = options.viewerUserId
+      ? await resolveMutualBlockIds(db as any, tenantId, options.viewerUserId)
+      : [];
+
     // Find posts with matching taxonomy tags
     const relatedPosts = await (db.postTaxonomyTag.findMany({
       where: {
@@ -126,6 +142,9 @@ export class ContentDiscovery {
           ...(options.includeSameAuthor
             ? {}
             : { authorId: { not: post.authorId } }),
+          ...(blockedIds.length > 0
+            ? { AND: [{ authorId: { notIn: blockedIds } }] }
+            : {}),
         },
       },
       include: {
@@ -381,6 +400,16 @@ export class ContentDiscovery {
 
     const taxonIds = taxons.map((t) => t.id);
 
+    // Block exclusion (M2): a recommendation surface is a read path, so it is
+    // covered by the same bidirectional set as the feed — otherwise blocking
+    // someone hides them from the feed and hands them straight back here.
+    const { resolveMutualBlockIds } = await import("./block-visibility.js");
+    const blockedIds = await resolveMutualBlockIds(
+      db as any,
+      tenantId,
+      userId,
+    );
+
     // Find posts with matching taxonomy tags
     const recommendedPosts = await (db.postTaxonomyTag.findMany({
       where: {
@@ -388,7 +417,10 @@ export class ContentDiscovery {
         post: {
           deletedAt: null,
           hiddenByAuthor: false,
-          authorId: { not: userId }, // Don't recommend own posts
+          authorId: {
+            not: userId, // Don't recommend own posts
+            ...(blockedIds.length > 0 ? { notIn: blockedIds } : {}),
+          },
         },
       },
       include: {
@@ -537,6 +569,16 @@ export class ContentDiscovery {
     const taxonIds = taxons.map((t) => t.id);
     const taxonIdMap = new Map(taxons.map((t) => [t.id, t.taxonId]));
 
+    // Block exclusion (M2). Recommending a PERSON is the surface where a
+    // missing block reads worst — the product would be suggesting, by name, the
+    // account the user just blocked.
+    const { resolveMutualBlockIds } = await import("./block-visibility.js");
+    const blockedIds = await resolveMutualBlockIds(
+      db as any,
+      tenantId,
+      userId,
+    );
+
     // Find all posts with matching taxonomy tags (grouped by author)
     const postsWithTags = await (db.postTaxonomyTag.findMany({
       where: {
@@ -544,7 +586,10 @@ export class ContentDiscovery {
         post: {
           deletedAt: null,
           hiddenByAuthor: false,
-          authorId: { not: userId }, // Don't recommend self
+          authorId: {
+            not: userId, // Don't recommend self
+            ...(blockedIds.length > 0 ? { notIn: blockedIds } : {}),
+          },
         },
       },
       include: {

@@ -85,6 +85,12 @@ describe("FeedHandler", () => {
     handler = new FeedHandler();
 
     mockDb = {
+      // M2: the block seam reads through this delegate. Default = no blocks,
+      // so these tests keep asserting the unblocked behaviour.
+      blockedUser: {
+        findUnique: vi.fn().mockResolvedValue(null),
+        findMany: vi.fn().mockResolvedValue([]),
+      },
       post: {
         findMany: vi.fn(),
       },
@@ -1010,6 +1016,48 @@ describe("FeedHandler", () => {
       });
       expect(data.posts[0].commentCount).toBe(3);
       expect(data.posts[0].userSentiment).toBe("positive");
+    });
+
+    it("commentCount query excludes soft-deleted and owner-hidden comments", async () => {
+      // Regression guard for the S2 fix: commentCount previously filtered
+      // hiddenByPostOwner but not deletedAt, so a soft-deleted comment stayed
+      // counted until hard-purged. Assert the actual `where` clause sent to
+      // Prisma, not just the returned number — a mock that ignores `where`
+      // would pass a numeric-only assertion even with the filter missing.
+      const posts = [
+        {
+          id: "post-1",
+          authorId: "user-123",
+          text: "Test post",
+          radius: PostRadius.SHOUT,
+          createdAt: new Date("2024-01-01T10:00:00Z"),
+          author: { id: "user-123", email: "test@example.com" },
+          subjectEntities: [],
+        },
+      ];
+
+      mockDb.post.findMany.mockResolvedValue(posts);
+      mockDb.postSentiment.groupBy.mockResolvedValue([]);
+      mockDb.postComment.groupBy.mockResolvedValue([]);
+
+      const request = new Request("http://test.com/feeds/home");
+      await handler.getHomeFeed(
+        mockSession,
+        request,
+        mockEnv,
+        { limit: 20 },
+        mockRequestContext,
+        TEST_TENANT_ID,
+      );
+
+      expect(mockDb.postComment.groupBy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            hiddenByPostOwner: false,
+            deletedAt: null,
+          }),
+        }),
+      );
     });
 
     it("should handle posts without sentiment counts", async () => {

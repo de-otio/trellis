@@ -192,6 +192,37 @@ export function processingKey(
 }
 
 // ---------------------------------------------------------------------------
+// c2paSidecarKey
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the C2PA sidecar key for a tenant-scoped, content-hashed object.
+ *
+ * `cas/{tenantId}/{sha256}.c2pa`
+ *
+ * The sidecar holds the raw manifest-store bytes copied out of the ORIGINAL
+ * upload before the re-encode stripped them (lib/metadata/c2pa-extractor.ts).
+ * It is a SIBLING of the media object, not a derivative preset, so it takes the
+ * `.c2pa` suffix rather than a `/{preset}` path segment: a preset is a rendering
+ * of the same pixels, and the manifest is not.
+ *
+ * Deriving it from the same `(tenantId, sha256)` pair as `casKey` is what makes
+ * erasure tractable — every deletion path that knows the media key can compute
+ * or read the sidecar key, and the DB row records it explicitly so no path has
+ * to re-derive it.
+ *
+ * @returns The key string, or a typed error describing which input was invalid.
+ */
+export function c2paSidecarKey(
+  tenantId: string,
+  sha256: string,
+): string | CasKeyError {
+  const base = casKey(tenantId, sha256);
+  if (isCasKeyError(base)) return base;
+  return `${base}.c2pa`;
+}
+
+// ---------------------------------------------------------------------------
 // Type guard helpers
 // ---------------------------------------------------------------------------
 

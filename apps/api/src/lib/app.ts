@@ -59,6 +59,7 @@ import { buildAgentSurfaceRoutes } from "./routes/agent-surface.js";
 import { authRoutes } from "./routes/auth.js";
 import { authDiscoverRoutes } from "./routes/auth-discover.js";
 import { badgesRoutes } from "./routes/badges.js";
+import { blockRoutes } from "./routes/blocks.js";
 import { circleRoutes } from "./routes/circles.js";
 import { commentsRoutes } from "./routes/comments.js";
 import { connectionCodeRoutes } from "./routes/connection-codes.js";
@@ -344,6 +345,7 @@ const PORTED_ROUTE_SETS: ReadonlyArray<ReadonlyArray<Route>> = [
   userRoutes,
   // H4
   agentAuthorizeRoutes,
+  blockRoutes,
   circleRoutes,
   entityRelationshipRoutes,
   outRoutes,

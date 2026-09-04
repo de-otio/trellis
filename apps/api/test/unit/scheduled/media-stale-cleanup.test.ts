@@ -118,6 +118,11 @@ describe("cleanupStaleMedia", () => {
         id: true,
         contentHash: true,
         originalKey: true,
+        // The C2PA manifest sidecar goes with the object it describes. The
+        // reap scope is non-verdict lifecycles, which the only writer of a
+        // sidecar today never produces — selected anyway so a future writer
+        // cannot silently strand manifest bytes.
+        c2paSidecarKey: true,
         lifecycle: true,
         createdAt: true,
       },

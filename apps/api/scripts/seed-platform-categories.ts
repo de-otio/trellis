@@ -21,6 +21,8 @@
  */
 
 import { PrismaClient } from "@prisma/client";
+import type { CategorySeed } from "../src/lib/org-category/seed-data.js";
+import { ROOTS, LEAVES } from "../src/lib/org-category/seed-data.js";
 
 // Helper to get database URL from environment or AWS SSM (mirrors
 // seed-feature-toggles.ts so both scripts resolve the connection identically).
@@ -64,36 +66,6 @@ async function getDatabaseUrl(): Promise<string> {
       'Set DIRECT_DATABASE_URL="postgresql://..." or configure AWS credentials.',
   );
 }
-
-interface CategorySeed {
-  code: string;
-  displayName: string;
-  description?: string;
-  order: number;
-  /** Parent category `code`; undefined for a root. */
-  parentCode?: string;
-}
-
-// Root set — the top-level classification axis. Hand-curated (see 05-schema-changes.md).
-const ROOTS: CategorySeed[] = [
-  { code: "business", displayName: "Business", order: 0, description: "For-profit companies, sole traders, and commercial services." },
-  { code: "nonprofit", displayName: "Nonprofit", order: 1, description: "Charities, NGOs, foundations, and other not-for-profit organizations." },
-  { code: "community-group", displayName: "Community Group", order: 2, description: "Informal community groups, clubs, and grassroots collectives." },
-  { code: "government", displayName: "Government", order: 3, description: "Public bodies, agencies, and government services." },
-  { code: "educational", displayName: "Educational", order: 4, description: "Schools, universities, and other educational institutions." },
-  { code: "other", displayName: "Other", order: 5, description: "Fallback root for organizations that fit none of the above." },
-];
-
-// A handful of illustrative leaves — just enough to exercise hierarchy in the
-// directory-search tests. Deliberately NOT exhaustive.
-const LEAVES: CategorySeed[] = [
-  { code: "business:retail", displayName: "Retail", order: 0, parentCode: "business" },
-  { code: "business:hospitality", displayName: "Hospitality", order: 1, parentCode: "business" },
-  { code: "business:professional-services", displayName: "Professional Services", order: 2, parentCode: "business" },
-  { code: "nonprofit:animal-welfare", displayName: "Animal Welfare", order: 0, parentCode: "nonprofit" },
-  { code: "nonprofit:environment", displayName: "Environment", order: 1, parentCode: "nonprofit" },
-  { code: "nonprofit:education", displayName: "Education & Youth", order: 2, parentCode: "nonprofit" },
-];
 
 let prismaInstance: PrismaClient | null = null;
 

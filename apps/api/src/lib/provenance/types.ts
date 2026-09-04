@@ -80,6 +80,45 @@ export interface ProvenanceView {
   readonly labelDetailKey: string;
 }
 
+/**
+ * Summary of a C2PA manifest found in a media file's ORIGINAL bytes and copied
+ * out before the ingest metadata strip destroyed it.
+ *
+ * READ THE `verified` FIELD BEFORE YOU RENDER ANY OF THIS. Trellis extracts the
+ * manifest; it does not check its signature, walk its certificate chain, or read
+ * a single assertion out of it. `verified` is a constant `false`, and there is
+ * no stored column behind it — a client that renders "Content Credentials
+ * verified" from this object is publishing a claim the platform never made. The
+ * honest rendering is "this file arrived carrying Content Credentials, which we
+ * have kept but not checked", or nothing at all.
+ */
+export interface C2paManifestView {
+  /** Always true when this object exists at all; absence is expressed as null. */
+  readonly present: true;
+  /** How the manifest was carried: "jpeg-app11", "png-cabx", or "unidentified". */
+  readonly container: string;
+  /**
+   * Storage key of the kept manifest bytes, or null when presence was recorded
+   * but the bytes could not be located cleanly in that container.
+   */
+  readonly sidecarKey: string | null;
+  readonly byteLength: number | null;
+  /** SHA-256 (lowercase hex) of the kept bytes. An integrity check on OUR copy,
+   *  not a signature check on the manifest. */
+  readonly sha256: string | null;
+  /** ALWAYS false. See the interface doc. */
+  readonly verified: false;
+}
+
+/**
+ * A media file's provenance view: the Art. 50 projection plus the C2PA manifest
+ * summary, which exists only for media (text has no container to carry one).
+ */
+export type MediaProvenanceView = ProvenanceView & {
+  /** Null when no manifest was found, or the bytes predate the sidecar. */
+  readonly c2pa: C2paManifestView | null;
+};
+
 /** Every source type, in ascending disclosure strength. The ONE ordering. */
 export const SOURCE_TYPES_BY_STRENGTH: readonly SyntheticSourceType[] = [
   "UNKNOWN",

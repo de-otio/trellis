@@ -18,6 +18,7 @@ import prismaPkg from "@prisma/client";
 const { PostRadius } = prismaPkg;
 import { getLogger } from "./logger.js";
 
+import { resolveMutualBlockIds } from "./block-visibility.js";
 import { DataRouter } from "./data-router.js";
 import { getFriendUserIds } from "./friend-ids.js";
 import {
@@ -80,9 +81,33 @@ export interface FeedPost {
    * field into misinformation. Per-attachment provenance is on `media[].provenance`.
    */
   provenance: ProvenanceView;
+  /**
+   * Reaction totals for this post, keyed by sentiment type (see
+   * `sentimentTypes`). Computed by `PostSentiment.groupBy` (enrichPosts,
+   * this file) — every `PostSentiment` row for the post, unfiltered.
+   *
+   * There is no soft-delete or moderation-status column on `PostSentiment`
+   * (prisma/schema.prisma): removing a reaction hard-deletes the row
+   * (`reaction-handler.ts`), so nothing to exclude ever lingers here. The
+   * post author's own reaction, if any, counts like anyone else's. Used to
+   * DISPLAY reaction counts only — never as a feed sort input; see
+   * feed-pagination.ts's `ALLOWED_SORT_FIELDS` / the no-covert-ordering
+   * invariant in REPRODUCIBILITY.md.
+   */
   sentimentCounts?: Record<string, number>;
   sentimentTypes?: string[];                    // only when display mode = DISTRIBUTION
   sentimentDisplayMode?: string;                // "full" | "distribution" | "hidden"
+  /**
+   * Number of comments on this post. Computed by `PostComment.groupBy`
+   * (enrichPosts, this file), which excludes:
+   *   - comments hidden by the post owner (`hiddenByPostOwner: true`)
+   *   - soft-deleted comments (`deletedAt IS NOT NULL`)
+   *
+   * There is no separate comment-moderation-status field in the schema to
+   * filter on. The count is NOT author-scoped: the post author's own
+   * comments count the same as anyone else's. Display only — never a feed
+   * sort input (see `sentimentCounts` above for the same invariant).
+   */
   commentCount?: number;
   userSentiment?: string;
   isOwner?: boolean;
@@ -192,14 +217,28 @@ function encodeFeedCursor(createdAt: Date, postId: string): string {
  * task P1.4 — at which point this function and its three call sites go away
  * together. Thread the resolver into those three; do not add a fourth.
  *
+ * M2 added the block exclusion here rather than at each call site for the same
+ * reason the audience `OR` lives here: three readers that disagree about who is
+ * invisible have no block at all. It is a conjunct, not another `OR` arm — a
+ * block OVERRIDES every way a post could otherwise be visible, including
+ * `SHOUT`. (It cannot hide the viewer's own posts: a self-block is refused at
+ * the write path, so `viewerUserId` is never in the set.)
+ *
  * @param viewerUserId the cuid of the viewing user (never an OIDC `sub`)
  * @param friendUserIds ids this viewer is connected to, resolved by the caller
+ * @param blockedUserIds ids mutually invisible to this viewer (both
+ *   directions), resolved by the caller via `resolveMutualBlockIds`. Empty is
+ *   the no-op: the key is omitted entirely rather than emitting a `NOT IN ()`.
  */
 export function buildPostAudienceFilter(
   viewerUserId: string,
   friendUserIds: string[],
+  blockedUserIds: string[] = [],
 ) {
   return {
+    ...(blockedUserIds.length > 0
+      ? { authorId: { notIn: blockedUserIds } }
+      : {}),
     OR: [
       { radius: PostRadius.SHOUT },
       { authorId: viewerUserId }, // Own posts
@@ -355,12 +394,25 @@ export class FeedHandler {
         activeTenantId,
       );
 
+      // Block exclusion (M2): ONE batched query for both directions, applied
+      // below as a `WHERE authorId NOT IN (…)` inside the SAME query that
+      // paginates. Deliberately not a post-filter over the returned page: the
+      // keyset cursor is built from the LAST row of the page and `hasMore` from
+      // `take: limit + 1`, so dropping rows afterwards would both shorten pages
+      // and let the cursor skip unblocked posts that fell past the boundary.
+      const blockedIds = await resolveMutualBlockIds(
+        db as any,
+        activeTenantId,
+        session.userId,
+      );
+
       // Build visibility filter (shared with getPost — see
       // buildPostAudienceFilter; the two paths must not diverge).
       // Note: This OR condition is at the top level, not nested
       const visibilityFilter = buildPostAudienceFilter(
         session.userId,
         friendIds,
+        blockedIds,
       );
 
       // Build entity filter for multi-entity tagging
@@ -753,6 +805,18 @@ export class FeedHandler {
       activeTenantId,
     );
 
+    // Block exclusion (M2) — same set, same reason, as the home feed.
+    const blockedIds = await resolveMutualBlockIds(
+      DataRouter.getDatabaseForRegion(
+        region,
+        env,
+        undefined,
+        session.userId,
+      ) as any,
+      activeTenantId,
+      session.userId,
+    );
+
     const post = await withQueryTimeoutAndRetry(
       sharedDatabaseConnectionManager,
       region,
@@ -767,7 +831,7 @@ export class FeedHandler {
             // predicate, so any authenticated caller could read any post —
             // including WHISPER — by id. Both are now required.
             tenantId: activeTenantId,
-            ...buildPostAudienceFilter(session.userId, friendIds),
+            ...buildPostAudienceFilter(session.userId, friendIds, blockedIds),
           },
           include: {
             author: {
@@ -920,6 +984,16 @@ export class FeedHandler {
         // Get comment counts with timeout/retry
         // OPTIMIZATION: Batch queries are fast enough (<100ms) that caching isn't needed
         // Individual comment counts are updated in real-time, so batch caching has low hit rate
+        //
+        // `commentCount` (see FeedPost.commentCount) excludes comments hidden
+        // by the post owner (hiddenByPostOwner) AND soft-deleted comments
+        // (deletedAt IS NOT NULL — PostComment.deletedAt, prisma/schema.prisma).
+        // Fixed 2026-09: deletedAt was not previously filtered here, so a
+        // deleted comment stayed counted until the row was hard-purged.
+        // There is no separate comment-moderation-status field to filter on
+        // (schema has only hiddenByPostOwner/deletedAt), and the count is not
+        // author-scoped — the post author's own comments count like anyone
+        // else's, by design.
         withQueryTimeoutAndRetry(
           sharedDatabaseConnectionManager,
           region,
@@ -930,6 +1004,7 @@ export class FeedHandler {
               where: {
                 postId: { in: postIds },
                 hiddenByPostOwner: false,
+                deletedAt: null,
               },
               _count: true,
             });

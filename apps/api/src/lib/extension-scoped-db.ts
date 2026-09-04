@@ -134,6 +134,15 @@ export const PROVENANCE_PROTECTED_FIELDS: readonly string[] = [
   // does not silently expose the intrinsic reading to extension writes).
   "embeddedSourceType",
   "provenanceExamined",
+  // MediaFile — the C2PA manifest sidecar summary. Same defensive listing, and
+  // the same reason: an extension able to write `c2paSidecarKey` could point a
+  // row at an object of its choosing, or blank the summary and orphan the
+  // manifest bytes beyond the reach of every deletion path.
+  "c2paManifestPresent",
+  "c2paContainer",
+  "c2paSidecarKey",
+  "c2paSidecarBytes",
+  "c2paSidecarSha256",
 ];
 
 // ---------------------------------------------------------------------------
