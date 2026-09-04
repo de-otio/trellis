@@ -100,6 +100,76 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ### Added
 
+- **`@de-otio/trellis-extension-api` 0.10.0 — the scoped-surface contract,
+  declared and inert.** Every field this bump adds is optional, and **core
+  reads none of them**. Nothing enforces a scope, validates a schema, emits an
+  event or publishes a route as a result of it. An extension written against
+  `0.9.2` compiles and behaves identically; the minor moved only because a
+  `0.x` minor is the breaking unit, and three separate pieces of work each
+  needed to add a field to the same published file — landing them as one inert
+  change is cheaper than merging them three ways later.
+
+  `ExtensionRouteDefinition` gains `scopes`, `publicSpec`, `requestSchema`,
+  `responseSchema`, `idempotent`, `operationId` and `stability`, mirroring the
+  same additions to core's `Route` one-for-one so an extension route can enter
+  the published spec on the same terms as a core route. `TrellisExtension`
+  gains `scopes` (id + the consent copy a person reads before granting it) and
+  `events` (type + payload schema): core owns the mechanism and cannot invent a
+  vertical's words, so both have to come from the extension.
+  `ExtensionSession` gains `clientId?` (absent means first-party) and
+  `scopes?`, added to the whitelist it is built from — which stays a whitelist,
+  so no token internals came with them. `ExtensionContext` gains
+  `events?.emit(type, payload)`; it is optional and core does not supply it
+  yet, so call it as `ctx.events?.emit(…)`. New exported types:
+  `ExtensionEventEmitter`, `ExtensionScopeDeclaration`,
+  `ExtensionEventDeclaration`.
+
+  Schema fields are typed `ZodType` — Zod v4's base type — not the v3
+  `ZodSchema` name that `metadataSchema` still uses. Both packages already
+  depend on `zod@^4.4.3`, so turning these into JSON Schema later needs no new
+  dependency.
+
+  Declaring a field that does nothing is the same shape as the seven dead
+  extension points removed in `0.9.0`, and the reference doc now carries a
+  [Declared but not yet read](docs/reference/extension-api.md) section saying
+  where the difference lies and what it is safe to conclude. The short version:
+  those seven were declared as working features and were not; these are
+  declared as a contract to build against, and every table row says so.
+
+- **Core scope catalog and `hasScope` (`apps/api/src/lib/auth/scopes.ts`).**
+  `CORE_SCOPES` maps seven scope ids to their consent copy — `profile:read`,
+  `entities:read`, `entities:write`, `posts:read`, `posts:write`,
+  `tenant:read`, `events:subscribe` — keeping the sentence a user reads beside
+  the id it grants, rather than leaving a consent page to invent it later.
+  `hasScope(granted, needed)` is the single place set-inclusion is decided:
+  `"*"` passes everything, an empty requirement is satisfied by anything, and
+  otherwise every needed scope must match exactly. No prefix rule, no
+  per-scope wildcard, no separator normalisation.
+
+  Scopes are a **different authorization axis** from capabilities
+  (`auth/capabilities.ts`), which are role-derived and tenant-scoped. Scope
+  strings are `<resource>:<verb>`, capabilities `<resource>.<verb>`, and
+  neither implies the other. The differing separators are a reading aid only —
+  the capability catalog already contains one colon-separated legacy value, so
+  exact matching is what actually keeps the two apart, and the test suite
+  asserts that no capability satisfies any core scope.
+
+  `AuthContext` gains `clientId?` and `scopes?`. An absent `scopes` is
+  equivalent to `"*"`: every context built before scopes existed is a
+  first-party session, which is what makes the addition break none of its
+  construction sites. Readers must normalise explicitly (`auth.scopes ?? "*"`)
+  so the permissive default stays visible where it is applied rather than
+  hidden in the predicate.
+
+- **Route self-description (`apps/api/src/lib/routes/types.ts`).** `Route`
+  gains `scopes`, `tags`, `requestSchema`, `responseSchema`, `operationId`,
+  `idempotent` and `stability`, all optional and none yet read by the
+  dispatcher. Three distinct states for `scopes` and the difference matters:
+  absent is first-party only, `[]` is any authenticated caller, non-empty
+  requires every listed scope. The pre-existing, unread `version` field is
+  documented as reserved for the public-mount rule rather than allowed to grow
+  a second versioning concept beside it.
+
 - **`@de-otio/trellis-extension-testkit` (new package, 0.1.0).** An extension
   author could typecheck against the contract and do nothing else: the server
   boot, the docker stack, the migrations and the feature-toggle seeding all
