@@ -420,6 +420,10 @@ export class OrphanedMediaHandler {
                 originalKey: true,
                 thumbnailKey: true,
                 optimizedKey: true,
+                // The kept C2PA manifest is derived from the user's original
+                // upload and is more identifying than the pixels; it is erased
+                // with them, never left behind.
+                c2paSidecarKey: true,
               },
               take: batchSize,
               orderBy: {
@@ -451,6 +455,7 @@ export class OrphanedMediaHandler {
             media.originalKey,
             media.thumbnailKey,
             media.optimizedKey,
+            media.c2paSidecarKey,
           ].filter((key): key is string => !!key);
 
           for (const key of keysToDelete) {

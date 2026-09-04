@@ -129,6 +129,30 @@ describe("MediaCleanupHandler", () => {
       expect(result.deleted).toBe(1);
     });
 
+    it("deletes the C2PA manifest sidecar with the media it belongs to", async () => {
+      // A kept manifest is more identifying than the pixels — camera model and
+      // serial number, capture times, often an identity claim. Reclaiming the
+      // image and leaving the sidecar would delete the least sensitive half.
+      mockWithQueryTimeoutAndRetry.mockResolvedValueOnce([
+        {
+          id: "1",
+          contentHash: "h1",
+          originalKey: "cas/t/h1",
+          thumbnailKey: null,
+          optimizedKey: null,
+          c2paSidecarKey: "cas/t/h1.c2pa",
+          deletedAt: new Date(),
+        },
+      ]);
+      mockWithQueryTimeoutAndRetry.mockResolvedValueOnce([]);
+      mockWithQueryTimeoutAndRetry.mockResolvedValueOnce([]);
+
+      await handler.runCleanup(env);
+
+      expect(mockR2Bucket.delete).toHaveBeenCalledWith("cas/t/h1.c2pa");
+      expect(mockR2Bucket.delete).toHaveBeenCalledTimes(2);
+    });
+
     it("skips thumbnail/optimized when null", async () => {
       mockWithQueryTimeoutAndRetry.mockResolvedValueOnce([
         {

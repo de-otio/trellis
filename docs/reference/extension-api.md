@@ -642,6 +642,12 @@ mentions `textSourceType`, `textBasis`, `declaredSourceType`, `declaredBasis`,
 `embeddedSourceType` or `provenanceExamined`. You will get a `ScopedDbError`
 naming the field.
 
+The C2PA manifest-sidecar columns are in the same protected set —
+`c2paManifestPresent`, `c2paContainer`, `c2paSidecarKey`, `c2paSidecarBytes`,
+`c2paSidecarSha256`. An extension able to write `c2paSidecarKey` could point a
+media row at an object of its choosing, or blank the summary and leave the kept
+manifest bytes beyond the reach of every deletion path.
+
 Three things worth knowing about how that guard behaves:
 
 - **It rejects on presence, not on value.** `{ textSourceType: undefined }` is
