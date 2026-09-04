@@ -21,6 +21,7 @@ import type { MiddlewareContext } from "../../../src/lib/middleware.js";
 import {
   idempotencyMiddleware,
   buildRequestHash,
+  routeNeedsIdempotency,
 } from "../../../src/lib/middleware/idempotency.js";
 import {
   IN_FLIGHT_SENTINEL,
@@ -923,5 +924,82 @@ describe("buildRequestHash (exported)", () => {
   it("hex output is 64 characters long", () => {
     const h = buildRequestHash("POST", "/", new Uint8Array(0));
     expect(h.length).toBe(64);
+  });
+});
+
+// ─── routeNeedsIdempotency (plan 034, lane C.2) ───────────────────────────────
+
+describe("routeNeedsIdempotency (exported metadata rule)", () => {
+  // Truth table required by the lane spec: public+POST, public+GET,
+  // private+POST, explicit opt-out.
+  it("public + POST (mutating) → true (the default rule)", () => {
+    expect(
+      routeNeedsIdempotency({ publicSpec: true, method: "POST" }),
+    ).toBe(true);
+  });
+
+  it("public + GET (non-mutating) → false", () => {
+    expect(
+      routeNeedsIdempotency({ publicSpec: true, method: "GET" }),
+    ).toBe(false);
+  });
+
+  it("private (no publicSpec) + POST → false", () => {
+    expect(
+      routeNeedsIdempotency({ publicSpec: false, method: "POST" }),
+    ).toBe(false);
+    expect(routeNeedsIdempotency({ method: "POST" })).toBe(false);
+  });
+
+  it("explicit opt-out (idempotent: false) wins even for public + POST", () => {
+    expect(
+      routeNeedsIdempotency({
+        publicSpec: true,
+        method: "POST",
+        idempotent: false,
+      }),
+    ).toBe(false);
+  });
+
+  // Beyond the required four: the other stated precedence rules.
+  it("explicit opt-in (idempotent: true) wins even for a private GET", () => {
+    expect(
+      routeNeedsIdempotency({
+        publicSpec: false,
+        method: "GET",
+        idempotent: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("mutating methods beyond POST count as mutating under the default rule", () => {
+    for (const method of ["PUT", "PATCH", "DELETE"]) {
+      expect(
+        routeNeedsIdempotency({ publicSpec: true, method }),
+        `expected ${method} to be treated as mutating`,
+      ).toBe(true);
+    }
+  });
+
+  it("an array of methods is mutating if any entry is mutating", () => {
+    expect(
+      routeNeedsIdempotency({ publicSpec: true, method: ["GET", "POST"] }),
+    ).toBe(true);
+    expect(
+      routeNeedsIdempotency({ publicSpec: true, method: ["GET", "HEAD"] }),
+    ).toBe(false);
+  });
+
+  it("an unrestricted method ('*' or absent) is treated as potentially mutating", () => {
+    expect(routeNeedsIdempotency({ publicSpec: true, method: "*" })).toBe(
+      true,
+    );
+    expect(routeNeedsIdempotency({ publicSpec: true })).toBe(true);
+  });
+
+  it("method matching is case-insensitive", () => {
+    expect(routeNeedsIdempotency({ publicSpec: true, method: "post" })).toBe(
+      true,
+    );
   });
 });
