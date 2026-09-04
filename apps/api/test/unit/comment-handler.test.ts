@@ -37,10 +37,12 @@ vi.mock("../../src/lib/db-query-helper", () => ({
 
 // Mock DataRouter
 const mockGetPost = vi.fn();
+const mockGetDatabaseForRegion = vi.fn();
 vi.mock("../../src/lib/data-router", () => ({
   DataRouter: {
     getPost: (...args: any[]) => mockGetPost(...args),
-    getDatabaseForRegion: vi.fn(),
+    getDatabaseForRegion: (...args: any[]) =>
+      mockGetDatabaseForRegion(...args),
   },
 }));
 
@@ -153,10 +155,17 @@ describe("CommentHandler", () => {
         create: vi.fn(),
         findMany: vi.fn(),
       },
+      // M2: the block seam reads through this delegate. Default = no blocks,
+      // so these tests keep asserting the unblocked behaviour.
+      blockedUser: {
+        findUnique: vi.fn().mockResolvedValue(null),
+        findMany: vi.fn().mockResolvedValue([]),
+      },
     };
 
     // Make createPrisma return mockDb
     mockCreatePrisma.mockReturnValue(mockDb);
+    mockGetDatabaseForRegion.mockReturnValue(mockDb);
 
     // Default mock: withQueryTimeoutAndRetry executes the query function with mockDb
     mockWithQueryTimeoutAndRetry.mockImplementation(

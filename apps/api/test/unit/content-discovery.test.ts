@@ -25,6 +25,11 @@ vi.mock("../../src/lib/data-router", () => {
     user: {
       findMany: vi.fn(),
     },
+    // M2: the block seam reads through this delegate. Default = no blocks.
+    blockedUser: {
+      findUnique: vi.fn().mockResolvedValue(null),
+      findMany: vi.fn().mockResolvedValue([]),
+    },
   };
   return {
     DataRouter: {

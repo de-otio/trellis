@@ -324,7 +324,10 @@ describe("notification floor — golden behavior", () => {
     // FAIL-LOUD: a handler whose block store always returns false (the check
     // removed) creates a row where the real path drops it.
     it("FAILS LOUDLY: a no-op block store delivers where the real one drops", async () => {
-      const noopStore: BlockStore = { isBlocked: async () => false };
+      const noopStore: BlockStore = {
+        isBlocked: async () => false,
+        listMutualBlockIds: async () => [],
+      };
       const real = new InMemoryBlockStore();
       real.block(TENANT, USER, SENDER);
 

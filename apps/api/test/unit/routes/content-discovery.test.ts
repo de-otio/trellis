@@ -119,6 +119,9 @@ describe("Content Discovery Routes", () => {
           limit: 10,
           minMatchingTags: 1,
           includeSameAuthor: false,
+          // M2: the viewer is threaded through so blocked accounts are
+          // excluded from related content in both directions.
+          viewerUserId: "user-123",
         },
       );
       expect(response.status).toBe(200);
@@ -148,6 +151,7 @@ describe("Content Discovery Routes", () => {
           limit: 15,
           minMatchingTags: 2,
           includeSameAuthor: true,
+          viewerUserId: "user-123",
         },
       );
     });

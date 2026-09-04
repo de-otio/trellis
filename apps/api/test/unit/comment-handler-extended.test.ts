@@ -38,10 +38,12 @@ vi.mock("../../src/lib/db-query-helper", () => ({
 
 // Mock DataRouter
 const mockGetPost = vi.fn();
+const mockGetDatabaseForRegion = vi.fn();
 vi.mock("../../src/lib/data-router", () => ({
   DataRouter: {
     getPost: (...args: any[]) => mockGetPost(...args),
-    getDatabaseForRegion: vi.fn(),
+    getDatabaseForRegion: (...args: any[]) =>
+      mockGetDatabaseForRegion(...args),
   },
 }));
 
@@ -173,6 +175,12 @@ describe("CommentHandler - Extended", () => {
     mockCanReadPost.mockResolvedValue(true);
 
     mockDb = {
+      // M2: the block seam reads through this delegate. Default = no blocks,
+      // so these tests keep asserting the unblocked behaviour.
+      blockedUser: {
+        findUnique: vi.fn().mockResolvedValue(null),
+        findMany: vi.fn().mockResolvedValue([]),
+      },
       post: {
         findUnique: vi.fn(),
       },
@@ -197,6 +205,7 @@ describe("CommentHandler - Extended", () => {
     };
 
     mockCreatePrisma.mockReturnValue(mockDb);
+    mockGetDatabaseForRegion.mockReturnValue(mockDb);
     mockGetWrappedDatabase.mockReturnValue(mockDb);
 
     mockWithQueryTimeoutAndRetry.mockImplementation(
