@@ -226,6 +226,61 @@ describe("RsvpHandler", () => {
     expect(tx.$executeRaw).not.toHaveBeenCalled();
   });
 
+  // -- Domain-event emission (plan 034 lane E) ------------------------------
+
+  it("emits rsvp.updated in the SAME transaction as a real transition", async () => {
+    const state: RawState = { claimResults: [1], promoteQueue: [], deleteRows: [] };
+    const { db, tx } = buildDb(state);
+    db.event.findUnique.mockResolvedValue(makeEvent({ capacity: 10 }));
+    tx.rsvp.findUnique.mockResolvedValue(makeRsvp({ status: "GOING", guests: 1 }));
+
+    const handler = new RsvpHandler(db as any);
+    await handler.handleRsvp("evt_1", rsvpRequest({ status: "GOING", guests: 3 }), session, mockEnv, ctx, "tenant_1");
+
+    // The emit runs on the transaction client the handler was given, not on
+    // the outer db — that is what makes it roll back with the transition.
+    expect(tx.domainEvent.create).toHaveBeenCalledTimes(1);
+    const row = tx.domainEvent.create.mock.calls[0][0].data;
+    expect(row).toMatchObject({
+      type: "rsvp.updated",
+      tenantId: "tenant_1",
+      subjectKind: "rsvp",
+    });
+    // Ids and changed field names only — no status value, no party size.
+    expect(row.payload).toMatchObject({
+      eventId: "evt_1",
+      userId: "user_1",
+      fields: ["status", "guests"],
+    });
+  });
+
+  it("emits NOTHING when the request changed no row", async () => {
+    // delta === 0 → `unchanged`. An event here would announce a transition
+    // that did not happen, which a subscriber would act on.
+    const state: RawState = { claimResults: [], promoteQueue: [], deleteRows: [] };
+    const { db, tx } = buildDb(state);
+    db.event.findUnique.mockResolvedValue(makeEvent({ capacity: 10 }));
+    tx.rsvp.findUnique.mockResolvedValue(makeRsvp({ status: "GOING", guests: 2 }));
+
+    const handler = new RsvpHandler(db as any);
+    await handler.handleRsvp("evt_1", rsvpRequest({ status: "GOING", guests: 2 }), session, mockEnv, ctx, "tenant_1");
+
+    expect(tx.domainEvent.create).not.toHaveBeenCalled();
+  });
+
+  it("emits NOTHING when the seat claim is capacity-rejected", async () => {
+    const state: RawState = { claimResults: [0], promoteQueue: [], deleteRows: [] };
+    const { db, tx } = buildDb(state);
+    db.event.findUnique.mockResolvedValue(makeEvent({ capacity: 2 }));
+    tx.rsvp.findUnique.mockResolvedValue(makeRsvp({ status: "GOING", guests: 1 }));
+
+    const handler = new RsvpHandler(db as any);
+    const res = await handler.handleRsvp("evt_1", rsvpRequest({ status: "GOING", guests: 5 }), session, mockEnv, ctx, "tenant_1");
+
+    expect(res.status).toBe(409);
+    expect(tx.domainEvent.create).not.toHaveBeenCalled();
+  });
+
   // -- Guest-delta on an existing GOING RSVP --------------------------------
 
   it("grows a GOING party when the delta fits (200)", async () => {
