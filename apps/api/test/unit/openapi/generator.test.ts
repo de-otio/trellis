@@ -21,6 +21,11 @@ import {
 } from "../../../src/lib/openapi/generator.js";
 import type { Route } from "../../../src/lib/routes/types.js";
 import { CORE_SCOPES } from "../../../src/lib/auth/scopes.js";
+// The generator reads the LIVE extension registry for extension consent copy
+// (plan 034, F-2). Registration is append-only and process-wide, so the one
+// test below that registers does so last within its describe and uses an id no
+// other test in this file names.
+import { registerExtension, getExtensions } from "../../../src/extensions.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -415,12 +420,107 @@ describe("generateOpenApiDoc", () => {
       expect(schemes.bearerAuth.type).toBe("http");
     });
 
-    it("imports the core scope catalog rather than restating it — fails if the two diverge", () => {
+    it("contains every core scope entry verbatim — fails if the catalog and the spec diverge", () => {
+      // Not `toEqual(CORE_SCOPES)` any more: the map is now the UNION of core's
+      // catalog and whatever scopes the published operations reference (see the
+      // extension-scope test below). Core's entries must still appear
+      // unmodified — the generator imports the catalog, it never restates it.
       const doc = generateOpenApiDoc([]);
       const schemes = doc.components?.securitySchemes as {
         oauth2: { flows: { authorizationCode: { scopes: Record<string, string> } } };
       };
+      expect(schemes.oauth2.flows.authorizationCode.scopes).toMatchObject(CORE_SCOPES);
+      // With no route in the document there is nothing to union on, so the two
+      // coincide exactly here.
       expect(schemes.oauth2.flows.authorizationCode.scopes).toEqual(CORE_SCOPES);
+    });
+
+    it("defines a published route's non-core scope in securitySchemes, not just in security", () => {
+      // The F-2 defect, inverted. `buildSecurity` copies whatever the route
+      // declared; before the fix `buildSecuritySchemes` emitted `CORE_SCOPES`
+      // alone, so an extension route publishing `walks:read` produced a
+      // document whose operation referenced a scope its own scheme never
+      // defined — invalid per OpenAPI 3.1 §4.8.29.2.
+      const doc = generateOpenApiDoc([
+        makeRoute({ path: "/api/v1/ext/dog/walks", method: "GET", scopes: ["walks:read"] }),
+      ]);
+      const scopes = (
+        doc.components?.securitySchemes as {
+          oauth2: { flows: { authorizationCode: { scopes: Record<string, string> } } };
+        }
+      ).oauth2.flows.authorizationCode.scopes;
+
+      expect(doc.paths["/api/v1/ext/dog/walks"].get.security).toEqual([
+        { oauth2: ["walks:read"] },
+      ]);
+      expect(Object.keys(scopes)).toContain("walks:read");
+      // No extension is registered in this unit context, so the description
+      // falls back to the id verbatim rather than core inventing consent copy.
+      expect(scopes["walks:read"]).toBe("walks:read");
+      expect(scopes).toMatchObject(CORE_SCOPES);
+    });
+
+    it("takes the description from the registered extension's own consent copy", () => {
+      // Where the words come from when the extension IS registered: its
+      // `TrellisExtension.scopes` declaration, which lane 0 added for exactly
+      // this and which nothing read before the F-2 fix.
+      const before = getExtensions().length;
+      registerExtension({
+        id: "walkext",
+        terminology: { entity: "walk", entityPlural: "walks" },
+        routes: [],
+        metadataSchema: z.object({}),
+        scopes: [{ id: "walks:read", description: "See the walks you recorded" }],
+      } as unknown as Parameters<typeof registerExtension>[0]);
+      expect(getExtensions().length).toBe(before + 1);
+
+      const doc = generateOpenApiDoc([
+        makeRoute({ path: "/api/v1/ext/walkext/walks", method: "GET", scopes: ["walks:read"] }),
+      ]);
+      const scopes = (
+        doc.components?.securitySchemes as {
+          oauth2: { flows: { authorizationCode: { scopes: Record<string, string> } } };
+        }
+      ).oauth2.flows.authorizationCode.scopes;
+
+      expect(scopes["walks:read"]).toBe("See the walks you recorded");
+    });
+
+    it("defines every scope any operation references — the OpenAPI validity property", () => {
+      // Table-driven rather than example-driven: this is the invariant, and it
+      // must hold for whatever set of operations the document happens to carry.
+      const doc = generateOpenApiDoc([
+        makeRoute({ path: "/api/v1/a", method: "GET", scopes: ["posts:read"] }),
+        makeRoute({ path: "/api/v1/b", method: "GET", scopes: ["walks:read", "walks:write"] }),
+        makeRoute({ path: "/api/v1/c", method: "GET", scopes: [] }),
+      ]);
+      const defined = new Set(
+        Object.keys(
+          (
+            doc.components?.securitySchemes as {
+              oauth2: { flows: { authorizationCode: { scopes: Record<string, string> } } };
+            }
+          ).oauth2.flows.authorizationCode.scopes,
+        ),
+      );
+
+      const referenced: string[] = [];
+      for (const [path_, item] of Object.entries(doc.paths)) {
+        for (const [method, op] of Object.entries(item)) {
+          for (const requirement of op.security ?? []) {
+            for (const [scheme, list] of Object.entries(requirement)) {
+              if (scheme !== "oauth2") continue;
+              for (const scope of list) {
+                referenced.push(scope);
+                expect(defined, `${method.toUpperCase()} ${path_} references ${scope}`).toContain(
+                  scope,
+                );
+              }
+            }
+          }
+        }
+      }
+      expect(referenced.sort()).toEqual(["posts:read", "walks:read", "walks:write"]);
     });
 
     it("omits an operation from the document entirely when scopes is absent", () => {

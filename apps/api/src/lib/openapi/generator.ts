@@ -15,7 +15,9 @@
  *    entirely (first-party only; lane G enforces the same rule at mount
  *    time — this is only a preview of it); **`[]`** marks it
  *    authenticated-no-particular-scope (the bearer scheme); a **non-empty**
- *    list marks it oauth2-scoped.
+ *    list marks it oauth2-scoped, and every scope so referenced is also
+ *    *defined* in the oauth2 scheme — core's from `CORE_SCOPES`, an
+ *    extension's from its own `TrellisExtension.scopes` consent copy.
  *  - `tags`, `operationId`, `stability` → carried through as declared,
  *    falling back to the existing derivation when absent.
  *
@@ -32,6 +34,7 @@ import path from "node:path";
 import { z, type ZodType } from "zod";
 import type { Route } from "../routes/types.js";
 import { CORE_SCOPES } from "../auth/scopes.js";
+import { getExtensions } from "../../extensions.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -261,7 +264,61 @@ function toComponentSchema(schema: ZodType): Record<string, unknown> {
 
 // ── Security ─────────────────────────────────────────────────────────────────
 
-function buildSecuritySchemes(): Record<string, unknown> {
+/**
+ * Consent copy for the scopes the *registered extensions* define, keyed by id.
+ *
+ * Read from the live registry (`src/extensions.ts`) rather than captured at
+ * module load: `registerExtension` is called by the consuming application
+ * **after** this module is imported, and `/openapi.json` generates lazily on
+ * first request (`routes/agent-surface.ts` caches behind a getter), so by the
+ * time this runs the registry is populated. The route list stays a parameter
+ * for the opposite reason — the module-level aggregate in `lib/routes/index.ts`
+ * *is* evaluated at import time.
+ *
+ * A caller that generates a document before registration (a unit test building
+ * routes by hand, a build-time script) simply sees no extension copy and gets
+ * the id-as-description fallback below. That is a degraded description, never
+ * an invalid document.
+ */
+function registeredExtensionScopeCopy(): Record<string, string> {
+  const copy: Record<string, string> = {};
+  for (const ext of getExtensions()) {
+    for (const decl of ext.scopes ?? []) {
+      copy[decl.id] = decl.description;
+    }
+  }
+  return copy;
+}
+
+/**
+ * The `oauth2` scheme, whose `scopes` map must **define every scope any
+ * operation in this document references** (OpenAPI 3.1 §4.8.29.2). An
+ * operation asking for a scope the scheme never declares is an invalid
+ * document, and a consent screen generated from the scheme could not offer
+ * the scope the operation demands.
+ *
+ * So the map is `CORE_SCOPES` ∪ every scope a published operation declared —
+ * core's catalog is the floor, and an extension route published under
+ * `/api/v1` adds its own vocabulary on top. Extras are appended in sorted
+ * order so the emitted document is deterministic (the additivity gate diffs
+ * it byte-for-byte).
+ *
+ * @param usedScopes every scope referenced by an emitted operation's `security`.
+ */
+function buildSecuritySchemes(usedScopes: ReadonlySet<string>): Record<string, unknown> {
+  const extensionCopy = registeredExtensionScopeCopy();
+  const scopes: Record<string, string> = { ...CORE_SCOPES };
+  for (const id of [...usedScopes].sort()) {
+    if (id in scopes) continue;
+    // Fallback is the id verbatim, deliberately: core has no way to describe a
+    // vertical's scope and must not invent consent copy for one (see
+    // `TrellisExtension.scopes`). A scope reaching this branch is declared on a
+    // route but missing from its extension's `scopes` catalog, or generated
+    // before that extension registered. The document stays valid either way,
+    // and the placeholder is visibly an id rather than a sentence nobody wrote.
+    scopes[id] = extensionCopy[id] ?? id;
+  }
+
   return {
     [OAUTH2_SCHEME]: {
       type: "oauth2",
@@ -278,8 +335,9 @@ function buildSecuritySchemes(): Record<string, unknown> {
           authorizationUrl: "/agents/authorize",
           tokenUrl: "/oauth2/token",
           // Imported, not restated: `auth/scopes.ts` is the single source
-          // of truth for the core scope catalog and its consent copy.
-          scopes: { ...CORE_SCOPES },
+          // of truth for the core scope catalog and its consent copy. Every
+          // core entry appears here verbatim; extension scopes are unioned on.
+          scopes,
         },
       },
     },
@@ -412,6 +470,10 @@ export function generateOpenApiDoc(routes: Route[]): OpenApiDocument {
   const paths: Record<string, OpenApiPathItem> = {};
   const schemas: Record<string, unknown> = {};
   const seenOperationIds = new Map<string, string>();
+  // Every scope an emitted operation ends up referencing. Collected while
+  // walking, not from `routes`, so the scheme defines exactly the vocabulary
+  // the document uses — a route filtered out above contributes nothing.
+  const usedScopes = new Set<string>();
 
   for (const route of routes) {
     if (route.publicSpec !== true) continue;
@@ -453,6 +515,7 @@ export function generateOpenApiDoc(routes: Route[]): OpenApiDocument {
       }
 
       paths[openApiPath][method] = buildOperation(route, method, openApiPath, operationId, scopes, schemas);
+      for (const scope of scopes) usedScopes.add(scope);
     }
   }
 
@@ -467,7 +530,7 @@ export function generateOpenApiDoc(routes: Route[]): OpenApiDocument {
     paths,
     components: {
       schemas,
-      securitySchemes: buildSecuritySchemes(),
+      securitySchemes: buildSecuritySchemes(usedScopes),
     },
   };
 }

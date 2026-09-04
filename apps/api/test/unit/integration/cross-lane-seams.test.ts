@@ -123,13 +123,17 @@ describe("one scope catalog, two consumers", () => {
     }
   ).flows.authorizationCode.scopes;
 
-  it("emits the core catalog verbatim — the generator imports it, never restates it", () => {
+  it("contains the core catalog verbatim — the generator imports it, never restates it", () => {
     // Lane B asserts this too (`openapi/generator.test.ts`). It is repeated
     // here because it is the premise everything below rests on: if the spec's
     // catalog were a copy, every equivalence in this file would be comparing
     // a copy to itself.
-    expect(catalog).toEqual(CORE_SCOPES);
-    expect(read("lib/openapi/generator.ts")).toMatch(/scopes:\s*\{\s*\.\.\.CORE_SCOPES\s*\}/);
+    //
+    // `toMatchObject`, not `toEqual`: since the F-2 fix the map is the UNION of
+    // core's catalog and every scope a published operation references. Core's
+    // entries must appear unchanged; extras are legitimate.
+    expect(catalog).toMatchObject(CORE_SCOPES);
+    expect(read("lib/openapi/generator.ts")).toMatch(/=\s*\{\s*\.\.\.CORE_SCOPES\s*\}/);
   });
 
   it("declares every scope any route in the live table asks for", () => {
@@ -155,19 +159,14 @@ describe("one scope catalog, two consumers", () => {
     }
   });
 
-  it("RECORDED GAP: an extension's own scopes reach `security` but not `securitySchemes`", () => {
-    // `buildSecuritySchemes()` emits `{...CORE_SCOPES}` and nothing else,
-    // while `buildSecurity()` copies whatever the route declared. An extension
-    // route publishing `dogs:read` therefore produces a document whose
-    // operation references a scope its own `oauth2` scheme never defines —
-    // invalid per OpenAPI 3.1 §4.8.29.2, and a consent screen generated from
-    // the scheme could not offer the scope the operation demands.
-    //
-    // Recorded, not fixed: `lib/openapi/generator.ts` is lane B's file and
-    // nothing publishes an extension route yet (plan 034 README §"Do not pivot
-    // on blockers"). This test pins the CURRENT behaviour so the day the
-    // generator learns extension catalogs, it fails here and is inverted
-    // deliberately rather than drifting silently.
+  it("an extension's own scopes reach BOTH `security` and `securitySchemes`", () => {
+    // F-2, fixed and inverted. `buildSecurity()` copies whatever the route
+    // declared; `buildSecuritySchemes()` used to emit `{...CORE_SCOPES}` and
+    // nothing else, so an extension route publishing `walks:read` produced a
+    // document whose operation referenced a scope its own `oauth2` scheme never
+    // defined — invalid per OpenAPI 3.1 §4.8.29.2, and a consent screen
+    // generated from the scheme could not offer the scope the operation
+    // demands. The scheme's map is now the union of the two.
     const ext: TrellisExtension = {
       id: "dog",
       terminology: { entity: "dog", entityPlural: "dogs" },
@@ -203,8 +202,14 @@ describe("one scope catalog, two consumers", () => {
         flows: { authorizationCode: { scopes: Record<string, string> } };
       }
     ).flows.authorizationCode.scopes;
-    expect(Object.keys(extCatalog)).not.toContain("walks:read");
-    expect(extCatalog).toEqual(CORE_SCOPES);
+    expect(Object.keys(extCatalog)).toContain("walks:read");
+    // No extension named `dog` is registered in this unit context, so the
+    // description falls back to the id verbatim — core never invents consent
+    // copy for a vertical. `openapi/generator.test.ts` covers the registered
+    // case, where the words come from `TrellisExtension.scopes`.
+    expect(extCatalog["walks:read"]).toBe("walks:read");
+    // Core's catalog is the floor, unchanged.
+    expect(extCatalog).toMatchObject(CORE_SCOPES);
   });
 });
 
