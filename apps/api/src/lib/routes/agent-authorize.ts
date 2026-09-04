@@ -37,6 +37,8 @@ import {
   type CognitoIssuer,
 } from "../oauth/cognito-issuer.js";
 import {
+  deriveRefreshJti,
+  hashSessionToken,
   recordAgentSession,
   type AgentSessionRecord,
 } from "../oauth/refresh-detection.js";
@@ -529,11 +531,19 @@ export const agentAuthorizeRoutes: Route[] = [
         refreshToken,
       });
 
+      // D.2 — the jti MUST be a function of the refresh token actually issued.
+      // It used to be `randomBytes(16)` under a comment claiming derivation,
+      // so `consumeRefreshJti` could never match a presented token and replay
+      // detection had no production caller. `SESSION_SECRET` is the master the
+      // HMAC sub-key is derived from; it is required at boot, so an absent
+      // value here is a misconfiguration, not a runtime branch.
+      const jtiMasterSecret = env.SESSION_SECRET;
+      if (!jtiMasterSecret) {
+        return jsonError(env, { error: "not_configured" }, 503);
+      }
+
       const sessionId = `s_${randomBytes(16).toString("base64url")}`;
-      // Naive jti extraction from the new refresh token — Cognito refresh
-      // tokens are opaque, so we derive a jti from the token bytes via
-      // a stable hash.
-      const initialJti = `j_${randomBytes(16).toString("base64url")}`;
+      const initialJti = deriveRefreshJti(tokens.refresh_token, jtiMasterSecret);
 
       await approveDeviceAuth({
         deviceCode,
@@ -556,8 +566,16 @@ export const agentAuthorizeRoutes: Route[] = [
         sourceIp: requestIp,
         createdAt: Math.floor(Date.now() / 1000),
         lastUsedAt: Math.floor(Date.now() / 1000),
+        // D.1 — pin the access token this session will present, so revoking
+        // this session can blocklist exactly it instead of globally signing
+        // the human out. Hash only; the token itself is never stored here.
+        accessTokenHash: hashSessionToken(tokens.access_token),
       };
-      await recordAgentSession({ session: sessionRow, initialJti });
+      await recordAgentSession({
+        session: sessionRow,
+        refreshToken: tokens.refresh_token,
+        masterSecret: jtiMasterSecret,
+      });
 
       // Audit: agent session approved.
       try {
