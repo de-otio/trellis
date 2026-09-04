@@ -36,6 +36,13 @@ vi.mock("../../src/lib/report-operator-alert.js", () => ({
     rc === "ILLEGAL_PRIORITY" || rc === "ILLEGAL",
 }));
 
+const mockCarveOut = vi.fn(async () => ({ applied: true }));
+vi.mock("../../src/lib/compliance/report-carveout.js", () => ({
+  applyIllegalPriorityCarveOut: (...args: unknown[]) => mockCarveOut(...args),
+  isCarveOutResourceType: (t: string) =>
+    ["post", "comment", "media", "entity"].includes(t),
+}));
+
 const mockEnv = {
   DEFAULT_REGION: "EU",
   SESSION_SECRET: "test-secret-32-characters-long!!!",
@@ -388,5 +395,86 @@ describe("ReportHandler — back-compat + listing", () => {
     expect(mockDb.report.findMany.mock.calls[0][0].where.reporterUserId).toBe(
       "user123",
     );
+  });
+});
+
+/**
+ * The CSAM-class carve-out has to fire on INTAKE, because there is no standing
+ * moderator to fire it later. These pin the ROUTING decision (which class does
+ * and does not trigger it) at the handler; report-carveout.test.ts pins what it
+ * then does.
+ */
+describe("ReportHandler.handleCreate — ILLEGAL_PRIORITY carve-out routing", () => {
+  let handler: ReportHandler;
+  beforeEach(() => {
+    vi.clearAllMocks();
+    handler = new ReportHandler();
+    mockDb.report.findFirst.mockResolvedValue(null);
+    mockDb.user.findUnique.mockResolvedValue({
+      email: "reporter@example.com",
+      personalTenantId: "tenant123",
+    });
+    mockDb.report.create.mockResolvedValue({
+      id: "rep1",
+      status: "pending",
+      createdAt: new Date("2026-09-04T00:00:00Z"),
+    });
+    mockCarveOut.mockResolvedValue({ applied: true });
+  });
+
+  async function fileWith(routingClass: string, resourceType = "media") {
+    mockDb.reportCategory.findUnique.mockResolvedValue({
+      key: "k",
+      active: true,
+      routingClass,
+    });
+    return handler.handleCreate(
+      createReq({ categoryKey: "k", resourceType, resourceId: "m1" }),
+      session,
+      mockEnv,
+      requestContext,
+    );
+  }
+
+  it("fires the carve-out on ILLEGAL_PRIORITY, with the new report id", async () => {
+    const res = await fileWith("ILLEGAL_PRIORITY");
+
+    expect(res.status).toBe(201);
+    expect(mockCarveOut).toHaveBeenCalledOnce();
+    const [, input] = mockCarveOut.mock.calls[0] as any[];
+    expect(input).toMatchObject({
+      reportId: "rep1",
+      resourceType: "media",
+      resourceId: "m1",
+    });
+  });
+
+  it("does NOT fire it for ILLEGAL, POLICY_VIOLATION or FEEDBACK", async () => {
+    for (const rc of ["ILLEGAL", "POLICY_VIOLATION", "FEEDBACK"]) {
+      mockCarveOut.mockClear();
+      await fileWith(rc);
+      expect(mockCarveOut, rc).not.toHaveBeenCalled();
+    }
+  });
+
+  it("does NOT restrict a legacy url/user target even at ILLEGAL_PRIORITY", async () => {
+    await fileWith("ILLEGAL_PRIORITY", "url");
+    expect(mockCarveOut).not.toHaveBeenCalled();
+  });
+
+  it("a failed carve-out still returns 201 — the notice is never dropped", async () => {
+    mockCarveOut.mockResolvedValue({
+      applied: false,
+      failure: "seam-not-configured",
+    });
+
+    const res = await fileWith("ILLEGAL_PRIORITY");
+
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as any;
+    expect(body.report.id).toBe("rep1");
+    // And the reporter learns nothing about the carve-out either way.
+    expect(JSON.stringify(body)).not.toContain("carve");
+    expect(JSON.stringify(body)).not.toContain("evidence");
   });
 });

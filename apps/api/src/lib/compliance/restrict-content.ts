@@ -71,7 +71,7 @@ export function setComplianceAlarmHook(hook: ComplianceAlarmHook): void {
 export function __resetComplianceAlarmHookForTests(): void {
   injectedAlarmHook = undefined;
 }
-function getComplianceAlarmHook(): ComplianceAlarmHook {
+export function getComplianceAlarmHook(): ComplianceAlarmHook {
   return (
     injectedAlarmHook ??
     (async (alarm) => {
@@ -135,6 +135,9 @@ export interface RestrictContentDb extends StatementOfReasonsDb {
         hiddenBy?: string;
         evidenceHold?: boolean;
         evidenceId?: string;
+        // Server-only class (block-class.ts). Written by the ILLEGAL_PRIORITY
+        // carve-out; never crosses the API boundary.
+        blockClass?: string;
       };
       select: { id: true };
     }): Promise<{ id: string }>;

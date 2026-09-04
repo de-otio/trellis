@@ -153,8 +153,28 @@ export class ReportHandler {
         env,
       );
 
+      // ILLEGAL_PRIORITY carve-out (plan 08 §2.3/§2.6): hide + evidence hold +
+      // suppressed statement + non-appealable block class + a PENDING authority
+      // report, all before any human looks at the queue. Authority SUBMISSION
+      // stays human-gated. Never throws — see report-carveout.ts.
+      if (category.routingClass === "ILLEGAL_PRIORITY") {
+        const { applyIllegalPriorityCarveOut, isCarveOutResourceType } =
+          await import("./compliance/report-carveout.js");
+        if (isCarveOutResourceType(resourceType)) {
+          await applyIllegalPriorityCarveOut(
+            db as unknown as Parameters<typeof applyIllegalPriorityCarveOut>[0],
+            {
+              reportId: report.id,
+              resourceType,
+              resourceId,
+            },
+            env,
+            region as Parameters<typeof applyIllegalPriorityCarveOut>[3],
+          );
+        }
+      }
+
       // ILLEGAL_PRIORITY / ILLEGAL => alert the operator immediately (M1 clock).
-      // Hook point only — no takedown here (Lane A2).
       if (routingClassAlertsOperator(category.routingClass)) {
         try {
           await getOperatorAlertHook()(
