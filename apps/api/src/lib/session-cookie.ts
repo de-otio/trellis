@@ -26,6 +26,7 @@ import {
 } from "@de-otio/saas-foundation/session";
 import { getLogger } from "./logger.js";
 import { CUID_RE } from "./auth/cuid.js";
+import type { ScopeSet } from "./auth/scopes.js";
 import type { Env } from "../env.js";
 
 export type UserRole =
@@ -99,6 +100,30 @@ export interface Session {
   // it only from a ≤1h token is what keeps a removed-from-tenant user from
   // retaining scoped access for a cookie lifetime.
   activeTenantId?: string;
+
+  // ── Principal (plan 034 lane A) ────────────────────────────────────────
+  //
+  // Both are stamped at *read* time by `getSession` and are in
+  // SEAL_FORBIDDEN_FIELDS — they are never written into sealed material and
+  // never trusted from it. The reasoning is `activeTenantId`'s, verbatim:
+  // freshness is a security property for scope-shaped data. A sealed scope
+  // set would survive its own revocation for up to the 90-day cookie
+  // lifetime, which is the exact failure the seal strip exists to prevent.
+
+  /**
+   * The third-party client acting on the user's behalf. Absent means
+   * first-party — a cookie or localStorage session is the human's own, with
+   * no client in between, so nothing populates this today.
+   */
+  clientId?: string;
+
+  /**
+   * What this session was granted. Every path in `getSession` stamps `"*"`:
+   * a session that survived decryption is by construction first-party and
+   * unscoped. It is deliberately not "the set of all core scopes" — a
+   * first-party session must keep passing when a new scope is defined.
+   */
+  scopes?: ScopeSet;
 }
 
 /** Minimum session-secret length. Mirrors foundation's MIN_SECRET_LENGTH. */
@@ -108,8 +133,15 @@ const SESSION_SECRET_MIN_LENGTH = MIN_SECRET_LENGTH;
  * Session fields that must NEVER be persisted in sealed material (cookie /
  * localStorage token). Trusted only from a freshly-verified JWT per request.
  * See the `Session.activeTenantId` doc and `encryptSession`'s `[SR:H3]` note.
+ *
+ * Plan 034 lane A adds the principal fields on the same argument: a grant is
+ * scope-shaped data whose freshness is a security property. Sealing `scopes`
+ * into a 90-day cookie would let a revoked grant keep working for the cookie's
+ * lifetime, and sealing `clientId` would let a decrypted payload *claim* to be
+ * a third-party client. Both are stamped per request instead, from the
+ * freshly-authenticated credential.
  */
-const SEAL_FORBIDDEN_FIELDS = ["activeTenantId"] as const;
+const SEAL_FORBIDDEN_FIELDS = ["activeTenantId", "clientId", "scopes"] as const;
 
 /**
  * Remove {@link SEAL_FORBIDDEN_FIELDS} from a to-be-sealed JSON payload string.
@@ -416,7 +448,10 @@ export class SessionManager {
       // path can never supply one — defense-in-depth behind `encryptSession`'s
       // seal-time strip.
       for (const field of SEAL_FORBIDDEN_FIELDS) delete session[field];
-      return session as unknown as Session;
+      // Plan 034 lane A: stamp the principal AFTER the strip, so a sealed
+      // payload can neither supply a `clientId` nor widen/narrow `scopes`.
+      // A cookie session is first-party and unscoped, always.
+      return { ...(session as unknown as Session), scopes: "*" };
     }
 
     this.hadInvalidSessionCookie = true;
@@ -585,6 +620,12 @@ export class SessionManager {
             ageTier:
               (claimsRecord["custom:ageTier"] as AgeTier) || "ADULT",
             ...(activeTenantId ? { activeTenantId } : {}),
+            // Plan 034 lane A: a verified Bearer JWT on this path is the
+            // human's own token — first-party, unscoped. No `scope`/`scp`/
+            // `azp` claim is read from the IdP (see auth-middleware.ts for
+            // why); a narrowed grant will come from the trellis authorization
+            // server in Phase 1, not from a new claim here.
+            scopes: "*",
           };
 
           // SEC L2: the JWT is verified — now check revocation. `revokeSession`
@@ -759,7 +800,10 @@ export class SessionManager {
       // the same strip as `narrowSession`. `activeTenantId` is trusted ONLY from
       // a verified JWT (Strategy 1a), never from a decrypted token payload.
       for (const field of SEAL_FORBIDDEN_FIELDS) delete session[field];
-      return session as unknown as Session;
+      // Plan 034 lane A: same stamp as `narrowSession` — a localStorage token
+      // is a sealed session too, so its principal comes from here, not from
+      // the decrypted payload.
+      return { ...(session as unknown as Session), scopes: "*" };
     }
     return null;
   }

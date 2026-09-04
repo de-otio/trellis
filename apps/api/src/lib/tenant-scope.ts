@@ -117,6 +117,12 @@ export const TENANT_SCOPED_MODELS: ReadonlySet<string> = new Set<string>([
   "Rsvp",
   "EventShift",
   "ShiftSignup",
+  // Domain-event outbox (plan 034 lane E). Carries its own denormalized
+  // tenantId, set explicitly at every emission point — an event is *about* a
+  // tenant and must never be readable from another one, so it is classified
+  // here rather than as a global log table. Nothing reads it yet, which is
+  // exactly why classifying it now is cheap.
+  "DomainEvent",
   // Composed extension-owned (`ext_*`) models — appended from the generated
   // registry (O-1 design §12.3 H1). Empty today; L2's composer populates it.
   ...extensionScopedModelNames(),

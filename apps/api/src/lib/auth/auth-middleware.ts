@@ -94,6 +94,22 @@ export async function authMiddleware(
     tenantRole,
     handle,
     membershipsLoader,
+
+    // Principal (plan 034 lane A). A verified Bearer JWT on this path is the
+    // human's own token, so the principal is first-party: no client in
+    // between, and no narrowing of the user's authority.
+    //
+    // NOTE — do **not** start reading a `scope` / `scp` / `azp` / `client_id`
+    // claim from the IdP here. The realm's protocol mappers are documented as
+    // inert (identity is resolved server-side from `sub` — see
+    // `resolveJitClaims` above), so a claim read here would be attacker- or
+    // misconfiguration-controlled rather than trellis-issued. A genuinely
+    // scoped token will be minted by the trellis authorization server in
+    // Phase 1 (plan 034 README, "What this plan deliberately does not do"),
+    // and *that* is where `clientId` and a narrowed `scopes` get populated —
+    // on every branch, including the failure branches.
+    clientId: undefined,
+    scopes: "*",
   };
 }
 

@@ -5,29 +5,18 @@
  * Applies new privacy defaults and notifies users and guardians.
  */
 
-import type { AgeTier } from "@prisma/client";
 import type { Env } from "../env.js";
 import { getLogger, Logger } from "./logger.js";
 import { getPrivacyDefaults, type PrivacySettings } from "./privacy-defaults.js";
 
-/**
- * Compute the age tier from a date of birth.
- */
-export function computeAgeTier(dateOfBirth: Date, now: Date = new Date()): AgeTier {
-  const age = getAge(dateOfBirth, now);
-  if (age < 13) return "CHILD";
-  if (age < 18) return "TEEN";
-  return "ADULT";
-}
-
-function getAge(dateOfBirth: Date, now: Date): number {
-  let age = now.getFullYear() - dateOfBirth.getFullYear();
-  const monthDiff = now.getMonth() - dateOfBirth.getMonth();
-  if (monthDiff < 0 || (monthDiff === 0 && now.getDate() < dateOfBirth.getDate())) {
-    age--;
-  }
-  return age;
-}
+// `computeAgeTier` used to be re-implemented here, and this copy read the
+// clock in SERVER-LOCAL time while the other two copies read UTC. Dates of
+// birth are stored at UTC midnight, so on any host not running in UTC this job
+// could place a user one day either side of a birthday and disagree with
+// provisioning about the same user's tier. Re-exported so existing importers
+// of this module keep working.
+export { computeAgeTier } from "./age-gate.js";
+import { computeAgeTier } from "./age-gate.js";
 
 /**
  * Determine if a user setting is MORE restrictive than the new default.

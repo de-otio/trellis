@@ -49,6 +49,7 @@ import type { RealtimeTransport } from "./lib/realtime/index.js";
 import type { DirectoryProfileConfig } from "./lib/org-category/directory-profile-config.js";
 import type { DirectorySearchConfig } from "./lib/org-category/directory-search-config.js";
 import type { DisclosurePosture } from "./lib/provenance/posture.js";
+import type { AgentSurfaceContent } from "./lib/routes/agent-surface.js";
 /** Application environment — available to all route handlers */
 export interface Env {
     DATABASE_URL: string;
@@ -133,6 +134,16 @@ export interface Env {
     APP_DOMAIN?: string;
     APP_URL?: string;
     ALLOWED_ORIGINS?: string;
+    /**
+     * Consumer-supplied content for the agent-surface text routes (GET
+     * /llms.txt, GET /security.txt) — plan 034 lane "agent words". Same
+     * app-configuration path as APP_DOMAIN/ALLOWED_ORIGINS above: sourced from
+     * AGENT_SURFACE_LLMS_TXT / AGENT_SURFACE_SECURITY_TXT env vars, additive and
+     * optional. `llmsTxt` absent falls back to core's generic, truthful default
+     * (see agent-surface.ts); `securityTxt` absent makes GET /security.txt 404
+     * rather than serve a placeholder contact — see agent-surface.ts for why.
+     */
+    agentSurface?: AgentSurfaceContent;
     ACTIVITYPUB_BASE_URL?: string;
     /**
      * Master switch for ActivityPub federation. Defaults to `false`. When false,
@@ -837,18 +848,7 @@ export type { MediaModerationProvider, MediaPin, ImageRef, S3Ref, ModerationVerd
 export { completionEnvelopeBody, parseCompletionEnvelope, } from "./lib/media/completion-envelope.js";
 export type { ModerationCompletionEnvelope } from "./lib/media/completion-envelope.js";
 export { setTextModerationProvider } from "./lib/media/request-text-moderation.js";
-export { setEvidencePreservationStore, setAuthorityReportChannel, setModerationFeedbackSink, } from "./lib/media/compliance-seams.js";
-export type { EvidencePreservationStore, AuthorityReportChannel, ModerationFeedbackSink, EvidenceBundle, AuthorityReportBundle, AuthorityReportResult, ModerationFeedbackRecord, BlockClass, } from "./lib/media/compliance-seams.js";
-export { setReportTemplates, REPORT_TEMPLATE_KEYS, } from "./lib/report-templates.js";
-export type { ReportTemplate, ReportTemplateMap } from "./lib/report-templates.js";
-export { setOperatorAlertHook, } from "./lib/report-operator-alert.js";
-export type { OperatorAlert, OperatorAlertHook, } from "./lib/report-operator-alert.js";
-export { restrictContent, evidenceHoldExemptWhere, setComplianceAlarmHook, } from "./lib/compliance/restrict-content.js";
-export type { RestrictContentRef, RestrictContentOpts, RestrictContentResult, ComplianceAlarm, ComplianceAlarmHook, } from "./lib/compliance/restrict-content.js";
-export { setStatementDelivery } from "./lib/compliance/statement-of-reasons.js";
-export type { StatementDelivery } from "./lib/compliance/statement-of-reasons.js";
-export { ILLEGAL_SUSPECTED_LABEL, deriveBlockClass, isAppealable, } from "./lib/compliance/block-class.js";
-export { createPendingAuthorityReport, markAuthorityReportSubmitted, markAuthorityReportClosed, } from "./lib/compliance/authority-report.js";
+export type { AgentSurfaceContent } from "./lib/routes/agent-surface.js";
 
 // ===== lib/audit-composer.d.ts =====
 /**
@@ -1025,352 +1025,79 @@ export declare class TenantAuditEmitter {
 }
 export type { AuditEvent };
 
-// ===== lib/compliance/authority-report.d.ts =====
-import type { Env } from "../../env.js";
-import type { Region } from "../region-detection.js";
-/** Minimal Prisma slice for authority-report persistence. */
-export interface AuthorityReportDb {
-    authorityReport: {
-        create(args: {
-            data: {
-                jurisdiction: string;
-                status: string;
-                evidenceId?: string | null;
-                bundle: Record<string, unknown>;
-            };
-            select: {
-                id: true;
-                status: true;
-            };
-        }): Promise<{
-            id: string;
-            status: string;
-        }>;
-        findUnique(args: {
-            where: {
-                id: string;
-            };
-            select: {
-                id: true;
-                status: true;
-                evidenceId: true;
-            };
-        }): Promise<{
-            id: string;
-            status: string;
-            evidenceId: string | null;
-        } | null>;
-        update(args: {
-            where: {
-                id: string;
-            };
-            data: {
-                status?: string;
-                channelMode?: string | null;
-                submittedAt?: Date;
-                closedAt?: Date;
-            };
-            select: {
-                id: true;
-                status: true;
-            };
-        }): Promise<{
-            id: string;
-            status: string;
-        }>;
-    };
-}
-export interface CreateAuthorityReportInput {
-    jurisdiction: string;
-    evidenceId?: string | null;
-    /** Art.-18 info bundle — REFS, never bytes. */
-    bundle: Record<string, unknown>;
-}
+// ===== lib/auth/scopes.d.ts =====
 /**
- * Create a `pending` authority report. This function DELIBERATELY does not touch
- * the {@link AuthorityReportChannel} — nothing is filed on creation. The record
- * sits `pending` until an operator confirms via {@link markAuthorityReportSubmitted}.
- */
-export declare function createPendingAuthorityReport(db: AuthorityReportDb, input: CreateAuthorityReportInput, env: Env, region: Region): Promise<{
-    id: string;
-    status: string;
-}>;
-/**
- * Operator-confirmed submission (M3). Files the report THROUGH the injected
- * channel — never called automatically by the pipeline. Persists the channel
- * mode + `submitted` status. Idempotent-ish: a non-`pending` report is returned
- * unchanged.
- */
-export declare function markAuthorityReportSubmitted(db: AuthorityReportDb, id: string, input: {
-    jurisdiction: string;
-    bundle: Record<string, unknown>;
-    evidenceId?: string | null;
-}, env: Env, region: Region): Promise<{
-    id: string;
-    status: string;
-    channelMode: string;
-}>;
-/**
- * Close an authority report and RELEASE the evidence hold (plan 08 §2.6). The
- * hold release calls the injected {@link EvidencePreservationStore} for the
- * WORM-copy hold and clears the DB `evidenceHold` flag on any media rows carrying
- * this evidence id, so the hard-delete GC path may resume for them.
- */
-export declare function markAuthorityReportClosed(db: AuthorityReportDb & {
-    mediaFile?: {
-        updateMany(args: {
-            where: {
-                evidenceId: string;
-            };
-            data: {
-                evidenceHold: boolean;
-            };
-        }): Promise<{
-            count: number;
-        }>;
-    };
-}, id: string, reason: string, env: Env, region: Region): Promise<{
-    id: string;
-    status: string;
-}>;
-
-// ===== lib/compliance/block-class.d.ts =====
-import type { ModerationVerdict } from "../media/moderation-provider.js";
-import type { BlockClass } from "../media/compliance-seams.js";
-/**
- * The RESERVED, jurisdiction-/provider-neutral label token that signals the
- * illegal-suspected class. A deployment's moderation adapter emits a
- * {@link ModerationLabel} with this `category` when its underlying provider
- * flags a suspected-illegal category (the text path: OpenAI `sexual/minors`;
- * later: a media hash-match hit). Core matches ONLY this token, so no real
- * category vocabulary is ever compiled into the public tarball.
+ * Core scope catalog and the single set-inclusion predicate.
  *
- * The `x-` prefix marks it as an out-of-band, reserved control token distinct
- * from ordinary opaque classifier tokens.
+ * A **scope** is what a third-party client was granted on behalf of a user.
+ * It is a *different authorization axis* from a **capability**
+ * (`auth/capabilities.ts`), which is role-derived and tenant-scoped and
+ * answers "may this member do this in this tenant". Both must pass; neither
+ * implies the other, and the two vocabularies are deliberately kept apart:
+ *
+ * - scope strings are `<resource>:<verb>` — colon (`posts:write`)
+ * - capability strings are `<resource>.<verb>` — dot (`post.create`)
+ *
+ * The separators differ so that a value from one axis can never silently
+ * satisfy a check on the other: `posts.write` is not a scope and
+ * {@link hasScope} will not accept it in place of `posts:write`.
+ *
+ * This module is **declaration only**. Nothing here reads a request, decides
+ * an HTTP status, or is wired into the dispatcher; the gate that does
+ * (`requireScope`) is built on top of {@link hasScope} and lives in
+ * `auth/require.ts`.
  */
-export declare const ILLEGAL_SUSPECTED_LABEL = "x-illegal-suspected";
 /**
- * Derive the SERVER-ONLY {@link BlockClass} from a moderation verdict.
+ * The scopes core itself defines, with the consent copy shown to the user.
  *
- * `illegal-suspected` iff ANY label carries the reserved
- * {@link ILLEGAL_SUSPECTED_LABEL} token; otherwise `lawful-flagged`. Total over
- * its input; a verdict with no labels is `lawful-flagged`.
+ * The copy lives beside the id on purpose. It is the sentence a person reads
+ * before granting access, so it is part of the contract rather than something
+ * a consent page invents later. Second person, present tense, describing what
+ * the client will be able to do — not what the endpoint is called.
  *
- * The asymmetry is deliberate and conservative in the direction that matters:
- * illegal-class must be affirmatively signalled by the adapter, never inferred.
+ * Extensions declare their own scopes (with their own copy) through
+ * `TrellisExtension.scopes`; core never invents vocabulary for a vertical.
  */
-export declare function deriveBlockClass(verdict: ModerationVerdict): BlockClass;
-/**
- * Whether a blocked item may be offered the submit-for-analysis appeal path.
- *
- * `false` for `illegal-suspected` (the carve-out: never appealable, never
- * offered submit). `true` for `lawful-flagged`. An UNKNOWN/absent block class is
- * treated as `lawful-flagged` → appealable — media illegal-class detection is a
- * known gap (spec 07 §8), so only an explicitly-marked illegal item is
- * non-appealable; a blocked-but-unclassified item gets the lawful appeal path.
- *
- * `appealable` is the ONLY bit derived from the block class that ever crosses
- * the domain boundary (spec 07 §4.1).
- */
-export declare function isAppealable(blockClass: BlockClass | null | undefined): boolean;
-
-// ===== lib/compliance/restrict-content.d.ts =====
-import type { Env } from "../../env.js";
-import type { Region } from "../region-detection.js";
-import { type StatementOfReasonsDb } from "./statement-of-reasons.js";
-/**
- * The canonical Prisma `where` fragment that EXCLUDES content under a live
- * evidence hold. Applied by BOTH the nightly hard-delete purge and the
- * account-deletion media-erasure cascade so a held original is never destroyed
- * while an authority case is open. Referencing one definition keeps the two call
- * sites from drifting.
- */
-export declare function evidenceHoldExemptWhere(): {
-    evidenceHold: false;
+export declare const CORE_SCOPES: {
+    readonly "profile:read": "Read your name, handle and avatar";
+    readonly "entities:read": "Read the profiles you can see";
+    readonly "entities:write": "Create and update profiles you own";
+    readonly "posts:read": "Read posts you can see";
+    readonly "posts:write": "Post on your behalf";
+    readonly "tenant:read": "Read which space you are in";
+    readonly "events:subscribe": "Receive notifications about your data";
 };
-export interface ComplianceAlarm {
-    readonly kind: string;
-    readonly ref: string;
-    readonly detail?: Record<string, unknown>;
-}
-export type ComplianceAlarmHook = (alarm: ComplianceAlarm) => Promise<void>;
-export declare function setComplianceAlarmHook(hook: ComplianceAlarmHook): void;
-export declare function __resetComplianceAlarmHookForTests(): void;
-export declare function getComplianceAlarmHook(): ComplianceAlarmHook;
-/** Bounded in-request preserve retries. Deployment may add an async queue too. */
-export declare const MAX_PRESERVE_ATTEMPTS = 3;
-export type RestrictResourceType = "post" | "comment" | "media" | "entity";
-export interface RestrictContentRef {
-    resourceType: RestrictResourceType;
-    resourceId: string;
-    /** The affected user (content owner) — the Art. 17 statement recipient. */
-    affectedUserId: string;
-    tenantId?: string;
-    /** The chain of report ids / signals that led here (for the evidence bundle). */
-    reportChain?: ReadonlyArray<string>;
-    /** Uploader/account context available at preservation time (refs, not bytes). */
-    uploaderContext?: Record<string, unknown>;
-    /** Where the preserved bytes live (media path). Refs only. */
-    bytesLocation?: {
-        bucket: string;
-        key: string;
-        versionId?: string;
-    };
-}
-export interface RestrictContentOpts {
-    /** Copy to the evidence store before serving stops permanently. */
-    preserve: boolean;
-    /** Deployment-supplied Art. 17 template key. */
-    statementTemplateKey: string;
-    /** Non-tip-off carve-out: writes the statement, skips delivery. */
-    suppressStatement?: {
-        reasonKey: string;
-    };
-    /** "removed" | "hidden" | "account-suspended" … (default "hidden"). */
-    restriction?: string;
-    /** Template PARAMS only — never raw classifier output (sanitized downstream). */
-    statementParams?: Record<string, unknown>;
-}
-export interface RestrictContentResult {
-    restricted: true;
-    evidenceId?: string;
-    statementId: string;
-    /** True if preservation was requested but ultimately failed (item still hidden). */
-    preserveFailed?: boolean;
-}
-/** Prisma slice restrictContent needs (structural — mockable in unit tests). */
-export interface RestrictContentDb extends StatementOfReasonsDb {
-    mediaFile: {
-        update(args: {
-            where: {
-                id: string;
-            };
-            data: {
-                hidden?: boolean;
-                hiddenAt?: Date;
-                hiddenBy?: string;
-                evidenceHold?: boolean;
-                evidenceId?: string;
-                blockClass?: string;
-            };
-            select: {
-                id: true;
-            };
-        }): Promise<{
-            id: string;
-        }>;
-    };
-    post: {
-        update(args: {
-            where: {
-                id: string;
-            };
-            data: {
-                hiddenByAuthor?: boolean;
-            };
-            select: {
-                id: true;
-            };
-        }): Promise<{
-            id: string;
-        }>;
-    };
-    postComment: {
-        update(args: {
-            where: {
-                id: string;
-            };
-            data: {
-                deletedAt?: Date;
-            };
-            select: {
-                id: true;
-            };
-        }): Promise<{
-            id: string;
-        }>;
-    };
-}
+/** A scope id defined by core. Extension scopes are plain strings. */
+export type CoreScope = keyof typeof CORE_SCOPES;
 /**
- * Orchestrate a takedown. See the module header for ordering + failure
- * semantics. Returns the statement id and (when preserved) the evidence id.
+ * What a principal was granted.
+ *
+ * `"*"` means **an unscoped first-party session** — a cookie or JWT session
+ * belonging to the human themselves, which predates scopes entirely and is
+ * not narrowed by them. It is deliberately not spelled as "the set of all
+ * core scopes": a first-party session must keep passing when a new scope is
+ * added to {@link CORE_SCOPES} or by an extension.
+ *
+ * An **empty set** is the opposite and is a real, reachable state: a token
+ * that authenticated but was granted nothing. It passes only a requirement
+ * that asks for nothing.
  */
-export declare function restrictContent(db: RestrictContentDb, ref: RestrictContentRef, opts: RestrictContentOpts, env: Env, region: Region): Promise<RestrictContentResult>;
-
-// ===== lib/compliance/statement-of-reasons.d.ts =====
-import type { Env } from "../../env.js";
+export type ScopeSet = ReadonlySet<string> | "*";
 /**
- * Keys that MUST NEVER appear in a statement's `params` — they are raw
- * classifier / moderation output whose exposure would (a) leak operational
- * thresholds (anti-oracle) and (b) reveal detection detail to the affected user.
- * The sanitizer drops them defensively even if a caller passes them by mistake.
+ * The one place set-inclusion is decided.
+ *
+ * - `"*"` (first-party) satisfies every requirement.
+ * - An empty `needed` is satisfied by anything, including the empty set —
+ *   "authenticated, no particular scope".
+ * - Otherwise every needed scope must be present exactly. Membership is exact
+ *   string equality: there is no prefix rule, no wildcard within a scope, and
+ *   no separator normalisation, so `posts.write` (the capability separator)
+ *   does not satisfy `posts:write`.
+ *
+ * @param granted what the principal holds (`AuthContext.scopes`)
+ * @param needed what the route declared (`Route.scopes`)
  */
-export declare const FORBIDDEN_STATEMENT_PARAM_KEYS: ReadonlyArray<string>;
-/**
- * Strip any forbidden raw-classifier keys from statement params. Pure + total;
- * returns a new object (immutable input). A non-object input yields `undefined`.
- */
-export declare function sanitizeStatementParams(params: Record<string, unknown> | null | undefined): Record<string, unknown> | undefined;
-/** Delivery transport for a written statement. Injected for tests. */
-export type StatementDelivery = (record: {
-    id: string;
-    affectedUserId: string;
-    templateKey: string;
-    params?: Record<string, unknown>;
-}) => Promise<void>;
-/** Deployment injects the affected-user delivery transport at startup. */
-export declare function setStatementDelivery(delivery: StatementDelivery): void;
-/** Test-only: clear the injected delivery transport. */
-export declare function __resetStatementDeliveryForTests(): void;
-/** Minimal Prisma slice needed to write a statement. */
-export interface StatementOfReasonsDb {
-    statementOfReasons: {
-        create(args: {
-            data: {
-                affectedUserId: string;
-                resourceType: string;
-                resourceId: string;
-                restriction: string;
-                templateKey: string;
-                params?: Record<string, unknown>;
-                suppressed: boolean;
-                suppressReason?: string | null;
-            };
-            select: {
-                id: true;
-                suppressed: true;
-            };
-        }): Promise<{
-            id: string;
-            suppressed: boolean;
-        }>;
-    };
-}
-export interface WriteStatementInput {
-    affectedUserId: string;
-    resourceType: string;
-    resourceId: string;
-    /** "removed" | "hidden" | "account-suspended" … */
-    restriction: string;
-    templateKey: string;
-    params?: Record<string, unknown>;
-    /** Present => suppress DELIVERY (still writes the record, audited). */
-    suppress?: {
-        reasonKey: string;
-    };
-}
-export interface WriteStatementResult {
-    statementId: string;
-    suppressed: boolean;
-    delivered: boolean;
-}
-/**
- * Write a statement of reasons and (unless suppressed) deliver it. Params are
- * sanitized of raw classifier output before persistence. Delivery is
- * best-effort — a transport fault never fails the takedown, and never throws
- * into the caller.
- */
-export declare function writeStatementOfReasons(db: StatementOfReasonsDb, input: WriteStatementInput, _env: Env): Promise<WriteStatementResult>;
+export declare function hasScope(granted: ScopeSet, needed: readonly string[]): boolean;
 
 // ===== lib/extension-model-registry.d.ts =====
 /**
@@ -1850,140 +1577,6 @@ export declare function parseCompletionEnvelope(body: string): ModerationComplet
  * so core's own tests round-trip against the same producer the docs point at.
  */
 export declare function completionEnvelopeBody(envelope: ModerationCompletionEnvelope): string;
-
-// ===== lib/media/compliance-seams.d.ts =====
-/**
- * The internal, BACKEND-ONLY moderation block class. This bit NEVER leaves the
- * domain: it is not in `ModerationResolvedPayload`, not in the owner-scoped
- * disposition read (which exposes only a coarse `appealable` boolean derived
- * from it), and never in any client response or notification payload.
- *
- * - `lawful-flagged`   — a lawful-content false-positive candidate. May be
- *                        offered the submit-for-analysis path (plan 07).
- * - `illegal-suspected`— suspected-illegal (e.g. OpenAI `sexual/minors`, or a
- *                        future hash-match hit). Drives the carve-out: NEVER
- *                        offered submit, NEVER written to the analysis sink,
- *                        routed to preserve-in-place + the mandated report.
- *
- * Lane A2 consumes this; Lane A only defines it so the contract is fixed.
- */
-export type BlockClass = "lawful-flagged" | "illegal-suspected";
-/**
- * The Art. 18 "all relevant information available" bundle: a reference to the
- * content, where its bytes live, the uploader/account context, the report
- * chain, and timestamps. Refs only — NEVER raw bytes in this object.
- *
- * Field shapes are intentionally loose (`string`/`Json`-ish) at the Lane A stub
- * stage; Lane A2 tightens them alongside the `restrictContent` orchestration.
- */
-/**
- * The literal that MUST NEVER be used as an evidence copy-source bucket.
- * `"processing"` is a CAS key PREFIX inside the media bucket (see cas-keys.ts),
- * not a bucket name — handing it to a store's `CopyObject` as the source bucket
- * fails `NoSuchBucket`, and the WORM evidence then holds a manifest with no
- * bytes behind it while looking preserved (V2 Finding G).
- *
- * Lives here, next to {@link EvidenceBundle}, so every path that builds a
- * `bytesLocation` checks the SAME literal rather than each keeping its own copy.
- */
-export declare const PLACEHOLDER_EVIDENCE_BUCKET = "processing";
-export interface EvidenceBundle {
-    /** Opaque content reference (e.g. `${resourceType}:${resourceId}`). */
-    readonly contentRef: string;
-    /** Where the preserved bytes live (bucket/key handle), NOT the bytes. */
-    readonly bytesLocation?: {
-        readonly bucket: string;
-        readonly key: string;
-        readonly versionId?: string;
-    };
-    /** Uploader / account context available at preservation time. */
-    readonly uploaderContext?: Record<string, unknown>;
-    /** The chain of report ids / signals that led here. */
-    readonly reportChain?: ReadonlyArray<string>;
-    /** ISO timestamps of the relevant events. */
-    readonly timestamps?: Record<string, string>;
-}
-/**
- * M7 — preserve illegal-content evidence to a WORM store and, on case closure,
- * release the hold. skybber injects an `S3EvidencePreservationStore` (Object
- * Lock + Legal Hold). Fail-safe default THROWS: a deployment MUST inject a real
- * store before enabling any `ILLEGAL_*` category (plan 08 §5 fail-safe test).
- */
-export interface EvidencePreservationStore {
-    preserve(bundle: EvidenceBundle): Promise<{
-        evidenceId: string;
-    }>;
-    /** Release the legal hold when the authority case closes. Audited. */
-    releaseHold(evidenceId: string, reason: string): Promise<void>;
-}
-/** The bundle handed to the authority channel. Refs, never bytes. */
-export interface AuthorityReportBundle {
-    readonly jurisdiction: string;
-    readonly evidenceId?: string;
-    readonly bundle: Record<string, unknown>;
-}
-/** The two channel outcomes. `manual` = the operator files it by hand. */
-export type AuthorityReportResult = {
-    readonly mode: "manual";
-    readonly instructionsKey: string;
-} | {
-    readonly mode: "api";
-    readonly receiptId: string;
-};
-/**
- * M3 — submit an authority report through the deployment's channel. NEVER
- * auto-submits from core routing: the operator confirms and files (a false
- * positive to a federal police portal is not acceptable). Fail-safe default is
- * a manual stub that records nothing and returns a placeholder instructions key
- * — a real deployment injects `ManualBkaChannel` (which notifies the operator).
- */
-export interface AuthorityReportChannel {
-    submit(report: AuthorityReportBundle): Promise<AuthorityReportResult>;
-}
-/** A consent-gated, lawful-content feedback record destined for the sink. */
-export interface ModerationFeedbackRecord {
-    readonly resourceType: string;
-    readonly resourceId: string;
-    readonly reporterUserId: string;
-    readonly description?: string;
-    readonly includeContent: boolean;
-    /**
-     * Deterministic idempotency key for (user, resource). The sink adapter keys
-     * its (per-user-prefixed) object name on this so N identical submits from one
-     * user collapse to ONE stored record (spec 07 §6.1 + the dedup test). Stable
-     * across retries; never contains raw content.
-     */
-    readonly dedupKey: string;
-    /**
-     * The server-re-derived block class. Defense-in-depth (plan 09 §6.5): the
-     * concrete sink adapter MUST refuse to write an `illegal-suspected` record —
-     * illegal content never lands in the analysis sink even if core mis-routes.
-     */
-    readonly blockClass: BlockClass;
-}
-/**
- * plan 07 §4.2 — the write-only analysis sink for lawful-content false-positive
- * submissions. skybber injects an `S3ModerationFeedbackSink`. Fail-safe default
- * THROWS when un-injected: a submit path that silently no-ops would look like a
- * successful capture while dropping the data.
- */
-export interface ModerationFeedbackSink {
-    store(record: ModerationFeedbackRecord): Promise<void>;
-}
-/** Error thrown by an un-injected fail-safe seam. Lets wiring/tests assert. */
-export declare class ComplianceSeamNotConfiguredError extends Error {
-    constructor(seam: string);
-}
-export declare function setEvidencePreservationStore(store: EvidencePreservationStore): void;
-export declare function getEvidencePreservationStore(): EvidencePreservationStore;
-export declare function setAuthorityReportChannel(channel: AuthorityReportChannel): void;
-export declare function getAuthorityReportChannel(): AuthorityReportChannel;
-export declare function setModerationFeedbackSink(sink: ModerationFeedbackSink): void;
-export declare function getModerationFeedbackSink(): ModerationFeedbackSink;
-/** True when no real evidence store has been injected (still the throwing default). */
-export declare function isEvidencePreservationConfigured(): boolean;
-/** Test-only: clear all injected compliance seams so tests don't leak state. */
-export declare function __resetComplianceSeamsForTests(): void;
 
 // ===== lib/media/cross-check-provider.d.ts =====
 import { type ImageRef, type MediaModerationProvider, type ModerationCallOptions, type ModerationVerdict, type S3Ref, type VideoModerationStart } from "./moderation-provider.js";
@@ -4506,6 +4099,117 @@ export declare function encryptSecret(secret: string, encryptionKey: string): Pr
  */
 export declare function decryptSecret(encryptedSecret: string, encryptionKey: string): Promise<string>;
 
+// ===== lib/middleware.d.ts =====
+/**
+ * Middleware
+ *
+ * Provides middleware functionality for the route abstraction layer.
+ * Middleware can modify requests, responses, or short-circuit the request.
+ */
+import type { Env } from "../env.js";
+import type { TrellisRequestContext } from "./request-context.js";
+export interface MiddlewareContext {
+    request: Request;
+    env: Env;
+    requestContext?: TrellisRequestContext;
+    url: URL;
+    pathname: string;
+    method: string;
+}
+export type Middleware = (context: MiddlewareContext, next: () => Promise<Response>) => Promise<Response>;
+/**
+ * Compose multiple middleware functions
+ */
+export declare function composeMiddleware(middlewares: Middleware[]): Middleware;
+/**
+ * CORS middleware
+ */
+export declare function corsMiddleware(): Middleware;
+/**
+ * Client-version backstop middleware (426 Upgrade Required).
+ *
+ * The forced-upgrade mechanism is primarily a CLIENT concern: the app fetches
+ * `/api/app/version-policy` and blocks itself. This middleware is the server
+ * backstop for the case where the client's own check did not run (an old
+ * build that predates the policy code, a client with a stale cached policy).
+ *
+ * It is deliberately the narrowest thing that can work:
+ *
+ *   - it returns EITHER a 426 OR `next()` — it never produces a 2xx of its
+ *     own, authenticates nothing, and can bypass nothing;
+ *   - it acts only when a policy is configured AND the header is present AND
+ *     the header parses AND the parsed version is strictly older than the
+ *     minimum. Absent/garbage headers (curl, federation peers, health probes,
+ *     agents) pass through untouched;
+ *   - it NEVER intercepts `OPTIONS`: a browser whose preflight fails sees an
+ *     opaque network error, so an outdated web client could never even learn
+ *     that it is outdated;
+ *   - exempt paths (`/api/app/version-policy`, `/.well-known/*`, the public
+ *     ActivityPub object surface, `/health`) are listed in
+ *     `lib/client-version.ts`.
+ *
+ * LOG HYGIENE: the raw header value is never logged — only the decision token
+ * (`parsed` / `invalid` / …). The 426 body carries NO URL (a client must never
+ * navigate to a link supplied by an error response).
+ *
+ * @see lib/client-version.ts for the bounded semver rule and the telemetry cap
+ */
+export declare function clientVersionMiddleware(): Middleware;
+/**
+ * Security headers middleware
+ */
+export declare function securityHeadersMiddleware(env: Env): Middleware;
+/**
+ * Rate limiting middleware
+ *
+ * Limits requests per caller within a window, backed by the **foundation
+ * token-bucket** limiter (`RateLimiter` in `rate-limit.ts`) — the same limiter
+ * the auth path uses. Consolidated from the former fixed-window-over-KV
+ * implementation: one algorithm (token-bucket), one store (the
+ * `RATE_LIMIT_TABLE` DynamoDB limiter, or an in-memory limiter in dev/test),
+ * one 429 shape.
+ *
+ * `{maxRequests, windowMs}` map to `capacity = maxRequests`,
+ * `refillRate = maxRequests / windowSeconds` (bursts up to `maxRequests`, then
+ * continuous refill). The caller is keyed by the authenticated `userId` when
+ * present, else by request IP (handled inside `RateLimiter.getRateLimitKey`).
+ *
+ * Failure policy (S4.2) is preserved: if the distributed limiter is
+ * unreachable, fail CLOSED (503) on `/api/admin` and `/api/auth`, fail OPEN
+ * elsewhere.
+ *
+ * @param options.maxRequests - Token-bucket capacity / window limit (default: 20)
+ * @param options.windowMs - Window in ms; sets the refill rate (default: 60000)
+ */
+export declare function rateLimitMiddleware(options?: {
+    maxRequests?: number;
+    windowMs?: number;
+}): Middleware;
+/**
+ * CSRF protection middleware
+ *
+ * Validates CSRF tokens for state-changing operations (POST, PUT, DELETE, PATCH).
+ * Uses Double Submit Cookie pattern: token stored in session cookie, validated against header.
+ * Skips validation for safe methods (GET, HEAD, OPTIONS).
+ *
+ * Requires:
+ * - Valid session (user must be authenticated)
+ * - X-CSRF-Token header with valid token
+ * - CSRF token in session (or KV fallback if configured)
+ */
+export declare function csrfMiddleware(): Middleware;
+/**
+ * MFA enforcement middleware (AUTH-1)
+ *
+ * Checks if the authenticated user has a role that requires MFA
+ * and whether their session has been MFA-verified. If MFA is
+ * required but not verified, returns 403 with an mfa_required error.
+ *
+ * This middleware should be placed AFTER authentication middleware
+ * on admin/sensitive routes.
+ */
+export declare function mfaMiddleware(): Middleware;
+
 // ===== lib/org-category/directory-profile-config.d.ts =====
 /**
  * Directory-profile runtime configuration resolver.
@@ -5237,6 +4941,186 @@ export interface DeliveryPolicyResolver {
     decide(ctx: DeliveryContext): DeliveryDecision;
 }
 
+// ===== lib/region-config.d.ts =====
+/**
+ * Regional Configuration Module
+ *
+ * Provides region-specific configuration including:
+ * - Feature flags
+ * - Endpoints
+ * - Timeouts
+ * - Provider settings
+ *
+ * Security: All configurations are validated before use.
+ */
+import { type Region } from "./region-detection.js";
+/**
+ * Feature flags for authentication methods
+ */
+export interface AuthenticationFlags {
+    emailPassword: boolean;
+    magicLink: boolean;
+    phoneAuth: boolean;
+    weChatAuth: boolean;
+    qqAuth: boolean;
+    microsoftSSO: boolean;
+}
+/**
+ * Feature flags for application features
+ */
+export interface ApplicationFeatures {
+    offlineMode: boolean;
+    realTimeUpdates: boolean;
+    pushNotifications: boolean;
+}
+/**
+ * Performance configuration flags
+ */
+export interface PerformanceFlags {
+    extendedTimeouts: boolean;
+    aggressiveCaching: boolean;
+    requestBatching: boolean;
+}
+/**
+ * Security features (always enabled, cannot be disabled)
+ */
+export interface SecurityFlags {
+    encryption: boolean;
+    rateLimiting: boolean;
+    auditLogging: boolean;
+    regionValidation: boolean;
+}
+/**
+ * Feature flags for a region
+ */
+export interface FeatureFlags {
+    authentication: AuthenticationFlags;
+    features: ApplicationFeatures;
+    performance: PerformanceFlags;
+    security: SecurityFlags;
+}
+/**
+ * Endpoint configuration
+ */
+export interface EndpointConfig {
+    api: string;
+    frontend: string;
+    cdn: string;
+}
+/**
+ * Timeout configuration (in milliseconds)
+ */
+export interface TimeoutConfig {
+    api: number;
+    database: number;
+    storage: number;
+}
+/**
+ * Complete regional configuration
+ */
+export interface RegionConfig {
+    region: Region;
+    features: FeatureFlags;
+    endpoints: EndpointConfig;
+    timeouts: TimeoutConfig;
+}
+/**
+ * Environment variables interface for region configuration
+ */
+export interface Env {
+    DEFAULT_REGION?: string;
+    US_API_ENDPOINT?: string;
+    US_FRONTEND_ENDPOINT?: string;
+    US_CDN_ENDPOINT?: string;
+    EU_API_ENDPOINT?: string;
+    EU_FRONTEND_ENDPOINT?: string;
+    EU_CDN_ENDPOINT?: string;
+    CN_API_ENDPOINT?: string;
+    CN_FRONTEND_ENDPOINT?: string;
+    CN_CDN_ENDPOINT?: string;
+}
+/**
+ * Get default CN region configuration
+ *
+ * Note: This is a placeholder for future CN-region support.
+ * Currently uses conservative defaults that assume CN infrastructure is not yet set up.
+ */
+export declare function getDefaultCNConfig(env: Env): RegionConfig;
+/**
+ * Region Configuration Manager class
+ */
+export declare class RegionConfigManager {
+    private env;
+    private logger;
+    private static configCache;
+    constructor(env: Env);
+    /**
+     * Get a simple hash of environment variables that affect config
+     * This allows us to invalidate cache when env changes
+     */
+    private getEnvHash;
+    /**
+     * Get region-specific configuration
+     *
+     * Security: All configurations are validated before return (first time only)
+     *
+     * Performance: Configs are cached to avoid recreation on every request.
+     * Cache is invalidated if environment variables change.
+     *
+     * @param region - Region code ('US', 'EU', 'CN')
+     * @returns Region configuration
+     * @throws Error if region is invalid or configuration is invalid
+     */
+    getRegionConfig(region: string): RegionConfig;
+    /**
+     * Get feature flags for a region
+     *
+     * Convenience function to get just the feature flags
+     *
+     * @param region - Region code
+     * @returns Feature flags for the region
+     */
+    getFeatureFlags(region: string): FeatureFlags;
+    /**
+     * Get feature flags for a region with database toggle checks
+     *
+     * This async version checks FeatureToggleService for overrides.
+     * Falls back to default config if toggle doesn't exist.
+     *
+     * @param region - Region code
+     * @param db - Prisma client (optional, will create if not provided)
+     * @returns Feature flags for the region with toggle overrides
+     */
+    getFeatureFlagsAsync(region: string, db?: any): Promise<FeatureFlags>;
+    /**
+     * Get endpoints for a region
+     *
+     * Convenience function to get just the endpoints
+     *
+     * @param region - Region code
+     * @returns Endpoints for the region
+     */
+    getEndpoints(region: string): EndpointConfig;
+    /**
+     * Get timeouts for a region
+     *
+     * Convenience function to get just the timeouts
+     *
+     * @param region - Region code
+     * @returns Timeouts for the region
+     */
+    getTimeouts(region: string): TimeoutConfig;
+}
+/**
+ * Legacy functions for backward compatibility
+ * @deprecated Use new RegionConfigManager class instead
+ */
+export declare function getRegionConfig(region: string, env: Env): RegionConfig;
+export declare function getFeatureFlags(region: string, env: Env): FeatureFlags;
+export declare function getFeatureFlagsAsync(region: string, env: Env, db?: any): Promise<FeatureFlags>;
+export declare function getEndpoints(region: string, env: Env): EndpointConfig;
+export declare function getTimeouts(region: string, env: Env): TimeoutConfig;
+
 // ===== lib/region-detection.d.ts =====
 /**
  * Region Detection Module
@@ -5379,68 +5263,286 @@ export declare function isValidRegion(region: string): region is Region;
 export declare function detectRegion(request: Request, env: Env, sessionManager?: SessionManager, session?: Session | null): Promise<Region>;
 export declare function detectRegionSync(request: Request, env: Env): Region;
 
-// ===== lib/report-operator-alert.d.ts =====
-import type { Env } from "../env.js";
-import type { RoutingClass } from "@prisma/client";
-/** The payload handed to the operator-alert hook. Opaque refs, no legal copy. */
-export interface OperatorAlert {
-    readonly reportId: string;
-    readonly routingClass: RoutingClass;
-    readonly categoryKey: string;
-    readonly resourceType: string;
-    readonly resourceId: string;
+// ===== lib/request-context.d.ts =====
+/**
+ * Request Context Module
+ *
+ * Provides request context including region detection and configuration.
+ * This allows handlers to access region-specific settings throughout the request lifecycle.
+ */
+import { type RegionConfig } from "./region-config.js";
+import { type Region } from "./region-detection.js";
+import type { Session, SessionManager } from "./session-cookie.js";
+/**
+ * Extended environment interface for request context
+ */
+export interface TrellisRequestContextEnv {
+    DEFAULT_REGION?: string;
+    ENABLE_IP_GEOLOCATION?: string;
+    IP_GEOLOCATION_API_KEY?: string;
+    IP_GEOLOCATION_SERVICE?: "cloudflare" | "ipapi" | "ip-api";
+    SESSION_SECRET?: string;
+    US_API_ENDPOINT?: string;
+    US_FRONTEND_ENDPOINT?: string;
+    US_CDN_ENDPOINT?: string;
+    EU_API_ENDPOINT?: string;
+    EU_FRONTEND_ENDPOINT?: string;
+    EU_CDN_ENDPOINT?: string;
+    CN_API_ENDPOINT?: string;
+    CN_FRONTEND_ENDPOINT?: string;
+    CN_CDN_ENDPOINT?: string;
 }
-export type OperatorAlertHook = (alert: OperatorAlert, env: Env) => Promise<void>;
-/** RoutingClasses that trigger an immediate operator alert (M1 awareness clock). */
-export declare function routingClassAlertsOperator(routingClass: RoutingClass): boolean;
-/** Deployment injects a concrete operator-alert hook at startup. */
-export declare function setOperatorAlertHook(hook: OperatorAlertHook): void;
-/** Test-only: clear the injected hook. */
-export declare function __resetOperatorAlertHookForTests(): void;
-/** Returns the injected hook, or the fail-safe default. */
-export declare function getOperatorAlertHook(): OperatorAlertHook;
-
-// ===== lib/report-templates.d.ts =====
-/** Stable template keys. Values are the keys the deployment map is keyed by. */
-export declare const REPORT_TEMPLATE_KEYS: {
-    /** Art. 16(4) — receipt confirmation on report creation. */
-    readonly RECEIPT: "report.receipt";
-    /** Art. 16(5) — terminal outcome: the report was actioned. */
-    readonly DECISION_ACTIONED: "report.decision.actioned";
-    /** Art. 16(5) — terminal outcome: the report was rejected/closed no-action. */
-    readonly DECISION_REJECTED: "report.decision.rejected";
+/**
+ * Request context containing region and configuration
+ */
+export interface TrellisRequestContext {
+    region: Region;
+    config: RegionConfig;
+    session?: Session | null;
+}
+/**
+ * Request Context Manager class
+ */
+export declare class TrellisRequestContextManager {
+    private regionDetector;
+    private regionConfigManager;
+    private env;
+    constructor(env: TrellisRequestContextEnv);
     /**
-     * Art. 16(5) — the redress information that must accompany a decision
-     * ("information on the possibilities for redress"). Kept a SEPARATE key from
-     * the two decision notices because the redress routes are identical whatever
-     * the outcome, and because it is the part counsel is most likely to redline
-     * on its own.
+     * Create request context with region detection and configuration
+     *
+     * This is the main function to call at the start of request handling.
+     * It detects the region, loads configuration, and optionally fetches the session.
+     *
+     * Performance: Optimized to use sync detection when possible (99% of cases).
+     * Only uses async if external IP geolocation is configured (rare).
+     *
+     * @param request - Request object
+     * @param sessionManager - Optional session manager (for user preference detection)
+     * @param session - Optional existing session (to avoid re-fetching)
+     * @returns Request context with region and configuration
      */
-    readonly REDRESS: "report.redress";
-};
-export type ReportTemplateKey = (typeof REPORT_TEMPLATE_KEYS)[keyof typeof REPORT_TEMPLATE_KEYS];
-/** A single localized template. `body` may contain `{param}` placeholders. */
-export interface ReportTemplate {
-    readonly title: string;
-    readonly body: string;
+    createRequestContext(request: Request, sessionManager?: SessionManager, session?: Session | null): Promise<TrellisRequestContext>;
+    /**
+     * Create request context synchronously (for simple cases)
+     *
+     * Uses only synchronous detection methods (CloudFront-Viewer-Country / CF-IPCountry, Accept-Language).
+     * Does not fetch session or use external IP geolocation.
+     *
+     * @param request - Request object
+     * @returns Request context with region and configuration
+     */
+    createRequestContextSync(request: Request): TrellisRequestContext;
+    /**
+     * Add region headers to response for debugging
+     *
+     * Adds X-Region and X-Region-Detected headers to help with debugging.
+     * These headers are safe to expose and help identify region detection issues.
+     *
+     * @param response - Response object
+     * @param context - Request context
+     * @returns New response with region headers added
+     */
+    addRegionHeaders(response: Response, context: TrellisRequestContext): Response;
+    /**
+     * Add region headers to response (async version that handles body reading)
+     *
+     * This version can handle responses that have already been created.
+     *
+     * PERFORMANCE: Only reads body if response has already been created.
+     * For new responses, use addRegionHeaders() instead to avoid body reading.
+     *
+     * @param response - Response object
+     * @param context - Request context
+     * @returns New response with region headers added
+     */
+    addRegionHeadersAsync(response: Response, context: TrellisRequestContext): Promise<Response>;
 }
-/** Deployment-supplied template map, keyed by template key. */
-export type ReportTemplateMap = Readonly<Record<string, ReportTemplate>>;
 /**
- * Consuming app injects localized, counsel-approved templates at startup (via
- * registerComplianceProfile). Keys not present in the injected map fall back to
- * the neutral core copy — so a partial deployment map never yields an empty
- * notification.
+ * Legacy functions for backward compatibility
+ * @deprecated Use new TrellisRequestContextManager class instead
  */
-export declare function setReportTemplates(templates: ReportTemplateMap): void;
-/** Test-only: clear injected templates so tests don't leak across cases. */
-export declare function __resetReportTemplatesForTests(): void;
+export declare function createRequestContext(request: Request, env: TrellisRequestContextEnv, sessionManager?: SessionManager, session?: Session | null): Promise<TrellisRequestContext>;
+export declare function createRequestContextSync(request: Request, env: TrellisRequestContextEnv): TrellisRequestContext;
+export declare function addRegionHeaders(response: Response, context: TrellisRequestContext): Response;
+export declare function addRegionHeadersAsync(response: Response, context: TrellisRequestContext): Promise<Response>;
+
+// ===== lib/routes/agent-surface.d.ts =====
 /**
- * Resolve a template by key and fill its `{param}` placeholders. Prefers the
- * injected deployment template; falls back to the neutral core copy. Throws only
- * if a key has neither an injected nor a fallback template (a programming error).
+ * Agent-Surface Routes  (T9b-a)
+ *
+ * Public, unauthenticated discovery endpoints for AI agents and tooling:
+ *
+ *   GET /llms.txt           — setup contract for AI agents (llmstxt.org convention)
+ *   GET /openapi.json       — OpenAPI 3.1 document auto-generated from route registry
+ *   GET /security.txt       — RFC 9116 security contact
+ *
+ * All three are rate-limited at the API Gateway / WAF layer (120 req/min per IP).
+ * No session required.
+ *
+ * ── Consumer-configurable content (plan 034, lane "agent words") ───────────
+ *
+ * `llms.txt` and `security.txt` bodies are plain text with no place to put a
+ * consuming app's own product name, contacts, or persona-specific setup
+ * narrative — trellis is the generic core, and its defaults must describe
+ * only what trellis itself truthfully does. A consuming application (e.g.
+ * Skybber) supplies its own content via `AgentSurfaceContent`, injected
+ * through the SAME app-configuration path as `APP_DOMAIN`/`ALLOWED_ORIGINS`
+ * (see `Env.agentSurface` in `apps/api/src/env.ts`, sourced from the
+ * `AGENT_SURFACE_LLMS_TXT` / `AGENT_SURFACE_SECURITY_TXT` env vars):
+ *
+ *   - `llmsTxt` absent  → serve `DEFAULT_LLMS_TXT_CONTENT` below (generic,
+ *     verified true against this repo's routes).
+ *   - `securityTxt` absent → 404 with the standard error envelope. A missing
+ *     security.txt is honest; the placeholder `security@example.com` contact
+ *     it replaced was not (RFC 9116 has no "not configured yet" placeholder
+ *     convention, and inventing one is worse than a 404).
  */
-export declare function resolveReportTemplate(key: ReportTemplateKey, params?: Record<string, string>): ReportTemplate;
+import type { Route } from "./types.js";
+/**
+ * Consumer-supplied content for the agent-surface text routes. Both fields
+ * are optional and additive — see the file banner above for the fallback
+ * behaviour of each. Bodies are served verbatim (no template substitution),
+ * so the consumer is responsible for the full RFC 9116 / llmstxt.org shape.
+ */
+export interface AgentSurfaceContent {
+    /** Full body for GET /llms.txt. */
+    llmsTxt?: string;
+    /** Full body for GET /security.txt. */
+    securityTxt?: string;
+}
+/**
+ * Build the agent-surface routes, injecting the full route list so the
+ * OpenAPI generator can introspect the registry.
+ *
+ * Usage in routes/index.ts:
+ *   import { buildAgentSurfaceRoutes } from "./agent-surface.js";
+ *   // after all routes are collected:
+ *   const agentSurface = buildAgentSurfaceRoutes(coreRoutes);
+ *
+ * Because we need the full route list for OpenAPI generation but the route
+ * list includes these routes themselves, we expose a plain `agentSurfaceRoutes`
+ * export that uses a deferred getter — the first HTTP request triggers
+ * generation using whatever has been registered by then.
+ */
+export declare function buildAgentSurfaceRoutes(getAllRoutes: () => Route[]): Route[];
+/**
+ * Static export for the route registry.
+ *
+ * These routes have no dependency on the full route list (llms.txt and
+ * security.txt are static; openapi.json generates lazily on first request).
+ * Import and spread into coreRoutes in routes/index.ts.
+ */
+export declare const agentSurfaceRoutes: Route[];
+
+// ===== lib/routes/types.d.ts =====
+/**
+ * Route Types
+ *
+ * Shared types and interfaces for route definitions.
+ */
+import type { ZodType } from "zod";
+import type { Env } from "../../env.js";
+import type { TrellisRequestContext } from "../request-context.js";
+import type { Middleware } from "../middleware.js";
+/**
+ * A route's path pattern: an exact/prefix string or an anchored RegExp.
+ * (Historically lived in the now-removed `route-matcher.ts`; the linear
+ * matcher it served was superseded by the Hono router in Stream 2.1.)
+ */
+export type RoutePattern = string | RegExp;
+export interface Route {
+    /**
+     * Route pattern (exact path, prefix with *, or regex)
+     * Examples:
+     * - '/health' (exact)
+     * - '/auth/*' (prefix)
+     * - '/api/users/:id' (with parameter)
+     * - /^\/api\/posts\/(\d+)$/ (regex)
+     */
+    path: RoutePattern;
+    /**
+     * HTTP method(s) - '*' for all methods, or specific method(s)
+     */
+    method?: string | string[];
+    /**
+     * Route handler function
+     */
+    handler: (request: Request, env: Env, context: {
+        url: URL;
+        pathname: string;
+        params: Record<string, string>;
+        requestContext?: TrellisRequestContext;
+    }) => Promise<Response>;
+    /**
+     * Middleware to apply (executed in order)
+     */
+    middleware?: Middleware[];
+    /**
+     * Route description (for documentation)
+     */
+    description?: string;
+    /**
+     * API version (for versioning support).
+     *
+     * Currently unread by anything. **Reserved** for the public-surface rule
+     * ("in the spec ⇔ under `/api/v1` ⇔ covered by the additivity gate") rather
+     * than being a second versioning concept — do not introduce another field
+     * for that; extend the meaning of this one.
+     */
+    version?: string;
+    /**
+     * Scopes a third-party principal must hold to call this route.
+     *
+     * Three distinct states, and the difference matters:
+     * - **absent** — first-party only. No third-party client reaches it.
+     * - **`[]`** — any authenticated principal, no particular scope.
+     * - **non-empty** — every listed scope required (`hasScope` semantics,
+     *   `auth/scopes.ts`). Strings are `<resource>:<verb>`; core's vocabulary is
+     *   `CORE_SCOPES`, and an extension route may also name its own.
+     *
+     * A first-party session (`"*"`) satisfies all three.
+     */
+    scopes?: string[];
+    /** Grouping for the generated spec — becomes an OpenAPI tag. */
+    tags?: string[];
+    /**
+     * Zod schema for the request body. Emitted as JSON Schema in the spec, and
+     * the intended validation point *before* the handler runs.
+     *
+     * `ZodType` is Zod v4's base type; `ZodSchema` is the v3 name for the same
+     * thing and is not used in new declarations here.
+     */
+    requestSchema?: ZodType;
+    /** Zod schema for the success response body. Emitted as JSON Schema. */
+    responseSchema?: ZodType;
+    /**
+     * Stable machine name for this operation (OpenAPI `operationId`). It is the
+     * symbol a generated client is named after, so it should outlive the path.
+     */
+    operationId?: string;
+    /**
+     * Whether a repeated call with the same `Idempotency-Key` must be
+     * de-duplicated rather than re-executed. Expected to be true for every
+     * public write.
+     */
+    idempotent?: boolean;
+    /**
+     * The compatibility promise this route carries in the published spec.
+     * `"beta"` says the shape may change without a major bump; absent means
+     * unstated, which for a route that is not `publicSpec` is the normal case.
+     */
+    stability?: "stable" | "beta";
+    /**
+     * Opt-in flag for publication on the public OpenAPI spec
+     * (`/openapi.json`) (G4 MEDIUM-3). Default `false` — only routes
+     * explicitly marked `publicSpec: true` appear in the document. The
+     * agent-discovery surface and the federation management routes are
+     * expected to set this; non-federation routes (posts, comments,
+     * media, ActivityPub, etc.) are excluded from the public spec.
+     */
+    publicSpec?: boolean;
+}
 
 // ===== lib/session-cookie.d.ts =====
 /**
@@ -5462,6 +5564,7 @@ export declare function resolveReportTemplate(key: ReportTemplateKey, params?: R
  */
 import type { AgeTier } from "@prisma/client";
 import { MIN_SALT_LENGTH, MIN_SECRET_LENGTH } from "@de-otio/saas-foundation/session";
+import type { ScopeSet } from "./auth/scopes.js";
 export type UserRole = "END_USER" | "B2B_PARTNER" | "PARTNER_ADMIN" | "INTERNAL" | "CONTENT_CREATOR" | "SUPER_ADMIN";
 export interface Session {
     userId: string;
@@ -5481,6 +5584,19 @@ export interface Session {
     ageTier?: AgeTier;
     sessionEpoch?: number;
     activeTenantId?: string;
+    /**
+     * The third-party client acting on the user's behalf. Absent means
+     * first-party — a cookie or localStorage session is the human's own, with
+     * no client in between, so nothing populates this today.
+     */
+    clientId?: string;
+    /**
+     * What this session was granted. Every path in `getSession` stamps `"*"`:
+     * a session that survived decryption is by construction first-party and
+     * unscoped. It is deliberately not "the set of all core scopes" — a
+     * first-party session must keep passing when a new scope is defined.
+     */
+    scopes?: ScopeSet;
 }
 /**
  * Test-only: clear the module-scope `SessionCookie` cache so KDF-count

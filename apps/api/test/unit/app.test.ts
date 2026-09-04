@@ -64,10 +64,20 @@ describe("Hono app seam (H0)", () => {
     expect(HONO_PORTED_PATHS).toContain("/api/csrf-token");
   });
 
-  it("serves a non-empty /openapi.json covering the curated federation surface", async () => {
+  it("serves a non-empty /openapi.json describing exactly the published surface", async () => {
     // Regression guard: /openapi.json was mounted with an empty route getter,
     // so it served a valid-but-empty spec while llms.txt advertised a full
-    // one. It is now wired to the curated, publicSpec-flagged registry.
+    // one. It is now wired to the curated registry.
+    //
+    // Plan 034 narrowed what "curated" publishes. Before, `publicSpec: true`
+    // alone put a route in the document, so the whole federation surface
+    // appeared with `{param0}` positional parameters and no `security` — a
+    // document that named paths nothing enforced scopes on. Publication now
+    // additionally requires a `scopes` declaration, and a published route is
+    // mounted under /api/v1 behind the public dispatcher. So this asserts the
+    // rule, not a route list: whatever is in the document is versioned and
+    // scope-declared, and no first-party surface leaks into it. The route-level
+    // detail lives in test/unit/routes/public-mount.test.ts.
     const app = buildHonoApp();
     const res = await app.fetch(new Request("http://localhost/openapi.json"), {
       trellisEnv: env,
@@ -76,21 +86,24 @@ describe("Hono app seam (H0)", () => {
 
     const doc = (await res.json()) as {
       openapi: string;
-      paths: Record<string, Record<string, unknown>>;
+      paths: Record<string, Record<string, { security?: unknown }>>;
     };
     expect(doc.openapi).toBe("3.1.0");
 
     const paths = Object.keys(doc.paths);
-    // Non-empty, and the federation/discovery surface is present.
-    expect(paths.length).toBeGreaterThan(10);
-    expect(paths).toContain("/api/tenants");
-    expect(paths).toContain("/api/auth/discover");
-    expect(paths).toContain("/api/tenants/{param0}/identity-provider");
+    expect(paths.length).toBeGreaterThan(0);
+    expect(paths).toContain("/api/v1/users/me/tenants");
 
-    // The generator emits ONLY publicSpec routes — non-federation surfaces
-    // (posts, comments, media, ActivityPub, …) must NOT leak into the spec.
     for (const p of paths) {
-      expect(p).not.toMatch(/\/api\/posts|\/api\/comments|\/api\/media|\/api\/sentiments|webfinger/);
+      expect(p.startsWith("/api/v1/"), `${p} is in the spec but not under /api/v1`).toBe(true);
+      // No positional `{paramN}` placeholders: a published path names its
+      // parameters, or the generator refuses to emit it at all.
+      expect(p).not.toMatch(/\{param\d+\}/);
+      // No first-party surface (posts, comments, media, ActivityPub, …).
+      expect(p).not.toMatch(/\/posts|\/comments|\/media|\/sentiments|webfinger/);
+      for (const op of Object.values(doc.paths[p])) {
+        expect(op.security, `${p} is published without security`).toBeDefined();
+      }
     }
   });
 

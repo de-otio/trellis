@@ -245,3 +245,10 @@ export {
   markAuthorityReportSubmitted,
   markAuthorityReportClosed,
 } from "./lib/compliance/authority-report.js";
+// Agent-surface content seam (plan 034): a consuming app supplies its own
+// GET /llms.txt and GET /security.txt bodies via `Env.agentSurface` (the
+// AGENT_SURFACE_LLMS_TXT / AGENT_SURFACE_SECURITY_TXT env vars, the same
+// app-configuration path as APP_DOMAIN/ALLOWED_ORIGINS). Core ships a
+// generic, truthful llms.txt default and NO security.txt default — an
+// unconfigured deployment 404s rather than serve a placeholder contact.
+export type { AgentSurfaceContent } from "./lib/routes/agent-surface.js";

@@ -28,7 +28,7 @@ import {
 import type { ProvenanceView } from "./provenance/types.js";
 import { Logger, type LoggerEnv } from "./logger.js";
 import type { TrellisRequestContext } from "./request-context.js";
-import { getSentimentDisplayMode, SentimentDisplayMode } from "./sentiment-display.js";
+import { resolveSessionAgeTier } from "./age-gate.js";
 import type { Session } from "./session-cookie.js";
 import type { Env } from "../env.js";
 
@@ -699,31 +699,43 @@ export class FeedHandler {
         requestContext,
       );
 
-      // Safer Social Design: Check quiet hours
-      let quietHoursActive = false;
-      if (requestContext.featureAccess || session.ageTier) {
-        const { isInQuietHours } = await import("./quiet-hours.js");
-        const now = new Date();
-        const nowMinutes = now.getHours() * 60 + now.getMinutes();
-        // We'd need the user's quiet hours settings from DB, but for now check requestContext
-        // Quiet hours integration is optional - the flag is set if the user has quiet hours configured
-      }
+      // Safer Social Design: quiet hours.
+      //
+      // This block loaded `isInQuietHours`, computed a local-time minute
+      // count, and then did nothing with either — the flag it was supposed to
+      // set never moved off `false`. It was removed rather than left looking
+      // like a feature. `quietHoursActive` stays in the response shape (always
+      // absent) because clients read it; the per-user quiet-hours settings it
+      // would need are not loaded on this path.
+      const quietHoursActive = false;
 
-      // Safer Social Design: Check session awareness nudge
+      // Safer Social Design: session-awareness nudge and feed page caps.
+      //
+      // Both are tier-driven, and the tier now resolves to ADULT for every
+      // session (age-gate.ts MINOR_TIERS_SUPPORTED — minors are not a
+      // supported account type). They are kept, not deleted: the ADULT tier
+      // has its own nudge threshold and an uncapped page count, so this is a
+      // live adult-facing feature, not inert minor machinery.
+      //
+      // The `session.ageTier` presence check is retained as the trigger so
+      // behaviour is unchanged for callers whose session carries no tier at
+      // all; what changed is that a tier which IS present can no longer select
+      // a minor's caps.
+      const feedAgeTier = resolveSessionAgeTier(session.ageTier);
+
       let nudge: FeedResponse["nudge"] = undefined;
       if (sessionDurationMinutes > 0 && session.ageTier) {
         const { getSessionNudge } = await import("./session-awareness.js");
-        const sessionNudge = getSessionNudge(sessionDurationMinutes, session.ageTier);
+        const sessionNudge = getSessionNudge(sessionDurationMinutes, feedAgeTier);
         if (sessionNudge) {
           nudge = sessionNudge;
         }
       }
 
-      // Safer Social Design: Check pagination limits
       let hasReachedLimit = false;
       if (session.ageTier) {
         const { getPaginationConfig, computePaginationMetadata } = await import("./feed-pagination.js");
-        const paginationConfig = getPaginationConfig(session.ageTier);
+        const paginationConfig = getPaginationConfig(feedAgeTier);
         const metadata = computePaginationMetadata(pageNumber, limit, paginationConfig.maxPages);
         hasReachedLimit = metadata.hasReachedLimit;
       }
@@ -1145,26 +1157,14 @@ export class FeedHandler {
       // detail: the duty is disclosure "at the latest at the first interaction or
       // exposure", and for most users first exposure is the scroll.
       provenance: textProvenanceView(post),
-      // Safer Social Design: Apply sentiment display mode based on age tier
-      ...(() => {
-        if (session.ageTier && session.ageTier !== "ADULT") {
-          const isPostAuthor = post.authorId === session.userId;
-          const mode = getSentimentDisplayMode(session.ageTier, isPostAuthor);
-          if (mode === SentimentDisplayMode.HIDDEN) {
-            return { sentimentDisplayMode: "hidden" };
-          }
-          if (mode === SentimentDisplayMode.DISTRIBUTION) {
-            return {
-              sentimentTypes: Object.keys(sentimentCountsMap[post.id] || {}),
-              sentimentDisplayMode: "distribution",
-            };
-          }
-        }
-        return {
-          sentimentCounts: sentimentCountsMap[post.id] || {},
-          sentimentDisplayMode: "full",
-        };
-      })(),
+      // Safer Social Design: sentiment display was hidden/aggregated for
+      // CHILD and TEEN viewers. Minor tiers are not a supported account type
+      // (age-gate.ts MINOR_TIERS_SUPPORTED), so the non-ADULT branch could
+      // never be taken and has been removed rather than left as gating that
+      // reads as live. Every viewer gets the full display, which is what the
+      // branch already produced in practice.
+      sentimentCounts: sentimentCountsMap[post.id] || {},
+      sentimentDisplayMode: "full" as const,
       commentCount: commentCountMap[post.id] || 0,
       userSentiment: userSentimentMap[post.id],
       isOwner: post.authorId === session.userId,

@@ -124,7 +124,7 @@ export class SecurityHeaders {
   /**
    * Add security headers to a new response
    */
-  createSecureResponse(body: BodyInit | null, init?: ResponseInit): Response {
+  createSecureResponse(body: ConstructorParameters<typeof Response>[0], init?: ResponseInit): Response {
     const response = new Response(body, init);
     return this.addSecurityHeaders(response);
   }

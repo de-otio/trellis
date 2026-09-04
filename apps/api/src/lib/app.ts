@@ -125,7 +125,7 @@ import { userRoutes } from "./routes/user.js";
 // The curated, `publicSpec`-flagged route aggregate (routes/index.ts applies
 // `markPublicSpec` to the federation surface). Used only as the OpenAPI
 // generator's data source — NOT for routing (Hono mounts PORTED_ROUTE_SETS).
-import { routes as curatedRouteRegistry } from "./routes/index.js";
+import { routes as curatedRouteRegistry, buildPublicV1Routes } from "./routes/index.js";
 import { SecurityHeaders } from "./security-headers.js";
 
 /**
@@ -572,6 +572,16 @@ export function buildHonoApp(): Hono<AppEnv> {
     for (const route of ext.routes as Route[]) mount(app, route);
     for (const route of wrapExtensionRoutes(ext)) mount(app, route);
   }
+
+  // H-public / plan 034 lane G — the `/api/v1` mount. Every route that is
+  // `publicSpec` *and* declares `scopes` is aliased here behind the public
+  // dispatcher (authenticate → requireScope → validate → idempotency → handle);
+  // the rule and the derivation live in routes/index.ts, this is only where the
+  // derived table is registered. Called here rather than read from the
+  // module-level aggregate so extensions registered after import are included,
+  // exactly like the extension loop above. Registered LAST so a `/api/v1` alias
+  // can never shadow an unversioned path.
+  for (const route of buildPublicV1Routes()) mount(app, route);
 
   // CORS preflight (browser OPTIONS). `mount` above registers only each route's
   // *declared* methods, so a cross-origin preflight to a GET/POST route would

@@ -1,12 +1,28 @@
 /**
  * Age Gate Middleware
  *
- * Reads ageTier from the session and injects featureAccess into the request context.
- * Defaults to ADULT access if no ageTier is present on the session.
+ * Injects `featureAccess` into the request context for authenticated
+ * requests.
+ *
+ * **The tier is ADULT for every session**, and that is deliberate, not a
+ * side-effect. Minor tiers are quarantined behind
+ * `age-gate.ts`'s `MINOR_TIERS_SUPPORTED` (see the 18+ decision documented
+ * there), so resolution goes through `resolveSessionAgeTier`, which returns
+ * ADULT even for a session that explicitly carries `ageTier: "CHILD"`.
+ *
+ * This used to read `session.ageTier ?? "ADULT"`, which produced ADULT too —
+ * but only because no token path ever populated the field. That is an
+ * accident, not a guarantee: it would have silently started gating the moment
+ * a claim carried a tier. The behaviour is now a property of one tested
+ * function.
  */
 
 import type { Middleware } from "./middleware.js";
-import { getFeatureAccess, type FeatureAccess } from "./age-gate.js";
+import {
+  getFeatureAccess,
+  resolveSessionAgeTier,
+  type FeatureAccess,
+} from "./age-gate.js";
 
 // Extend TrellisRequestContext with optional featureAccess
 declare module "./request-context.js" {
@@ -16,8 +32,9 @@ declare module "./request-context.js" {
 }
 
 /**
- * Middleware that computes feature access based on the session's ageTier
- * and attaches it to the request context.
+ * Middleware that resolves the request's age tier and attaches the matching
+ * feature access to the request context. See the module header: the resolved
+ * tier is ADULT for every session while minor tiers are quarantined.
  */
 export function ageGateMiddleware(): Middleware {
   return async (context, next) => {
@@ -25,7 +42,7 @@ export function ageGateMiddleware(): Middleware {
 
     // Only inject if we have a request context with a session
     if (requestContext?.session) {
-      const ageTier = requestContext.session.ageTier ?? "ADULT";
+      const ageTier = resolveSessionAgeTier(requestContext.session.ageTier);
       requestContext.featureAccess = getFeatureAccess(ageTier);
     }
 

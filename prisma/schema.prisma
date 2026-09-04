@@ -3023,3 +3023,44 @@ model RateLimitBucket {
   @@index([expiresAt]) // powers the TTL sweep
   @@map("rate_limit_buckets")
 }
+
+/// Domain-event outbox (plan 034 lane E). Append-only record that something
+/// happened in a tenant; **nothing reads this table** — there is no dispatcher,
+/// no sweeper and no subscriber. It exists now because emission *points* are
+/// what is expensive to retrofit across every mutation; delivery is not.
+///
+/// Every row is written by `emitDomainEvent(tx, …)` INSIDE the emitting
+/// mutation's own transaction, so a rolled-back mutation leaves no event. An
+/// event for a write that did not happen is worse than no event at all — a
+/// subscriber acting on a phantom event corrupts its own state.
+///
+/// ERASURE POSTURE: **ids and changed field names only, no personal data.**
+/// `payload` carries identifiers and the names of the fields that changed —
+/// never their values, never free text, never contact data. A consumer that
+/// needs the object fetches it with a scoped token, at which point the normal
+/// access controls and the normal erasure path apply. The table therefore
+/// carries no `/// erasure:` obligation of its own; if a future emission point
+/// ever needs a payload with personal data in it, that annotation has to be
+/// added here in the same change — not assumed away.
+///
+/// `deliveredAt` is unset by everything today and is here on purpose: adding a
+/// column to a table that already has rows is a migration, adding it now is a
+/// line of DDL.
+model DomainEvent {
+  id          String    @id @default(cuid())
+  /// `<subject>.<verb>` past tense — `post.published`, `consent.withdrawn`.
+  type        String
+  tenantId    String    @map("tenant_id")
+  /// What the event is about (`post`, `consent`, `rsvp`, `extension`).
+  subjectKind String    @map("subject_kind")
+  subjectId   String    @map("subject_id")
+  /// Ids + changed field names only. See the ERASURE POSTURE note above.
+  payload     Json
+  occurredAt  DateTime  @default(now()) @map("occurred_at") @db.Timestamptz(6)
+  /// Set by a future dispatcher; nothing writes it in Phase 0.
+  deliveredAt DateTime? @map("delivered_at") @db.Timestamptz(6)
+
+  @@index([tenantId, occurredAt]) // per-tenant replay, newest-first
+  @@index([deliveredAt]) // the undelivered-sweep predicate a dispatcher will use
+  @@map("domain_events")
+}

@@ -11,8 +11,27 @@
  * Routes are organized by domain/feature in separate files and combined here.
  */
 
+import {
+  createRequestContext as createAmbientRequestContext,
+  runWithRequestContext,
+} from "@de-otio/saas-foundation/request-context";
+import type { TrellisExtension } from "@de-otio/trellis-extension-api";
+
+import type { Env } from "../../env.js";
+import { requireScope, InsufficientScopeError } from "../auth/require.js";
+import { generateRequestId } from "../logger.js";
 import { corsMiddleware } from "../middleware.js";
+import {
+  idempotencyMiddleware,
+  routeNeedsIdempotency,
+} from "../middleware/idempotency.js";
 import { SecurityHeaders } from "../security-headers.js";
+import { SessionManager } from "../session-cookie.js";
+import {
+  structuredError,
+  unauthorizedError,
+  type ErrorRouteMeta,
+} from "./errors.js";
 import { actorRoutes } from "./activitypub/actor.js";
 import { audienceRoutes } from "./activitypub/audiences.js";
 import { collectionRoutes } from "./activitypub/collections.js";
@@ -78,7 +97,7 @@ import { sentimentsRoutes } from "./sentiments.js";
 import { settingsRoutes } from "./settings.js";
 import { taxonomyRoutes } from "./taxonomy.js";
 import { taxonomyAnalyticsRoutes } from "./taxonomy-analytics.js";
-import type { Route } from "./types.js";
+import type { Route, RoutePattern } from "./types.js";
 import { tenantRoutes } from "./tenants.js";
 import { tenantAuditRoutes } from "./tenant-audit.js";
 import { tenantComplianceRoutes } from "./tenant-compliance.js";
@@ -97,15 +116,26 @@ import { agentAuthorizeRoutes } from "./agent-authorize.js";
 import { agentSessionsRoutes } from "./agent-sessions.js";
 
 /**
- * G4 MEDIUM-3: mark every route in `routes` as `publicSpec: true` so it
- * appears in the auto-generated OpenAPI document. Routes left without
- * the flag are excluded from `/openapi.json`. The federation surface
- * and the agent-integration discovery routes are the curated public
- * spec; non-federation routes (posts, comments, media, ActivityPub,
- * extensions, etc.) are intentionally omitted.
+ * G4 MEDIUM-3: mark a whole module's routes as `publicSpec: true` — the
+ * curated agent-integration surface, as opposed to every registered handler.
+ *
+ * Plan 034 lane G.1 makes the **per-route flag authoritative where present**:
+ * a route that has already decided its own `publicSpec` (either direction)
+ * keeps that decision. Before, this wrapper overwrote it, so a route module
+ * could not opt *out* of a module-level mark — which is the wrong direction
+ * for a flag on the path to `/api/v1`.
+ *
+ * `publicSpec: true` alone does **not** make a route public. See
+ * {@link isPublicRoute}: publication additionally requires a `scopes`
+ * declaration, so the routes this wrapper marks are "curated for the spec,
+ * not yet published" until their module declares what a third-party
+ * principal must hold. That is a deliberate fail-closed transitional state,
+ * not an error — the mark is what puts a module inside the error-format
+ * lint's discovered set (`test/unit/routes/error-format.lint.test.ts`), which
+ * is exactly the work that has to happen *before* a route is published.
  */
 function markPublicSpec(routes: Route[]): Route[] {
-  return routes.map((r) => ({ ...r, publicSpec: true }));
+  return routes.map((r) => (r.publicSpec === undefined ? { ...r, publicSpec: true } : r));
 }
 
 /**
@@ -373,26 +403,469 @@ const coreRoutes: Route[] = [
 import { getExtensions } from "../../extensions.js";
 import { wrapExtensionRoutes } from "../extension-route-wrapper.js";
 
-const extensionRoutes: Route[] = [
-  // Raw routes (legacy — app-side wired handlers).
-  //
-  // SEC M5 / TRUST MODEL: extensions are NOT sandboxed. A raw route is spliced
-  // into the core table verbatim — core applies no auth, no CSRF and no
-  // security headers, and the handler is invoked with the full core `Env`
-  // (SESSION_SECRET, DATABASE_URL, every KV binding and queue). Registering an
-  // extension is therefore a decision to trust its code at the same level as
-  // core code. `validateExtensions` now REJECTS at startup any raw route with
-  // no auth middleware, so the unauthenticated-with-full-Env shape can no
-  // longer boot; the remaining exposure (a raw route's access to `Env`) is
-  // inherent to this legacy path. Prefer `extensionRoutes` below.
-  ...getExtensions().flatMap((ext) => ext.routes as Route[]),
-  // Core-wrapped routes (clean pattern — extension provides handler, core wraps)
-  ...getExtensions().flatMap((ext) => wrapExtensionRoutes(ext)),
-];
+/**
+ * The public namespace. Path, not header, deliberately: AI-generated clients
+ * hardcode paths and rarely send version headers, `/v2` can coexist with `/v1`
+ * during a deprecation window, and every comparable an agent has been trained
+ * on versions by path.
+ *
+ * Not to be confused with `X-Client-Version` + `/api/app/version-policy`, which
+ * is a *first-party client compatibility* mechanism and stays exactly as it is.
+ */
+export const PUBLIC_API_PREFIX = "/api/v1";
+
+const UNVERSIONED_PREFIX = "/api/";
+const VERSIONED_PREFIX = `${PUBLIC_API_PREFIX}/`;
+
+/**
+ * Carry an extension route's **self-description** onto the `Route` core mounts
+ * for it (plan 034 lane G.1).
+ *
+ * `wrapExtensionRoute` builds the HTTP shell — auth, scope enforcement, body
+ * validation, CORS/CSRF, security headers, the scoped `ExtensionContext` — but
+ * emits a `Route` carrying none of the declaring `ExtensionRouteDefinition`'s
+ * metadata. The consequence was structural: an extension route could never be
+ * `publicSpec`, never appear in `/openapi.json`, and therefore never be public,
+ * no matter what its author declared. An extension route is exactly the kind of
+ * route a vertical wants public, so the metadata is projected here.
+ *
+ * The zip is index-aligned by construction: `wrapExtensionRoutes` is
+ * `ext.extensionRoutes.map(...)`, so element *i* of the result is the wrapper
+ * for definition *i*. Nothing filters between them.
+ *
+ * One wiring rule is enforced here, mirroring lane A's `auth: "none"` +
+ * non-empty-`scopes` refusal: a `publicSpec` route with `auth: "none"` has no
+ * principal at all, so the public mount's authenticate → scope pipeline could
+ * never hold for it. Refused at boot rather than served looking gated.
+ */
+function describedExtensionRoutes(ext: TrellisExtension): Route[] {
+  const defs = ext.extensionRoutes ?? [];
+  return wrapExtensionRoutes(ext).map((route, index) => {
+    const def = defs[index];
+    if (!def) return route;
+    if (def.publicSpec === true && (def.auth ?? "required") === "none") {
+      throw new Error(
+        `Extension "${ext.id}" route "${def.path}" declares publicSpec: true ` +
+          `with auth: "none". A public route is mounted under ${PUBLIC_API_PREFIX} ` +
+          `behind authenticate → requireScope, so it must be able to have a ` +
+          `principal — set auth to "required" (or "optional"), or drop publicSpec.`,
+      );
+    }
+    return {
+      ...route,
+      ...(def.scopes !== undefined ? { scopes: [...def.scopes] } : {}),
+      ...(def.publicSpec !== undefined ? { publicSpec: def.publicSpec } : {}),
+      ...(def.requestSchema !== undefined ? { requestSchema: def.requestSchema } : {}),
+      ...(def.responseSchema !== undefined ? { responseSchema: def.responseSchema } : {}),
+      ...(def.operationId !== undefined ? { operationId: def.operationId } : {}),
+      ...(def.idempotent !== undefined ? { idempotent: def.idempotent } : {}),
+      ...(def.stability !== undefined ? { stability: def.stability } : {}),
+    };
+  });
+}
+
+/**
+ * Extension routes, rebuilt from the live registry on each call.
+ *
+ * Deliberately a function, not a module-level constant: `registerExtension` is
+ * called by the consuming application *after* this module is imported, so a
+ * value computed at module evaluation is empty in production. (The `routes`
+ * aggregate below still evaluates it once at module load — that is the
+ * pre-existing behaviour of this file and the reason `lib/app.ts` calls
+ * `getExtensions()` itself at `buildHonoApp()` time rather than reading the
+ * aggregate. `buildPublicV1Routes()` is callable at build time for the same
+ * reason.)
+ */
+function buildExtensionRoutes(): Route[] {
+  return [
+    // Raw routes (legacy — app-side wired handlers).
+    //
+    // SEC M5 / TRUST MODEL: extensions are NOT sandboxed. A raw route is spliced
+    // into the core table verbatim — core applies no auth, no CSRF and no
+    // security headers, and the handler is invoked with the full core `Env`
+    // (SESSION_SECRET, DATABASE_URL, every KV binding and queue). Registering an
+    // extension is therefore a decision to trust its code at the same level as
+    // core code. `validateExtensions` now REJECTS at startup any raw route with
+    // no auth middleware, so the unauthenticated-with-full-Env shape can no
+    // longer boot; the remaining exposure (a raw route's access to `Env`) is
+    // inherent to this legacy path. Prefer `extensionRoutes` below.
+    ...getExtensions().flatMap((ext) => ext.routes as Route[]),
+    // Core-wrapped routes (clean pattern — extension provides handler, core wraps)
+    ...getExtensions().flatMap((ext) => describedExtensionRoutes(ext)),
+  ];
+}
+
+const extensionRoutes: Route[] = buildExtensionRoutes();
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The public mount (plan 034 lane G)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * **In the spec ⇔ under `/api/v1` ⇔ covered by the additivity gate.**
+ *
+ * Three properties that must never diverge, so they are not three decisions.
+ * `isPublicRoute` is the single predicate, and everything downstream reads it:
+ *
+ *  - `buildPublicV1Routes()` derives the `/api/v1` mount from it;
+ *  - `generateOpenApiDoc` (`lib/openapi/generator.ts`) filters on exactly the
+ *    same two fields, so the emitted document and the mount are the same set
+ *    by construction rather than by agreement;
+ *  - the additivity gate (`scripts/check-openapi-additivity.mjs`) reads that
+ *    document, so gate coverage follows for free.
+ *
+ * A route is public iff **both**:
+ *
+ *  - `publicSpec === true` — its module curated it for the published surface,
+ *    and (the error-format lint keys off the same flag) its 4xx bodies go
+ *    through `structuredError`; and
+ *  - `scopes` is an **array** — its module said what a third-party principal
+ *    must hold. `[]` is a real, distinct value meaning "authenticated, no
+ *    particular grant"; `undefined` means the question has not been answered.
+ *
+ * Neither half alone publishes anything, and both directions of a half-wired
+ * route fail *closed*:
+ *
+ *  - `publicSpec` without `scopes` — curated but unpublished. Not an error:
+ *    `markPublicSpec` puts thirteen route sets in this state today and none of
+ *    them is public. It is the state a route sits in while its module does the
+ *    envelope and schema work.
+ *  - `scopes` without `publicSpec` — a scope declaration nothing enforces,
+ *    because only this mount checks scopes on a core route. That one **is** an
+ *    error and {@link assertPublicMountWiring} throws on it at startup: a route
+ *    that looks gated and is not is the failure this lane exists to prevent.
+ */
+export function isPublicRoute(route: Route): boolean {
+  return route.publicSpec === true && Array.isArray(route.scopes);
+}
+
+/**
+ * Hand-written `/api/v1` paths that predate this lane and are **not** public
+ * routes. The namespace is derived from `isPublicRoute`, never typed by hand,
+ * so any other occurrence is a route occupying the public namespace without
+ * the public enforcement — {@link assertPublicMountWiring} refuses it at boot.
+ *
+ * Each entry is keyed by `String(route.path)` and must carry its reason.
+ */
+const LEGACY_UNENFORCED_V1_PATHS: ReadonlySet<string> = new Set<string>([
+  // routes/sentiments.ts — `GET /api/v1/posts/:id/sentiments/users` was written
+  // with a `/api/v1` literal before any versioning rule existed (the handler
+  // even re-parses the path with that prefix). It is a first-party,
+  // session-authenticated route: not `publicSpec`, no `scopes`, absent from
+  // `/openapi.json`. Recorded 2026-09-04 for owner follow-up — the fix is to
+  // rename it to `/api/posts/:id/sentiments/users` (routes/sentiments.ts is not
+  // this lane's file, and nothing is live, so the rename is cheap and deferred).
+  String(/^\/api\/v1\/posts\/([^/]+)\/sentiments\/users$/),
+]);
+
+/**
+ * The `/api/v1` path a route is published at: its own path with the leading
+ * `/api/` replaced by `/api/v1/`. `/api/users/me/tenants` becomes
+ * `/api/v1/users/me/tenants` — not `/api/v1/api/...`.
+ *
+ * The result is always a **string** path, even for a regex route, because the
+ * two consumers disagree about regexes and a string satisfies both: the Hono
+ * router (`lib/app.ts` `regexToHonoPath`) translates only *unnamed* `([^/]+)`
+ * captures, while the OpenAPI generator *requires* named ones on a public
+ * route. A route whose named captures are rewritten here to `:name` segments
+ * mounts under Hono and emits `{name}` in the spec.
+ *
+ * Returns `null` for anything that cannot be published: a path outside `/api/`
+ * (the root-level well-known documents — `/llms.txt`, `/security.txt`,
+ * `/openapi.json` — are unversioned by their own conventions and are not API
+ * operations), a wildcard, an unanchored regex, or a regex with an unnamed
+ * capture or any surviving metacharacter.
+ */
+export function toPublicPath(pattern: RoutePattern): string | null {
+  if (typeof pattern === "string") {
+    if (!pattern.startsWith(UNVERSIONED_PREFIX) || pattern.includes("*")) return null;
+    return VERSIONED_PREFIX + pattern.slice(UNVERSIONED_PREFIX.length);
+  }
+
+  let src = pattern.source;
+  if (!src.startsWith("^") || !src.endsWith("$")) return null;
+  src = src.slice(1, -1).replace(/\\\//g, "/");
+  if (!src.startsWith(UNVERSIONED_PREFIX)) return null;
+  // Named single-segment captures become Hono/OpenAPI params. Unnamed ones are
+  // left in place on purpose so the metacharacter guard below rejects them.
+  src = src.replace(/\(\?<([A-Za-z_$][\w$]*)>\[\^\/\]\+\)/g, ":$1");
+  if (/[\\^$.*+?()[\]{}|]/.test(src)) return null;
+  return VERSIONED_PREFIX + src.slice(UNVERSIONED_PREFIX.length);
+}
+
+/** Map a `/api/v1/...` pathname back to the unversioned path handlers parse. */
+function toUnversionedPathname(pathname: string): string {
+  return pathname.startsWith(VERSIONED_PREFIX)
+    ? UNVERSIONED_PREFIX + pathname.slice(VERSIONED_PREFIX.length)
+    : pathname;
+}
+
+/** True for a route path that already sits in the public namespace. */
+function occupiesPublicNamespace(pattern: RoutePattern): boolean {
+  const raw =
+    typeof pattern === "string" ? pattern : pattern.source.replace(/\\\//g, "/");
+  return raw.startsWith(VERSIONED_PREFIX) || raw.startsWith(`^${VERSIONED_PREFIX}`);
+}
+
+/**
+ * Startup guard for the three-way rule. Throws — a boot failure is the correct
+ * outcome for every case below, because each one is a route whose declared
+ * authorization is not the authorization it would actually get.
+ */
+export function assertPublicMountWiring(source: readonly Route[]): void {
+  for (const route of source) {
+    const label = `${String(route.method ?? "GET")} ${String(route.path)}`;
+
+    if (occupiesPublicNamespace(route.path)) {
+      if (LEGACY_UNENFORCED_V1_PATHS.has(String(route.path))) continue;
+      throw new Error(
+        `Route ${label} declares a path inside the public namespace ` +
+          `${PUBLIC_API_PREFIX}, but that namespace is derived from ` +
+          `isPublicRoute() and is never written by hand. A hand-written ` +
+          `${PUBLIC_API_PREFIX} path is served without the public mount's ` +
+          `authenticate → requireScope → validate pipeline. Declare the route ` +
+          `at its unversioned "/api/..." path and set publicSpec + scopes.`,
+      );
+    }
+
+    if (route.scopes !== undefined && route.scopes.length > 0 && route.publicSpec !== true) {
+      throw new Error(
+        `Route ${label} declares scopes [${route.scopes.join(", ")}] without ` +
+          `publicSpec: true. Only the ${PUBLIC_API_PREFIX} mount checks a core ` +
+          `route's scopes, so this declaration is never enforced anywhere — the ` +
+          `route looks gated and is open. Set publicSpec: true to publish it, or ` +
+          `drop the scopes.`,
+      );
+    }
+
+    if (isPublicRoute(route) && toPublicPath(route.path) === null) {
+      throw new Error(
+        `Route ${label} is public (publicSpec + scopes) but its path cannot be ` +
+          `published under ${PUBLIC_API_PREFIX}. A public path must start with ` +
+          `"/api/", carry no wildcard, and — if it is a RegExp — be anchored ` +
+          `with named single-segment captures only (e.g. "(?<tenantId>[^/]+)").`,
+      );
+    }
+  }
+}
+
+/**
+ * The dispatcher for a public route. Runs, in order:
+ *
+ *   authenticate → requireScope → validate `requestSchema` → idempotency → handle
+ *
+ * matching the order lane A asserts for extension routes, and for the same
+ * reason: scoping before validation, because telling an unauthorized caller the
+ * shape of a body it may not send — answering 400 where 403 is the truth — is
+ * an information leak.
+ *
+ * **Rate limiting stays ahead of all of this**, as the route's own `middleware`
+ * (the dispatcher runs middleware before `handler`). That predates this lane
+ * and is the stricter placement — an unauthenticated flood is limited before it
+ * reaches authentication rather than after — so lane G keeps lane A's decision
+ * rather than moving the limiter inward to match the prose order.
+ *
+ * **Authentication is required for every public route**, whether `scopes` is
+ * `[]` or non-empty: `[]` means "authenticated, no particular grant", so both
+ * values presuppose a principal. `requireScope` deliberately does *not* check
+ * authentication (an absent `scopes` reads as first-party `"*"` and passes
+ * everything), so an anonymous caller reaching it would sail through a
+ * non-empty requirement. That is the `auth: "optional"` hole lane A handed
+ * over, and the core answer is to fail closed here, before the gate.
+ *
+ * The handler is invoked with the **unversioned** request: `/api/v1/x` is an
+ * alias mount of `/api/x` with enforcement added, so every handler that
+ * re-parses `pathname` with its own regex keeps working untouched, and the
+ * unversioned route it mirrors stays byte-identical for the first-party client.
+ *
+ * The whole thing runs inside a `RequestContext` scope so that the `request_id`
+ * in an error envelope (`routes/errors.ts`) is the same id the request's logs
+ * carry — nothing else in the trellis HTTP entrypoint enters that scope yet, so
+ * this is where a public request gets one.
+ */
+function dispatchPublicRoute(
+  route: Route,
+  request: Request,
+  env: Env,
+  context: Parameters<Route["handler"]>[2],
+): Promise<Response> {
+  const requestId = generateRequestId();
+  return runWithRequestContext(
+    createAmbientRequestContext({ requestId }),
+    async (): Promise<Response> => {
+      const securityHeaders = new SecurityHeaders(env);
+      const meta: ErrorRouteMeta = {
+        publicSpec: true,
+        ...(route.operationId ? { operationId: route.operationId } : {}),
+      };
+
+      // 1. authenticate
+      const session = await new SessionManager().getSession(
+        request,
+        env.SESSION_SECRET,
+        env,
+      );
+      if (!session) return unauthorizedError(securityHeaders, meta);
+
+      // 2. requireScope
+      try {
+        requireScope(session, route.scopes ?? []);
+      } catch (error) {
+        if (error instanceof InsufficientScopeError) {
+          // Rendered through `structuredError` rather than `error.toResponse()`
+          // so the envelope also carries `docs_url` for this operation.
+          return structuredError(error.status, error.body, securityHeaders, meta);
+        }
+        throw error;
+      }
+
+      // The unversioned twin of this request, built once and shared by
+      // validation, the idempotency key's body hash, and the handler.
+      const versionedUrl = context.url ?? new URL(request.url);
+      const innerUrl = new URL(versionedUrl.toString());
+      innerUrl.pathname = toUnversionedPathname(versionedUrl.pathname);
+      const method = request.method.toUpperCase();
+      const bodyText =
+        method === "GET" || method === "HEAD" ? undefined : await request.text();
+      const innerRequest = new Request(innerUrl.toString(), {
+        method: request.method,
+        headers: request.headers,
+        ...(bodyText ? { body: bodyText } : {}),
+      });
+
+      // 3. validate requestSchema
+      const invalid = validatePublicRequestBody(route, method, bodyText, securityHeaders, meta);
+      if (invalid) return invalid;
+
+      const invoke = (): Promise<Response> =>
+        route.handler(innerRequest, env, {
+          ...context,
+          url: innerUrl,
+          pathname: innerUrl.pathname,
+        });
+
+      // 4. idempotency — lane C owns the rule, this is its core call site.
+      if (!routeNeedsIdempotency(route)) return invoke();
+      return idempotencyMiddleware()(
+        {
+          request: innerRequest,
+          env,
+          ...(context.requestContext ? { requestContext: context.requestContext } : {}),
+          url: innerUrl,
+          pathname: innerUrl.pathname,
+          method: innerRequest.method,
+        },
+        invoke,
+      );
+    },
+  );
+}
+
+/**
+ * Validate the request body against the route's declared `requestSchema`.
+ * Returns the standard 400 envelope, or `null` when there is nothing to
+ * reject. Mirrors the extension wrapper's `validateRequestBody`, including
+ * that a schema declared on a GET/HEAD documents the operation and validates
+ * nothing.
+ */
+function validatePublicRequestBody(
+  route: Route,
+  method: string,
+  bodyText: string | undefined,
+  securityHeaders: SecurityHeaders,
+  meta: ErrorRouteMeta,
+): Response | null {
+  const schema = route.requestSchema;
+  if (!schema || method === "GET" || method === "HEAD") return null;
+
+  let body: unknown;
+  try {
+    body = JSON.parse(bodyText ?? "");
+  } catch {
+    return structuredError(
+      400,
+      {
+        error: "INVALID_REQUEST_BODY",
+        message: "Request body is not valid JSON.",
+        remediation:
+          "Send a JSON body with `content-type: application/json` matching this operation's request schema.",
+      },
+      securityHeaders,
+      meta,
+    );
+  }
+
+  const result = schema.safeParse(body);
+  if (result.success) return null;
+
+  const issue = result.error.issues[0];
+  const field = issue?.path.join(".") ?? "";
+  return structuredError(
+    400,
+    {
+      error: "VALIDATION_FAILED",
+      message: issue?.message ?? "Request body failed validation.",
+      remediation: field
+        ? `Correct the \`${field}\` field and retry.`
+        : "Correct the request body to match this operation's request schema and retry.",
+      ...(field ? { field } : {}),
+    },
+    securityHeaders,
+    meta,
+  );
+}
+
+/** The `/api/v1` alias of one public route, enforcement attached. */
+function toPublicV1Route(route: Route): Route {
+  const path = toPublicPath(route.path);
+  if (path === null) {
+    // assertPublicMountWiring has already refused this; belt and braces so the
+    // function is total for any caller that skipped the guard.
+    throw new Error(`Route ${String(route.path)} cannot be published under ${PUBLIC_API_PREFIX}.`);
+  }
+  return {
+    ...route,
+    path,
+    version: "v1",
+    handler: (request, env, context) => dispatchPublicRoute(route, request, env, context),
+  };
+}
+
+/**
+ * Every public route, mounted under `/api/v1`. The one place the mount rule is
+ * applied — `lib/app.ts` calls this at `buildHonoApp()` time (so extensions
+ * registered after import are included) and the `routes` aggregate below calls
+ * it at module load, which is where the OpenAPI generator and the route-mount
+ * parity guard read it.
+ *
+ * @param source route table to derive from; defaults to everything core and
+ *   the extensions registered *right now*.
+ */
+export function buildPublicV1Routes(
+  source: readonly Route[] = [...coreRoutes, ...buildExtensionRoutes()],
+): Route[] {
+  assertPublicMountWiring(source);
+  return source.filter(isPublicRoute).map(toPublicV1Route);
+}
+
+/**
+ * The unversioned twin of a public route keeps serving the first-party client
+ * byte-for-byte, and is deliberately **dropped from the published document**:
+ * the public contract is the `/api/v1` form, and emitting both would put a
+ * path in the spec that carries none of the mount's enforcement — the exact
+ * divergence this lane exists to prevent.
+ */
+function demotePublicTwin(route: Route): Route {
+  return isPublicRoute(route) ? { ...route, publicSpec: false } : route;
+}
 
 export const routes: Route[] = [
-  ...coreRoutes,
-  ...extensionRoutes,
+  ...[...coreRoutes, ...extensionRoutes].map(demotePublicTwin),
+
+  // The public mount — every route that is `publicSpec` *and* scope-declaring,
+  // aliased under /api/v1 behind the dispatcher. Registered after the
+  // unversioned table so an unversioned path can never be shadowed.
+  ...buildPublicV1Routes([...coreRoutes, ...extensionRoutes]),
 
   // 404 handler - must be last
   {

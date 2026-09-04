@@ -27,6 +27,7 @@
     "tenantRole": "ADMIN",
     "handle": "@alice"
   },
+  "_validAuthContext_comment": "`scopes: \"*\"` was added deliberately by plan 034 lane A: the Bearer-JWT path now states the principal it always was — first-party, unscoped — instead of leaving it implicit in an absent field. `clientId` is intentionally absent here rather than null, because the middleware sets it to `undefined` and the comparison treats undefined and absent alike. If a future change makes this anything other than \"*\" on the first-party path, this gate is supposed to fail.",
   "validAuthContext": {
     "sub": "opaque-subject-abc",
     "userId": "cabc1234567890abcdefghijk",
@@ -34,6 +35,7 @@
     "activeTenantId": "ctnt1234567890abcdefghijk",
     "tenantSlug": "acme",
     "tenantRole": "ADMIN",
-    "handle": "@alice"
+    "handle": "@alice",
+    "scopes": "*"
   }
 }

@@ -30,6 +30,13 @@ import {
 } from "@prisma/client";
 
 import type { ClaimsCache, CachedClaims } from "../auth/claims-cache.js";
+import {
+  computeAgeTier as computeTier,
+  isUnderMinimumAge,
+  MINIMUM_SIGNUP_AGE_YEARS,
+  MINOR_TIERS_SUPPORTED,
+  UnderMinimumAgeError,
+} from "../age-gate.js";
 import { deriveEmailDomain } from "../tenant/derive-domain.js";
 import { resolveTenantRole, type RoleMappingInput } from "../tenant/resolve-role.js";
 import { deriveHandle } from "../user/derive-handle.js";
@@ -58,7 +65,12 @@ export interface ConfirmedUserInput {
   dateOfBirthRaw?: string | undefined;
   /** Raw handle attribute, if any. */
   providedHandle?: string | undefined;
-  /** Raw guardian email attribute, if any (CHILD accounts). */
+  /**
+   * Raw guardian email attribute, if any (CHILD accounts).
+   *
+   * Accepted and IGNORED while `MINOR_TIERS_SUPPORTED` is false — the 18+
+   * floor below means no CHILD account can be provisioned to link one to.
+   */
   guardianEmail?: string | undefined;
   /** Raw invitation code presented at signup, if any. */
   invitationCode?: string | undefined;
@@ -104,17 +116,9 @@ export interface ProvisioningResult {
   invitationId: string | null;
 }
 
-export function computeAgeTier(dateOfBirth: Date): AgeTier {
-  const now = new Date();
-  let age = now.getUTCFullYear() - dateOfBirth.getUTCFullYear();
-  const monthDiff = now.getUTCMonth() - dateOfBirth.getUTCMonth();
-  if (monthDiff < 0 || (monthDiff === 0 && now.getUTCDate() < dateOfBirth.getUTCDate())) {
-    age--;
-  }
-  if (age < 13) return "CHILD";
-  if (age < 18) return "TEEN";
-  return "ADULT";
-}
+// The third copy of `computeAgeTier` used to live here. One implementation now
+// serves provisioning, the nightly transition job and the parental paths.
+export { computeAgeTier } from "../age-gate.js";
 
 /**
  * Parse an explicit `signupMethod` hint from clientMetadata, if present and
@@ -216,13 +220,36 @@ export async function provisionConfirmedUser(
   const federated = input.federated;
   const idpGroups = parseIdpGroups(input.idpGroupsRaw);
 
+  // ── Minimum-age floor (defence in depth) ──────────────────────────────────
+  //
+  // The consuming client refuses an under-18 date of birth at signup. That
+  // check is a UX affordance sitting on the far side of an HTTP boundary, and
+  // this function is reachable from a Cognito PostConfirmation trigger and
+  // from Keycloak JIT sign-in — neither of which the client mediates. So the
+  // floor is re-applied here, at the last point before the row is written.
+  //
+  // Throwing (rather than silently downgrading to ADULT, or provisioning a
+  // minor) is the fail-closed choice: on the Cognito path the trigger fails
+  // and the sign-up does not complete; on the JIT path `jit-claims.ts` logs
+  // and yields no claims, which surfaces as a 401. An account that should not
+  // exist is never created either way.
+  const now = new Date();
   let dateOfBirth: Date | undefined;
   let ageTier: AgeTier = "ADULT";
   if (input.dateOfBirthRaw) {
     const parsed = new Date(input.dateOfBirthRaw);
-    if (!isNaN(parsed.getTime()) && parsed < new Date()) {
+    if (!isNaN(parsed.getTime()) && parsed < now) {
+      if (isUnderMinimumAge(parsed, now)) {
+        // No date of birth in the log line — the reason is enough, and the
+        // value is the most sensitive field on the input.
+        logger.warn("postconfirm.under_minimum_age", {
+          sub,
+          minimumAgeYears: MINIMUM_SIGNUP_AGE_YEARS,
+        });
+        throw new UnderMinimumAgeError();
+      }
       dateOfBirth = parsed;
-      ageTier = computeAgeTier(parsed);
+      ageTier = computeTier(parsed, now);
     }
   }
 
@@ -260,7 +287,11 @@ export async function provisionConfirmedUser(
     "post_confirmation.provision",
   );
 
-  if (ageTier === "CHILD") {
+  // Guardian linking is minor-only machinery. The floor above already makes
+  // `ageTier === "CHILD"` unreachable; the explicit MINOR_TIERS_SUPPORTED
+  // guard states WHY rather than leaving a branch that looks live and never
+  // runs. `input.guardianEmail` is accepted and ignored while this is false.
+  if (MINOR_TIERS_SUPPORTED && ageTier === "CHILD") {
     const guardianEmail = input.guardianEmail?.toLowerCase();
     if (guardianEmail) {
       const guardian = await db.user.findUnique({ where: { email: guardianEmail } });

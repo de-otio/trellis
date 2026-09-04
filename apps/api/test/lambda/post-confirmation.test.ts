@@ -7,6 +7,7 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { UnderMinimumAgeError } from "../../src/lib/age-gate.js";
 
 const {
   mockSecretsSend,
@@ -327,11 +328,58 @@ describe("PostConfirmation Lambda — native sign-up", () => {
     expect(mockTransaction).not.toHaveBeenCalled();
   });
 
-  it("creates a CHILD parental link when guardianEmail matches an existing user", async () => {
+  // ── Minimum-age floor (18+) ────────────────────────────────────────────
+  //
+  // This trigger used to provision a CHILD account and link a guardian to it.
+  // Minor accounts are not a supported account type; the client refuses an
+  // under-18 date of birth at signup, and the server re-applies the floor here
+  // because the Cognito trigger is reachable without the client (see
+  // `src/lib/age-gate.ts`). The replaced test asserted the parental link was
+  // created — a behaviour the product no longer wants.
+  it.each([
+    ["a child", 10],
+    ["a teenager", 17],
+    ["someone one day short of 18", 17.99],
+  ])("refuses to provision %s", async (_label, yearsOld) => {
+    mockUserFindUnique.mockResolvedValueOnce({ id: "guardian_id" });
+    const handler = await loadHandler();
+    const dob = new Date(Date.now() - yearsOld * 365.25 * 24 * 60 * 60 * 1000);
+
+    // Matched by name and envelope rather than `instanceof`: `loadHandler`
+    // re-imports the lambda through a fresh module registry, so its
+    // `UnderMinimumAgeError` is a different class object from the one this
+    // file imported even though it is the same declaration.
+    const thrown = await handler(
+      makeEvent({
+        dateOfBirth: dob.toISOString().slice(0, 10),
+        guardianEmail: "guardian@example.com",
+      }),
+      {} as any,
+      () => {},
+    ).then(
+      () => null,
+      (err: unknown) => err,
+    );
+
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).name).toBe(new UnderMinimumAgeError().name);
+    expect((thrown as UnderMinimumAgeError).envelope).toEqual(
+      new UnderMinimumAgeError().envelope,
+    );
+
+    // Fail closed: no user row, no guardian link, nothing half-written that a
+    // later sign-in could heal into a working minor account.
+    expect(mockTransaction).not.toHaveBeenCalled();
+    expect(mockUserCreate).not.toHaveBeenCalled();
+    expect(mockParentalLinkUpsert).not.toHaveBeenCalled();
+  });
+
+  it("provisions an adult, and links no guardian even when one is supplied", async () => {
     mockUserFindUnique.mockResolvedValueOnce({ id: "guardian_id" });
     const handler = await loadHandler();
     const dob = new Date();
-    dob.setUTCFullYear(dob.getUTCFullYear() - 10);
+    dob.setUTCFullYear(dob.getUTCFullYear() - 30);
+
     await handler(
       makeEvent({
         dateOfBirth: dob.toISOString().slice(0, 10),
@@ -340,12 +388,10 @@ describe("PostConfirmation Lambda — native sign-up", () => {
       {} as any,
       () => {},
     );
-    expect(mockParentalLinkUpsert).toHaveBeenCalledTimes(1);
-    expect(mockParentalLinkUpsert.mock.calls[0][0].create).toMatchObject({
-      childId: "u_clxxxxxxxxxxxxxxxxxxxxxx",
-      guardianId: "guardian_id",
-      status: "PENDING",
-    });
+
+    expect(mockTransaction).toHaveBeenCalled();
+    // `guardianEmail` is still accepted on the input and deliberately ignored.
+    expect(mockParentalLinkUpsert).not.toHaveBeenCalled();
   });
 });
 

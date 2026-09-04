@@ -200,6 +200,57 @@ describe("handleRegister", () => {
       expect(calls).toHaveLength(0);
     });
 
+    // ── Minimum-age floor (18+) ──────────────────────────────────────────
+    //
+    // The client refuses an under-18 date of birth before it reaches here.
+    // This is a public HTTP endpoint, so the floor is re-applied server-side
+    // (`src/lib/age-gate.ts`). NOW is pinned at 2026-08-07.
+    it.each([
+      ["a child", "2016-01-01"],
+      ["a teenager", "2010-01-01"],
+      ["one day short of 18", "2008-08-08"],
+    ])("refuses %s with a 403 and the structured envelope", async (_label, dob) => {
+      const { port, calls } = provider();
+      const res = await post({ ...VALID, dateOfBirth: dob }, port);
+
+      expect(res.status).toBe(403);
+      const body = (await res.json()) as Record<string, string>;
+      expect(body.error).toBe("AGE_REQUIREMENT_NOT_MET");
+      expect(body.message).toContain("18");
+      expect(body.remediation.length).toBeGreaterThan(0);
+      expect(body.field).toBe("dateOfBirth");
+
+      // Fail closed: no realm user, so no account a sign-in link could reach.
+      expect(calls).toHaveLength(0);
+    });
+
+    it("admits someone on their 18th birthday", async () => {
+      const { port, calls } = provider();
+      // NOW is 2026-08-07; this is exactly 18 years earlier.
+      const res = await post({ ...VALID, dateOfBirth: "2008-08-07" }, port);
+
+      expect(res.status).toBe(200);
+      expect(calls).toHaveLength(1);
+    });
+
+    it("checks age before burning the invitation gate", async () => {
+      // An under-age attempt must not consume or even consult the invitation:
+      // ordering the checks the other way would let a mistyped birth year
+      // spend somebody's code.
+      const { port, calls } = provider();
+      const res = await post(
+        { ...VALID, dateOfBirth: "2016-01-01", invitationCode: "NO-SUCH-CODE" },
+        port,
+      );
+
+      // 403 AGE_REQUIREMENT_NOT_MET, not the invitation gate's 403.
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as Record<string, string>).error).toBe(
+        "AGE_REQUIREMENT_NOT_MET",
+      );
+      expect(calls).toHaveLength(0);
+    });
+
     it("rejects a malformed guardian email", async () => {
       const { port, calls } = provider();
       const res = await post({ ...VALID, guardianEmail: "nope" }, port);

@@ -55,6 +55,12 @@ vi.mock("../../../src/db", () => ({
           entity: {
             findMany: vi.fn().mockResolvedValue([]),
           },
+          // Outbox writer (plan 034 lane E) — `post.published` is emitted
+          // inside this same transaction, so the tx double needs the delegate.
+          // Same addition lane E made to `test/unit/data-router.test.ts`;
+          // missed here because this file is not in `test/unit/**` and only
+          // the full-suite run (lane H) reaches it.
+          domainEvent: { create: vi.fn().mockResolvedValue({ id: "de_1" }) },
         };
         return await callback(tx);
       }),

@@ -5,7 +5,7 @@
  * and the restricted context they receive at runtime.
  */
 
-import type { ZodSchema } from "zod";
+import type { ZodSchema, ZodType } from "zod";
 import type { Route } from "./route-types.js";
 import type {
   ExtensionCircleEntityStatus,
@@ -315,6 +315,79 @@ export interface ExtensionContext<TModels extends ExtensionModelMap = OpenScoped
 
   /** This extension's config values (populated from its configSchema keys) */
   config: Record<string, string>;
+
+  /**
+   * Domain-event emission seam.
+   *
+   * `emit` records that something happened; it does not deliver anything.
+   * There is no dispatcher and no subscriber — an emitted event is written to
+   * core's outbox and swept later, once a delivery mechanism exists. Emitting
+   * is therefore cheap and safe to do from the first version of a handler,
+   * which is the entire reason this exists before anything reads it: emission
+   * *points* are what is expensive to retrofit across every mutation, delivery
+   * is not.
+   *
+   * `type` is `<subject>.<verb>` past tense (`walk.created`, `dog.updated`)
+   * and should be declared in {@link TrellisExtension.events} together with
+   * the payload schema, so a subscriber can be written against it later.
+   *
+   * **Supplied by core, always.** Declared optional when the contract first
+   * landed, on the assumption that requiring it would break every existing
+   * constructor of an `ExtensionContext`; it does not, because core is the
+   * only real constructor — every other one in this repo and in the first
+   * consuming vertical is a test double behind an `as unknown as` cast, which
+   * a required member does not touch. Requiring it is what makes
+   * `ctx.events.emit(...)` (not `ctx.events?.emit(...)`) correct at the call
+   * site, so an extension author never has to reason about whether the seam
+   * is there.
+   *
+   * The emitter is bound to the tenant core resolved for the caller. There is
+   * no tenant parameter here on purpose: an extension has no way to name a
+   * tenant, so it cannot emit into one it does not act for.
+   *
+   * That binding is a property of the *call site* core builds the context
+   * from, not of this type, so it is stated as what it guarantees: a route
+   * handler (the seam extensions are written against) gets the tenant core
+   * verified for the request. Where core has no tenant to bind — a context
+   * built outside a request, before a tenant is known — `emit` **throws**
+   * rather than writing a row scoped to nothing. Fail-closed, loudly, is the
+   * posture; an event with no tenant is an event a dispatcher could not
+   * deliver.
+   */
+  events: ExtensionEventEmitter;
+}
+
+/**
+ * The emission half of the event seam — see {@link ExtensionContext.events}.
+ *
+ * Declared as a method (not a function-typed property) for the same
+ * bivariance reason as {@link ExtensionRouteDefinition.handle}, and so a
+ * later widening of `payload` stays assignable.
+ */
+export interface ExtensionEventEmitter {
+  emit(type: string, payload: unknown): Promise<void>;
+}
+
+/**
+ * One entry in an extension's scope vocabulary — see
+ * {@link TrellisExtension.scopes}.
+ */
+export interface ExtensionScopeDeclaration {
+  /** `<resource>:<verb>`, e.g. `walks:write`. Must not collide with core's. */
+  id: string;
+  /** The sentence a user reads on the consent screen before granting it. */
+  description: string;
+}
+
+/**
+ * One entry in an extension's event catalog — see
+ * {@link TrellisExtension.events}.
+ */
+export interface ExtensionEventDeclaration {
+  /** `<subject>.<verb>` past tense, e.g. `walk.created`. */
+  type: string;
+  /** Zod schema for the payload passed to `ctx.events.emit(type, payload)`. */
+  payloadSchema: ZodType;
 }
 
 // ---------------------------------------------------------------------------
@@ -430,7 +503,7 @@ export interface ExtensionJobDecl<TModels extends ExtensionModelMap = OpenScoped
  *   - Bump alongside every `package.json` version change.
  *   - Never change one without changing the other.
  */
-export const EXTENSION_API_VERSION = "0.9.2" as const;
+export const EXTENSION_API_VERSION = "0.10.0" as const;
 
 // ---------------------------------------------------------------------------
 // ActivityPub Extension — display-only Actor enrichment
@@ -489,6 +562,28 @@ export interface ExtensionSession {
    * route handler obtains a `TenantId` — pass it to `ctx.db.tenant(tid)`.
    */
   tenantId?: TenantId;
+
+  /**
+   * The third-party client acting on the user's behalf, if any. **Absent
+   * means first-party** — the human's own session, no client in between.
+   *
+   * Added to the whitelist deliberately: an extension may want to attribute a
+   * write, and this is the only identifier it should ever see for that. No
+   * token, secret or grant record crosses the boundary with it.
+   */
+  clientId?: string;
+
+  /**
+   * What this caller was granted: a set of `<resource>:<verb>` strings, or
+   * `"*"` for an unscoped first-party session.
+   *
+   * **Optional, and absent is equivalent to `"*"`** — sessions built before
+   * scopes existed are first-party. Enforcement of a route's declared
+   * {@link ExtensionRouteDefinition.scopes} belongs in core's route wrapper,
+   * not in a handler; read this field only when a single route's behaviour
+   * genuinely differs by grant rather than being allowed or refused by it.
+   */
+  scopes?: ReadonlySet<string> | "*";
 }
 
 /**
@@ -514,6 +609,68 @@ export interface ExtensionRouteDefinition<TModels extends ExtensionModelMap = Op
   /** Auth requirement (default: "required") */
   auth?: "required" | "optional" | "none";
   description?: string;
+
+  // -------------------------------------------------------------------------
+  // Self-description (declaration only in this version — core does not yet
+  // read these). They mirror the core `Route` metadata one-for-one, so an
+  // extension route can appear in the published spec on the same terms as a
+  // core route rather than being a second-class surface.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Scopes a third-party principal must hold to call this route.
+   *
+   * - **absent** — first-party only; no third-party client reaches it.
+   * - **`[]`** — any authenticated principal, no particular scope.
+   * - **non-empty** — every listed scope required.
+   *
+   * Strings are `<resource>:<verb>` (colon), distinct from core's capability
+   * convention `<resource>.<verb>` (dot). An extension declares its own scope
+   * ids and their consent copy in {@link TrellisExtension.scopes}; it may also
+   * require a core scope.
+   */
+  scopes?: string[];
+
+  /**
+   * Eligible for the public OpenAPI document and the versioned public mount.
+   * Default `false` — a route is private to the first-party client unless it
+   * says otherwise, because publishing is a compatibility promise.
+   */
+  publicSpec?: boolean;
+
+  /**
+   * Zod schema for the request body: emitted as JSON Schema in the spec, and
+   * the intended validation point before `handle()` runs.
+   *
+   * `ZodType` is Zod v4's base type. `ZodSchema` — the v3 name, still used by
+   * {@link TrellisExtension.metadataSchema} for compatibility — is the same
+   * thing; prefer `ZodType` in new declarations.
+   */
+  requestSchema?: ZodType;
+
+  /** Zod schema for the success response body. Emitted as JSON Schema. */
+  responseSchema?: ZodType;
+
+  /**
+   * Whether a repeated call carrying the same `Idempotency-Key` must be
+   * de-duplicated rather than re-executed. Expected to be true for every
+   * public write.
+   */
+  idempotent?: boolean;
+
+  /**
+   * Stable machine name for this operation (OpenAPI `operationId`) — the
+   * symbol a generated client is named after, so it should outlive the path.
+   * Unique across the extension.
+   */
+  operationId?: string;
+
+  /**
+   * The compatibility promise this route carries in the published spec.
+   * `"beta"` says the shape may change without a major bump.
+   */
+  stability?: "stable" | "beta";
+
   /**
    * Declared as a METHOD, not as a `handle: ExtensionHandler<TModels>`
    * property, and the difference is load-bearing.
@@ -621,6 +778,39 @@ export interface TrellisExtension<TModels extends ExtensionModelMap = OpenScoped
 
   /** Core-wrapped extension routes — preferred over raw `routes` */
   extensionRoutes?: ExtensionRouteDefinition<TModels>[];
+
+  /**
+   * The scope vocabulary this extension defines, with the consent copy for
+   * each id.
+   *
+   * Core owns the mechanism and never invents a vertical's words: it has no
+   * way to describe `walks:write` to a user, so the sentence a person reads
+   * before granting it has to come from here. Keep the copy second person and
+   * present tense, describing what the client will be able to do rather than
+   * naming the endpoint ("Record walks for your dogs", not "Access the walks
+   * API").
+   *
+   * Ids are `<resource>:<verb>` and must not collide with core's catalog.
+   * Declare a scope only when a route requires it — a declared-but-unused
+   * scope is a consent screen asking for something nothing needs.
+   *
+   * Declaration only in this version; nothing reads it yet.
+   */
+  scopes?: ExtensionScopeDeclaration[];
+
+  /**
+   * The domain events this extension emits, with their payload schemas.
+   *
+   * The catalog is what makes an emitted event addressable later — a
+   * subscriber, a webhook filter or a generated type needs the `type` string
+   * and the shape before either end exists. Types are `<subject>.<verb>` past
+   * tense (`walk.created`).
+   *
+   * Declaration only in this version: nothing validates a payload against its
+   * schema and nothing delivers an event. See {@link ExtensionContext.events}
+   * for the emission side.
+   */
+  events?: ExtensionEventDeclaration[];
 
   /** Zod schema declaring required env var keys — validated against scoped values only */
   configSchema?: ZodSchema;

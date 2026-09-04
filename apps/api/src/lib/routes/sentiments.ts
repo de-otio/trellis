@@ -210,13 +210,12 @@ export const sentimentsRoutes: Route[] = [
         env,
       );
 
-      // Safer Social Design: Age-gate sentiment user list
-      if (session?.ageTier === "CHILD") {
-        return securityHeaders.createSecureResponse(
-          JSON.stringify({ error: "FORBIDDEN", message: "This feature is not available for your account" }),
-          { status: 403, headers: { "content-type": "application/json" } },
-        );
-      }
+      // Safer Social Design: this endpoint used to 403 a CHILD session before
+      // the auth check below. Minor tiers are not a supported account type
+      // (lib/age-gate.ts MINOR_TIERS_SUPPORTED), so no session can carry that
+      // tier and the branch has been removed rather than left as a guard that
+      // reads as protection and protects nobody. The H3 checks below are what
+      // actually gates this endpoint.
 
       // H3: this endpoint discloses WHO reacted, and accepted `session || null`
       // — so the reader list of a private post was available anonymously. A
@@ -290,25 +289,18 @@ export const sentimentsRoutes: Route[] = [
           auth.activeTenantId,
         );
 
-        // Safer Social Design: TEEN users see sentiment types only, no user identities.
+        // Safer Social Design: a TEEN session used to get sentiment types
+        // only, with user identities stripped. Minor tiers are not a supported
+        // account type (lib/age-gate.ts MINOR_TIERS_SUPPORTED), so no session
+        // can carry that tier and the rewrite has been removed.
         //
-        // `response.ok` is load-bearing: without it a refusal (404) or an error
-        // (500) is parsed as if it were a user list and re-emitted as a 200 with
-        // an empty `sentimentTypes` array — laundering the deny into a success
-        // for exactly the accounts the platform is most careful with.
-        if (response.ok && session?.ageTier === "TEEN") {
-          const responseBody = await response.json() as any;
-          // Strip user identities, keep only sentiment types
-          const sentimentTypes = [...new Set(
-            (responseBody.users || responseBody.data || []).map((u: any) => u.sentiment).filter(Boolean)
-          )];
-          const teenResponse = new Response(
-            JSON.stringify({ sentimentTypes, total: sentimentTypes.length }),
-            { status: 200, headers: { "content-type": "application/json" } },
-          );
-          return securityHeaders.addSecurityHeaders(teenResponse);
-        }
-
+        // Worth recording why the removed block was shaped the way it was, in
+        // case minor support ever returns: its `response.ok` check was
+        // load-bearing. Without it a refusal (404) or an error (500) was
+        // parsed as if it were a user list and re-emitted as a 200 with an
+        // empty `sentimentTypes` array — laundering a deny into a success for
+        // exactly the accounts the platform is most careful with. Any future
+        // reinstatement must keep that check.
         return securityHeaders.addSecurityHeaders(response);
       } catch (error) {
         logger.error("Error getting sentiment users:", error);
