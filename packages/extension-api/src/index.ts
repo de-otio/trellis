@@ -25,6 +25,9 @@ export type {
   ExtensionHandler,
   ExtensionSession,
   ExtensionResponse,
+  ExtensionEventEmitter,
+  ExtensionScopeDeclaration,
+  ExtensionEventDeclaration,
   DiscoverDb,
   ActorEnrichment,
 } from "./extension.js";

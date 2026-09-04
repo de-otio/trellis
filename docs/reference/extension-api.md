@@ -44,8 +44,20 @@ expected contract version.
 Import from the **package root**. The package declares an `exports` map that
 exposes the root only, so deep specifiers into `lib/` do not resolve.
 
-> **Current version: `0.9.2`.** This line is checked against the
+> **Current version: `0.10.0`.** This line is checked against the
 > `EXTENSION_API_VERSION` constant in CI, so it cannot drift.
+>
+> `0.9.2 → 0.10.0` is **additive, and every added field is inert**. It declares
+> the shapes a developer surface needs — per-route `scopes`, `publicSpec`,
+> `requestSchema`/`responseSchema`, `idempotent`, `operationId`, `stability`;
+> a `scopes` vocabulary and an `events` catalog on `TrellisExtension`;
+> `clientId`/`scopes` on `ExtensionSession`; and `ctx.events` — **without core
+> reading any of them yet**. Nothing enforces a scope, validates a schema,
+> emits an event or publishes a route as a result of this bump. An extension
+> written against `0.9.2` compiles and behaves identically; the minor moved
+> only because a `0.x` minor is the breaking unit and these had to land
+> together. Fields marked _declared_ in the tables below are the ones core does
+> not call yet — see [Declared but not yet read](#declared-but-not-yet-read).
 >
 > `0.9.1 → 0.9.2` tightens `ExtensionModelMap` from `Record<string, object>` to
 > `Record<string, ScopedDelegate>`, with **no runtime change**. If you declare a
@@ -118,8 +130,13 @@ omitted when the vertical has no interest in that surface.
 | `computeLifeStage`    | no       | Compute a life-stage (or equivalent) value from entity metadata; the result is persisted as `Entity.lifeStage`.                                                    |
 | `extendRecap`         | no       | Attach own-table aggregates to a year-in-review recap; merged under `payload.extension`.                                                                           |
 | `shutdown`            | no       | Called on server shutdown (SIGTERM/SIGINT).                                                                                                                        |
+| `scopes`              | no       | _Declared, not yet read._ This extension's scope vocabulary — `{ id, description }` per scope, the description being the consent-screen copy.                      |
+| `events`              | no       | _Declared, not yet read._ This extension's event catalog — `{ type, payloadSchema }` per event.                                                                    |
 
-**This table is the whole contract.** Every field listed is invoked by core.
+**This table is the whole contract.** Every field listed is invoked by core,
+except the two marked _declared, not yet read_ — see
+[Declared but not yet read](#declared-but-not-yet-read) for why those exist and
+what it is safe to conclude from them.
 If you are looking for a lifecycle hook, an entity-relationship-type
 registration, a discovery facet, a scoring signal, a taxonomy seed, a
 recommendation strategy or an `init` callback, they were removed in `0.9.0`:
@@ -230,6 +247,15 @@ interface ExtensionRouteDefinition {
   auth?: "required" | "optional" | "none";
   description?: string;
   handle: ExtensionHandler;
+
+  // Declared, not yet read by core (0.10.0).
+  scopes?: string[]; // absent = first-party only; [] = any authenticated caller
+  publicSpec?: boolean; // eligible for the public OpenAPI document
+  requestSchema?: ZodType; // → JSON Schema; the intended pre-handler validation point
+  responseSchema?: ZodType; // → JSON Schema
+  idempotent?: boolean; // repeated Idempotency-Key must not re-execute
+  operationId?: string; // stable machine name in the spec
+  stability?: "stable" | "beta";
 }
 ```
 
@@ -266,6 +292,14 @@ const pingHandler: ExtensionHandler = async () => ({
 });
 ```
 
+`ExtensionSession` is built by whitelist — core never spreads its internal
+session into it — so only the fields named in the type cross the boundary.
+Besides `userId`, `email`, `role` and the verified `tenantId`, `0.10.0` adds
+two _declared, not yet populated_ fields: `clientId?` (the third-party client
+acting on the user's behalf; absent means first-party) and `scopes?`
+(`ReadonlySet<string> | "*"`, where absent is equivalent to `"*"`). Both stay
+undefined until there is an authorization server to populate them.
+
 ### Raw routes
 
 `routes` is an array of `Route` definitions for cases that need direct control
@@ -290,8 +324,44 @@ interface ExtensionContext {
   appUrl: string; // e.g. "https://api.example.com"
   stage: string; // "dev", "prod"
   config: Record<string, string>; // this extension's validated config
+
+  // Declared, not yet supplied by core (0.10.0) — call as ctx.events?.emit(…).
+  events?: { emit(type: string, payload: unknown): Promise<void> };
 }
 ```
+
+### Declared but not yet read
+
+`0.10.0` adds fields that core accepts and does nothing with. That is normally
+the exact anti-pattern this document warns about — the seven dead extension
+points removed in `0.9.0` — so the difference is worth stating plainly rather
+than leaving you to discover it.
+
+Those seven were declared as _working features_ and were not. These are
+declared as a _contract to build against_, and the tables say so on every row.
+The reason to land them empty is that they are the vocabulary a scoped
+third-party surface needs — which route requires which grant, what a user is
+consenting to, what a payload looks like — and every one of them is cheap to
+add before there are callers and invasive afterwards, when adding a required
+field means touching every route at once.
+
+What this means for you today:
+
+- **Declaring them is safe and changes nothing.** No request is refused, no
+  body is validated, no event is delivered, nothing new appears in
+  `/openapi.json`.
+- **Do not rely on them for enforcement.** A route carrying
+  `scopes: ["walks:write"]` is not yet protected by that scope. If a route must
+  be restricted now, restrict it in the handler as you would have before.
+- **`ctx.events` is absent at runtime.** Call it as `ctx.events?.emit(…)`; an
+  unguarded call throws.
+- **Declare only what is true.** A scope you list is copy a person will
+  eventually be asked to consent to, and an `operationId` is a name a generated
+  client will eventually carry. Both are easier to get right now than to
+  rename later.
+
+Each field becomes live in a later release, and the release note for that
+version will say which.
 
 ### `db` — scoped database access
 
