@@ -80,6 +80,7 @@ import { invitationsRoutes } from "./routes/invitations.js";
 import { linkReportRoutes } from "./routes/link-reports.js";
 import { reportRoutes } from "./routes/reports.js";
 import { reportCategoryAdminRoutes } from "./routes/report-category-admin.js";
+import { contentReportAdminRoutes } from "./routes/content-report-admin.js";
 import { moderationFeedbackRoutes } from "./routes/moderation-feedback.js";
 import { mapRoutes } from "./routes/map.js";
 import { mediaRoutes } from "./routes/media.js";
@@ -385,6 +386,7 @@ const PORTED_ROUTE_SETS: ReadonlyArray<ReadonlyArray<Route>> = [
   linkReportRoutes,
   reportRoutes, // compliance plan 08 §2.2 — /api/reports[...]
   reportCategoryAdminRoutes, // compliance plan 08 §2.1 — /api/admin/report-categories[...]
+  contentReportAdminRoutes, // compliance plan 08 §2.5 — /api/admin/content-reports[...] (SUPER_ADMIN review queue)
   moderationFeedbackRoutes, // spec 07 §4 / plan 08 Phase 2 — disposition + feedback
   notificationsRoutes,
   oauthRoutes,
