@@ -120,18 +120,47 @@ describe("computeAgeTier — clock frame (regression)", () => {
     else process.env.TZ = originalTz;
   });
 
+  // Read the wall-clock hour:minute `date` shows in `timeZone`, using an
+  // *explicit* Intl time zone rather than the ambient default. This is the
+  // only reliable way to observe a non-UTC zone here: vitest's default pool
+  // ("threads") runs each test file in a worker_thread, and worker_threads
+  // snapshot the process's local time zone once at thread startup —
+  // reassigning `process.env.TZ` from inside a running test does not change
+  // what `Date.prototype.getTimezoneOffset()` (or any local-time accessor)
+  // subsequently returns in that thread. Verified locally: `TZ=UTC npm test`
+  // reproduces this suite's CI failure exactly (CI runners default to UTC),
+  // while `TZ=America/Los_Angeles` / `TZ=Pacific/Kiritimati` do not, because
+  // the guard below used to read `NOW.getTimezoneOffset()`, which stays
+  // frozen at whatever the worker's ambient TZ was when it started.
+  function hourMinuteIn(date: Date, timeZone: string): string {
+    return new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).format(date);
+  }
+
   it.each([
     "America/Los_Angeles", // behind UTC — the direction that mis-ages upward
     "Pacific/Kiritimati", // UTC+14 — the far side, mis-ages downward
     "UTC",
   ])("computes the same tier under TZ=%s as under UTC", (tz) => {
+    // Kept for parity with how the app is actually deployed (some
+    // server-side code paths do read `process.env.TZ`), and restored in
+    // afterEach — but `computeAgeTier`/`computeAgeYears`/`isUnderMinimumAge`
+    // read only `getUTC*` accessors, so this assignment has no effect on the
+    // production code path under test, and the guard below deliberately does
+    // not depend on it either (see `hourMinuteIn` above).
     process.env.TZ = tz;
 
-    // Guard: if the runtime ignored the TZ change this assertion would pass
-    // for the wrong reason, so prove the change took effect before relying on
-    // it. (`UTC` is exempt — offset 0 is the expected result there.)
+    // Guard: prove `tz` is actually a different wall-clock reading from UTC
+    // at this instant, via an explicit-zone Intl computation (immune to the
+    // worker-thread ambient-TZ freeze). If this ever failed to differ, the
+    // assertions below would be passing for the wrong reason.
+    // (`UTC` is exempt — it trivially equals itself.)
     if (tz !== "UTC") {
-      expect(NOW.getTimezoneOffset()).not.toBe(0);
+      expect(hourMinuteIn(NOW, tz)).not.toBe(hourMinuteIn(NOW, "UTC"));
     }
 
     expect(computeAgeTier(DOB, NOW)).toBe("TEEN");
