@@ -25,6 +25,7 @@
 
 import exifr from "exifr";
 import type { SyntheticSourceType } from "../provenance/types.js";
+import { sniffC2paPresence } from "./c2pa-extractor.js";
 
 /** The ONLY thing this module may return. See the module header. */
 export interface ProvenanceReading {
@@ -79,27 +80,19 @@ function newsCodeOf(raw: string): string {
 }
 
 /**
- * Bounded byte sniff for a C2PA/JUMBF container.
+ * Presence sniff for a C2PA/JUMBF container — {@link sniffC2paPresence} in
+ * ./c2pa-extractor.ts, imported rather than re-implemented so that "a manifest
+ * is present" has exactly one definition. This module's use of it is unchanged:
+ * presence only, never a source type, because a manifest usually attests CAMERA
+ * CAPTURE and mapping presence to "AI" would mislabel photojournalism from
+ * provenance-enabled cameras (Leica/Sony/Nikon ship these).
  *
- * Presence only — this does NOT parse or validate a manifest, and therefore never
- * yields a source type. That matters: a C2PA manifest usually attests CAMERA
- * CAPTURE, so mapping "manifest present" to "AI" would mislabel photojournalism
- * from provenance-enabled cameras (Leica/Sony/Nikon ship these). Presence gets us
- * `examined: true`, which is honest, and nothing more.
- *
- * Scans only a prefix: containers sit near the front of the file, and an
- * unbounded scan of an attacker-supplied buffer is a cheap DoS.
+ * The manifest BYTES are a separate concern with a separate reviewed module:
+ * this function's return type is still a boolean, and this function's caller
+ * still returns nothing but {@link ProvenanceReading}. The sidecar extraction
+ * runs beside this read in routes/media.ts, not inside it — the privacy control
+ * described in the module header is that THIS return type cannot widen.
  */
-function sniffC2pa(bytes: Uint8Array): boolean {
-  const limit = Math.min(bytes.length, 256 * 1024);
-  const head = Buffer.from(
-    bytes.buffer,
-    bytes.byteOffset,
-    limit,
-  ) as unknown as Buffer;
-  // JPEG: APP11 JUMBF boxes carry the box type "jumb". PNG: a "caBX" chunk.
-  return head.includes("jumb") || head.includes("caBX");
-}
 
 /**
  * Read provenance from ORIGINAL (pre-re-encode) image bytes.
@@ -119,7 +112,7 @@ export async function readProvenance(
   if (!mimeType.startsWith("image/")) return NOTHING;
 
   try {
-    const c2paPresent = sniffC2pa(original);
+    const c2paPresent = sniffC2paPresence(original);
 
     let parsed: unknown;
     try {

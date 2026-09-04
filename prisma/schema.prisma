@@ -870,6 +870,37 @@ model MediaFile {
   // "never looked" — needed for coverage metrics and any future backfill.
   provenanceExamined Boolean             @default(false) @map("provenance_examined")
 
+  // --- C2PA manifest sidecar: EXTRACTED, NEVER VERIFIED ---------------------
+  // The T7 re-encode destroys any C2PA manifest along with the rest of the
+  // metadata, and that strip stays (a manifest carries camera identity, serial
+  // numbers, capture times). But the destruction is irreversible: once the
+  // original is gone, no viewer can ever check a Content Credentials claim
+  // about these bytes. So the manifest store is copied out BEFORE the strip
+  // (lib/metadata/c2pa-extractor.ts) into a sidecar object, and summarised
+  // here. Written via lib/media/c2pa-sidecar.ts — claim-then-write, guarded on
+  // `c2paManifestPresent: null`, because dedup collapses two different
+  // originals onto this one row (see the note on embeddedSourceType above).
+  //
+  // NOTHING HERE IS A VERIFICATION. No signature is checked and no assertion
+  // is read; there is deliberately no `verified` column, so no code path can
+  // set one without implementing verification first. The API emits a constant
+  // `verified: false` alongside this summary.
+  //
+  // NULL means "no manifest found, or these bytes predate this feature" —
+  // `provenanceExamined` is what distinguishes "looked" from "never looked".
+  c2paManifestPresent Boolean? @map("c2pa_manifest_present")
+  // "jpeg-app11" | "png-cabx" | "unidentified" (present but not locatable).
+  c2paContainer       String?  @map("c2pa_container")
+  // Storage key of the manifest bytes: cas/{tenantId}/{hash}.c2pa (see
+  // lib/media/cas-keys.ts). NULL with c2paManifestPresent = true means
+  // presence was recorded but the bytes could not be located. EVERY sidecar
+  // object that exists is named here — that is what makes erasure tractable.
+  c2paSidecarKey      String?  @map("c2pa_sidecar_key")
+  c2paSidecarBytes    Int?     @map("c2pa_sidecar_bytes")
+  // SHA-256 (lowercase hex) of the sidecar bytes, so a later read can confirm
+  // it got what we stored. NOT a signature check.
+  c2paSidecarSha256   String?  @map("c2pa_sidecar_sha256")
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
