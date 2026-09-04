@@ -327,3 +327,289 @@ describe("wrapExtensionRoute", () => {
     expect(ctx).not.toHaveProperty("DATABASE_URL");
   });
 });
+
+/**
+ * Scope enforcement and request-body validation (plan 034 lane A).
+ *
+ * The pipeline is authenticate -> scope -> validate -> handle, and the order
+ * is asserted, not just the individual steps: each stage is exercised with a
+ * request that would also fail a *later* stage, so a reordering shows up as a
+ * changed status code rather than passing quietly.
+ */
+describe("wrapExtensionRoute — scopes and request schemas", () => {
+  const bodySchema = z.object({ name: z.string().min(1) });
+
+  const call = (route: ReturnType<typeof wrapExtensionRoute>, request: Request) =>
+    route.handler(request, {} as any, {
+      url: new URL(request.url),
+      pathname: new URL(request.url).pathname,
+      params: {},
+    });
+
+  const post = (body: string) =>
+    new Request("https://test.com/api/ext/dog/walks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+    });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetSession.mockResolvedValue(null);
+    mockUserFindUnique.mockResolvedValue({ personalTenantId: null });
+  });
+
+  describe("scope enforcement", () => {
+    const scopedRoute = (handle: any) =>
+      wrapExtensionRoute(makeExt(), {
+        path: "walks",
+        method: "POST",
+        auth: "required",
+        scopes: ["posts:write"],
+        handle,
+      });
+
+    it("403s a principal whose grant lacks the scope, naming it in remediation", async () => {
+      mockGetSession.mockResolvedValue({
+        userId: "u1", email: "a@b.com", role: "END_USER",
+        scopes: new Set(["posts:read"]),
+      });
+      const handler = vi.fn(async () => ({ status: 200, body: {} }));
+
+      const response = await call(scopedRoute(handler), post('{"name":"Rex"}'));
+
+      expect(response.status).toBe(403);
+      expect(await response.json()).toEqual({
+        error: "INSUFFICIENT_SCOPE",
+        message:
+          "This operation requires the `posts:write` scope, which this credential was not granted.",
+        remediation:
+          "Request the `posts:write` scope and have the user re-authorize.",
+      });
+      expect(handler).not.toHaveBeenCalled();
+    });
+
+    it("200s a principal that holds the scope", async () => {
+      mockGetSession.mockResolvedValue({
+        userId: "u1", email: "a@b.com", role: "END_USER",
+        scopes: new Set(["posts:write"]),
+      });
+      const handler = vi.fn(async () => ({ status: 200, body: { ok: true } }));
+
+      const response = await call(scopedRoute(handler), post('{"name":"Rex"}'));
+
+      expect(response.status).toBe(200);
+      expect(handler).toHaveBeenCalled();
+    });
+
+    it('200s a first-party session ("*") — the no-regression case that matters most', async () => {
+      mockGetSession.mockResolvedValue({
+        userId: "u1", email: "a@b.com", role: "END_USER", scopes: "*",
+      });
+      const handler = vi.fn(async () => ({ status: 200, body: { ok: true } }));
+
+      const response = await call(scopedRoute(handler), post('{"name":"Rex"}'));
+
+      expect(response.status).toBe(200);
+      expect(handler).toHaveBeenCalled();
+    });
+
+    it("200s a session predating scopes entirely (field absent)", async () => {
+      mockGetSession.mockResolvedValue({ userId: "u1", email: "a@b.com", role: "END_USER" });
+      const handler = vi.fn(async () => ({ status: 200, body: { ok: true } }));
+
+      const response = await call(scopedRoute(handler), post('{"name":"Rex"}'));
+
+      expect(response.status).toBe(200);
+      expect(handler).toHaveBeenCalled();
+    });
+
+    it("scopes: [] requires authentication and nothing more", async () => {
+      const handler = vi.fn(async () => ({ status: 200, body: { ok: true } }));
+      const route = wrapExtensionRoute(makeExt(), {
+        path: "walks", method: "POST", auth: "required", scopes: [], handle: handler,
+      });
+
+      // No session -> 401 from the auth stage.
+      expect((await call(route, post("{}"))).status).toBe(401);
+      expect(handler).not.toHaveBeenCalled();
+
+      // Authenticated with an EMPTY grant -> through, because nothing is asked for.
+      mockGetSession.mockResolvedValue({
+        userId: "u1", email: "a@b.com", role: "END_USER", scopes: new Set<string>(),
+      });
+      expect((await call(route, post("{}"))).status).toBe(200);
+      expect(handler).toHaveBeenCalledOnce();
+    });
+
+    it('refuses to wire auth: "none" together with a non-empty scopes list', () => {
+      // A route with no principal can never have its scopes checked; served,
+      // it would look gated and be open. Boot fails instead of serving it.
+      expect(() =>
+        wrapExtensionRoute(makeExt(), {
+          path: "public", method: "GET", auth: "none", scopes: ["posts:write"],
+          handle: async () => ({ status: 200, body: {} }),
+        }),
+      ).toThrow(/auth: "none"/);
+
+      // An empty list is not a gate, so it stays legal.
+      expect(() =>
+        wrapExtensionRoute(makeExt(), {
+          path: "public", method: "GET", auth: "none", scopes: [],
+          handle: async () => ({ status: 200, body: {} }),
+        }),
+      ).not.toThrow();
+    });
+  });
+
+  describe("requestSchema validation", () => {
+    const validatedRoute = (handle: any) =>
+      wrapExtensionRoute(makeExt(), {
+        path: "walks", method: "POST", auth: "required",
+        requestSchema: bodySchema, handle,
+      });
+
+    beforeEach(() => {
+      mockGetSession.mockResolvedValue({
+        userId: "u1", email: "a@b.com", role: "END_USER", scopes: "*",
+      });
+    });
+
+    it("400s a body that fails the schema, with field set, and never invokes handle", async () => {
+      const handler = vi.fn(async () => ({ status: 200, body: {} }));
+
+      const response = await call(validatedRoute(handler), post('{"name":42}'));
+
+      expect(response.status).toBe(400);
+      const body = await response.json();
+      expect(body.error).toBe("VALIDATION_FAILED");
+      expect(body.field).toBe("name");
+      expect(typeof body.message).toBe("string");
+      expect(body.remediation).toBe("Correct the `name` field and retry.");
+      expect(handler).not.toHaveBeenCalled();
+    });
+
+    it("400s a body that is not JSON at all", async () => {
+      const handler = vi.fn(async () => ({ status: 200, body: {} }));
+
+      const response = await call(validatedRoute(handler), post("not json"));
+
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toBe("INVALID_REQUEST_BODY");
+      expect(handler).not.toHaveBeenCalled();
+    });
+
+    it("leaves the body readable by the handler — the wrapper reads a clone", async () => {
+      const handler = vi.fn(async (request: Request) => ({
+        status: 200,
+        body: await request.json(),
+      }));
+
+      const response = await call(validatedRoute(handler), post('{"name":"Rex"}'));
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ name: "Rex" });
+    });
+
+    it("does not try to validate a GET, which has no body to validate", async () => {
+      const handler = vi.fn(async () => ({ status: 200, body: { ok: true } }));
+      const route = wrapExtensionRoute(makeExt(), {
+        path: "walks", method: "GET", auth: "required",
+        requestSchema: bodySchema, handle: handler,
+      });
+
+      const response = await call(route, new Request("https://test.com/api/ext/dog/walks"));
+
+      expect(response.status).toBe(200);
+      expect(handler).toHaveBeenCalled();
+    });
+  });
+
+  describe("pipeline order — authenticate, then scope, then validate", () => {
+    const fullRoute = (handle: any) =>
+      wrapExtensionRoute(makeExt(), {
+        path: "walks", method: "POST", auth: "required",
+        scopes: ["posts:write"], requestSchema: bodySchema, handle,
+      });
+
+    it("an unauthenticated request with a malformed body gets 401, not 400", async () => {
+      const handler = vi.fn(async () => ({ status: 200, body: {} }));
+
+      const response = await call(fullRoute(handler), post('{"name":42}'));
+
+      expect(response.status).toBe(401);
+      expect(handler).not.toHaveBeenCalled();
+    });
+
+    it("an under-scoped request with a malformed body gets 403, not 400", async () => {
+      // Validating first would describe the body shape to a caller not
+      // permitted to send one.
+      mockGetSession.mockResolvedValue({
+        userId: "u1", email: "a@b.com", role: "END_USER", scopes: new Set<string>(),
+      });
+      const handler = vi.fn(async () => ({ status: 200, body: {} }));
+
+      const response = await call(fullRoute(handler), post('{"name":42}'));
+
+      expect(response.status).toBe(403);
+      expect((await response.json()).error).toBe("INSUFFICIENT_SCOPE");
+      expect(handler).not.toHaveBeenCalled();
+    });
+
+    it("a fully authorized request with a malformed body gets 400", async () => {
+      mockGetSession.mockResolvedValue({
+        userId: "u1", email: "a@b.com", role: "END_USER",
+        scopes: new Set(["posts:write"]),
+      });
+      const handler = vi.fn(async () => ({ status: 200, body: {} }));
+
+      const response = await call(fullRoute(handler), post('{"name":42}'));
+
+      expect(response.status).toBe(400);
+      expect(handler).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("the principal crosses the boundary by whitelist", () => {
+    it("passes clientId and scopes through to the extension session", async () => {
+      mockGetSession.mockResolvedValue({
+        userId: "u1", email: "a@b.com", role: "END_USER",
+        clientId: "client_abc",
+        scopes: new Set(["posts:write"]),
+        csrfToken: "secret-csrf",
+      });
+
+      const handler = vi.fn(async () => ({ status: 200, body: {} }));
+      await call(
+        wrapExtensionRoute(makeExt(), {
+          path: "me", method: "GET", auth: "required", handle: handler,
+        }),
+        new Request("https://test.com/api/ext/dog/me"),
+      );
+
+      const passed = handler.mock.calls[0][2];
+      expect(Object.keys(passed).sort()).toEqual([
+        "clientId", "email", "role", "scopes", "userId",
+      ]);
+      expect(passed.clientId).toBe("client_abc");
+      expect(passed.scopes).toEqual(new Set(["posts:write"]));
+      expect(passed.csrfToken).toBeUndefined();
+    });
+
+    it("omits both keys for a session that carries neither", async () => {
+      mockGetSession.mockResolvedValue({ userId: "u1", email: "a@b.com", role: "END_USER" });
+
+      const handler = vi.fn(async () => ({ status: 200, body: {} }));
+      await call(
+        wrapExtensionRoute(makeExt(), {
+          path: "me", method: "GET", auth: "required", handle: handler,
+        }),
+        new Request("https://test.com/api/ext/dog/me"),
+      );
+
+      expect(Object.keys(handler.mock.calls[0][2]).sort()).toEqual([
+        "email", "role", "userId",
+      ]);
+    });
+  });
+});
