@@ -1,17 +1,35 @@
 /**
- * Authorization helpers — role and capability gating.
+ * Authorization helpers — role, capability and scope gating.
  *
  * Layers:
  *  1. `requireRole`            — coarse role-rank check (legacy; T3 uses it).
  *  2. `requireCapability(cap)` — full capability matrix + resource scoping.
+ *  3. `requireScope(scopes)`   — delegated-authority check (plan 034 lane A).
  *
- * SUPER_ADMIN bypasses every check (platform-wide override).
+ * SUPER_ADMIN bypasses every *role/capability* check (platform-wide override).
+ * It deliberately does **not** bypass `requireScope`: see that function.
+ *
+ * Capabilities and scopes are **orthogonal and both must pass**. They are not
+ * merged, and `capabilities.ts` must not learn about scopes:
+ *
+ *   - a **capability** answers "what may this role do in this tenant" — it is
+ *     derived from the user's role and is a property of *the user*;
+ *   - a **scope** answers "how much of the user's authority did the user
+ *     delegate to this client" — it is a property of *the credential*.
+ *
+ * A client holding `posts:write` on behalf of a GUEST still may not post; a
+ * tenant OWNER acting through a client granted only `profile:read` still may
+ * not post. Neither axis can stand in for the other, which is why the next
+ * reader's instinct to unify them into one matrix is wrong.
  */
 
 import type { TenantRole, UserRole } from "@prisma/client";
 import type { AuthContext } from "./auth-context.js";
 import { Capability, type CapabilityValue } from "./capabilities.js";
 import { RoleGrants } from "./role-grants.js";
+import { hasScope, type ScopeSet } from "./scopes.js";
+import { structuredError, type StructuredError } from "../routes/errors.js";
+import type { SecurityHeaders } from "../security-headers.js";
 
 export { Capability, type CapabilityValue } from "./capabilities.js";
 export { RoleGrants } from "./role-grants.js";
@@ -128,4 +146,116 @@ export function requireCapability(
   if (isOwnedBy(options.resource, auth.userId)) return null;
 
   return forbidden(`Requires ownership or ${moderationCap}`);
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Scope gate (plan 034 lane A)
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * The scope-carrying half of a principal.
+ *
+ * {@link AuthContext} satisfies this structurally, and so does core's internal
+ * cookie `Session` — the two places a principal exists today. The parameter is
+ * typed on the *fields the gate reads* rather than on `AuthContext` so the
+ * extension-route wrapper (which holds a `Session`, never an `AuthContext`)
+ * can call the same gate instead of growing a second copy of the rule. It is
+ * not a widening of what passes: an object with no `scopes` is exactly the
+ * first-party case that {@link requireScope} already admits.
+ */
+export interface ScopedPrincipal {
+  /** The third-party client acting for the user; absent means first-party. */
+  clientId?: string;
+  /** What the credential was granted; absent is equivalent to `"*"`. */
+  scopes?: ScopeSet;
+}
+
+/**
+ * Format a scope list for human-facing copy: `` `a` ``, `` `a` and `b` ``,
+ * `` `a`, `b` and `c` ``. Order follows the route's declaration so the string
+ * is deterministic and diffable in a test.
+ */
+function formatScopeList(scopes: readonly string[]): string {
+  const quoted = scopes.map((scope) => `\`${scope}\``);
+  if (quoted.length <= 1) return quoted[0] ?? "";
+  return `${quoted.slice(0, -1).join(", ")} and ${quoted[quoted.length - 1]}`;
+}
+
+/**
+ * Thrown by {@link requireScope}. Carries the standard 4xx envelope
+ * (`lib/routes/errors.ts`) so every caller renders the identical body.
+ *
+ * **Why a throw and not a `Response | null` return** — unlike
+ * `requireCapability`, whose ignored return value is a visible `null` sitting
+ * unused, an authorization gate that can be *silently* skipped by forgetting
+ * to check its result is the failure mode this lane exists to prevent. A
+ * throw that some outer `catch` turns into a 500 is a wrong status; a return
+ * value nobody reads is an authorization bypass. Only one of those is safe to
+ * get wrong, so the gate throws.
+ */
+export class InsufficientScopeError extends Error {
+  /** Always 403: the caller *is* authenticated, it is simply not permitted. */
+  readonly status = 403 as const;
+  /** The scopes that were required and absent, in declaration order. */
+  readonly missing: readonly string[];
+  /** The response body, ready for `structuredError`. */
+  readonly body: StructuredError;
+
+  constructor(missing: readonly string[]) {
+    const list = formatScopeList(missing);
+    const noun = missing.length === 1 ? "scope" : "scopes";
+    super(`Insufficient scope: ${missing.join(", ")}`);
+    this.name = "InsufficientScopeError";
+    this.missing = missing;
+    this.body = {
+      error: "INSUFFICIENT_SCOPE",
+      message: `This operation requires the ${list} ${noun}, which this credential was not granted.`,
+      // Named literally, and actionable: an AI-driven client reads this string
+      // and knows both what to ask for and that asking needs the user back in
+      // the loop. "Insufficient scope" alone costs a support round trip.
+      remediation: `Request the ${list} ${noun} and have the user re-authorize.`,
+    };
+  }
+
+  /** Render the 403. Pass `securityHeaders` at a route boundary. */
+  toResponse(securityHeaders?: SecurityHeaders): Response {
+    return structuredError(this.status, this.body, securityHeaders);
+  }
+}
+
+/**
+ * The single scope gate. Throws {@link InsufficientScopeError} (403) when the
+ * principal's grant does not cover `needed`; returns normally otherwise.
+ *
+ * Rules, in order:
+ *  1. `scopes === "*"` — pass. A first-party session is unscoped by
+ *     construction and predates scopes entirely.
+ *  2. `needed.length === 0` — pass. "Authenticated, no particular scope."
+ *     Note this gate does **not** verify authentication: having a principal
+ *     at all is what authentication produced, and the route's
+ *     `auth: "required" | "optional" | "none"` flag stays authoritative for it.
+ *  3. otherwise every element of `needed` must be present, by exact string
+ *     equality (see `scopes.ts` — no prefix rule, no wildcard within a scope).
+ *
+ * **SUPER_ADMIN does not bypass this.** A platform admin who authorized a
+ * narrow third-party client did not thereby hand it the platform. The role
+ * override lives on the capability axis and must not leak onto this one.
+ *
+ * The permissive default is written here, once, and visibly: an absent
+ * `scopes` means the context predates the field, which can only be a
+ * first-party session. Any path that can mint a *non*-first-party principal
+ * must set `scopes` on every branch — an unset value on such a path reads as
+ * full access.
+ */
+export function requireScope(
+  ctx: ScopedPrincipal,
+  needed: readonly string[],
+): void {
+  const granted: ScopeSet = ctx.scopes ?? "*";
+  if (hasScope(granted, needed)) return;
+  // `hasScope` already returned false, so `granted` is a real set here — "*"
+  // and an empty `needed` both pass. Report every absent scope, not just the
+  // first, so one round trip tells the client the whole story.
+  const held = granted as ReadonlySet<string>;
+  throw new InsufficientScopeError(needed.filter((scope) => !held.has(scope)));
 }
