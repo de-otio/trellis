@@ -20,6 +20,12 @@
  * comment or a reviewer's diligence. Do NOT widen it. If you need more metadata,
  * that is a different module with a different review.
  *
+ * That review happened once, for the C2PA manifest store: ./c2pa-extractor.ts
+ * copies it out of the same original bytes so it can be kept as a sidecar (see
+ * that module for why). It is a SEPARATE call from a separate module, made
+ * side by side with this one in routes/media.ts — deliberately not folded in
+ * here, because folding it in is exactly the widening this paragraph forbids.
+ *
  * Spec: trellis-internal analysis/ai-act-transparency/04-provenance-at-ingest.md
  */
 

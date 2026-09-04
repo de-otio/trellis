@@ -27,6 +27,18 @@ by different mechanisms:
 
 - **Images** are re-encoded through sharp without `.withMetadata()`, which drops
   EXIF, IPTC, XMP and any C2PA manifest. `assertNoExif` enforces it.
+  **One exception is kept deliberately, and it is not kept in the file:** the
+  C2PA manifest store is copied out of the original *before* the strip and
+  written as a separate sidecar object (`cas/{tenant}/{hash}.c2pa`), because
+  destroying it is irreversible and it is the only thing a viewer could ever
+  check a Content Credentials claim against. The served bytes are unaffected —
+  the manifest never goes back into them. The sidecar is treated as the most
+  privacy-sensitive object of the set (it carries camera serial numbers, capture
+  times, often an identity claim) and is deleted by every media-deletion path
+  alongside the image itself. It is summarised on the media record and in the
+  media read response, always as **extracted, unverified** — no signature is
+  checked. See
+  [`provenance-api.md`](provenance-api.md#c2pa-manifests-on-media).
 - **Video and audio** are re-encoded through ffmpeg with `-dn -sn`
   (drop data and subtitle **streams**) **and `-map_metadata -1`** (drop the
   container metadata **dictionary**). The poster frame gets the same flags.
