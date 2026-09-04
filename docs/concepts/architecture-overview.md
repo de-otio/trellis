@@ -163,4 +163,5 @@ flowchart TB
 - [Async processing](async-processing.md) — queues, schedules, and workers
 - [DynamoDB single-table](dynamodb-single-table.md) — key design and access patterns
 - [Graph and circles](graph-and-circles.md) — entity-centric model and visibility
+- [Feed ordering](feed-ordering.md) — the no-covert-engagement-ordering invariant
 - [ActivityPub federation](activitypub.md) — how Trellis participates in the fediverse

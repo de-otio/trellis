@@ -81,9 +81,33 @@ export interface FeedPost {
    * field into misinformation. Per-attachment provenance is on `media[].provenance`.
    */
   provenance: ProvenanceView;
+  /**
+   * Reaction totals for this post, keyed by sentiment type (see
+   * `sentimentTypes`). Computed by `PostSentiment.groupBy` (enrichPosts,
+   * this file) — every `PostSentiment` row for the post, unfiltered.
+   *
+   * There is no soft-delete or moderation-status column on `PostSentiment`
+   * (prisma/schema.prisma): removing a reaction hard-deletes the row
+   * (`reaction-handler.ts`), so nothing to exclude ever lingers here. The
+   * post author's own reaction, if any, counts like anyone else's. Used to
+   * DISPLAY reaction counts only — never as a feed sort input; see
+   * feed-pagination.ts's `ALLOWED_SORT_FIELDS` / the no-covert-ordering
+   * invariant in REPRODUCIBILITY.md.
+   */
   sentimentCounts?: Record<string, number>;
   sentimentTypes?: string[];                    // only when display mode = DISTRIBUTION
   sentimentDisplayMode?: string;                // "full" | "distribution" | "hidden"
+  /**
+   * Number of comments on this post. Computed by `PostComment.groupBy`
+   * (enrichPosts, this file), which excludes:
+   *   - comments hidden by the post owner (`hiddenByPostOwner: true`)
+   *   - soft-deleted comments (`deletedAt IS NOT NULL`)
+   *
+   * There is no separate comment-moderation-status field in the schema to
+   * filter on. The count is NOT author-scoped: the post author's own
+   * comments count the same as anyone else's. Display only — never a feed
+   * sort input (see `sentimentCounts` above for the same invariant).
+   */
   commentCount?: number;
   userSentiment?: string;
   isOwner?: boolean;
@@ -960,6 +984,16 @@ export class FeedHandler {
         // Get comment counts with timeout/retry
         // OPTIMIZATION: Batch queries are fast enough (<100ms) that caching isn't needed
         // Individual comment counts are updated in real-time, so batch caching has low hit rate
+        //
+        // `commentCount` (see FeedPost.commentCount) excludes comments hidden
+        // by the post owner (hiddenByPostOwner) AND soft-deleted comments
+        // (deletedAt IS NOT NULL — PostComment.deletedAt, prisma/schema.prisma).
+        // Fixed 2026-09: deletedAt was not previously filtered here, so a
+        // deleted comment stayed counted until the row was hard-purged.
+        // There is no separate comment-moderation-status field to filter on
+        // (schema has only hiddenByPostOwner/deletedAt), and the count is not
+        // author-scoped — the post author's own comments count like anyone
+        // else's, by design.
         withQueryTimeoutAndRetry(
           sharedDatabaseConnectionManager,
           region,
@@ -970,6 +1004,7 @@ export class FeedHandler {
               where: {
                 postId: { in: postIds },
                 hiddenByPostOwner: false,
+                deletedAt: null,
               },
               _count: true,
             });
