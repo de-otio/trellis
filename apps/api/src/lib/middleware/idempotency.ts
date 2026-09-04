@@ -67,6 +67,13 @@ function isMutatingMethod(method: Route["method"]): boolean {
 export type IdempotencyRouteMeta = Pick<Route, "idempotent" | "publicSpec" | "method">;
 
 /**
+ * The `body` accepted by the `Request` constructor. Derived from the global
+ * rather than named `BodyInit`, which only the DOM lib declares — api sources
+ * are also compiled with the worker's DOM-free tsconfig.
+ */
+type RequestBody = NonNullable<ConstructorParameters<typeof Request>[1]>["body"];
+
+/**
  * Decide whether a route needs the idempotency middleware applied, from its
  * declared metadata alone. This is **the rule**; lanes A and G each own the
  * call site that applies `idempotencyMiddleware()` when this returns `true`
@@ -312,7 +319,7 @@ export function idempotencyMiddleware(
     // ── We own the key: execute the handler ──────────────────────────────────
     // We've consumed request.body. Patch context.request so downstream middleware
     // and the route handler see a readable body again.
-    const freshRequest = new Request(request, { body: bodyBytes.length > 0 ? (bodyBytes as BodyInit) : null });
+    const freshRequest = new Request(request, { body: bodyBytes.length > 0 ? (bodyBytes as RequestBody) : null });
     (context as { request: Request }).request = freshRequest;
 
     let response: Response;
