@@ -100,14 +100,20 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ### Added
 
-- **`@de-otio/trellis-extension-api` 0.10.0 — the scoped-surface contract,
-  declared and inert.** Every field this bump adds is optional, and **core
-  reads none of them**. Nothing enforces a scope, validates a schema, emits an
-  event or publishes a route as a result of it. An extension written against
-  `0.9.2` compiles and behaves identically; the minor moved only because a
-  `0.x` minor is the breaking unit, and three separate pieces of work each
-  needed to add a field to the same published file — landing them as one inert
-  change is cheaper than merging them three ways later.
+- **`@de-otio/trellis-extension-api` 0.10.0 — the scoped-surface contract, and
+  the code that reads it.** An extension written against `0.9.2` compiles and
+  behaves identically: every field this bump adds is optional and defaults to
+  the pre-existing behaviour. The minor moved because a `0.x` minor is the
+  breaking unit and several pieces of work each needed to add a field to the
+  same published file.
+
+  The contract landed first as a declaration nothing read; by the time it
+  publishes, core reads most of it. `scopes` is enforced (by the extension-route
+  wrapper and by the `/api/v1` dispatcher), `requestSchema` is validated on both
+  paths, `publicSpec` + `scopes` publishes a route into `/openapi.json` and
+  mounts it under `/api/v1`, and `ctx.events.emit` writes an outbox row. The one
+  field still inert is `clientId`, which stays `undefined` until an authorization
+  server exists to populate it.
 
   `ExtensionRouteDefinition` gains `scopes`, `publicSpec`, `requestSchema`,
   `responseSchema`, `idempotent`, `operationId` and `stability`, mirroring the
@@ -119,10 +125,22 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   `ExtensionSession` gains `clientId?` (absent means first-party) and
   `scopes?`, added to the whitelist it is built from — which stays a whitelist,
   so no token internals came with them. `ExtensionContext` gains
-  `events?.emit(type, payload)`; it is optional and core does not supply it
-  yet, so call it as `ctx.events?.emit(…)`. New exported types:
-  `ExtensionEventEmitter`, `ExtensionScopeDeclaration`,
-  `ExtensionEventDeclaration`.
+  **`events.emit(type, payload)` — required, not optional**: core is the only
+  real constructor of an `ExtensionContext` and always supplies it, so
+  `ctx.events.emit(…)` is correct at the call site and an author never has to
+  reason about whether the seam is there. (It was declared `events?` while the
+  contract was inert; requiring it broke no constructor, because every other one
+  in this repo and in the first consuming vertical is a test double behind an
+  `as unknown as` cast.) New exported types: `ExtensionEventEmitter`,
+  `ExtensionScopeDeclaration`, `ExtensionEventDeclaration`.
+
+  One limit on `emit`, stated because the type does not: the emitter is bound to
+  the tenant core resolved for the caller, and on the extension-route path that
+  tenant comes from the **ambient tenant context**, which `lib/app.ts`
+  establishes only when `TENANT_SCOPE_MODE` is not `"off"`. On a deployment that
+  leaves it at the default, an extension's `emit` throws rather than writing a
+  row scoped to nothing. Core's own emission points are unaffected — they pass
+  the tenant explicitly.
 
   Schema fields are typed `ZodType` — Zod v4's base type — not the v3
   `ZodSchema` name that `metadataSchema` still uses. Both packages already

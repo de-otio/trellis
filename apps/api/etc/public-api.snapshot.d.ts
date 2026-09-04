@@ -49,6 +49,7 @@ import type { RealtimeTransport } from "./lib/realtime/index.js";
 import type { DirectoryProfileConfig } from "./lib/org-category/directory-profile-config.js";
 import type { DirectorySearchConfig } from "./lib/org-category/directory-search-config.js";
 import type { DisclosurePosture } from "./lib/provenance/posture.js";
+import type { AgentSurfaceContent } from "./lib/routes/agent-surface.js";
 /** Application environment — available to all route handlers */
 export interface Env {
     DATABASE_URL: string;
@@ -133,6 +134,16 @@ export interface Env {
     APP_DOMAIN?: string;
     APP_URL?: string;
     ALLOWED_ORIGINS?: string;
+    /**
+     * Consumer-supplied content for the agent-surface text routes (GET
+     * /llms.txt, GET /security.txt) — plan 034 lane "agent words". Same
+     * app-configuration path as APP_DOMAIN/ALLOWED_ORIGINS above: sourced from
+     * AGENT_SURFACE_LLMS_TXT / AGENT_SURFACE_SECURITY_TXT env vars, additive and
+     * optional. `llmsTxt` absent falls back to core's generic, truthful default
+     * (see agent-surface.ts); `securityTxt` absent makes GET /security.txt 404
+     * rather than serve a placeholder contact — see agent-surface.ts for why.
+     */
+    agentSurface?: AgentSurfaceContent;
     ACTIVITYPUB_BASE_URL?: string;
     /**
      * Master switch for ActivityPub federation. Defaults to `false`. When false,
@@ -837,6 +848,7 @@ export type { MediaModerationProvider, MediaPin, ImageRef, S3Ref, ModerationVerd
 export { completionEnvelopeBody, parseCompletionEnvelope, } from "./lib/media/completion-envelope.js";
 export type { ModerationCompletionEnvelope } from "./lib/media/completion-envelope.js";
 export { setTextModerationProvider } from "./lib/media/request-text-moderation.js";
+export type { AgentSurfaceContent } from "./lib/routes/agent-surface.js";
 
 // ===== lib/audit-composer.d.ts =====
 /**
@@ -1012,6 +1024,80 @@ export declare class TenantAuditEmitter {
     emit(input: TenantAuditEmitInput, prisma: AuditPrismaClientLike): Promise<void>;
 }
 export type { AuditEvent };
+
+// ===== lib/auth/scopes.d.ts =====
+/**
+ * Core scope catalog and the single set-inclusion predicate.
+ *
+ * A **scope** is what a third-party client was granted on behalf of a user.
+ * It is a *different authorization axis* from a **capability**
+ * (`auth/capabilities.ts`), which is role-derived and tenant-scoped and
+ * answers "may this member do this in this tenant". Both must pass; neither
+ * implies the other, and the two vocabularies are deliberately kept apart:
+ *
+ * - scope strings are `<resource>:<verb>` — colon (`posts:write`)
+ * - capability strings are `<resource>.<verb>` — dot (`post.create`)
+ *
+ * The separators differ so that a value from one axis can never silently
+ * satisfy a check on the other: `posts.write` is not a scope and
+ * {@link hasScope} will not accept it in place of `posts:write`.
+ *
+ * This module is **declaration only**. Nothing here reads a request, decides
+ * an HTTP status, or is wired into the dispatcher; the gate that does
+ * (`requireScope`) is built on top of {@link hasScope} and lives in
+ * `auth/require.ts`.
+ */
+/**
+ * The scopes core itself defines, with the consent copy shown to the user.
+ *
+ * The copy lives beside the id on purpose. It is the sentence a person reads
+ * before granting access, so it is part of the contract rather than something
+ * a consent page invents later. Second person, present tense, describing what
+ * the client will be able to do — not what the endpoint is called.
+ *
+ * Extensions declare their own scopes (with their own copy) through
+ * `TrellisExtension.scopes`; core never invents vocabulary for a vertical.
+ */
+export declare const CORE_SCOPES: {
+    readonly "profile:read": "Read your name, handle and avatar";
+    readonly "entities:read": "Read the profiles you can see";
+    readonly "entities:write": "Create and update profiles you own";
+    readonly "posts:read": "Read posts you can see";
+    readonly "posts:write": "Post on your behalf";
+    readonly "tenant:read": "Read which space you are in";
+    readonly "events:subscribe": "Receive notifications about your data";
+};
+/** A scope id defined by core. Extension scopes are plain strings. */
+export type CoreScope = keyof typeof CORE_SCOPES;
+/**
+ * What a principal was granted.
+ *
+ * `"*"` means **an unscoped first-party session** — a cookie or JWT session
+ * belonging to the human themselves, which predates scopes entirely and is
+ * not narrowed by them. It is deliberately not spelled as "the set of all
+ * core scopes": a first-party session must keep passing when a new scope is
+ * added to {@link CORE_SCOPES} or by an extension.
+ *
+ * An **empty set** is the opposite and is a real, reachable state: a token
+ * that authenticated but was granted nothing. It passes only a requirement
+ * that asks for nothing.
+ */
+export type ScopeSet = ReadonlySet<string> | "*";
+/**
+ * The one place set-inclusion is decided.
+ *
+ * - `"*"` (first-party) satisfies every requirement.
+ * - An empty `needed` is satisfied by anything, including the empty set —
+ *   "authenticated, no particular scope".
+ * - Otherwise every needed scope must be present exactly. Membership is exact
+ *   string equality: there is no prefix rule, no wildcard within a scope, and
+ *   no separator normalisation, so `posts.write` (the capability separator)
+ *   does not satisfy `posts:write`.
+ *
+ * @param granted what the principal holds (`AuthContext.scopes`)
+ * @param needed what the route declared (`Route.scopes`)
+ */
+export declare function hasScope(granted: ScopeSet, needed: readonly string[]): boolean;
 
 // ===== lib/extension-model-registry.d.ts =====
 /**
@@ -4013,6 +4099,117 @@ export declare function encryptSecret(secret: string, encryptionKey: string): Pr
  */
 export declare function decryptSecret(encryptedSecret: string, encryptionKey: string): Promise<string>;
 
+// ===== lib/middleware.d.ts =====
+/**
+ * Middleware
+ *
+ * Provides middleware functionality for the route abstraction layer.
+ * Middleware can modify requests, responses, or short-circuit the request.
+ */
+import type { Env } from "../env.js";
+import type { TrellisRequestContext } from "./request-context.js";
+export interface MiddlewareContext {
+    request: Request;
+    env: Env;
+    requestContext?: TrellisRequestContext;
+    url: URL;
+    pathname: string;
+    method: string;
+}
+export type Middleware = (context: MiddlewareContext, next: () => Promise<Response>) => Promise<Response>;
+/**
+ * Compose multiple middleware functions
+ */
+export declare function composeMiddleware(middlewares: Middleware[]): Middleware;
+/**
+ * CORS middleware
+ */
+export declare function corsMiddleware(): Middleware;
+/**
+ * Client-version backstop middleware (426 Upgrade Required).
+ *
+ * The forced-upgrade mechanism is primarily a CLIENT concern: the app fetches
+ * `/api/app/version-policy` and blocks itself. This middleware is the server
+ * backstop for the case where the client's own check did not run (an old
+ * build that predates the policy code, a client with a stale cached policy).
+ *
+ * It is deliberately the narrowest thing that can work:
+ *
+ *   - it returns EITHER a 426 OR `next()` — it never produces a 2xx of its
+ *     own, authenticates nothing, and can bypass nothing;
+ *   - it acts only when a policy is configured AND the header is present AND
+ *     the header parses AND the parsed version is strictly older than the
+ *     minimum. Absent/garbage headers (curl, federation peers, health probes,
+ *     agents) pass through untouched;
+ *   - it NEVER intercepts `OPTIONS`: a browser whose preflight fails sees an
+ *     opaque network error, so an outdated web client could never even learn
+ *     that it is outdated;
+ *   - exempt paths (`/api/app/version-policy`, `/.well-known/*`, the public
+ *     ActivityPub object surface, `/health`) are listed in
+ *     `lib/client-version.ts`.
+ *
+ * LOG HYGIENE: the raw header value is never logged — only the decision token
+ * (`parsed` / `invalid` / …). The 426 body carries NO URL (a client must never
+ * navigate to a link supplied by an error response).
+ *
+ * @see lib/client-version.ts for the bounded semver rule and the telemetry cap
+ */
+export declare function clientVersionMiddleware(): Middleware;
+/**
+ * Security headers middleware
+ */
+export declare function securityHeadersMiddleware(env: Env): Middleware;
+/**
+ * Rate limiting middleware
+ *
+ * Limits requests per caller within a window, backed by the **foundation
+ * token-bucket** limiter (`RateLimiter` in `rate-limit.ts`) — the same limiter
+ * the auth path uses. Consolidated from the former fixed-window-over-KV
+ * implementation: one algorithm (token-bucket), one store (the
+ * `RATE_LIMIT_TABLE` DynamoDB limiter, or an in-memory limiter in dev/test),
+ * one 429 shape.
+ *
+ * `{maxRequests, windowMs}` map to `capacity = maxRequests`,
+ * `refillRate = maxRequests / windowSeconds` (bursts up to `maxRequests`, then
+ * continuous refill). The caller is keyed by the authenticated `userId` when
+ * present, else by request IP (handled inside `RateLimiter.getRateLimitKey`).
+ *
+ * Failure policy (S4.2) is preserved: if the distributed limiter is
+ * unreachable, fail CLOSED (503) on `/api/admin` and `/api/auth`, fail OPEN
+ * elsewhere.
+ *
+ * @param options.maxRequests - Token-bucket capacity / window limit (default: 20)
+ * @param options.windowMs - Window in ms; sets the refill rate (default: 60000)
+ */
+export declare function rateLimitMiddleware(options?: {
+    maxRequests?: number;
+    windowMs?: number;
+}): Middleware;
+/**
+ * CSRF protection middleware
+ *
+ * Validates CSRF tokens for state-changing operations (POST, PUT, DELETE, PATCH).
+ * Uses Double Submit Cookie pattern: token stored in session cookie, validated against header.
+ * Skips validation for safe methods (GET, HEAD, OPTIONS).
+ *
+ * Requires:
+ * - Valid session (user must be authenticated)
+ * - X-CSRF-Token header with valid token
+ * - CSRF token in session (or KV fallback if configured)
+ */
+export declare function csrfMiddleware(): Middleware;
+/**
+ * MFA enforcement middleware (AUTH-1)
+ *
+ * Checks if the authenticated user has a role that requires MFA
+ * and whether their session has been MFA-verified. If MFA is
+ * required but not verified, returns 403 with an mfa_required error.
+ *
+ * This middleware should be placed AFTER authentication middleware
+ * on admin/sensitive routes.
+ */
+export declare function mfaMiddleware(): Middleware;
+
 // ===== lib/org-category/directory-profile-config.d.ts =====
 /**
  * Directory-profile runtime configuration resolver.
@@ -4744,6 +4941,186 @@ export interface DeliveryPolicyResolver {
     decide(ctx: DeliveryContext): DeliveryDecision;
 }
 
+// ===== lib/region-config.d.ts =====
+/**
+ * Regional Configuration Module
+ *
+ * Provides region-specific configuration including:
+ * - Feature flags
+ * - Endpoints
+ * - Timeouts
+ * - Provider settings
+ *
+ * Security: All configurations are validated before use.
+ */
+import { type Region } from "./region-detection.js";
+/**
+ * Feature flags for authentication methods
+ */
+export interface AuthenticationFlags {
+    emailPassword: boolean;
+    magicLink: boolean;
+    phoneAuth: boolean;
+    weChatAuth: boolean;
+    qqAuth: boolean;
+    microsoftSSO: boolean;
+}
+/**
+ * Feature flags for application features
+ */
+export interface ApplicationFeatures {
+    offlineMode: boolean;
+    realTimeUpdates: boolean;
+    pushNotifications: boolean;
+}
+/**
+ * Performance configuration flags
+ */
+export interface PerformanceFlags {
+    extendedTimeouts: boolean;
+    aggressiveCaching: boolean;
+    requestBatching: boolean;
+}
+/**
+ * Security features (always enabled, cannot be disabled)
+ */
+export interface SecurityFlags {
+    encryption: boolean;
+    rateLimiting: boolean;
+    auditLogging: boolean;
+    regionValidation: boolean;
+}
+/**
+ * Feature flags for a region
+ */
+export interface FeatureFlags {
+    authentication: AuthenticationFlags;
+    features: ApplicationFeatures;
+    performance: PerformanceFlags;
+    security: SecurityFlags;
+}
+/**
+ * Endpoint configuration
+ */
+export interface EndpointConfig {
+    api: string;
+    frontend: string;
+    cdn: string;
+}
+/**
+ * Timeout configuration (in milliseconds)
+ */
+export interface TimeoutConfig {
+    api: number;
+    database: number;
+    storage: number;
+}
+/**
+ * Complete regional configuration
+ */
+export interface RegionConfig {
+    region: Region;
+    features: FeatureFlags;
+    endpoints: EndpointConfig;
+    timeouts: TimeoutConfig;
+}
+/**
+ * Environment variables interface for region configuration
+ */
+export interface Env {
+    DEFAULT_REGION?: string;
+    US_API_ENDPOINT?: string;
+    US_FRONTEND_ENDPOINT?: string;
+    US_CDN_ENDPOINT?: string;
+    EU_API_ENDPOINT?: string;
+    EU_FRONTEND_ENDPOINT?: string;
+    EU_CDN_ENDPOINT?: string;
+    CN_API_ENDPOINT?: string;
+    CN_FRONTEND_ENDPOINT?: string;
+    CN_CDN_ENDPOINT?: string;
+}
+/**
+ * Get default CN region configuration
+ *
+ * Note: This is a placeholder for future CN-region support.
+ * Currently uses conservative defaults that assume CN infrastructure is not yet set up.
+ */
+export declare function getDefaultCNConfig(env: Env): RegionConfig;
+/**
+ * Region Configuration Manager class
+ */
+export declare class RegionConfigManager {
+    private env;
+    private logger;
+    private static configCache;
+    constructor(env: Env);
+    /**
+     * Get a simple hash of environment variables that affect config
+     * This allows us to invalidate cache when env changes
+     */
+    private getEnvHash;
+    /**
+     * Get region-specific configuration
+     *
+     * Security: All configurations are validated before return (first time only)
+     *
+     * Performance: Configs are cached to avoid recreation on every request.
+     * Cache is invalidated if environment variables change.
+     *
+     * @param region - Region code ('US', 'EU', 'CN')
+     * @returns Region configuration
+     * @throws Error if region is invalid or configuration is invalid
+     */
+    getRegionConfig(region: string): RegionConfig;
+    /**
+     * Get feature flags for a region
+     *
+     * Convenience function to get just the feature flags
+     *
+     * @param region - Region code
+     * @returns Feature flags for the region
+     */
+    getFeatureFlags(region: string): FeatureFlags;
+    /**
+     * Get feature flags for a region with database toggle checks
+     *
+     * This async version checks FeatureToggleService for overrides.
+     * Falls back to default config if toggle doesn't exist.
+     *
+     * @param region - Region code
+     * @param db - Prisma client (optional, will create if not provided)
+     * @returns Feature flags for the region with toggle overrides
+     */
+    getFeatureFlagsAsync(region: string, db?: any): Promise<FeatureFlags>;
+    /**
+     * Get endpoints for a region
+     *
+     * Convenience function to get just the endpoints
+     *
+     * @param region - Region code
+     * @returns Endpoints for the region
+     */
+    getEndpoints(region: string): EndpointConfig;
+    /**
+     * Get timeouts for a region
+     *
+     * Convenience function to get just the timeouts
+     *
+     * @param region - Region code
+     * @returns Timeouts for the region
+     */
+    getTimeouts(region: string): TimeoutConfig;
+}
+/**
+ * Legacy functions for backward compatibility
+ * @deprecated Use new RegionConfigManager class instead
+ */
+export declare function getRegionConfig(region: string, env: Env): RegionConfig;
+export declare function getFeatureFlags(region: string, env: Env): FeatureFlags;
+export declare function getFeatureFlagsAsync(region: string, env: Env, db?: any): Promise<FeatureFlags>;
+export declare function getEndpoints(region: string, env: Env): EndpointConfig;
+export declare function getTimeouts(region: string, env: Env): TimeoutConfig;
+
 // ===== lib/region-detection.d.ts =====
 /**
  * Region Detection Module
@@ -4886,6 +5263,287 @@ export declare function isValidRegion(region: string): region is Region;
 export declare function detectRegion(request: Request, env: Env, sessionManager?: SessionManager, session?: Session | null): Promise<Region>;
 export declare function detectRegionSync(request: Request, env: Env): Region;
 
+// ===== lib/request-context.d.ts =====
+/**
+ * Request Context Module
+ *
+ * Provides request context including region detection and configuration.
+ * This allows handlers to access region-specific settings throughout the request lifecycle.
+ */
+import { type RegionConfig } from "./region-config.js";
+import { type Region } from "./region-detection.js";
+import type { Session, SessionManager } from "./session-cookie.js";
+/**
+ * Extended environment interface for request context
+ */
+export interface TrellisRequestContextEnv {
+    DEFAULT_REGION?: string;
+    ENABLE_IP_GEOLOCATION?: string;
+    IP_GEOLOCATION_API_KEY?: string;
+    IP_GEOLOCATION_SERVICE?: "cloudflare" | "ipapi" | "ip-api";
+    SESSION_SECRET?: string;
+    US_API_ENDPOINT?: string;
+    US_FRONTEND_ENDPOINT?: string;
+    US_CDN_ENDPOINT?: string;
+    EU_API_ENDPOINT?: string;
+    EU_FRONTEND_ENDPOINT?: string;
+    EU_CDN_ENDPOINT?: string;
+    CN_API_ENDPOINT?: string;
+    CN_FRONTEND_ENDPOINT?: string;
+    CN_CDN_ENDPOINT?: string;
+}
+/**
+ * Request context containing region and configuration
+ */
+export interface TrellisRequestContext {
+    region: Region;
+    config: RegionConfig;
+    session?: Session | null;
+}
+/**
+ * Request Context Manager class
+ */
+export declare class TrellisRequestContextManager {
+    private regionDetector;
+    private regionConfigManager;
+    private env;
+    constructor(env: TrellisRequestContextEnv);
+    /**
+     * Create request context with region detection and configuration
+     *
+     * This is the main function to call at the start of request handling.
+     * It detects the region, loads configuration, and optionally fetches the session.
+     *
+     * Performance: Optimized to use sync detection when possible (99% of cases).
+     * Only uses async if external IP geolocation is configured (rare).
+     *
+     * @param request - Request object
+     * @param sessionManager - Optional session manager (for user preference detection)
+     * @param session - Optional existing session (to avoid re-fetching)
+     * @returns Request context with region and configuration
+     */
+    createRequestContext(request: Request, sessionManager?: SessionManager, session?: Session | null): Promise<TrellisRequestContext>;
+    /**
+     * Create request context synchronously (for simple cases)
+     *
+     * Uses only synchronous detection methods (CloudFront-Viewer-Country / CF-IPCountry, Accept-Language).
+     * Does not fetch session or use external IP geolocation.
+     *
+     * @param request - Request object
+     * @returns Request context with region and configuration
+     */
+    createRequestContextSync(request: Request): TrellisRequestContext;
+    /**
+     * Add region headers to response for debugging
+     *
+     * Adds X-Region and X-Region-Detected headers to help with debugging.
+     * These headers are safe to expose and help identify region detection issues.
+     *
+     * @param response - Response object
+     * @param context - Request context
+     * @returns New response with region headers added
+     */
+    addRegionHeaders(response: Response, context: TrellisRequestContext): Response;
+    /**
+     * Add region headers to response (async version that handles body reading)
+     *
+     * This version can handle responses that have already been created.
+     *
+     * PERFORMANCE: Only reads body if response has already been created.
+     * For new responses, use addRegionHeaders() instead to avoid body reading.
+     *
+     * @param response - Response object
+     * @param context - Request context
+     * @returns New response with region headers added
+     */
+    addRegionHeadersAsync(response: Response, context: TrellisRequestContext): Promise<Response>;
+}
+/**
+ * Legacy functions for backward compatibility
+ * @deprecated Use new TrellisRequestContextManager class instead
+ */
+export declare function createRequestContext(request: Request, env: TrellisRequestContextEnv, sessionManager?: SessionManager, session?: Session | null): Promise<TrellisRequestContext>;
+export declare function createRequestContextSync(request: Request, env: TrellisRequestContextEnv): TrellisRequestContext;
+export declare function addRegionHeaders(response: Response, context: TrellisRequestContext): Response;
+export declare function addRegionHeadersAsync(response: Response, context: TrellisRequestContext): Promise<Response>;
+
+// ===== lib/routes/agent-surface.d.ts =====
+/**
+ * Agent-Surface Routes  (T9b-a)
+ *
+ * Public, unauthenticated discovery endpoints for AI agents and tooling:
+ *
+ *   GET /llms.txt           — setup contract for AI agents (llmstxt.org convention)
+ *   GET /openapi.json       — OpenAPI 3.1 document auto-generated from route registry
+ *   GET /security.txt       — RFC 9116 security contact
+ *
+ * All three are rate-limited at the API Gateway / WAF layer (120 req/min per IP).
+ * No session required.
+ *
+ * ── Consumer-configurable content (plan 034, lane "agent words") ───────────
+ *
+ * `llms.txt` and `security.txt` bodies are plain text with no place to put a
+ * consuming app's own product name, contacts, or persona-specific setup
+ * narrative — trellis is the generic core, and its defaults must describe
+ * only what trellis itself truthfully does. A consuming application (e.g.
+ * Skybber) supplies its own content via `AgentSurfaceContent`, injected
+ * through the SAME app-configuration path as `APP_DOMAIN`/`ALLOWED_ORIGINS`
+ * (see `Env.agentSurface` in `apps/api/src/env.ts`, sourced from the
+ * `AGENT_SURFACE_LLMS_TXT` / `AGENT_SURFACE_SECURITY_TXT` env vars):
+ *
+ *   - `llmsTxt` absent  → serve `DEFAULT_LLMS_TXT_CONTENT` below (generic,
+ *     verified true against this repo's routes).
+ *   - `securityTxt` absent → 404 with the standard error envelope. A missing
+ *     security.txt is honest; the placeholder `security@example.com` contact
+ *     it replaced was not (RFC 9116 has no "not configured yet" placeholder
+ *     convention, and inventing one is worse than a 404).
+ */
+import type { Route } from "./types.js";
+/**
+ * Consumer-supplied content for the agent-surface text routes. Both fields
+ * are optional and additive — see the file banner above for the fallback
+ * behaviour of each. Bodies are served verbatim (no template substitution),
+ * so the consumer is responsible for the full RFC 9116 / llmstxt.org shape.
+ */
+export interface AgentSurfaceContent {
+    /** Full body for GET /llms.txt. */
+    llmsTxt?: string;
+    /** Full body for GET /security.txt. */
+    securityTxt?: string;
+}
+/**
+ * Build the agent-surface routes, injecting the full route list so the
+ * OpenAPI generator can introspect the registry.
+ *
+ * Usage in routes/index.ts:
+ *   import { buildAgentSurfaceRoutes } from "./agent-surface.js";
+ *   // after all routes are collected:
+ *   const agentSurface = buildAgentSurfaceRoutes(coreRoutes);
+ *
+ * Because we need the full route list for OpenAPI generation but the route
+ * list includes these routes themselves, we expose a plain `agentSurfaceRoutes`
+ * export that uses a deferred getter — the first HTTP request triggers
+ * generation using whatever has been registered by then.
+ */
+export declare function buildAgentSurfaceRoutes(getAllRoutes: () => Route[]): Route[];
+/**
+ * Static export for the route registry.
+ *
+ * These routes have no dependency on the full route list (llms.txt and
+ * security.txt are static; openapi.json generates lazily on first request).
+ * Import and spread into coreRoutes in routes/index.ts.
+ */
+export declare const agentSurfaceRoutes: Route[];
+
+// ===== lib/routes/types.d.ts =====
+/**
+ * Route Types
+ *
+ * Shared types and interfaces for route definitions.
+ */
+import type { ZodType } from "zod";
+import type { Env } from "../../env.js";
+import type { TrellisRequestContext } from "../request-context.js";
+import type { Middleware } from "../middleware.js";
+/**
+ * A route's path pattern: an exact/prefix string or an anchored RegExp.
+ * (Historically lived in the now-removed `route-matcher.ts`; the linear
+ * matcher it served was superseded by the Hono router in Stream 2.1.)
+ */
+export type RoutePattern = string | RegExp;
+export interface Route {
+    /**
+     * Route pattern (exact path, prefix with *, or regex)
+     * Examples:
+     * - '/health' (exact)
+     * - '/auth/*' (prefix)
+     * - '/api/users/:id' (with parameter)
+     * - /^\/api\/posts\/(\d+)$/ (regex)
+     */
+    path: RoutePattern;
+    /**
+     * HTTP method(s) - '*' for all methods, or specific method(s)
+     */
+    method?: string | string[];
+    /**
+     * Route handler function
+     */
+    handler: (request: Request, env: Env, context: {
+        url: URL;
+        pathname: string;
+        params: Record<string, string>;
+        requestContext?: TrellisRequestContext;
+    }) => Promise<Response>;
+    /**
+     * Middleware to apply (executed in order)
+     */
+    middleware?: Middleware[];
+    /**
+     * Route description (for documentation)
+     */
+    description?: string;
+    /**
+     * API version (for versioning support).
+     *
+     * Currently unread by anything. **Reserved** for the public-surface rule
+     * ("in the spec ⇔ under `/api/v1` ⇔ covered by the additivity gate") rather
+     * than being a second versioning concept — do not introduce another field
+     * for that; extend the meaning of this one.
+     */
+    version?: string;
+    /**
+     * Scopes a third-party principal must hold to call this route.
+     *
+     * Three distinct states, and the difference matters:
+     * - **absent** — first-party only. No third-party client reaches it.
+     * - **`[]`** — any authenticated principal, no particular scope.
+     * - **non-empty** — every listed scope required (`hasScope` semantics,
+     *   `auth/scopes.ts`). Strings are `<resource>:<verb>`; core's vocabulary is
+     *   `CORE_SCOPES`, and an extension route may also name its own.
+     *
+     * A first-party session (`"*"`) satisfies all three.
+     */
+    scopes?: string[];
+    /** Grouping for the generated spec — becomes an OpenAPI tag. */
+    tags?: string[];
+    /**
+     * Zod schema for the request body. Emitted as JSON Schema in the spec, and
+     * the intended validation point *before* the handler runs.
+     *
+     * `ZodType` is Zod v4's base type; `ZodSchema` is the v3 name for the same
+     * thing and is not used in new declarations here.
+     */
+    requestSchema?: ZodType;
+    /** Zod schema for the success response body. Emitted as JSON Schema. */
+    responseSchema?: ZodType;
+    /**
+     * Stable machine name for this operation (OpenAPI `operationId`). It is the
+     * symbol a generated client is named after, so it should outlive the path.
+     */
+    operationId?: string;
+    /**
+     * Whether a repeated call with the same `Idempotency-Key` must be
+     * de-duplicated rather than re-executed. Expected to be true for every
+     * public write.
+     */
+    idempotent?: boolean;
+    /**
+     * The compatibility promise this route carries in the published spec.
+     * `"beta"` says the shape may change without a major bump; absent means
+     * unstated, which for a route that is not `publicSpec` is the normal case.
+     */
+    stability?: "stable" | "beta";
+    /**
+     * Opt-in flag for publication on the public OpenAPI spec
+     * (`/openapi.json`) (G4 MEDIUM-3). Default `false` — only routes
+     * explicitly marked `publicSpec: true` appear in the document. The
+     * agent-discovery surface and the federation management routes are
+     * expected to set this; non-federation routes (posts, comments,
+     * media, ActivityPub, etc.) are excluded from the public spec.
+     */
+    publicSpec?: boolean;
+}
+
 // ===== lib/session-cookie.d.ts =====
 /**
  * Session Management
@@ -4906,6 +5564,7 @@ export declare function detectRegionSync(request: Request, env: Env): Region;
  */
 import type { AgeTier } from "@prisma/client";
 import { MIN_SALT_LENGTH, MIN_SECRET_LENGTH } from "@de-otio/saas-foundation/session";
+import type { ScopeSet } from "./auth/scopes.js";
 export type UserRole = "END_USER" | "B2B_PARTNER" | "PARTNER_ADMIN" | "INTERNAL" | "CONTENT_CREATOR" | "SUPER_ADMIN";
 export interface Session {
     userId: string;
@@ -4925,6 +5584,19 @@ export interface Session {
     ageTier?: AgeTier;
     sessionEpoch?: number;
     activeTenantId?: string;
+    /**
+     * The third-party client acting on the user's behalf. Absent means
+     * first-party — a cookie or localStorage session is the human's own, with
+     * no client in between, so nothing populates this today.
+     */
+    clientId?: string;
+    /**
+     * What this session was granted. Every path in `getSession` stamps `"*"`:
+     * a session that survived decryption is by construction first-party and
+     * unscoped. It is deliberately not "the set of all core scopes" — a
+     * first-party session must keep passing when a new scope is defined.
+     */
+    scopes?: ScopeSet;
 }
 /**
  * Test-only: clear the module-scope `SessionCookie` cache so KDF-count
