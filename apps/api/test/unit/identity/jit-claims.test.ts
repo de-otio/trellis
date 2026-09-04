@@ -4,6 +4,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { UnderMinimumAgeError } from "../../../src/lib/age-gate.js";
 import { MemoryKvStore } from "@de-otio/saas-foundation/kv";
 import { Prisma, type PrismaClient } from "@prisma/client";
 
@@ -282,6 +283,24 @@ describe("resolveJitClaims", () => {
     const result = await resolveJitClaims(tokenClaims(), mockEnv);
 
     expect(result).toBeNull();
+  });
+
+  it("fails closed (→401) when the realm user is under the minimum age", async () => {
+    // This is the path the Keycloak deployment actually runs, so it is the one
+    // that has to hold: the 18+ floor lives in `provisionConfirmedUser`, and a
+    // refusal must surface as no claims (a 401) rather than as claims for an
+    // account that was never created. See `src/lib/age-gate.ts`.
+    provision.mockRejectedValue(new UnderMinimumAgeError());
+    getUser.mockResolvedValue({
+      email: "minor@example.com",
+      attributes: { "custom:dateOfBirth": ["2016-01-01"] },
+    });
+
+    const result = await resolveJitClaims(tokenClaims(), mockEnv);
+
+    expect(result).toBeNull();
+    // Not retried as if it were a transient race — the answer will not change.
+    expect(provision).toHaveBeenCalledTimes(1);
   });
 
   it("prefers the org tenant in the claims when provisioning resolved one", async () => {
