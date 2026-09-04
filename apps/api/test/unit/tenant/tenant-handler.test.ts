@@ -52,7 +52,7 @@ function makeAuth(
   overrides: Partial<AuthContext> = {},
 ): AuthContext {
   return {
-    cognitoSub: "cognito-sub",
+    sub: "cognito-sub",
     userId: "user-id",
     globalRole: "B2B_PARTNER" as UserRole,
     activeTenantId: "tenant-id",
@@ -466,8 +466,8 @@ describe("TenantHandler.handleTransferOwnership", () => {
     // First findUnique call: candidate (new owner) lookup.
     // Second findUnique call: current owner row.
     mockDb.tenantMember.findUnique
-      .mockResolvedValueOnce({ status: "ACTIVE", user: { cognitoSub: "new-owner-sub" } })
-      .mockResolvedValueOnce({ role: "OWNER", user: { cognitoSub: "cognito-sub" } });
+      .mockResolvedValueOnce({ status: "ACTIVE", user: { subject: "new-owner-sub" } })
+      .mockResolvedValueOnce({ role: "OWNER", user: { subject: "cognito-sub" } });
 
     const request = new Request("https://api.example.com/api/tenants/tenant-id/transfer-ownership", {
       method: "POST",

@@ -1,0 +1,57 @@
+name: API snapshot gate
+
+# Fails a PR if either public-type snapshot (packages/extension-api's or
+# apps/api's) no longer matches the code, or if the extension-api package's
+# EXTENSION_API_VERSION const and its package.json version have drifted
+# apart. See:
+#   - apps/api/scripts/check-api-snapshot.mjs
+#   - apps/api/scripts/check-extension-api-version.mjs
+# Both checks regenerate the current state in-memory (or read source
+# directly) and compare — never against a hardcoded expectation — so the
+# gate stays correct regardless of which side of a version bump landed
+# first.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: api-snapshot-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  api-snapshot:
+    name: Public API snapshot + version lockstep check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npm run prisma:generate
+
+      - name: Extension API version lockstep check
+        run: node apps/api/scripts/check-extension-api-version.mjs
+
+      - name: Public API snapshot check (both packages)
+        run: node apps/api/scripts/check-api-snapshot.mjs
+
+      # Type-level tests for the extension contract. These cannot run in the
+      # vitest lanes: `expectTypeOf` is a runtime no-op and apps/api's
+      # `tsc --build` excludes `test/`, so nothing would compile them.
+      # Every negative case is an `@ts-expect-error`, so the check is
+      # fail-closed — a directive that stops being needed fails the build.
+      - name: Extension contract type tests
+        run: npm run test:types -w @de-otio/trellis-extension-api

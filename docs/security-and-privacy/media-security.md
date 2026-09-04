@@ -92,6 +92,57 @@ rights as other personal data:
 See [Compliance](compliance.md) for how these rights map to regulatory
 obligations.
 
+## Moderation observability is an oracle
+
+Counters about moderation are genuinely needed — a provider that has quietly
+started reviewing everything, or a taxonomy that has been running unpinned for
+a month, are both invisible without them. They are also, if published and
+fresh, a **per-upload verdict readout**: upload a probe, poll a counter, watch
+which bucket moves, and you can tune content against the classifier without
+ever seeing a decision.
+
+Three controls keep the first without the second:
+
+- **Aggregates only.** Counters are keyed by `{provider, decision}` and carry
+  no media id, tenant, user, or key.
+- **Closed windows only.** Snapshots report completed time buckets and never
+  the one in progress. A probe uploaded now cannot be read back now — that is
+  what breaks the poll-and-correlate loop, rather than merely slowing it.
+- **Authenticated surface only.** The unauthenticated health payload carries
+  exactly one moderation fact: a boolean saying a provider is wired. That is
+  what an uptime check needs and it says nothing about any upload.
+
+The same reasoning governs the audit record kept behind a video verdict —
+per-frame decisions, labels, confidences, frame offsets, sampling parameters,
+skip counts. All of it is recorded server-side, because the frames it describes
+are deleted moments later and it cannot be reconstructed afterwards; **none of
+it may be served to a client**, because together it tells an adversary which
+frames were looked at and how close a piece of content came to a bar.
+
+Provider names are treated as untrusted before becoming a metric dimension:
+validated against the operator-declared set, charset-restricted, and
+length-capped, so a hostile or merely sloppy value cannot blow up a metrics
+backend's cardinality.
+
+## Approval applies to specific bytes
+
+A moderation verdict is a statement about the bytes that were scanned, not
+about a key. Between a scan and an approval — automatic or human — the object
+at a staging key may have been replaced.
+
+So every path that can make bytes servable copies a **version-pinned** source:
+the exact version recorded when the classifier ran. This includes the human
+review queue, where the temptation to "just copy what's there" is strongest and
+the consequence is worst — an approval that copies current bytes launders
+unreviewed content through a moderator's decision. When the pinned version can
+no longer be resolved, the promotion is **refused** and the item stays in
+review. Doubt holds; doubt never serves.
+
+Pins are opaque: captured once and compared, never recomputed. An entity tag is
+not a content digest on every store (a multipart upload's tag is a digest of
+digests), so "verifying" a pin by re-hashing bytes would disagree with itself
+for identical content.
+
 ## Threats this guards against
 
 Embedded media metadata can leak more than users expect. The controls above
@@ -104,7 +155,16 @@ specifically address:
 - **Timeline reconstruction** — timestamps revealing activity patterns. Mitigated
   by the same owner-only access controls.
 - **Metadata leakage in shared media** — mitigated by not exposing metadata
-  through public APIs.
+  through public APIs. Frames sampled from a video for moderation are extracted
+  with the container metadata dictionary stripped, so a still cannot carry
+  location tags that the transcode removed from the video itself.
+- **Classifier tuning by oracle** — probing the pipeline to learn where the
+  bars sit. Mitigated by keeping thresholds out of the published package,
+  keeping verdict counters authenticated and coarsened, and never serving the
+  per-frame evidence behind a verdict.
+- **Approval of unreviewed bytes** — swapping an object between the scan and
+  the approval. Mitigated by version-pinned promotion on every path, and by
+  refusing to promote when the pin cannot be resolved.
 
 For the broader platform posture, see
 [Security architecture](security-architecture.md). For the user-facing view of

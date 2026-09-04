@@ -19,6 +19,33 @@ visibility flags.
 > visibility flags that do exist; the storage and per-field claims are accurate
 > for the model, not for current end-to-end behaviour.
 
+## What is stripped from the file itself
+
+Separate from *extraction* (what we read) is the **strip** (what we remove from
+the bytes we serve). Both media types are re-encoded and served metadata-free, but
+by different mechanisms:
+
+- **Images** are re-encoded through sharp without `.withMetadata()`, which drops
+  EXIF, IPTC, XMP and any C2PA manifest. `assertNoExif` enforces it.
+- **Video and audio** are re-encoded through ffmpeg with `-dn -sn`
+  (drop data and subtitle **streams**) **and `-map_metadata -1`** (drop the
+  container metadata **dictionary**). The poster frame gets the same flags.
+
+> **Both flags are required, and this was a live defect.** `-dn` drops data
+> *streams* and does nothing to the metadata dictionary — which is where MP4 keeps
+> GPS coordinates as the `©xyz` atom (`location`), alongside `comment` and `title`
+> — and ffmpeg copies that dictionary from input to output by default. Verified
+> against ffmpeg 8.1: with `-dn -sn` but no `-map_metadata -1`, an uploaded video's
+> `location` and `comment` survived the transcode intact. Fixed 2026-08-04. If you
+> ever see `-map_metadata` removed or set to anything other than `-1`, videos are
+> republishing the uploader's coordinates.
+
+One deliberate exception to the strip, added for AI Act Art. 50: a single
+enumerated *provenance* value is read from the original bytes **before** the strip
+runs, and nothing else. The reader's return type cannot carry GPS, camera identity
+or free-form metadata — see
+[the provenance API reference](./provenance-api.md).
+
 ## What the extracted EXIF subset contains
 
 The shipped extractor (`metadata-extractor.ts`) extracts only:

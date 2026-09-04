@@ -30,16 +30,18 @@ import type { KVNamespace } from "../types/cloudflare-compat.js";
  * through the KV path for production-grade distributed limiting.
  */
 
-import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoTokenBucketLimiter,
   MemoryTokenBucketLimiter,
+  PostgresTokenBucketLimiter,
   computeConsumeResult,
   type BucketState,
   type TokenBucketConfig,
   type RateLimitResult,
 } from "@de-otio/saas-foundation/rate-limit";
+import { createDefaultDynamoClient } from "@de-otio/saas-foundation/kv";
 
+import { resolveKvProvider, getKvSqlExecutor } from "./kv/kv-provider.js";
 import { getLogger, type LoggerEnv } from "./logger.js";
 
 interface RateLimitStore {
@@ -104,19 +106,33 @@ let cachedLimiterKey: string | undefined;
 function getLimiter(env: RateLimitEnv): FoundationLimiter {
   const tableName = env.RATE_LIMIT_TABLE;
   const namespace = env.RATE_LIMIT_NAMESPACE || "ratelimit";
-  // Cache key distinguishes the Dynamo table/namespace from the memory limiter.
-  const key = tableName ? `dynamo:${tableName}:${namespace}` : "memory";
+  const provider = resolveKvProvider();
+  const executor = provider === "postgres" ? getKvSqlExecutor() : undefined;
+  const usePostgres = provider === "postgres" && executor !== undefined;
+  // Cache key distinguishes the Postgres/Dynamo backends from the memory limiter.
+  const key = usePostgres
+    ? `postgres:${namespace}`
+    : tableName
+      ? `dynamo:${tableName}:${namespace}`
+      : "memory";
 
   if (cachedLimiter && cachedLimiterKey === key) {
     return cachedLimiter;
   }
 
-  if (tableName) {
-    // Construct the DynamoDB client only when a table is configured, so
-    // dev/test never reaches for AWS. `@aws-sdk/client-dynamodb` is a direct
-    // dependency of apps/api and is used by several other modules.
-    const client = new DynamoDBClient({ region: env.AWS_REGION });
-    cachedLimiter = new DynamoTokenBucketLimiter(client, {
+  if (usePostgres && executor !== undefined) {
+    // KV_PROVIDER=postgres: a single-row-per-key token bucket over the shared KV
+    // pool. F5 fail-open is inside the limiter (§3.10). The dedicated
+    // rate_limit_buckets table backs it.
+    cachedLimiter = new PostgresTokenBucketLimiter(executor, {
+      tableName: "rate_limit_buckets",
+      namespace,
+      unknownKeyStrategy: "shared-bucket",
+    });
+  } else if (tableName) {
+    // Construct the DynamoDB client via the foundation factory only when a table
+    // is configured, so dev/test never reaches for AWS.
+    cachedLimiter = new DynamoTokenBucketLimiter(createDefaultDynamoClient(), {
       tableName,
       namespace,
       // Default 'shared-bucket' matches trellis's prior implicit shared
@@ -131,6 +147,30 @@ function getLimiter(env: RateLimitEnv): FoundationLimiter {
   }
   cachedLimiterKey = key;
   return cachedLimiter;
+}
+
+/**
+ * Consume from the SHARED (distributed) token bucket under an explicit key.
+ *
+ * The `RateLimiter` methods derive their key from a `Request` (IP, session,
+ * user). Some limits are keyed by something else entirely — ActivityPub
+ * federation limits per remote instance DOMAIN, not per connection — and this
+ * is the seam for those. It deliberately PROPAGATES limiter errors so each
+ * caller picks its own failure policy; the inbox fails closed.
+ *
+ * @param env - Environment carrying the limiter configuration
+ * @param key - Fully-qualified bucket key (namespaced by the caller)
+ * @param limit - Bucket capacity (max burst)
+ * @param windowSeconds - Window the capacity refills over
+ * @returns The limiter's decision
+ */
+export async function consumeSharedBucket(
+  env: RateLimitEnv,
+  key: string,
+  limit: number,
+  windowSeconds: number,
+): Promise<RateLimitResult> {
+  return getLimiter(env).consume(key, 1, windowToConfig(limit, windowSeconds));
 }
 
 /** Test seam: reset the memoized module-level limiter between tests. */

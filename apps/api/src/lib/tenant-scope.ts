@@ -36,7 +36,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { Prisma } from "@prisma/client";
 import { getCurrentTenantId } from "@de-otio/saas-foundation/tenant";
 import {
-  EXTENSION_MODEL_REGISTRY,
+  getExtensionModelRegistry,
   type ExtensionModelRegistryEntry,
 } from "./extension-model-registry.js";
 import { getLogger } from "./logger.js";
@@ -69,7 +69,7 @@ export function delegateKeyToModelName(key: string): string {
  * second AND-merge).
  */
 export function extensionScopedModelNames(
-  registry: readonly ExtensionModelRegistryEntry[] = EXTENSION_MODEL_REGISTRY,
+  registry: readonly ExtensionModelRegistryEntry[] = getExtensionModelRegistry(),
 ): string[] {
   return registry.map((entry) => delegateKeyToModelName(entry.model));
 }
@@ -241,6 +241,16 @@ export const UNSCOPED_MODELS: ReadonlyMap<string, string> = new Map([
   ["EmailSubscription", "anonymous-capability"],
   ["Collection", "user"],
   ["CollectionItem", "by-relation"],
+  // WS-1 KV port: the PostgresKvStore backing table. GLOBAL, never tenant-scoped
+  // — every key is (namespace, key)-scoped, and the dedicated KV pool bypasses
+  // the tenant Prisma extension entirely (it must not be auto-filtered by an
+  // active tenant). See ws1-kv-port-plan §4.2.
+  ["KvEntry", "global"],
+  // WS-1 rate-limit port: the PostgresTokenBucketLimiter backing table. GLOBAL,
+  // never tenant-scoped — every bucket_key is `<namespace>#<key>`-scoped, and the
+  // dedicated rate-limit/KV pool bypasses the tenant Prisma extension. See
+  // ws1-kv-port-plan §3.10/§4.2, security fix F5.
+  ["RateLimitBucket", "global"],
 ]);
 
 // Operations whose `where` can safely have `{ tenantId }` AND-merged in.

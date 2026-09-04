@@ -6,20 +6,31 @@
  * — before publish — rather than downstream in a consuming vertical.
  */
 
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it, beforeEach, vi } from "vitest";
+
+// Boot warnings (undeclared extensionApiVersion, missing auth middleware) are
+// assertable rather than stdout noise.
+const { mockLogger } = vi.hoisted(() => ({
+  mockLogger: { warn: vi.fn(), error: vi.fn(), debug: vi.fn(), info: vi.fn(), trace: vi.fn() },
+}));
+vi.mock("../../src/lib/logger", () => ({
+  getLogger: () => mockLogger,
+  Logger: class {},
+}));
+
 import { validateExtensions } from "../../src/lib/extension-validator.js";
+import { EXTENSION_API_VERSION } from "@de-otio/trellis-extension-api";
+import type { TrellisExtension } from "@de-otio/trellis-extension-api";
 import {
   exampleExtension,
   minimalExtension,
   hookCalls,
   resetHookCalls,
-} from "../fixtures/example-extension/index.js";
+} from "@de-otio/trellis-extension-testkit/example";
 
 describe("extension contract: validateExtensions", () => {
   it("accepts the full and minimal reference extensions", () => {
-    expect(() =>
-      validateExtensions([exampleExtension, minimalExtension]),
-    ).not.toThrow();
+    expect(() => validateExtensions([exampleExtension, minimalExtension])).not.toThrow();
   });
 
   it("rejects a reserved id", () => {
@@ -28,18 +39,16 @@ describe("extension contract: validateExtensions", () => {
   });
 
   it("rejects an invalid id format (uppercase / too short)", () => {
-    expect(() =>
-      validateExtensions([{ ...minimalExtension, id: "X" }]),
-    ).toThrow(/lowercase|2-32/i);
-    expect(() =>
-      validateExtensions([{ ...minimalExtension, id: "Widget" }]),
-    ).toThrow(/lowercase|2-32/i);
+    expect(() => validateExtensions([{ ...minimalExtension, id: "X" }])).toThrow(/lowercase|2-32/i);
+    expect(() => validateExtensions([{ ...minimalExtension, id: "Widget" }])).toThrow(
+      /lowercase|2-32/i,
+    );
   });
 
   it("rejects duplicate ids", () => {
-    expect(() =>
-      validateExtensions([minimalExtension, { ...minimalExtension }]),
-    ).toThrow(/duplicate/i);
+    expect(() => validateExtensions([minimalExtension, { ...minimalExtension }])).toThrow(
+      /duplicate/i,
+    );
   });
 
   it("rejects routes that shadow a reserved core prefix", () => {
@@ -55,6 +64,62 @@ describe("extension contract: validateExtensions", () => {
       ],
     };
     expect(() => validateExtensions([ext as any])).toThrow(/reserved prefix/i);
+  });
+});
+
+/**
+ * `extensionApiVersion` (added in extension-api 0.8.0) is a NEW OPTIONAL field
+ * on TrellisExtension. This block is the deliberate acknowledgement of that
+ * contract change: it pins both halves of the compatibility promise —
+ * omitting the field must stay valid forever (every pre-0.8.0 extension omits
+ * it), and declaring it must gate startup on compatibility.
+ */
+describe("extension contract: extensionApiVersion (extension-api 0.8.0)", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("the minimal reference extension omits the field and remains valid", () => {
+    // Backward compatibility: the field is additive, never required. The
+    // minimal fixture is the one that carries this promise — it exists to omit
+    // every optional field — while `exampleExtension` models the good version
+    // and declares it. Two fixtures, two jobs.
+    expect(minimalExtension.extensionApiVersion).toBeUndefined();
+    expect(exampleExtension.extensionApiVersion).toBe(EXTENSION_API_VERSION);
+    expect(() => validateExtensions([exampleExtension, minimalExtension])).not.toThrow();
+  });
+
+  it("omitting the field warns exactly once, naming every extension that omits it", () => {
+    const alsoUndeclared: TrellisExtension = { ...minimalExtension, id: "undeclared" };
+    validateExtensions([exampleExtension, minimalExtension, alsoUndeclared]);
+    const versionWarnings = mockLogger.warn.mock.calls
+      .map((c) => String(c[0]))
+      .filter((m) => m.includes("extensionApiVersion"));
+    expect(versionWarnings).toHaveLength(1);
+    expect(versionWarnings[0]).toContain(`"${minimalExtension.id}"`);
+    expect(versionWarnings[0]).toContain(`"${alsoUndeclared.id}"`);
+    // …and says nothing about the one that declared it.
+    expect(versionWarnings[0]).not.toContain(`"${exampleExtension.id}"`);
+  });
+
+  it("declaring the current version is accepted silently", () => {
+    const declared: TrellisExtension = {
+      ...minimalExtension,
+      extensionApiVersion: EXTENSION_API_VERSION,
+    };
+    expect(() => validateExtensions([declared])).not.toThrow();
+    const versionWarnings = mockLogger.warn.mock.calls
+      .map((c) => String(c[0]))
+      .filter((m) => m.includes("extensionApiVersion"));
+    expect(versionWarnings).toHaveLength(0);
+  });
+
+  it("declaring an incompatible version fails startup", () => {
+    const stale: TrellisExtension = {
+      ...minimalExtension,
+      extensionApiVersion: "0.1.0",
+    };
+    expect(() => validateExtensions([stale], "0.8.0")).toThrow(
+      /built against extension-api 0\.1\.0/,
+    );
   });
 });
 
@@ -76,9 +141,7 @@ describe("extension contract: metadataSchema", () => {
   });
 
   it("the example schema rejects missing required fields and unknown keys", () => {
-    expect(exampleExtension.metadataSchema.safeParse({ color: "blue" }).success).toBe(
-      false,
-    );
+    expect(exampleExtension.metadataSchema.safeParse({ color: "blue" }).success).toBe(false);
     expect(
       exampleExtension.metadataSchema.safeParse({
         color: "blue",
@@ -89,28 +152,14 @@ describe("extension contract: metadataSchema", () => {
   });
 
   it("the minimal schema accepts arbitrary object metadata", () => {
-    expect(
-      minimalExtension.metadataSchema.safeParse({ anything: true }).success,
-    ).toBe(true);
+    expect(minimalExtension.metadataSchema.safeParse({ anything: true }).success).toBe(true);
   });
 });
 
 describe("extension contract: optional surfaces", () => {
   it("computeLifeStage derives a value from metadata", () => {
-    expect(exampleExtension.computeLifeStage?.({ size: "l" }, false, null)).toBe(
-      "mature",
-    );
+    expect(exampleExtension.computeLifeStage?.({ size: "l" }, false, null)).toBe("mature");
     expect(exampleExtension.computeLifeStage?.({ size: "m" }, false, null)).toBeNull();
-  });
-
-  it("relationshipSignalProvider returns a blendable signal", async () => {
-    const signal = await exampleExtension.relationshipSignalProvider?.computeSignal(
-      "u1",
-      "u2",
-      "user",
-      { currentScore: 0.1, tier: 1 },
-    );
-    expect(signal).toBe(0.5);
   });
 
   it("activityPub.enrichActor returns display-only fields", () => {
@@ -121,36 +170,18 @@ describe("extension contract: optional surfaces", () => {
     expect(a?.summary).toContain("Spinny");
     expect(a?.attachment?.[0]).toMatchObject({ name: "Color", value: "red" });
   });
-
-  it("declares entity relationship types and discovery facets", () => {
-    expect(exampleExtension.entityRelationshipTypes).toContain("LINKED_TO");
-    expect(exampleExtension.discoveryFacets?.[0]).toMatchObject({
-      field: "color",
-      type: "exact",
-    });
-  });
 });
 
-describe("extension contract: hooks & lifecycle", () => {
-  const ctx: any = { appDomain: "localhost", appUrl: "http://localhost", stage: "test", config: {}, db: {} };
-
+describe("extension contract: lifecycle", () => {
   beforeEach(() => resetHookCalls());
 
-  it("init and shutdown fire and record in order", async () => {
-    await exampleExtension.init?.(ctx);
+  // `shutdown` is the one lifecycle callback core actually invokes
+  // (server.ts, on SIGTERM/SIGINT). Everything this block used to cover —
+  // `init` and the five `hooks` — was declared by the contract but never
+  // dispatched by core, so these assertions passed against the fixture's own
+  // functions while proving nothing about core. Removed with that surface.
+  it("shutdown fires and records", async () => {
     await exampleExtension.shutdown?.();
-    const order = hookCalls.map((c) => c.hook);
-    expect(order.indexOf("init")).toBeGreaterThanOrEqual(0);
-    expect(order.indexOf("shutdown")).toBeGreaterThan(order.indexOf("init"));
-  });
-
-  it("onEntityCreated / onPostCreated record their payloads", async () => {
-    await exampleExtension.hooks?.onEntityCreated?.({ id: "e1" }, ctx);
-    await exampleExtension.hooks?.onPostCreated?.({ id: "p1" }, ctx);
-    expect(hookCalls.map((c) => c.hook)).toEqual([
-      "onEntityCreated",
-      "onPostCreated",
-    ]);
-    expect(hookCalls[0].args[0]).toMatchObject({ id: "e1" });
+    expect(hookCalls.map((c) => c.hook)).toContain("shutdown");
   });
 });

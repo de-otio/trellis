@@ -54,7 +54,7 @@ import type {
  */
 type Satisfies<Contract, T extends Contract> = T;
 
-// --- Prisma models satisfy the hook-payload DTOs ---------------------------
+// --- Prisma models satisfy the published entity/post DTOs ------------------
 type _EntitySatisfiesDto = Satisfies<ExtensionEntity, Entity>;
 type _PostSatisfiesDto = Satisfies<ExtensionPost, Post>;
 
@@ -90,7 +90,7 @@ type _EntityRelationshipSatisfiesDto = Satisfies<
 // The graph-service returns are ALSO checked structurally where
 // `createReadOnlyGraphService` (extension-context.ts) binds core methods to
 // the tightened `ExtensionGraphService` interface — this file makes the same
-// contract explicit and covers the hook payloads, which are dispatched
-// through `any` args in hook-dispatcher.ts and would otherwise be unchecked.
+// contract explicit and additionally covers the entity/post shapes, which
+// reach extensions through routes and `extendRecap`.
 
 export {};

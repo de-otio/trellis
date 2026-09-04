@@ -29,6 +29,7 @@ vi.mock("../../../src/lib/rate-limit", () => ({
 // Mock LinkSecurityHandler
 const mockNormalizeUrl = vi.fn();
 const mockValidateUrlSync = vi.fn();
+const mockValidateUrl = vi.fn();
 vi.mock("../../../src/lib/link-security-handler", async (importOriginal) => {
   const original = (await importOriginal()) as any;
   return {
@@ -36,6 +37,7 @@ vi.mock("../../../src/lib/link-security-handler", async (importOriginal) => {
     LinkSecurityHandler: class {
       normalizeUrl = mockNormalizeUrl;
       validateUrlSync = mockValidateUrlSync;
+      validateUrl = mockValidateUrl;
     },
   };
 });
@@ -64,6 +66,13 @@ describe("Out Routes", () => {
     };
 
     mockApplyRateLimitKV.mockResolvedValue(null);
+    // The route now uses the DNS-validating `validateUrl` (Phase 6 M1). By
+    // default it mirrors whatever the existing `validateUrlSync` arrangement
+    // returns, so each test's setup keeps expressing the lexical verdict; the
+    // DNS-specific case gets its own test below.
+    mockValidateUrl.mockImplementation(async (url: string) =>
+      mockValidateUrlSync(url),
+    );
     mockCreateSecureResponse.mockImplementation(
       (body, options) => new Response(body, options),
     );
@@ -171,6 +180,39 @@ describe("Out Routes", () => {
       const body = await response.text();
       expect(body).toContain("Link Blocked");
           });
+
+    it("should block a destination whose DNS answer is internal (SSRF)", async () => {
+      // Phase 6 M1: the interstitial must run the DNS-validating check, not
+      // just the lexical one — `cdn.attacker.example` looks entirely ordinary
+      // until you resolve it to the metadata address.
+      mockNormalizeUrl.mockReturnValue({
+        normalized: "https://cdn.attacker.example/",
+        domain: "cdn.attacker.example",
+      });
+      mockValidateUrlSync.mockReturnValue({ status: LinkStatus.SAFE });
+      mockValidateUrl.mockResolvedValue({
+        status: LinkStatus.BLOCKED,
+        reason: "Internal network access blocked",
+      });
+
+      const request = new Request(
+        "https://example.com/out?url=https://cdn.attacker.example/",
+        { method: "GET" },
+      );
+
+      const response = await route!.handler(request, mockEnv, {
+        url: new URL("https://example.com/out?url=https://cdn.attacker.example/"),
+        pathname: "/out",
+        params: {},
+      });
+
+      expect(mockValidateUrl).toHaveBeenCalled();
+      expect(response.status).toBe(403);
+      const body = await response.text();
+      expect(body).toContain("Link Blocked");
+      // Reputation is never consulted — we refuse before spending that lookup.
+      expect(mockGetReputation).not.toHaveBeenCalled();
+    });
 
     it("should show blocked page when domain reputation is blocked", async () => {
       mockNormalizeUrl.mockReturnValue({

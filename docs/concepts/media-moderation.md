@@ -33,7 +33,7 @@ A media object's `moderationStatus` is one of five states, persisted on the
 | `QUARANTINED` | The classifier flagged it — awaiting a human moderator. |
 | `REJECTED` | Terminal. Never serves. |
 
-The legal transitions are a pure state machine (`moderation-status.ts`):
+The legal transitions are a pure state machine (`media-lifecycle.ts`):
 
 ```
 PENDING            --decision approved-->   APPROVED
@@ -140,6 +140,55 @@ sticky across an absent/errored sibling; and the combinator never returns
 content-addressed object is actually present in storage — approval alone never
 serves bytes that are not there.
 
+### Frame-sampled video, resolved inline
+
+When the video half of the seam is served by core's frame-sampling adapter, the
+shape of the flow changes in one way worth understanding.
+
+The adapter does the whole job during `startVideoModeration`: it samples,
+classifies each frame, and aggregates. There is no remote job to poll and no
+completion notification will ever arrive, so it returns the decision alongside
+the job id and the processing worker records it immediately — the same
+mechanism a silent video's audio track already used.
+
+That leaves one case where nothing external can settle the object: a **silent**
+video whose visual track also resolved inline. Both tracks are decided the
+moment processing finishes, and waiting for a message that will never be sent
+would leave the object un-servable and un-rejected indefinitely. So the
+processing worker settles it there, reusing the same pure promotion decision
+and the same version-pinned copy the completion worker uses — the two paths
+cannot drift on what "approved" means, because they are the same code.
+
+The aggregation law is deliberately one-directional: it can degrade a verdict
+and can never improve one.
+
+1. **Quarantine dominates** — one quarantined frame quarantines the video.
+2. Otherwise the **worst frame wins**; `approved` requires every frame to have
+   approved.
+3. **Zero frames** ⇒ `review`. No evidence is not good evidence.
+4. A frame that could not be classified counts as `review` at best.
+5. **An extraction shortfall** ⇒ `review`, regardless of the per-frame
+   verdicts. If fewer frames decoded than the policy expected, the video was
+   only partly seen — this is the rule that stops a clip whose harmful frames
+   fail to decode from being approved on its benign ones.
+6. A sampling plan that **exceeds the operator's per-job ceiling** ⇒ `review`.
+   Silently sampling fewer would scan the video at a rate nobody chose, and
+   would afterwards be indistinguishable from a decode failure.
+
+Sampling time is spent inside the processing worker's budget, bounded by the
+frame ceiling. Extracted frames are deleted on every path, and they are
+extracted with the container metadata dictionary stripped — a sampled still
+must not resurrect the location tags the transcode removed.
+
+### Audio-only uploads are refused
+
+The pipeline resolves a VISUAL track and an AUDIO track derived from a video.
+An audio-only object has no visual track to resolve, so it is refused at the
+type-routing boundary with a specific error rather than accepted. The
+alternative is worse than a refusal: stored bytes that no verdict can settle,
+a row that is neither servable nor rejected, and a client that believes the
+upload succeeded.
+
 ### No-audio videos
 
 A video with no audio stream (a silent clip, a screen recording, a GIF-style
@@ -173,6 +222,17 @@ seam).
 | `TranscribePort` | Async speech-to-text for the AUDIO track. | Interface + `MockTranscribePort`. |
 | `StoragePort` | Object storage (get/put/copy/delete/head). | Interface + `MockStoragePort`. |
 
+Core also ships pieces that sit *between* the pipeline and a provider, so that
+binding a backend does not mean re-implementing them:
+
+| Capability | What it does | Why it is in core |
+|------------|--------------|-------------------|
+| `FrameSamplingVideoModerationAdapter` | Turns an image-only classifier into a video one: samples frames, classifies each through `moderateImage`, aggregates. | Most classifiers have no video job model, and every implementor writing their own sampling loop would re-derive the same aggregation rules — differently. |
+| `createLabelPolicy` | Derives the decision from the provider's labels under the **operator's** category map and confidence bars. | Moves authorship of the policy from the vendor to the operator, who can audit and change it. |
+| `withModerationDeadline` | Bounds every seam call and commits the decision at the deadline. | A timeout that only stops waiting is not a timeout; the late-answer rule has to live somewhere both paths share. |
+| `createMediaBytesAccess` | Hands an adapter a size-capped, version-pinned `Buffer`. | A classifier that takes bytes in its request body otherwise needs its own storage credentials — a second identity with read access to all user media. |
+| `parseCompletionEnvelope` | Accepts the canonical `{ track, jobId }` completion body, and the historical wire shapes. | Signalling completion should not mean reproducing a particular vendor's notification JSON. |
+
 Binding rules every provider must obey:
 
 - A classifier verdict is **3-value** (`approved` / `review` / `quarantine`).
@@ -181,18 +241,66 @@ Binding rules every provider must obey:
 - Absence of signal, an internal fault, a spent budget, or **any** uncertainty
   must fail closed to `review`. A provider must never manufacture `approved`
   from doubt.
-- References are opaque (a key plus a bucket handle), never raw bytes.
+- References are opaque (a key plus a bucket handle), never raw bytes. A ref may
+  carry a **pin** (a version id, an entity tag, or a content hash); when it
+  does, the provider must scan that exact version, and the pin is compared,
+  never recomputed — an entity tag is not a content digest on every store.
+- A verdict should report `modelVersion`, the opaque identifier of the taxonomy
+  that produced it. Under a pinned label policy, a verdict without one is
+  unverifiable and therefore `review`: a category map is only meaningful
+  against the taxonomy it was written for, and a silent model reship would
+  otherwise keep the map "working" while changing what it means.
+- Failures should be thrown as `ModerationProviderError` with an honest
+  `retryable` flag. Core reads the type first and falls back to matching error
+  names only for untyped errors — a guess must never overrule a statement. A
+  failure the adapter cannot attribute (`unknownCause: true`) holds the media
+  **and** raises an infrastructure fault, because a provider that is down and a
+  provider that is being careful otherwise look identical from the review
+  queue.
+- Every method takes an `AbortSignal`. When the caller's deadline expires, the
+  decision is committed: a provider resolving `approved` afterwards is
+  discarded, not applied.
+
+See [Implementing a media-moderation
+provider](../guides/implementing-a-media-moderation-provider.md) for the full
+implementor's contract, and [Media moderation
+configuration](../reference/media-moderation-config.md) for the operator knobs.
 
 The Null provider returns `review` for every call and warns loudly. A startup
 guard refuses to run it outside development: an un-moderated, fail-closed
 backend in production would silently send all media to review with no path to
 approval, so the wiring fails loudly instead.
 
+## Boundary invariants
+
+The pipeline separates two layers with different rules, and the separation is
+enforced, not aspirational:
+
+- **The decision core is dependency-free.** The lifecycle state machine, track
+  fan-in, promotion decision, serve-gate predicate, and the provider/port
+  interfaces import nothing but Node built-ins and each other — no Prisma, no
+  cloud SDKs, no env, no worker or route code. This is enforced by an
+  architectural test
+  (`test/unit/media/decision-core-boundary.test.ts`); an import from outside
+  that set fails the suite.
+- **Enforcement is platform code.** The serve gate's wiring, CAS promotion,
+  quarantine prefixes, quotas, the spend guard, and the processing/completion
+  workers are integrated with storage, queues, and tenancy — deliberately.
+  Fail-closed serving is a property of the platform, not of any provider.
+- **New moderation intelligence goes behind the seams.** Any new
+  classification capability — a provider integration, a shared detection
+  service, a future standard protocol — enters as an implementation of the
+  existing provider interfaces (or a new seam beside them), never inline in
+  workers or handlers, and obeys the binding rules above: 3-value verdicts,
+  fail-closed on any doubt.
+
+Rule of thumb: **enforcement in the core, intelligence behind a port.**
+
 ## Where to look in the code
 
 | Concern | Module |
 |---------|--------|
-| Lifecycle states + state machine | `apps/api/src/lib/media/moderation-status.ts` |
+| Lifecycle states + state machine | `apps/api/src/lib/media/media-lifecycle.ts` |
 | Serve gate predicate | `apps/api/src/lib/media/serve-gate.ts` |
 | Track fan-in | `apps/api/src/lib/media/track-verdict.ts` |
 | Promotion decision | `apps/api/src/lib/media/promote-decision.ts` |

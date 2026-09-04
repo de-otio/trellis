@@ -51,6 +51,21 @@ vi.mock("../../src/lib/feed-handler", () => ({
   },
 }));
 
+// Mock the shared read authorizer (H3). Default ALLOW, so the existing
+// behaviour tests below still exercise the body of each method.
+//
+// Note what this mock does NOT prove: whether the predicate inside
+// `canReadPost` is correct. That is decided by real Postgres in
+// test/integration/post-attachment-read-authz.integration.test.ts — a mocked
+// Prisma resolves canned rows regardless of the `where`, so a unit test cannot
+// tell a right predicate from a missing one.
+const mockCanReadPost = vi.fn();
+vi.mock("../../src/lib/post-read-authorizer", () => ({
+  canReadPost: (...args: any[]) => mockCanReadPost(...args),
+}));
+
+const TENANT = "tenant-123";
+
 describe("ReactionHandler", () => {
   let handler: ReactionHandler;
   let mockEnv: any;
@@ -61,6 +76,7 @@ describe("ReactionHandler", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     handler = new ReactionHandler();
+    mockCanReadPost.mockResolvedValue(true);
 
     mockDb = {
       post: {
@@ -322,6 +338,7 @@ describe("ReactionHandler", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(200);
@@ -344,26 +361,59 @@ describe("ReactionHandler", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(404);
     });
 
-    it("should work without session (unauthenticated)", async () => {
+    // H3: reaction counts are an attachment of the post and must not be more
+    // readable than it. This method used to accept a null session and gate on
+    // "does the post row exist", so a WHISPER post's reaction activity was
+    // readable by anyone with the id.
+    it("refuses with the not-found body when the viewer may not read the post", async () => {
+      mockCanReadPost.mockResolvedValue(false);
       mockDb.postSentiment.groupBy.mockResolvedValue([
         { sentiment: "love", _count: 5 },
       ]);
 
       const response = await handler.getPostSentiments(
         "post-123",
-        null,
+        mockSession,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
-      expect(response.status).toBe(200);
-      const data = await response.json();
-      expect(data.userSentiment).toBeUndefined();
+      expect(response.status).toBe(404);
+      // Byte-identical to the absent-post refusal: a distinguishable deny is an
+      // existence oracle for private post ids.
+      expect(await response.text()).toBe(
+        JSON.stringify({ error: "Post not found" }),
+      );
+      // And no count reached the caller.
+      expect(mockDb.postSentiment.groupBy).not.toHaveBeenCalled();
+    });
+
+    it("passes the caller's active tenant to the authorizer, never an ambient one", async () => {
+      mockDb.postSentiment.groupBy.mockResolvedValue([]);
+      mockDb.postSentiment.findUnique.mockResolvedValue(null);
+
+      await handler.getPostSentiments(
+        "post-123",
+        mockSession,
+        mockEnv,
+        mockRequestContext,
+        TENANT,
+      );
+
+      expect(mockCanReadPost).toHaveBeenCalledWith(
+        expect.objectContaining({
+          postId: "post-123",
+          viewerUserId: "user-123",
+          tenantId: TENANT,
+        }),
+      );
     });
 
     it("should use timeout/retry logic for both queries", async () => {
@@ -375,6 +425,7 @@ describe("ReactionHandler", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       // Verify withQueryTimeoutAndRetry was called twice (counts + user reaction)

@@ -2,6 +2,7 @@ import { randomBytes, createHash } from "node:crypto";
 import { DynamoDBClient, PutItemCommand, GetItemCommand, UpdateItemCommand } from "@aws-sdk/client-dynamodb";
 import { Logger } from "@aws-lambda-powertools/logger";
 import { createEmailProvider, emailProviderConfigFromEnv } from "../lib/email-provider.js";
+import { buildMagicLinkEmail } from "../lib/identity/magic-link-email.js";
 
 const logger = new Logger({ serviceName: "create-auth-challenge" });
 
@@ -13,6 +14,14 @@ const dynamo = new DynamoDBClient({ region: process.env.AWS_REGION });
 const emailProvider = createEmailProvider(emailProviderConfigFromEnv(process.env));
 const TABLE = process.env.DYNAMODB_TABLE!;
 const DOMAIN = process.env.DOMAIN!;
+// Same From/branding fix as lib/identity/magic-link-initiate.ts — this Lambda
+// sends the IDENTICAL S-8 magic-link email (buildMagicLinkEmail) for the
+// Cognito flow, so it carries the identical bug: a hardcoded "Trellis
+// <noreply@DOMAIN>" ignores FROM_EMAIL, which breaks/DMARC-misaligns at the
+// Scaleway TEM cutover (TEM rejects sends from an unvalidated domain). Read
+// once at module scope, same as the other env-derived constants above.
+const FROM_EMAIL = process.env.FROM_EMAIL;
+const BRAND_NAME = process.env.EMAIL_BRAND_NAME || "Trellis";
 
 const RATE_LIMIT_MAX = 5;
 const RATE_LIMIT_WINDOW_SECONDS = 900; // 15 minutes
@@ -57,7 +66,13 @@ export const handler = async (event: any) => {
     if (err?.message?.startsWith("RATE_LIMIT_EXCEEDED")) {
       throw err;
     }
-    logger.error("Rate limit check failed, proceeding with token generation", { error: err });
+    // [F2] FAIL CLOSED. A limiter-backend error (DynamoDB outage/throttle) must
+    // NOT lift the per-email rate limit — proceeding here would open an
+    // unmetered magic-link email-flooding path exactly when the limiter is
+    // down. Abort challenge creation instead, matching the /auth/magic-link
+    // endpoint's 503 posture. (Was previously fail-open: logged + proceeded.)
+    logger.error("Rate limit check failed — failing closed (aborting challenge creation)", { error: err });
+    throw err;
   }
 
   const token = randomBytes(32).toString("base64url");
@@ -83,21 +98,22 @@ export const handler = async (event: any) => {
   }
 
   // Send magic link email via the email-provider abstraction (AWS SES by
-  // default, role-based auth). Subject/HTML/text content is unchanged.
+  // default, role-based auth). Subject/HTML/text content is unchanged —
+  // extracted VERBATIM to the shared S-8 template (WS-3.3) so the app-owned
+  // email is identical on every identity provider.
   const magicLink = `https://${DOMAIN}/auth/verify?token=${token}&email=${encodeURIComponent(email)}`;
+  const content = buildMagicLinkEmail(magicLink, BRAND_NAME);
+  // FROM_EMAIL (validated sending domain) wins when set; only fall back to
+  // the `noreply@${DOMAIN}` construction when it's unset, so a deployment
+  // that never sets FROM_EMAIL keeps booting with identical output.
+  const from = FROM_EMAIL ? `${BRAND_NAME} <${FROM_EMAIL}>` : `${BRAND_NAME} <noreply@${DOMAIN}>`;
   try {
     await emailProvider.sendEmail({
-      from: `Trellis <noreply@${DOMAIN}>`,
+      from,
       to: email,
-      subject: "Sign in to Trellis",
-      html: `
-              <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 32px;">
-                <h2 style="color: #1a1a1a; margin-bottom: 24px;">Sign in to Trellis</h2>
-                <p style="color: #4a4a4a; font-size: 16px; line-height: 1.5;">Click the button below to sign in. This link expires in 5 minutes.</p>
-                <a href="${magicLink}" style="display: inline-block; background: #2563eb; color: #fff; padding: 14px 28px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 16px; margin: 24px 0;">Sign in to Trellis</a>
-                <p style="color: #9a9a9a; font-size: 13px; margin-top: 32px;">If you didn't request this, you can safely ignore this email.</p>
-              </div>`,
-      text: `Sign in to Trellis\n\nClick this link to sign in (expires in 5 minutes):\n${magicLink}\n\nIf you didn't request this, ignore this email.`,
+      subject: content.subject,
+      html: content.html,
+      text: content.text,
     });
   } catch (err) {
     logger.error("Failed to send magic link email", { error: err });

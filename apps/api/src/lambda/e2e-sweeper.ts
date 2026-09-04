@@ -1,18 +1,12 @@
 /**
- * E2E Test Data Sweeper (User-Scoped)
+ * Thin AWS entrypoint for the E2E test-data sweeper (WS-2 T4).
  *
- * Safety net for leaked test data. Runs hourly.
- *
- * Instead of querying the database directly, this sweeper:
- * 1. Lists Cognito users with __e2e_ email prefix older than 2 hours
- * 2. Queues their deletion via the delete-account SQS queue
- *    (same pipeline used by GDPR account deletions)
- * 3. Deletes the Cognito user
- *
- * The delete-account-worker handles the actual cleanup:
- * DB cascade (deleteUserData) → S3 media → Cognito identity
- *
- * This approach eliminates the risk of a WHERE clause bug deleting real user data.
+ * EventBridge `rate(1 hour)`. The work lives in `lib/workers/e2e-sweeper.ts`;
+ * this entrypoint wires the AWS concretes: the Cognito-backed identity
+ * directory (ListUsers filter `email ^= "__e2e_"` + AdminDeleteUser), the
+ * raw SQS producer to the delete-account queue, the `cron`-namespace
+ * DynamoKvStore CronLock, and the EMF MetricsPort (Trellis/E2E, Stage
+ * dimension).
  */
 
 import {
@@ -21,10 +15,16 @@ import {
   AdminDeleteUserCommand,
 } from "@aws-sdk/client-cognito-identity-provider";
 import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
-import { DynamoDBClient, PutItemCommand } from "@aws-sdk/client-dynamodb";
-import { marshall } from "@aws-sdk/util-dynamodb";
 import { Logger } from "@aws-lambda-powertools/logger";
-import { Metrics, MetricUnit } from "@aws-lambda-powertools/metrics";
+import { Metrics } from "@aws-lambda-powertools/metrics";
+import { getKvStore } from "../lib/kv/kv-provider.js";
+import { getLogger } from "../lib/logger.js";
+import { makeKvCronLock } from "../lib/workers/cron-lock.js";
+import {
+  runE2eSweeper,
+  type E2eIdentityDirectoryPort,
+} from "../lib/workers/e2e-sweeper.js";
+import { makeEmfMetricsPort } from "./emf-metrics-adapter.js";
 
 const logger = new Logger({ serviceName: "e2e-sweeper" });
 const metrics = new Metrics({ namespace: "Trellis/E2E", serviceName: "e2e-sweeper" });
@@ -33,102 +33,59 @@ const region = process.env.AWS_REGION || "eu-central-1";
 const stage = process.env.STAGE || "dev";
 const userPoolId = process.env.COGNITO_USER_POOL_ID!;
 const deleteQueueUrl = process.env.DELETE_ACCOUNT_QUEUE_URL!;
-const dynamoTable = process.env.DYNAMODB_TABLE!;
 
 const cognito = new CognitoIdentityProviderClient({ region });
 const sqs = new SQSClient({ region });
-const dynamo = new DynamoDBClient({ region });
 
-const STALE_THRESHOLD_HOURS = 2;
-const E2E_PREFIX = "__e2e_";
-const MAX_PAGES = 20;
+const directory: E2eIdentityDirectoryPort = {
+  async listUsersByEmailPrefix({ prefix, limit, paginationToken }) {
+    const res = await cognito.send(
+      new ListUsersCommand({
+        UserPoolId: userPoolId,
+        Filter: `email ^= "${prefix}"`,
+        Limit: limit,
+        PaginationToken: paginationToken,
+      }),
+    );
+    return {
+      users: (res.Users || []).map((u) => ({
+        username: u.Username,
+        email: u.Attributes?.find((a) => a.Name === "email")?.Value,
+        sub: u.Attributes?.find((a) => a.Name === "sub")?.Value,
+        createdAt: u.UserCreateDate,
+      })),
+      paginationToken: res.PaginationToken,
+    };
+  },
+  async deleteUserByUsername(username) {
+    await cognito.send(
+      new AdminDeleteUserCommand({ UserPoolId: userPoolId, Username: username }),
+    );
+  },
+};
 
 export const handler = async (): Promise<void> => {
-  const cutoff = new Date(Date.now() - STALE_THRESHOLD_HOURS * 60 * 60 * 1000);
-  const now = Math.floor(Date.now() / 1000);
-
-  // Acquire distributed lock
   try {
-    await dynamo.send(new PutItemCommand({
-      TableName: dynamoTable,
-      Item: marshall({ pk: "cron:e2e-sweeper", sk: "lock", ttl: now + 300, lockedAt: now }),
-      ConditionExpression: "attribute_not_exists(pk) OR #ttl < :now",
-      ExpressionAttributeNames: { "#ttl": "ttl" },
-      ExpressionAttributeValues: marshall({ ":now": now }),
-    }));
-  } catch {
-    logger.info("E2E sweeper already running, skipping");
-    return;
-  }
-
-  logger.info("E2E sweeper started", { cutoff: cutoff.toISOString() });
-
-  let totalQueued = 0;
-
-  // Step 1: List stale __e2e_ Cognito users
-  try {
-    let paginationToken: string | undefined;
-    let pages = 0;
-
-    do {
-      const res = await cognito.send(new ListUsersCommand({
-        UserPoolId: userPoolId,
-        Filter: `email ^= "${E2E_PREFIX}"`,
-        Limit: 60,
-        PaginationToken: paginationToken,
-      }));
-
-      for (const user of res.Users || []) {
-        if (!user.UserCreateDate || user.UserCreateDate >= cutoff) continue;
-        if (!user.Username) continue;
-
-        const email = user.Attributes?.find(a => a.Name === "email")?.Value || user.Username;
-        const sub = user.Attributes?.find(a => a.Name === "sub")?.Value;
-
-        // Step 2: Queue database + S3 deletion via delete-account worker
-        if (sub) {
-          try {
-            await sqs.send(new SendMessageCommand({
+    await runE2eSweeper({
+      logger: getLogger(),
+      metrics: makeEmfMetricsPort(metrics),
+      cronLock: makeKvCronLock(getKvStore("cron")),
+      clock: Date.now,
+      directory,
+      deleteAccountQueue: {
+        send: async (message) => {
+          await sqs.send(
+            new SendMessageCommand({
               QueueUrl: deleteQueueUrl,
-              MessageBody: JSON.stringify({ userId: sub }),
-            }));
-            totalQueued++;
-            logger.info(`Queued deletion for ${email}`, { userId: sub });
-          } catch (err) {
-            logger.warn(`Failed to queue deletion for ${email}`, { error: err });
-          }
-        }
-
-        // Step 3: Delete Cognito user immediately
-        // (worker also tries Cognito deletion, but we do it here too
-        //  since the worker may process the message after a delay)
-        try {
-          await cognito.send(new AdminDeleteUserCommand({
-            UserPoolId: userPoolId,
-            Username: user.Username,
-          }));
-          logger.info(`Deleted Cognito user ${email}`);
-        } catch (err) {
-          logger.warn(`Cognito delete failed for ${email}`, { error: err });
-        }
-      }
-
-      paginationToken = res.PaginationToken;
-      pages++;
-    } while (paginationToken && pages < MAX_PAGES);
-
+              MessageBody: JSON.stringify(message),
+            }),
+          );
+        },
+      },
+      stage,
+    });
   } catch (err) {
-    logger.error("Failed to list Cognito users", { error: err });
+    logger.error("E2E sweeper failed", { error: err });
+    throw err;
   }
-
-  // Step 4: Emit metric
-  try {
-    const m = metrics.singleMetric();
-    m.addDimension("Stage", stage);
-    m.addMetric("E2eLeakedRecords", MetricUnit.Count, totalQueued);
-  } catch (err) {
-    logger.error("Failed to emit metric", { error: err });
-  }
-
-  logger.info("E2E sweeper complete", { totalQueued });
 };

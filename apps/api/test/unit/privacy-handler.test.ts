@@ -7,6 +7,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   PrivacyHandler,
+  PrivacyPreferencesUnavailableError,
   type Env,
   type PrivacyPreferences,
 } from "../../src/lib/privacy-handler.js";
@@ -89,10 +90,24 @@ describe("PrivacyHandler", () => {
       expect(result).toBeNull();
     });
 
-    it("should return null on error", async () => {
+    // REVERSED. This used to assert `null` on a store error — the same value
+    // returned when a user genuinely has no preferences. That collapse is the
+    // defect: it converts "we cannot tell what you chose" into "you chose
+    // nothing", and the client then applies defaults over the user's actual
+    // privacy settings.
+    it("throws rather than reporting 'no preferences' when the store errors", async () => {
       mockPrivacyPreferencesKV.get.mockRejectedValue(new Error("KV error"));
 
-      const result = await handler.getPreferences(mockSession, mockEnv);
+      await expect(
+        handler.getPreferences(mockSession, mockEnv),
+      ).rejects.toBeInstanceOf(PrivacyPreferencesUnavailableError);
+    });
+
+    it("still reports null when NO store is wired at all", async () => {
+      // Absence is a deployment shape, not a malfunction: with no store, no
+      // preferences exist and defaults are the correct answer. Only failure
+      // is ambiguous.
+      const result = await handler.getPreferences(mockSession, {} as any);
 
       expect(result).toBeNull();
     });
@@ -232,7 +247,12 @@ describe("PrivacyHandler", () => {
       expect(body.error).toBe("Preferences not found");
     });
 
-    it("should return 404 on error (getPreferences returns null)", async () => {
+    // REVERSED. The old name and its comment ("getPreferences returns null on
+    // error, which causes 404") described the defect precisely and asserted it
+    // as correct. A 404 on this endpoint means "you have no preferences", which
+    // a client acts on by applying defaults — so a store outage silently
+    // overrode every user's privacy settings, with a 404 and no error anywhere.
+    it("returns 503, NOT 404, when the store errors", async () => {
       mockPrivacyPreferencesKV.get.mockRejectedValue(new Error("KV error"));
 
       const request = new Request(
@@ -248,10 +268,34 @@ describe("PrivacyHandler", () => {
         mockEnv,
       );
 
-      // getPreferences returns null on error, which causes 404
-      expect(response.status).toBe(404);
+      expect(response.status).toBe(503);
       const body = await response.json();
-      expect(body.error).toBe("Preferences not found");
+      expect(body.error).toBe("PREFERENCES_UNAVAILABLE");
+    });
+
+    it("offers Retry-After on the 503 so clients back off instead of defaulting", async () => {
+      mockPrivacyPreferencesKV.get.mockRejectedValue(new Error("KV error"));
+
+      const response = await handler.handleGetPreferences(
+        new Request("https://api.example.com/api/privacy/preferences"),
+        mockSession,
+        mockEnv,
+      );
+
+      expect(response.headers.get("retry-after")).toBe("30");
+    });
+
+    it("keeps 404 for a user who genuinely has no preferences", async () => {
+      // The distinction the 503 exists to preserve — absent must stay 404.
+      mockPrivacyPreferencesKV.get.mockResolvedValue(null);
+
+      const response = await handler.handleGetPreferences(
+        new Request("https://api.example.com/api/privacy/preferences"),
+        mockSession,
+        mockEnv,
+      );
+
+      expect(response.status).toBe(404);
     });
   });
 

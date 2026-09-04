@@ -24,7 +24,7 @@
 import * as crypto from "node:crypto";
 import type { Middleware } from "../middleware.js";
 import {
-  DynamoIdempotencyStore,
+  createIdempotencyStoreFromEnv,
   buildPk,
   isInFlight,
   IDEMPOTENCY_TTL_SECONDS,
@@ -197,7 +197,7 @@ export function idempotencyMiddleware(
     // ── Resolve the store ─────────────────────────────────────────────────────
     const tableName = (env as any).IDEMPOTENCY_TABLE as string | undefined;
     const store: IdempotencyStoreInterface =
-      storeOverride ?? new DynamoIdempotencyStore(tableName ?? `${(env as any).STAGE ?? "dev"}-trellis-idempotency`);
+      storeOverride ?? createIdempotencyStoreFromEnv(tableName ?? `${(env as any).STAGE ?? "dev"}-trellis-idempotency`);
 
     // G4 HIGH-1: scope the dedup key by tenant (preferred) or user.
     const scope = deriveScope(context);

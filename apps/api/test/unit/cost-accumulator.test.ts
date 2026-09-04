@@ -1,70 +1,55 @@
 /**
- * Unit Tests: Cost Accumulator
+ * Unit Tests: Cost Accumulator — behavior-comparison suite (WS-1 §3.1).
  *
- * Tests in-memory batching, DynamoDB flush, and daily summary.
+ * The pre-port suite mocked `@aws-sdk/client-dynamodb` and asserted the raw
+ * `ADD` UpdateItem shape. Post-port the flush uses `KvStore.increment`, so this
+ * suite injects a `MemoryKvStore` and asserts OUTCOME equivalence: buffering,
+ * atomic flush (counters summed), re-buffer on error, daily-summary reads, and
+ * over-budget classification.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { MemoryKvStore, type KvStore } from "@de-otio/saas-foundation/kv";
+import {
+  CostAccumulator,
+  type CostLimitsConfig,
+  __setCostStoreForTest,
+} from "../../src/lib/cost-accumulator.js";
 
-const { mockSend } = vi.hoisted(() => {
-  const mockSend = vi.fn();
-  return { mockSend };
-});
+let store: MemoryKvStore;
 
-vi.mock("@aws-sdk/client-dynamodb", () => {
-  return {
-    DynamoDBClient: class { send = mockSend; },
-    UpdateItemCommand: class { input: any; constructor(params: any) { this.input = params; } },
-    GetItemCommand: class { input: any; constructor(params: any) { this.input = params; } },
-  };
-});
-
-import { CostAccumulator, type CostLimitsConfig } from "../../src/lib/cost-accumulator.js";
+function today(): string {
+  return new Date().toISOString().slice(0, 10);
+}
 
 describe("CostAccumulator", () => {
   let accumulator: CostAccumulator;
   let config: CostLimitsConfig;
 
   beforeEach(() => {
-    vi.clearAllMocks();
     vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-01T12:00:00Z"));
     CostAccumulator.resetInstance();
-
-    config = {
-      dailyTotal: 10,
-      dailyPerService: { openai: 5, ses: 2 },
-    };
+    store = new MemoryKvStore({ now: () => Date.now() });
+    __setCostStoreForTest(store);
+    config = { dailyTotal: 10, dailyPerService: { openai: 5, ses: 2 } };
     accumulator = new CostAccumulator(config);
   });
 
   afterEach(() => {
     vi.useRealTimers();
     CostAccumulator.resetInstance();
+    __setCostStoreForTest(null);
   });
 
   describe("record", () => {
-    it("should buffer events without making DynamoDB calls", () => {
+    it("buffers events without writing to the store", async () => {
       accumulator.record({ service: "openai", operation: "moderation", units: 1 });
       accumulator.record({ service: "sqs", operation: "send-message", units: 3 });
-
-      expect(mockSend).not.toHaveBeenCalled();
+      expect(await store.get(`${today()}:openai`)).toBeNull();
     });
 
-    it("should aggregate units for the same service:operation", () => {
-      accumulator.record({ service: "openai", operation: "moderation", units: 1 });
-      accumulator.record({ service: "openai", operation: "moderation", units: 1 });
-      accumulator.record({ service: "openai", operation: "moderation", units: 1 });
-
-      // Force flush to verify aggregation
-      mockSend.mockResolvedValue({});
-      accumulator.forceFlush();
-
-      // Should have a single write with 3 units, not 3 separate writes
-      // (forceFlush is async, we'll test via getDailySummary below)
-    });
-
-    it("should never throw", () => {
-      // record() is synchronous and should never throw
+    it("never throws", () => {
       expect(() => {
         accumulator.record({ service: "openai", operation: "moderation", units: 1 });
       }).not.toThrow();
@@ -72,151 +57,150 @@ describe("CostAccumulator", () => {
   });
 
   describe("forceFlush", () => {
-    it("should write buffered events to DynamoDB", async () => {
-      mockSend.mockResolvedValue({});
-
+    it("writes buffered events to the store (atomic add)", async () => {
       accumulator.record({ service: "openai", operation: "moderation", units: 5 });
       accumulator.record({ service: "sqs", operation: "send-message", units: 3 });
-
       await accumulator.forceFlush();
-
-      expect(mockSend).toHaveBeenCalledTimes(2);
+      const openai = await store.get<{ units: number }>(`${today()}:openai`);
+      const sqs = await store.get<{ units: number }>(`${today()}:sqs`);
+      expect(openai?.value.units).toBe(5);
+      expect(sqs?.value.units).toBe(3);
     });
 
-    it("should clear the buffer after successful flush", async () => {
-      mockSend.mockResolvedValue({});
+    it("aggregates repeated events for one service:operation before flushing", async () => {
+      accumulator.record({ service: "openai", operation: "moderation", units: 1 });
+      accumulator.record({ service: "openai", operation: "moderation", units: 1 });
+      accumulator.record({ service: "openai", operation: "moderation", units: 1 });
+      await accumulator.forceFlush();
+      const rec = await store.get<{ units: number }>(`${today()}:openai`);
+      expect(rec?.value.units).toBe(3);
+    });
 
+    it("clears the buffer after a successful flush", async () => {
       accumulator.record({ service: "openai", operation: "moderation", units: 5 });
       await accumulator.forceFlush();
-
-      // Second flush should be a no-op
-      mockSend.mockClear();
-      await accumulator.forceFlush();
-      expect(mockSend).not.toHaveBeenCalled();
+      await accumulator.forceFlush(); // no-op
+      const rec = await store.get<{ units: number }>(`${today()}:openai`);
+      expect(rec?.value.units).toBe(5); // not double-counted
     });
 
-    it("should re-buffer events on DynamoDB failure", async () => {
-      mockSend.mockRejectedValueOnce(new Error("DynamoDB error"));
+    it("re-buffers events on a store failure and retries on the next flush", async () => {
+      let fail = true;
+      const flaky: KvStore = {
+        ...store,
+        increment: (k: string, f: string, d: number, o?: unknown) => {
+          if (fail) {
+            fail = false;
+            return Promise.reject(new Error("DynamoDB error"));
+          }
+          return store.increment(k, f, d, o as never);
+        },
+      } as unknown as KvStore;
+      __setCostStoreForTest(flaky);
 
       accumulator.record({ service: "openai", operation: "moderation", units: 5 });
-      await accumulator.forceFlush();
-
-      // Retry: should succeed this time
-      mockSend.mockResolvedValue({});
-      await accumulator.forceFlush();
-      expect(mockSend).toHaveBeenCalled();
+      await accumulator.forceFlush(); // first flush fails, re-buffers
+      await accumulator.forceFlush(); // retry succeeds
+      const rec = await store.get<{ units: number }>(`${today()}:openai`);
+      expect(rec?.value.units).toBe(5);
     });
 
-    it("should be a no-op when buffer is empty", async () => {
+    it("is a no-op when the buffer is empty", async () => {
       await accumulator.forceFlush();
-      expect(mockSend).not.toHaveBeenCalled();
+      expect(await store.get(`${today()}:s3`)).toBeNull();
     });
 
-    it("should use atomic ADD expression", async () => {
-      mockSend.mockResolvedValue({});
-
+    it("performs a set-once TTL add (counter grows, value persists)", async () => {
       accumulator.record({ service: "s3", operation: "put-object", units: 10 });
       await accumulator.forceFlush();
-
-      const callArg = mockSend.mock.calls[0][0];
-      expect(callArg.input.UpdateExpression).toContain("ADD");
-      expect(callArg.input.ExpressionAttributeValues[":inc"].N).toBe("10");
+      const rec = await store.get<{ units: number }>(`${today()}:s3`);
+      expect(rec?.value.units).toBe(10);
+      expect(rec?.expiresAt).toBeDefined();
     });
   });
 
   describe("getDailySummary", () => {
-    it("should return estimated costs by service", async () => {
-      // Mock DynamoDB reads for each service
-      mockSend.mockResolvedValueOnce({ Item: { units: { N: "100" } } }); // openai
-      mockSend.mockResolvedValueOnce({ Item: { units: { N: "1000" } } }); // ses
-      mockSend.mockResolvedValueOnce({ Item: { units: { N: "5000" } } }); // sqs
-      mockSend.mockResolvedValueOnce({ Item: { units: { N: "200" } } }); // s3
-      mockSend.mockResolvedValueOnce({ Item: { units: { N: "10000" } } }); // dynamodb
+    async function seed(service: string, units: number): Promise<void> {
+      await store.increment(`${today()}:${service}`, "units", units, { ttlSeconds: 172800 });
+    }
+
+    it("returns estimated costs by service", async () => {
+      await seed("openai", 100);
+      await seed("ses", 1000);
+      await seed("sqs", 5000);
+      await seed("s3", 200);
+      await seed("dynamodb", 10000);
 
       const summary = await accumulator.getDailySummary();
-
       expect(summary.date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
       expect(summary.limit).toBe(10);
-      expect(typeof summary.estimatedTotal).toBe("number");
       expect(summary.estimatedTotal).toBeGreaterThan(0);
       expect(summary.services.openai).toBeGreaterThan(0);
     });
 
-    it("should return zeros when no data exists", async () => {
-      mockSend.mockResolvedValue({ Item: undefined });
-
+    it("returns zeros when no data exists", async () => {
       const summary = await accumulator.getDailySummary();
-
       expect(summary.estimatedTotal).toBe(0);
       for (const cost of Object.values(summary.services)) {
         expect(cost).toBe(0);
       }
     });
 
-    it("should handle DynamoDB errors gracefully", async () => {
-      mockSend.mockRejectedValue(new Error("DynamoDB error"));
-
+    it("handles store errors gracefully (returns zeros, does not throw)", async () => {
+      const failing: KvStore = {
+        ...store,
+        get: () => Promise.reject(new Error("DynamoDB error")),
+      } as unknown as KvStore;
+      __setCostStoreForTest(failing);
       const summary = await accumulator.getDailySummary();
-
-      // Should return zeros on error, not throw
       expect(summary.estimatedTotal).toBe(0);
     });
   });
 
   describe("isOverBudget", () => {
-    it("should return exceeded when total exceeds limit", async () => {
-      // Return large counts that produce cost > $10 total limit
-      mockSend.mockResolvedValueOnce({ Item: { units: { N: "50000" } } }); // openai: $50
-      mockSend.mockResolvedValue({ Item: { units: { N: "0" } } });
+    async function seed(service: string, units: number): Promise<void> {
+      await store.increment(`${today()}:${service}`, "units", units, { ttlSeconds: 172800 });
+    }
 
+    it("returns exceeded when total exceeds the limit", async () => {
+      await seed("openai", 50000); // $50 > $10 total
       const result = await accumulator.isOverBudget();
-
       expect(result.exceeded).toBe(true);
       expect(result.services).toContain("total");
     });
 
-    it("should return exceeded for specific service over limit", async () => {
-      // openai at $6 (limit is $5)
-      mockSend.mockResolvedValueOnce({ Item: { units: { N: "6000" } } }); // openai
-      mockSend.mockResolvedValue({ Item: { units: { N: "0" } } });
-
+    it("returns exceeded for a specific service over its limit", async () => {
+      await seed("openai", 6000); // $6 > $5 openai limit, < $10 total
       const result = await accumulator.isOverBudget();
-
       expect(result.exceeded).toBe(true);
       expect(result.services).toContain("openai");
     });
 
-    it("should return not exceeded when under limits", async () => {
-      mockSend.mockResolvedValue({ Item: { units: { N: "1" } } });
-
+    it("returns not exceeded when under limits", async () => {
+      await seed("openai", 1);
       const result = await accumulator.isOverBudget();
-
       expect(result.exceeded).toBe(false);
       expect(result.services).toHaveLength(0);
     });
   });
 
   describe("singleton", () => {
-    it("should return the same instance", () => {
+    it("returns the same instance", () => {
       const a = CostAccumulator.getInstance(config);
       const b = CostAccumulator.getInstance();
-
       expect(a).toBe(b);
     });
 
-    it("should create a new instance after reset", () => {
+    it("creates a new instance after reset", () => {
       const a = CostAccumulator.getInstance(config);
       CostAccumulator.resetInstance();
       const b = CostAccumulator.getInstance(config);
-
       expect(a).not.toBe(b);
     });
 
-    it("should clear pending flush timer on reset", () => {
+    it("clears a pending flush timer on reset without error", () => {
       const inst = CostAccumulator.getInstance(config);
-      // Schedule a flush by recording something
       inst.record({ service: "openai", operation: "moderation", units: 1 });
-      // Reset should clear the timer without errors
       CostAccumulator.resetInstance();
     });
   });

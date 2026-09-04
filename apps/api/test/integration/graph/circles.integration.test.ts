@@ -3,10 +3,21 @@
  *
  * The dual-gated visibility query in getVisiblePostIds is a PRIVACY CONTROL and
  * its correctness can only be verified against a real Postgres — the SQL (the
- * COALESCE(manual,computed) effective-score gate, the radius→tier mapping, the
- * entity-subject ∪ author UNION, and the MIN-tier resolution for multi-entity
- * posts) is opaque to the unit suite. This suite seeds a small graph and asserts
- * who-can-see-what across tiers and radii.
+ * radius→tier mapping, the entity-subject ∪ author UNION, and the MIN-tier
+ * resolution for multi-entity posts) is opaque to the unit suite. This suite
+ * seeds a small graph and asserts who-can-see-what across tiers and radii.
+ *
+ * REWRITTEN FOR H1. The fixture used to give the VIEWER a high-scored edge to a
+ * target and expect that to open the target's narrow-radius posts. That was the
+ * defect: the reader set that score on their own edge. Every author here now
+ * carries an explicit, reciprocated edge placing the VIEWER at a tier, and it is
+ * THAT tier the radius is measured against. The viewer's own edges still select
+ * which entity band a post lands in — that part is the viewer's own data — but
+ * they no longer authorize anything. See lib/graph/postgres/circles.ts.
+ *
+ * Audience-boundary assertions proper live in
+ * test/integration/circle-read-authz.integration.test.ts (the CI lane). This
+ * suite is the behaviour/pagination/counting suite.
  *
  * Opt-in: set DATABASE_URL to a Postgres database carrying the trellis schema
  * (e.g. the local docker dev DB). Skipped otherwise so the default unit run
@@ -19,7 +30,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PrismaClient } from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
-import { runWithTenantContext, tenantId } from "@de-otio/saas-foundation/tenant";
 import { CircleOps } from "../../../src/lib/graph/postgres/circles.js";
 
 const TEST_DB_URL = process.env.DATABASE_URL ?? process.env.GEO_TEST_DATABASE_URL;
@@ -32,8 +42,10 @@ const OTHER_TENANT = "t-circles-itest-other";
 const VIEWER = "circ-viewer";
 const ENT_INNER = "circ-ent-inner"; // viewer relates at inner tier (0)
 const ENT_COMMUNITY = "circ-ent-comm"; // viewer relates at community tier (2)
-const AUTHOR_CLOSE = "circ-author-close"; // a user author at close-friends tier (1)
-const STRANGER = "circ-stranger"; // no relationship → never visible
+const AUTHOR_CLOSE = "circ-author-close"; // places the viewer at tier 1
+const AUTHOR_INNER = "circ-author-inner"; // places the viewer at tier 0
+const AUTHOR_COMM = "circ-author-comm"; // places the viewer at tier 2
+const STRANGER = "circ-stranger"; // no relationship in either direction
 
 const since = new Date("2026-01-01T00:00:00.000Z");
 // Recent timestamp (1h ago): getCircleStatus only counts posts inside its
@@ -71,7 +83,10 @@ suite("CircleOps dual-gated visibility (Postgres)", () => {
     await prisma.entity.create({ data: { id, tenantId: tenant, name } });
   }
 
-  /** Relationship row: effective score = manualScore ?? computedScore. */
+  /**
+   * An edge the VIEWER owns. Selects which band a target falls into for the
+   * viewer's own views; authorizes nothing (H1).
+   */
   async function relate(
     targetType: "entity" | "user",
     targetId: string,
@@ -87,6 +102,37 @@ suite("CircleOps dual-gated visibility (Postgres)", () => {
         computedScore,
         connectionMethod: "discovery",
       },
+    });
+  }
+
+  /**
+   * The edge an AUTHOR owns, placing the VIEWER at `tier` with a reverse edge
+   * present. This is what decides which of the author's radii the viewer may
+   * read — the whole point of H1 — and it is written from the author's side, so
+   * no amount of self-scoring by the viewer can produce it.
+   */
+  async function placesViewerAt(authorId: string, tier: number) {
+    await prisma.relationship.createMany({
+      data: [
+        {
+          tenantId: TENANT,
+          userId: authorId,
+          targetType: "user",
+          targetId: VIEWER,
+          tier,
+          reciprocated: true,
+          connectionMethod: "discovery",
+        },
+        {
+          tenantId: TENANT,
+          userId: VIEWER,
+          targetType: "user",
+          targetId: authorId,
+          tier: 3,
+          reciprocated: true,
+          connectionMethod: "discovery",
+        },
+      ],
     });
   }
 
@@ -126,10 +172,25 @@ suite("CircleOps dual-gated visibility (Postgres)", () => {
     await prisma.post.deleteMany({ where: { id: "p-other-tenant" } });
     await prisma.entity.deleteMany({ where: { id: "circ-other-ent" } });
     await prisma.relationship.deleteMany({
-      where: { userId: { in: [VIEWER, AUTHOR_CLOSE, STRANGER] } },
+      where: {
+        userId: {
+          in: [VIEWER, AUTHOR_CLOSE, AUTHOR_INNER, AUTHOR_COMM, STRANGER],
+        },
+      },
     });
     await prisma.user.deleteMany({
-      where: { id: { in: [VIEWER, AUTHOR_CLOSE, STRANGER, "circ-other-author"] } },
+      where: {
+        id: {
+          in: [
+            VIEWER,
+            AUTHOR_CLOSE,
+            AUTHOR_INNER,
+            AUTHOR_COMM,
+            STRANGER,
+            "circ-other-author",
+          ],
+        },
+      },
     });
     await prisma.tenant.deleteMany({
       where: {
@@ -139,6 +200,8 @@ suite("CircleOps dual-gated visibility (Postgres)", () => {
             OTHER_TENANT,
             `${VIEWER}-pt`,
             `${AUTHOR_CLOSE}-pt`,
+            `${AUTHOR_INNER}-pt`,
+            `${AUTHOR_COMM}-pt`,
             `${STRANGER}-pt`,
           ],
         },
@@ -150,6 +213,8 @@ suite("CircleOps dual-gated visibility (Postgres)", () => {
     // Users (authors + viewer + stranger) — each with its own personal tenant.
     await seedUser(VIEWER);
     await seedUser(AUTHOR_CLOSE);
+    await seedUser(AUTHOR_INNER);
+    await seedUser(AUTHOR_COMM);
     await seedUser(STRANGER);
 
     // Entities.
@@ -162,22 +227,30 @@ suite("CircleOps dual-gated visibility (Postgres)", () => {
     //  - AUTHOR_CLOSE  0.65 → tier 1 (close friends)
     await relate("entity", ENT_INNER, 0.9);
     await relate("entity", ENT_COMMUNITY, 0.3);
-    await relate("user", AUTHOR_CLOSE, 0.65);
+
+    // The author-side placements — the audience decision (H1). AUTHOR_CLOSE
+    // gets its reverse edge here rather than through `relate`, because what
+    // matters is the tier on the edge AUTHOR_CLOSE owns.
+    await placesViewerAt(AUTHOR_CLOSE, 1);
+    await placesViewerAt(AUTHOR_INNER, 0);
+    await placesViewerAt(AUTHOR_COMM, 2);
 
     // Posts:
-    // p-inner-whisper: WHISPER (radiusInt 0) about ENT_INNER → visible at tier 0.
-    await seedPost("p-inner-whisper", STRANGER, "WHISPER", [ENT_INNER]);
-    // p-comm-whisper: WHISPER about ENT_COMMUNITY → NOT visible at tier 2
-    //   (radiusInt 0 < tier 2): radius gate blocks it.
-    await seedPost("p-comm-whisper", STRANGER, "WHISPER", [ENT_COMMUNITY]);
-    // p-comm-loud: LOUD (radiusInt 2) about ENT_COMMUNITY → visible at tier 2.
-    await seedPost("p-comm-loud", STRANGER, "LOUD", [ENT_COMMUNITY]);
-    // p-author-normal: NORMAL (radiusInt 1) by AUTHOR_CLOSE → visible at tier 1.
+    // p-inner-whisper: WHISPER (radiusInt 0) about ENT_INNER, by an author who
+    //   placed the viewer at tier 0 → the only tier WHISPER reaches.
+    await seedPost("p-inner-whisper", AUTHOR_INNER, "WHISPER", [ENT_INNER]);
+    // p-comm-whisper: WHISPER about ENT_COMMUNITY by an author who placed the
+    //   viewer at tier 2 → radiusInt 0 < 2, so it reaches nobody here.
+    await seedPost("p-comm-whisper", AUTHOR_COMM, "WHISPER", [ENT_COMMUNITY]);
+    // p-comm-loud: LOUD (radiusInt 2) by the same author → reaches tier 2.
+    await seedPost("p-comm-loud", AUTHOR_COMM, "LOUD", [ENT_COMMUNITY]);
+    // p-author-normal: NORMAL (radiusInt 1) by AUTHOR_CLOSE → reaches tier 1.
     await seedPost("p-author-normal", AUTHOR_CLOSE, "NORMAL", []);
-    // p-multi: SHOUT about BOTH ENT_INNER (tier0) and ENT_COMMUNITY (tier2) →
-    //   resolvedTier = MIN(0,2) = 0.
-    await seedPost("p-multi", STRANGER, "SHOUT", [ENT_INNER, ENT_COMMUNITY]);
-    // p-stranger: SHOUT by STRANGER, no subjects, no relationship → never visible.
+    // p-multi: SHOUT about BOTH ENT_INNER (tier0 band) and ENT_COMMUNITY
+    //   (tier2 band) → resolvedTier = MIN(0,2) = 0 within the tier-0 query.
+    await seedPost("p-multi", AUTHOR_INNER, "SHOUT", [ENT_INNER, ENT_COMMUNITY]);
+    // p-stranger: SHOUT by STRANGER, no subjects and no edge in either
+    //   direction → never reachable through a circle view.
     await seedPost("p-stranger", STRANGER, "SHOUT", []);
     // (The cross-tenant post is seeded inside its own test, below.)
   });
@@ -189,14 +262,8 @@ suite("CircleOps dual-gated visibility (Postgres)", () => {
     await prisma.$disconnect();
   });
 
-  function run<T>(fn: () => Promise<T>): Promise<T> {
-    return runWithTenantContext(tenantId(TENANT), fn);
-  }
-
   it("tier 0 sees inner-entity posts (any radius reaches tier 0)", async () => {
-    const res = await run(() =>
-      ops.getVisiblePostIds(VIEWER, 0, since, { limit: 50 }),
-    );
+    const res = await ops.getVisiblePostIds(VIEWER, 0, since, { limit: 50 }, TENANT);
     const ids = res.items.map((i) => i.postId);
     expect(ids).toContain("p-inner-whisper");
     expect(ids).toContain("p-multi");
@@ -206,41 +273,33 @@ suite("CircleOps dual-gated visibility (Postgres)", () => {
   });
 
   it("resolves a multi-entity post to the closest (min) tier", async () => {
-    const res = await run(() =>
-      ops.getVisiblePostIds(VIEWER, 0, since, { limit: 50 }),
-    );
+    const res = await ops.getVisiblePostIds(VIEWER, 0, since, { limit: 50 }, TENANT);
     const multi = res.items.find((i) => i.postId === "p-multi");
     expect(multi?.resolvedTier).toBe(0); // MIN(tier0, tier2)
   });
 
   it("the radius gate blocks a WHISPER post from a community-tier relationship", async () => {
-    const res = await run(() =>
-      ops.getVisiblePostIds(VIEWER, 2, since, { limit: 50 }),
-    );
+    const res = await ops.getVisiblePostIds(VIEWER, 2, since, { limit: 50 }, TENANT);
     const ids = res.items.map((i) => i.postId);
     // LOUD reaches tier 2; WHISPER does not.
     expect(ids).toContain("p-comm-loud");
     expect(ids).not.toContain("p-comm-whisper");
   });
 
-  it("the author path makes a related user's post visible at their tier", async () => {
-    const res = await run(() =>
-      ops.getVisiblePostIds(VIEWER, 1, since, { limit: 50 }),
-    );
+  it("the author path makes a post visible at the tier THE AUTHOR assigned", async () => {
+    const res = await ops.getVisiblePostIds(VIEWER, 1, since, { limit: 50 }, TENANT);
     const ids = res.items.map((i) => i.postId);
     expect(ids).toContain("p-author-normal");
   });
 
-  it("never surfaces posts from strangers (no qualifying relationship)", async () => {
+  it("never surfaces posts from a user with no edge in either direction", async () => {
     for (const tier of [0, 1, 2, 3] as const) {
-      const res = await run(() =>
-        ops.getVisiblePostIds(VIEWER, tier, since, { limit: 50 }),
-      );
+      const res = await ops.getVisiblePostIds(VIEWER, tier, since, { limit: 50 }, TENANT);
       expect(res.items.map((i) => i.postId)).not.toContain("p-stranger");
     }
   });
 
-  it("scopes to the ambient tenant — no cross-tenant leakage", async () => {
+  it("scopes to the tenant it is GIVEN — no cross-tenant leakage", async () => {
     // Seed a cross-tenant post about the SAME entity id space; viewer relates to
     // ENT_INNER only within TENANT, so an OTHER_TENANT relationship row is needed
     // for any chance of a match — which we never create. Assert the OTHER_TENANT
@@ -280,26 +339,20 @@ suite("CircleOps dual-gated visibility (Postgres)", () => {
       data: { postId: "p-other-tenant", entityId: "circ-other-ent" },
     });
 
-    const res = await run(() =>
-      ops.getVisiblePostIds(VIEWER, 0, since, { limit: 50 }),
-    );
+    const res = await ops.getVisiblePostIds(VIEWER, 0, since, { limit: 50 }, TENANT);
     expect(res.items.map((i) => i.postId)).not.toContain("p-other-tenant");
   });
 
   it("paginates deterministically by (createdAt DESC, postId DESC)", async () => {
-    const page1 = await run(() =>
-      ops.getVisiblePostIds(VIEWER, 0, since, { limit: 1 }),
-    );
+    const page1 = await ops.getVisiblePostIds(VIEWER, 0, since, { limit: 1 }, TENANT);
     expect(page1.items).toHaveLength(1);
     expect(page1.hasMore).toBe(true);
     expect(page1.cursor).not.toBeNull();
 
-    const page2 = await run(() =>
-      ops.getVisiblePostIds(VIEWER, 0, since, {
+    const page2 = await ops.getVisiblePostIds(VIEWER, 0, since, {
         limit: 1,
         cursor: page1.cursor ?? undefined,
-      }),
-    );
+      }, TENANT);
     // No overlap between pages.
     const p1Ids = new Set(page1.items.map((i) => i.postId));
     for (const item of page2.items) {
@@ -308,7 +361,7 @@ suite("CircleOps dual-gated visibility (Postgres)", () => {
   });
 
   it("getCircleMembers returns tenant-scoped tier members", async () => {
-    const members = await run(() => ops.getCircleMembers(VIEWER, 0));
+    const members = await ops.getCircleMembers(VIEWER, 0, TENANT);
     const ids = members.map((m) => m.id);
     expect(ids).toContain(ENT_INNER);
     expect(ids).not.toContain(ENT_COMMUNITY); // tier 2, not tier 0
@@ -316,15 +369,15 @@ suite("CircleOps dual-gated visibility (Postgres)", () => {
 
   it("markCircleRead + getCircleStatus reflect the read watermark", async () => {
     // Before marking: tier 0 has unseen posts (POST_TS is inside the window).
-    const before = await run(() => ops.getCircleStatus(VIEWER));
+    const before = await ops.getCircleStatus(VIEWER, TENANT);
     const t0Before = before.find((s) => s.tier === 0);
     expect(t0Before?.unseenCount ?? 0).toBeGreaterThan(0);
 
     // Mark read at a timestamp after all seeded posts.
     const readAt = new Date();
-    await run(() => ops.markCircleRead(VIEWER, 0, readAt));
+    await ops.markCircleRead(VIEWER, 0, readAt);
 
-    const after = await run(() => ops.getCircleStatus(VIEWER));
+    const after = await ops.getCircleStatus(VIEWER, TENANT);
     const t0After = after.find((s) => s.tier === 0);
     expect(t0After?.unseenCount).toBe(0);
     expect(t0After?.caughtUp).toBe(true);
@@ -333,7 +386,7 @@ suite("CircleOps dual-gated visibility (Postgres)", () => {
 
   it("getGlanceItems surfaces the most-recent post per tier member (entity + author paths)", async () => {
     // Tier 0: the only member is ENT_INNER (entity path).
-    const glance0 = await run(() => ops.getGlanceItems(VIEWER, 0, 10));
+    const glance0 = await ops.getGlanceItems(VIEWER, 0, 10, TENANT);
     const inner = glance0.find((g) => g.targetId === ENT_INNER);
     expect(inner).toBeDefined();
     expect(inner?.targetType).toBe("entity");
@@ -341,29 +394,26 @@ suite("CircleOps dual-gated visibility (Postgres)", () => {
     expect(["p-multi", "p-inner-whisper"]).toContain(inner?.postId);
 
     // Tier 1: the only member is AUTHOR_CLOSE (author path).
-    const glance1 = await run(() => ops.getGlanceItems(VIEWER, 1, 10));
+    const glance1 = await ops.getGlanceItems(VIEWER, 1, 10, TENANT);
     const author = glance1.find((g) => g.targetId === AUTHOR_CLOSE);
     expect(author).toBeDefined();
     expect(author?.targetType).toBe("user");
     expect(author?.postId).toBe("p-author-normal");
   });
 
-  it("getDepthPostIds gates by the viewer's per-target tier (entity + user targets)", async () => {
-    const entityPosts = await run(() =>
-      ops.getDepthPostIds(VIEWER, "entity", ENT_INNER, since, 10),
-    );
-    // Viewer tier with ENT_INNER = 0 → all radii reach; both posts about it.
+  it("getDepthPostIds gates by the AUTHOR's placement (entity + user targets)", async () => {
+    const entityPosts = await ops.getDepthPostIds(VIEWER, "entity", ENT_INNER, since, 10, TENANT);
+    // The viewer subscribes to ENT_INNER, and AUTHOR_INNER placed them at
+    // tier 0, so both posts about it are readable (p-multi is SHOUT anyway).
     expect(new Set(entityPosts)).toEqual(new Set(["p-multi", "p-inner-whisper"]));
 
-    const userPosts = await run(() =>
-      ops.getDepthPostIds(VIEWER, "user", AUTHOR_CLOSE, since, 10),
-    );
-    // Viewer tier with AUTHOR_CLOSE = 1 → NORMAL reaches.
+    const userPosts = await ops.getDepthPostIds(VIEWER, "user", AUTHOR_CLOSE, since, 10, TENANT);
+    // AUTHOR_CLOSE placed the viewer at tier 1 → NORMAL (radiusInt 1) reaches.
     expect(userPosts).toEqual(["p-author-normal"]);
   });
 
   it("getCircleEntityStatus lists tier entities with unseen counts (radius-gated)", async () => {
-    const statuses = await run(() => ops.getCircleEntityStatus(VIEWER, 2));
+    const statuses = await ops.getCircleEntityStatus(VIEWER, 2, TENANT);
     const comm = statuses.find((s) => s.entityId === ENT_COMMUNITY);
     expect(comm).toBeDefined();
     expect(comm?.entityName).toBe("CommunityEnt");
@@ -375,27 +425,19 @@ suite("CircleOps dual-gated visibility (Postgres)", () => {
   });
 
   it("applies the org-category feed filter (null-code posts: kept by exclude, dropped by include)", async () => {
-    const unfiltered = await run(() =>
-      ops.getVisiblePostIds(VIEWER, 0, since, { limit: 50 }),
-    );
+    const unfiltered = await ops.getVisiblePostIds(VIEWER, 0, since, { limit: 50 }, TENANT);
     // All fixture posts carry a NULL author_org_root_category_code:
     // an exclude list keeps them …
-    const excluded = await run(() =>
-      ops.getVisiblePostIds(VIEWER, 0, since, { limit: 50 }, { exclude: ["VETS"] }),
-    );
+    const excluded = await ops.getVisiblePostIds(VIEWER, 0, since, { limit: 50 }, TENANT, { exclude: ["VETS"] });
     expect(excluded.items.map((i) => i.postId).sort()).toEqual(
       unfiltered.items.map((i) => i.postId).sort(),
     );
     // … an include whitelist drops them (NULL belongs to no listed category).
-    const included = await run(() =>
-      ops.getVisiblePostIds(VIEWER, 0, since, { limit: 50 }, { include: ["VETS"] }),
-    );
+    const included = await ops.getVisiblePostIds(VIEWER, 0, since, { limit: 50 }, TENANT, { include: ["VETS"] });
     expect(included.items).toEqual([]);
 
     // Same predicate on the glance query.
-    const glance = await run(() =>
-      ops.getGlanceItems(VIEWER, 0, 10, { include: ["VETS"] }),
-    );
+    const glance = await ops.getGlanceItems(VIEWER, 0, 10, TENANT, { include: ["VETS"] });
     expect(glance).toEqual([]);
   });
 
@@ -505,18 +547,15 @@ suite("CircleOps dual-gated visibility (Postgres)", () => {
       await wipeCapFixture();
     });
 
-    const runCap = <T,>(fn: () => Promise<T>) =>
-      runWithTenantContext(tenantId(CAP_TENANT), fn);
-
     it("saturates unseenCount at 100 (client renders 99+)", async () => {
-      const statuses = await runCap(() => ops.getCircleStatus(CAP_VIEWER));
+      const statuses = await ops.getCircleStatus(CAP_VIEWER, CAP_TENANT);
       const t0 = statuses.find((s) => s.tier === 0);
       expect(t0?.unseenCount).toBe(100);
       expect(t0?.caughtUp).toBe(false);
     });
 
     it("floors a never-read tier at the 7-day window (old posts not counted)", async () => {
-      const statuses = await runCap(() => ops.getCircleStatus(WIN_VIEWER));
+      const statuses = await ops.getCircleStatus(WIN_VIEWER, CAP_TENANT);
       const t0 = statuses.find((s) => s.tier === 0);
       // 5 recent posts count; the 3 posts older than 7 days do not.
       expect(t0?.unseenCount).toBe(5);
@@ -526,17 +565,13 @@ suite("CircleOps dual-gated visibility (Postgres)", () => {
     it("a read watermark inside the window still wins over the floor", async () => {
       // Watermark 30 minutes ago — inside the 7d window and NEWER than the
       // recent posts (1h ago) → everything is seen.
-      await runCap(() =>
-        ops.markCircleRead(WIN_VIEWER, 0, new Date(Date.now() - 30 * 60 * 1000)),
-      );
-      const mid = await runCap(() => ops.getCircleStatus(WIN_VIEWER));
+      await ops.markCircleRead(WIN_VIEWER, 0, new Date(Date.now() - 30 * 60 * 1000));
+      const mid = await ops.getCircleStatus(WIN_VIEWER, CAP_TENANT);
       expect(mid.find((s) => s.tier === 0)?.unseenCount).toBe(0);
 
       // Watermark BEFORE the recent posts (2h ago) → all 5 unseen again.
-      await runCap(() =>
-        ops.markCircleRead(WIN_VIEWER, 0, new Date(Date.now() - 2 * 60 * 60 * 1000)),
-      );
-      const back = await runCap(() => ops.getCircleStatus(WIN_VIEWER));
+      await ops.markCircleRead(WIN_VIEWER, 0, new Date(Date.now() - 2 * 60 * 60 * 1000));
+      const back = await ops.getCircleStatus(WIN_VIEWER, CAP_TENANT);
       expect(back.find((s) => s.tier === 0)?.unseenCount).toBe(5);
     });
   });

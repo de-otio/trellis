@@ -1,0 +1,122 @@
+# Scaleway-profile e2e lane (WS-5).
+#
+# Boots docker-compose.scaleway.yml (Postgres app+KV, Keycloak 26.6.3 + p2
+# magic-link JAR, Mailpit) and runs the Scaleway-relevant suites.
+#
+# SCHEDULED, NOT PER-PR — the 02-trellis-redesign §6 decision keeps CI cost
+# flat: the AWS-shaped lane (ci.yml) stays per-PR; this profile runs weekly
+# + on manual dispatch.
+#
+# PUBLISH PRECONDITION: npm ci resolves @de-otio/saas-foundation from the
+# registry (the local file: overrides are dev-only and uncommitted). Suites
+# that need the WS-1/WS-5 foundation surface (PostgresKvStore,
+# resolveScalewaySecret) require the coordinated 0.4.0 publish — the
+# version-guard step below fails with a clear message until it lands.
+# See scripts/scaleway-profile/README.md.
+
+name: Scaleway profile e2e
+
+on:
+  schedule:
+    - cron: "17 4 * * 1" # Mondays 04:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scaleway-profile-e2e
+  cancel-in-progress: false
+
+jobs:
+  scaleway-profile:
+    name: Scaleway-profile suites
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DATABASE_URL: postgresql://trellis:trellis_scaleway_ci@127.0.0.1:5433/trellis_scaleway
+      DIRECT_DATABASE_URL: postgresql://trellis:trellis_scaleway_ci@127.0.0.1:5433/trellis_scaleway
+      KV_PROVIDER: postgres
+    steps:
+      # Action majors verified node24 per the pinned shas already vetted in
+      # ci.yml (checkout v7 / setup-node v5).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Fetch verified Keycloak magic-link provider (sha256 + GPG)
+        timeout-minutes: 5
+        run: ./scripts/scaleway-profile/fetch-keycloak-provider.sh
+
+      - name: Boot the Scaleway-profile stack (detached)
+        timeout-minutes: 5
+        run: docker compose -f docker-compose.scaleway.yml up -d
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        timeout-minutes: 10
+        run: npm ci
+
+      - name: Guard — coordinated 0.4.0 foundation publish precondition
+        run: |
+          node -e '
+            const v = require("./node_modules/@de-otio/saas-foundation/package.json").version;
+            const [maj, min] = v.split(".").map(Number);
+            if (maj > 0 || min >= 4) { console.log("foundation " + v + " ok"); process.exit(0); }
+            console.error(
+              "@de-otio/saas-foundation " + v + " lacks the WS-1/WS-5 surface " +
+              "(PostgresKvStore, resolveScalewaySecret). This lane is gated on the " +
+              "coordinated 0.4.0 publish of @de-otio/saas-foundation + @de-otio/vestibulum " +
+              "(prepared changeset; see scripts/scaleway-profile/README.md and " +
+              "EXECUTION-COORDINATION.md). The local file: overrides are dev-only."
+            );
+            process.exit(1);'
+
+      - name: Wait for stack health (Postgres, Keycloak, Mailpit)
+        timeout-minutes: 10
+        run: docker compose -f docker-compose.scaleway.yml up -d --wait
+
+      - name: Generate Prisma client
+        run: npm run prisma:generate
+
+      - name: Run migrations (app schema + kv_entries on PostGIS PG)
+        timeout-minutes: 5
+        run: npm run prisma:migrate:deploy
+
+      - name: Build workspace packages
+        run: npm run build -w @de-otio/trellis
+
+      - name: Scaleway adapter unit suites (email TEM/SMTP, OTLP metrics, software HMAC)
+        timeout-minutes: 10
+        working-directory: apps/api
+        run: >-
+          npx vitest run
+          test/unit/email-provider-scaleway.test.ts
+          test/unit/metrics/otlp-metrics.test.ts
+          test/unit/crypto/software-hmac-mac.test.ts
+
+      - name: Mailpit SMTP smoke (live compose Mailpit)
+        timeout-minutes: 5
+        working-directory: apps/api
+        env:
+          SCALEWAY_PROFILE_SMTP_HOST: 127.0.0.1
+          SCALEWAY_PROFILE_SMTP_PORT: "1025"
+          SCALEWAY_PROFILE_MAILPIT_API: http://127.0.0.1:8025
+        run: >-
+          npx vitest run --config vitest.integration.config.ts
+          test/integration/scaleway-profile-smtp.integration.test.ts
+
+      # TODO (next lanes, see scripts/scaleway-profile/README.md): realm
+      # provisioning from the WS-4 identity module + magic-link e2e against
+      # Keycloak; full test:e2e shards once the WS-2 worker/env wiring lands.
+
+      - name: Stack logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.scaleway.yml logs --tail=200
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker-compose.scaleway.yml down -v

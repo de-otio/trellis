@@ -45,7 +45,7 @@ import type {
   TenantId,
 } from "@de-otio/trellis-extension-api";
 import {
-  EXTENSION_MODEL_REGISTRY,
+  getExtensionModelRegistry,
   type ExtensionModelRegistryEntry,
 } from "./extension-model-registry.js";
 
@@ -86,7 +86,55 @@ export interface ScopedModelMeta {
    * relation write. Defaults to none.
    */
   readonly jsonFields: readonly string[];
+  /**
+   * Columns an extension may **never write**, on any operation.
+   *
+   * REQUIRED, not optional, on purpose: a new entry in
+   * {@link CORE_SCOPED_DELEGATE_META} must state its protected set explicitly, and
+   * "I forgot" must be a compile error rather than a silently unprotected model.
+   * Use `[]` to mean "nothing protected" — that is a decision, and it should read
+   * like one.
+   *
+   * The AI Act Art. 50 provenance columns are the founding members (see
+   * {@link PROVENANCE_PROTECTED_FIELDS}). An extension is precisely where a
+   * vertical adds a generation feature, and `post`/`postMedia` are on this scoped
+   * surface with `create`/`update`/`updateMany`/`upsert` all permitted — so
+   * without this the extension-review criterion ("must not write provenance
+   * fields directly, suppress an existing value, or downgrade one") was
+   * honour-system, enforceable only by a human reading a diff. Monotonicity lives
+   * in the core handlers, which an extension bypasses entirely by going through
+   * this surface.
+   */
+  readonly protectedFields: readonly string[];
 }
+
+/**
+ * The synthetic-content provenance columns (AI Act Art. 50). Off-limits to
+ * extensions on every model that carries them.
+ *
+ * WHY A TOTAL BAN rather than "may raise, may not lower": the planner is a pure
+ * function with no database access, so it cannot compare a proposed value against
+ * the stored one — a monotonicity check is not expressible here. And a total ban
+ * is what the criterion actually wants: provenance must be set through the
+ * sanctioned core path, which mints `basis` server-side. An extension that could
+ * write `basis` could forge `PLATFORM_GENERATED`, our own strongest attestation,
+ * which is the same forgery the request schemas' `.strict()` exists to prevent.
+ *
+ * An extension that legitimately generates content sets provenance by calling the
+ * core post/comment API, not by writing the column.
+ */
+export const PROVENANCE_PROTECTED_FIELDS: readonly string[] = [
+  // Post
+  "textSourceType",
+  "textBasis",
+  // PostMedia
+  "declaredSourceType",
+  "declaredBasis",
+  // MediaFile (not on the scoped surface today; listed so that adding it there
+  // does not silently expose the intrinsic reading to extension writes).
+  "embeddedSourceType",
+  "provenanceExamined",
+];
 
 // ---------------------------------------------------------------------------
 // Core-delegate metadata + FK allowlist
@@ -107,13 +155,56 @@ export interface ScopedModelMeta {
  * or a tenant-carrying model. (ASSUMPTIONS A-L1.1.)
  */
 export const CORE_SCOPED_DELEGATE_META: readonly ScopedModelMeta[] = [
-  { model: "entity", tenantField: "tenantId", fkFields: [], jsonFields: [] },
-  { model: "post", tenantField: "tenantId", fkFields: [], jsonFields: [] },
-  { model: "postMedia", tenantField: "tenantId", fkFields: [], jsonFields: [] },
-  { model: "taxonomyTaxon", tenantField: "tenantId", fkFields: [], jsonFields: [] },
-  { model: "taxonomyCategory", tenantField: "tenantId", fkFields: [], jsonFields: [] },
-  { model: "taxonomyDimension", tenantField: "tenantId", fkFields: [], jsonFields: [] },
-  { model: "productTaxonomyTag", tenantField: "tenantId", fkFields: [], jsonFields: [] },
+  {
+    model: "entity",
+    tenantField: "tenantId",
+    fkFields: [],
+    jsonFields: [],
+    protectedFields: [],
+  },
+  {
+    model: "post",
+    tenantField: "tenantId",
+    fkFields: [],
+    jsonFields: [],
+    // Art. 50: an extension must not write, suppress or downgrade provenance.
+    protectedFields: PROVENANCE_PROTECTED_FIELDS,
+  },
+  {
+    model: "postMedia",
+    tenantField: "tenantId",
+    fkFields: [],
+    jsonFields: [],
+    protectedFields: PROVENANCE_PROTECTED_FIELDS,
+  },
+  {
+    model: "taxonomyTaxon",
+    tenantField: "tenantId",
+    fkFields: [],
+    jsonFields: [],
+    protectedFields: [],
+  },
+  {
+    model: "taxonomyCategory",
+    tenantField: "tenantId",
+    fkFields: [],
+    jsonFields: [],
+    protectedFields: [],
+  },
+  {
+    model: "taxonomyDimension",
+    tenantField: "tenantId",
+    fkFields: [],
+    jsonFields: [],
+    protectedFields: [],
+  },
+  {
+    model: "productTaxonomyTag",
+    tenantField: "tenantId",
+    fkFields: [],
+    jsonFields: [],
+    protectedFields: [],
+  },
 ];
 
 /**
@@ -268,6 +359,29 @@ function guardTenantField(
   return null;
 }
 
+/**
+ * Reject a write that touches a protected column.
+ *
+ * Keyed on PRESENCE, not on value: `{ textSourceType: undefined }` is rejected
+ * too. Prisma treats an explicit `undefined` as "omit this field", so allowing it
+ * would be harmless in practice — but the check exists to make an extension's
+ * *intent* to write provenance fail loudly, and an extension that computes the
+ * value conditionally would otherwise pass review while occasionally attempting
+ * the write. `hasOwnProperty` is the same test `guardTenantField` uses, for the
+ * same reason.
+ */
+function guardProtectedFields(
+  data: Record<string, unknown>,
+  protectedFields: readonly string[],
+): string | null {
+  for (const field of protectedFields) {
+    if (Object.prototype.hasOwnProperty.call(data, field)) {
+      return `cannot write "${field}" on the scoped extension surface: it is a synthetic-content provenance column (AI Act Art. 50). Set provenance through the core post/comment API, which mints the basis server-side — an extension that could write it could forge PLATFORM_GENERATED.`;
+    }
+  }
+  return null;
+}
+
 /** Build the read-before-write FK ownership checks for a write payload. */
 function fkChecksFor(
   data: Record<string, unknown>,
@@ -322,7 +436,9 @@ export function planScopedOp(input: PlanScopedOpInput): ScopedOpPlan {
   // (a)+(c)+(d) create — stamp tenant, validate FK targets, reject nested writes.
   if (operation === "create") {
     const data = asObject(args.data);
-    const reassign = guardTenantField(data, tf);
+    const reassign =
+      guardTenantField(data, tf) ??
+      guardProtectedFields(data, meta.protectedFields);
     if (reassign) return { kind: "reject", message: reassign };
     const nested = findNestedWrite(data, meta.jsonFields);
     if (nested) return { kind: "reject", message: nested };
@@ -340,7 +456,9 @@ export function planScopedOp(input: PlanScopedOpInput): ScopedOpPlan {
     const checks: FkCheck[] = [];
     for (const row of rows) {
       const data = asObject(row);
-      const reassign = guardTenantField(data, tf);
+      const reassign =
+        guardTenantField(data, tf) ??
+        guardProtectedFields(data, meta.protectedFields);
       if (reassign) return { kind: "reject", message: reassign };
       const nested = findNestedWrite(data, meta.jsonFields);
       if (nested) return { kind: "reject", message: nested };
@@ -358,7 +476,9 @@ export function planScopedOp(input: PlanScopedOpInput): ScopedOpPlan {
   // updateMany — scope the where AND validate FK targets in the data.
   if (operation === "updateMany") {
     const data = asObject(args.data);
-    const reassign = guardTenantField(data, tf);
+    const reassign =
+      guardTenantField(data, tf) ??
+      guardProtectedFields(data, meta.protectedFields);
     if (reassign) return { kind: "reject", message: reassign };
     const nested = findNestedWrite(data, meta.jsonFields);
     if (nested) return { kind: "reject", message: nested };
@@ -373,7 +493,9 @@ export function planScopedOp(input: PlanScopedOpInput): ScopedOpPlan {
   // (b)+(c)+(d) update by id → updateMany + assert count === 1.
   if (operation === "update") {
     const data = asObject(args.data);
-    const reassign = guardTenantField(data, tf);
+    const reassign =
+      guardTenantField(data, tf) ??
+      guardProtectedFields(data, meta.protectedFields);
     if (reassign) return { kind: "reject", message: reassign };
     const nested = findNestedWrite(data, meta.jsonFields);
     if (nested) return { kind: "reject", message: nested };
@@ -395,7 +517,10 @@ export function planScopedOp(input: PlanScopedOpInput): ScopedOpPlan {
     const create = asObject(args.create);
     const update = asObject(args.update);
     const reassign =
-      guardTenantField(create, tf) ?? guardTenantField(update, tf);
+      guardTenantField(create, tf) ??
+      guardTenantField(update, tf) ??
+      guardProtectedFields(create, meta.protectedFields) ??
+      guardProtectedFields(update, meta.protectedFields);
     if (reassign) return { kind: "reject", message: reassign };
     const nested =
       findNestedWrite(create, meta.jsonFields) ??
@@ -621,10 +746,10 @@ export function createScopedDb(
 // ---------------------------------------------------------------------------
 
 /**
- * Map the composed-model registry (Phase 0 T0.5 contract, empty today) into
- * proxy metadata. The registry carries `tenantField`; FK declarations arrive
- * once L2's composer enriches it, so `fkFields`/`jsonFields` are empty for now
- * and the FK-validation path is exercised via explicit metas in tests.
+ * Map the composed-model registry into proxy metadata. `fkFields` now flows from
+ * the registry entry (security F3/B4 — populated by the composer so the FK-tenant
+ * read-before-write check fires for `ext_*` models); `jsonFields` stays empty
+ * (no owned model declares a JSON FK-bearing column in v1).
  */
 export function registryToMetas(
   registry: readonly ExtensionModelRegistryEntry[],
@@ -632,21 +757,17 @@ export function registryToMetas(
   return registry.map((entry) => ({
     model: entry.model,
     tenantField: entry.tenantField,
-    fkFields: [],
+    fkFields: entry.fkFields ?? [],
     jsonFields: [],
+    // An `ext_*` model's columns are the extension's OWN — there is nothing for
+    // core to protect there. Protection applies to CORE models the extension is
+    // allowed to reach (see CORE_SCOPED_DELEGATE_META).
+    protectedFields: [],
   }));
 }
 
-/**
- * Assemble the full `delegate key → ScopedModelMeta` map for a scoped surface:
- * the tenant-carrying core delegates plus the extension's own composed models.
- * Validates that every declared FK target is either a core allowlist model or
- * another model on the surface — a config error fails fast (defense in depth).
- */
-export function buildScopedModelMetas(
-  extMetas: readonly ScopedModelMeta[] = registryToMetas(
-    EXTENSION_MODEL_REGISTRY,
-  ),
+function assembleScopedModelMetas(
+  extMetas: readonly ScopedModelMeta[],
 ): Map<string, ScopedModelMeta> {
   const map = new Map<string, ScopedModelMeta>();
   for (const meta of CORE_SCOPED_DELEGATE_META) map.set(meta.model, meta);
@@ -662,5 +783,36 @@ export function buildScopedModelMetas(
       }
     }
   }
+  return map;
+}
+
+// The default (no-arg) path reads the boot-injected registry and CACHES the
+// assembled map (security F5): the registry is immutable after freeze, and
+// `createExtensionContext` calls this per request — recomputing each time is
+// waste. The cache is keyed on the active-registry array identity, so a
+// `setExtensionModelRegistry` (before freeze) or a test reset — which replaces
+// the array reference — invalidates it automatically.
+let cachedRegistryRef: readonly ExtensionModelRegistryEntry[] | null = null;
+let cachedRegistryMetas: Map<string, ScopedModelMeta> | null = null;
+
+/**
+ * Assemble the full `delegate key → ScopedModelMeta` map for a scoped surface:
+ * the tenant-carrying core delegates plus the extension's own composed models.
+ * With no argument it reads the boot-injected registry (cached); an explicit
+ * `extMetas` (used by tests) bypasses the cache.
+ */
+export function buildScopedModelMetas(
+  extMetas?: readonly ScopedModelMeta[],
+): Map<string, ScopedModelMeta> {
+  if (extMetas !== undefined) {
+    return assembleScopedModelMetas(extMetas);
+  }
+  const registry = getExtensionModelRegistry();
+  if (cachedRegistryMetas && cachedRegistryRef === registry) {
+    return cachedRegistryMetas;
+  }
+  const map = assembleScopedModelMetas(registryToMetas(registry));
+  cachedRegistryRef = registry;
+  cachedRegistryMetas = map;
   return map;
 }

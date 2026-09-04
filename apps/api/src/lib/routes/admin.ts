@@ -35,9 +35,119 @@ import {
 import { getAppVersion } from "../version.js";
 import type { Route } from "./types.js";
 
+/**
+ * SEC L1 — fail-closed gate for the `/api/admin/test/*` seam.
+ *
+ * These routes create and delete arbitrary users (including SUPER_ADMINs). They
+ * previously defaulted to ENABLED whenever `STAGE`/`DEPLOY_ENV` was unset,
+ * which — for a published, reusable core — means "the deployer forgot to set
+ * STAGE" silently shipped an unauthenticated user-creation endpoint.
+ *
+ * The gate is now an ALLOW-LIST: the seam is off unless the operator explicitly
+ * opted in, and `prod`/`production` can never opt in.
+ */
+export function testRoutesEnabled(env: {
+  STAGE?: string;
+  DEPLOY_ENV?: string;
+  CI?: string;
+  GITHUB_ACTIONS?: string;
+  ENABLE_TEST_ROUTES?: string;
+}): boolean {
+  const stage = (env.STAGE || env.DEPLOY_ENV || "").toLowerCase();
+
+  // Belt and braces: an explicit prod marker always wins, even over CI.
+  if (stage === "prod" || stage === "production") return false;
+
+  // The explicit opt-in. This is the supported way to turn the seam on
+  // (trellis's own standalone e2e lane uses it).
+  if (env.ENABLE_TEST_ROUTES === "true") return true;
+
+  if (env.CI === "true" || env.GITHUB_ACTIONS === "true") return true;
+
+  // `dev` also enables it — but ONLY when STAGE was genuinely set to `dev`.
+  //
+  // `buildEnv` defaults `STAGE` to `"dev"` when `process.env.STAGE` is unset
+  // (env.ts), so `env.STAGE === "dev"` cannot distinguish "the operator chose
+  // dev" from "the operator set nothing". Trusting it alone would re-open the
+  // precise hole this gate exists to close — "the deployer didn't set STAGE" is
+  // the realistic case for a published, reusable core. So the unset case is
+  // resolved against the raw environment, where the default has not been
+  // applied yet.
+  return stage === "dev" && process.env.STAGE !== undefined;
+}
+
+/**
+ * SEC L1 — require a REAL authenticated SUPER_ADMIN session.
+ *
+ * Returns `null` when the caller is a verified SUPER_ADMIN, otherwise the
+ * error `Response` to return. There is deliberately no "no session → allow"
+ * branch and no body-derived bypass: the old code skipped this entirely for
+ * any request whose `email` contained `test-` or `@test.example.com`, which
+ * let an unauthenticated caller mint a SUPER_ADMIN *and* receive a valid
+ * session cookie for it.
+ */
+async function requireSuperAdminSession(
+  request: Request,
+  env: any,
+  securityHeaders: SecurityHeaders,
+): Promise<Response | null> {
+  const sessionManager = new SessionManager();
+  const session = await sessionManager.getSession(
+    request,
+    env.SESSION_SECRET,
+    env,
+  );
+
+  if (!session) {
+    return securityHeaders.createSecureResponse(
+      JSON.stringify({ error: "Unauthorized" }),
+      { status: 401, headers: { "content-type": "application/json" } },
+    );
+  }
+
+  const forbidden = () =>
+    securityHeaders.createSecureResponse(
+      JSON.stringify({ error: "Forbidden: Super-admin access required" }),
+      { status: 403, headers: { "content-type": "application/json" } },
+    );
+
+  let user: { role: string } | null = null;
+  try {
+    const detectedRegion = detectRegionSync(request, env);
+    user = await withQueryTimeoutAndRetry(
+      sharedDatabaseConnectionManager,
+      detectedRegion,
+      env,
+      async (db) => {
+        return await db.user.findUnique({
+          where: { id: session.userId },
+          select: { role: true },
+        });
+      },
+      {
+        ...QueryTimeoutPresets.USER_FACING,
+        // Fail CLOSED on a timeout: `null` here means "role unknown", which
+        // must deny, not allow (the old code used a null default to *skip*
+        // the check).
+        defaultValue: null,
+        context: {
+          operation: "requireSuperAdminForTestEndpoint",
+          userId: session.userId,
+        },
+      },
+    );
+  } catch {
+    return forbidden();
+  }
+
+  if (!user || user.role !== "SUPER_ADMIN") return forbidden();
+  return null;
+}
+
 export const adminRoutes: Route[] = [
   // Test-only endpoints (must be before wildcard routes)
-  // Test-only endpoint: Create test user (dev environment only, no auth required for tests)
+  // Test-only endpoint: Create test user. SEC L1: explicitly gated AND
+  // SUPER_ADMIN-authenticated — never unauthenticated, in any environment.
   {
     path: "/api/admin/test/users",
     method: "POST",
@@ -45,23 +155,27 @@ export const adminRoutes: Route[] = [
       const securityHeaders = new SecurityHeaders(env);
       const logger = getLogger();
 
-      // SECURITY: Only allow in dev/test environments
-      // Note: env.ENVIRONMENT falls back to NODE_ENV (which is "production" in Docker),
-      // so prefer env.STAGE which is explicitly set by CDK to the deployment stage.
-      const environment = (
-        env.STAGE ||
-        env.DEPLOY_ENV ||
-        "dev"
-      ).toLowerCase();
-      if (environment === "prod" || environment === "production") {
+      // SEC L1: fail-closed environment gate. DENIES when STAGE/DEPLOY_ENV is
+      // unset — the old code defaulted to "dev" and shipped this seam open.
+      if (!testRoutesEnabled(env as any)) {
         const errorResponse = securityHeaders.createSecureResponse(
           JSON.stringify({
-            error: "Forbidden: Test endpoints not available in production",
+            error: "Forbidden: Test endpoints are not enabled",
           }),
           { status: 403, headers: { "content-type": "application/json" } },
         );
         return addCorsHeaders(errorResponse, request, env);
       }
+
+      // SEC L1: a real authenticated SUPER_ADMIN session is required, always.
+      // Checked BEFORE the body is read so no attacker-controlled value can
+      // influence the authorization decision.
+      const authError = await requireSuperAdminSession(
+        request,
+        env,
+        securityHeaders,
+      );
+      if (authError) return addCorsHeaders(authError, request, env);
 
       try {
         const body = (await request.json()) as {
@@ -78,73 +192,16 @@ export const adminRoutes: Route[] = [
           `test-${Date.now()}-${Math.random().toString(36).substring(7)}@test.example.com`;
         const role = (body.role || "END_USER") as any;
 
-        // OPTIMIZATION: Detect test users and skip authentication check for speed
-        // Test users are identified by email pattern (@test.example.com or test- prefix)
-        const isTestUser =
-          email.includes("@test.example.com") || email.includes("test-");
+        // SEC L1: the body-derived `isTestUser` predicate is GONE. It used to
+        // decide whether to run the auth check at all — i.e. the attacker chose
+        // their own authorization. Authorization now happens above, before the
+        // body is even parsed.
         const isCI = env.CI === "true" || env.GITHUB_ACTIONS === "true";
 
-        // FAST PATH: For test users, use default region from env (skip region detection)
-        // This avoids any region detection overhead and uses the fastest default
         const defaultRegion = (env.DEFAULT_REGION || "US") as string;
-        const region = body.region || (isTestUser ? defaultRegion : "US");
+        const region = body.region || defaultRegion;
         const dataRegion = body.dataRegion || region;
 
-        // SECURITY: For non-test users or non-CI environments, check authentication
-        // This is safe because:
-        // 1. Only works in dev/test environments (checked above)
-        // 2. Test users are identified by email pattern
-        // 3. Tests need fast user creation without authentication overhead
-        if (!isTestUser && !isCI) {
-          const sessionManager = new SessionManager();
-          const sessionSecret = env.SESSION_SECRET;
-          const session = await sessionManager.getSession(
-            request,
-            sessionSecret,
-            env as any,
-          );
-
-          if (session) {
-            // Use fast query with timeout for role check (non-blocking for test user creation)
-
-            const detectedRegion = detectRegionSync(request, env);
-            const user = await withQueryTimeoutAndRetry(
-              sharedDatabaseConnectionManager,
-              detectedRegion,
-              env,
-              async (db) => {
-                return await db.user.findUnique({
-                  where: { id: session.userId },
-                  select: { role: true },
-                });
-              },
-              {
-                ...QueryTimeoutPresets.USER_FACING, // Fast timeout (1s + 1s retry)
-                defaultValue: null, // Return null on timeout (allow test user creation)
-                context: {
-                  operation: "checkUserRoleForTestEndpoint",
-                  userId: session.userId,
-                },
-              },
-            );
-
-            if (!user || user.role !== "SUPER_ADMIN") {
-              const errorResponse = securityHeaders.createSecureResponse(
-                JSON.stringify({
-                  error: "Forbidden: Super-admin access required",
-                }),
-                {
-                  status: 403,
-                  headers: { "content-type": "application/json" },
-                },
-              );
-              return addCorsHeaders(errorResponse, request, env);
-            }
-          }
-        }
-
-        // OPTIMIZATION: For test users, don't pass request object to avoid any overhead
-        // This ensures the fastest possible path for test user creation
         const userCreationStartTime = Date.now();
 
         // ✅ BEST PRACTICE: Defense-in-depth timeout wrapper
@@ -179,7 +236,7 @@ export const adminRoutes: Route[] = [
           },
           region,
           env,
-          isTestUser ? undefined : request, // Skip request for test users to avoid overhead
+          undefined, // synthetic test account: no real request context (see P3 note)
         );
 
         const timeoutPromise = new Promise<never>((_, reject) => {
@@ -205,7 +262,6 @@ export const adminRoutes: Route[] = [
           duration: userCreationDuration,
           userId: createdUser.id,
           region,
-          isTestUser,
         });
 
         // Create a session for the test user so tests don't need to know SESSION_SECRET
@@ -257,8 +313,10 @@ export const adminRoutes: Route[] = [
         return addCorsHeaders(errorResponse, request, env);
       }
     },
-    middleware: [corsMiddleware()], // No CSRF for test endpoints (unauthenticated in CI)
-    description: "Create test user (dev environment only)",
+    // SEC L1: these routes are now cookie-authenticated state-changing
+    // endpoints, so CSRF applies like everywhere else.
+    middleware: [corsMiddleware(), csrfMiddleware()],
+    description: "Create test user (gated; SUPER_ADMIN only)",
   },
 
   // Test-only endpoint: Delete test user (dev environment only)
@@ -266,59 +324,29 @@ export const adminRoutes: Route[] = [
     path: "/api/admin/test/users/:userId",
     method: "DELETE",
     handler: async (request, env, { pathname }) => {
-      const sessionManager = new SessionManager();
       const securityHeaders = new SecurityHeaders(env);
       const logger = getLogger();
 
-      // SECURITY: Only allow in dev/test environments
-      // Note: env.ENVIRONMENT falls back to NODE_ENV (which is "production" in Docker),
-      // so prefer env.STAGE which is explicitly set by CDK to the deployment stage.
-      const environment = (
-        env.STAGE ||
-        env.DEPLOY_ENV ||
-        "dev"
-      ).toLowerCase();
-      if (environment === "prod" || environment === "production") {
+      // SEC L1: fail-closed environment gate (see `testRoutesEnabled`).
+      if (!testRoutesEnabled(env as any)) {
         const errorResponse = securityHeaders.createSecureResponse(
           JSON.stringify({
-            error: "Forbidden: Test endpoints not available in production",
+            error: "Forbidden: Test endpoints are not enabled",
           }),
           { status: 403, headers: { "content-type": "application/json" } },
         );
         return addCorsHeaders(errorResponse, request, env);
       }
 
-      // SECURITY: In test mode (CI), allow unauthenticated access for test user deletion
-      const isCI = env.CI === "true" || env.GITHUB_ACTIONS === "true";
-
-      // Optionally check for SUPER_ADMIN in local dev (but allow unauthenticated in CI)
-      if (!isCI) {
-        const sessionSecret = env.SESSION_SECRET;
-        const session = await sessionManager.getSession(
-          request,
-          sessionSecret,
-          env as any,
-        );
-
-        if (session) {
-          const db = createPrisma(env);
-          const user = await db.user.findUnique({
-            where: { id: session.userId },
-            select: { role: true },
-          });
-
-          if (!user || user.role !== "SUPER_ADMIN") {
-            const errorResponse = securityHeaders.createSecureResponse(
-              JSON.stringify({
-                error: "Forbidden: Super-admin access required",
-              }),
-              { status: 403, headers: { "content-type": "application/json" } },
-            );
-            return addCorsHeaders(errorResponse, request, env);
-          }
-        }
-        // If no session in local dev, still allow (for test convenience)
-      }
+      // SEC L1: a real authenticated SUPER_ADMIN session is required — in CI
+      // too. The old code allowed unauthenticated deletion whenever `CI` was
+      // set, and, when not in CI, fell through to "no session → still allow".
+      const authError = await requireSuperAdminSession(
+        request,
+        env,
+        securityHeaders,
+      );
+      if (authError) return addCorsHeaders(authError, request, env);
 
       // Extract userId from pathname (outside try block for error handler access)
       const userIdMatch = pathname.match(/\/api\/admin\/test\/users\/([^/]+)/);
@@ -342,8 +370,15 @@ export const adminRoutes: Route[] = [
           region,
           env,
           async (db) => {
-            const { deleteUserData } = await import("../services/user-data-deletion.js");
-            await deleteUserData(db, userId);
+            const { deleteUserData, resolvePseudonymSecret } = await import(
+              "../services/user-data-deletion.js"
+            );
+            // Fail-closed (WS-2 finding 2): an unresolvable tombstone key
+            // errors this test-cleanup route rather than writing an unkeyed
+            // (reversible) tombstone.
+            await deleteUserData(db, userId, {
+              pseudonymSecret: await resolvePseudonymSecret(),
+            });
           },
           {
             ...QueryTimeoutPresets.STANDARD,
@@ -435,8 +470,9 @@ export const adminRoutes: Route[] = [
         return addCorsHeaders(errorResponse, request, env);
       }
     },
-    middleware: [corsMiddleware()], // No CSRF for test endpoints (unauthenticated in CI)
-    description: "Delete test user (dev environment only)",
+    // SEC L1: see the create route — CSRF applies.
+    middleware: [corsMiddleware(), csrfMiddleware()],
+    description: "Delete test user (gated; SUPER_ADMIN only)",
   },
 
   {

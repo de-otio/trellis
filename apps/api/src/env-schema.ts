@@ -21,7 +21,10 @@
  *      local work but never the intent of a prod deploy).
  *   3. Optional keys validated for FORMAT when set (any stage): the numeric
  *      MEDIA_* caps/limits, the MEDIA_*_JSON allowlists/presets,
- *      `MEDIA_CANONICAL_FORMAT`/`_QUALITY`, and `ACTIVITYPUB_ENABLED`.
+ *      `MEDIA_CANONICAL_FORMAT`/`_QUALITY`, `ACTIVITYPUB_ENABLED`, and the four
+ *      client-version-policy keys (`CLIENT_MIN_SUPPORTED_VERSION`,
+ *      `CLIENT_RECOMMENDED_VERSION`, `CLIENT_STORE_URL_ANDROID`,
+ *      `CLIENT_STORE_URL_IOS`).
  *      Previously an unparsable value was silently replaced by a dev default
  *      (or fail-closed) at runtime; at boot we treat it as operator misconfig
  *      and refuse to start. The runtime resolvers in env.ts keep their
@@ -36,6 +39,13 @@
  */
 
 import { z } from "zod";
+
+import {
+  ALLOWED_STORE_URL_HOSTS,
+  MAX_CLIENT_VERSION_LENGTH,
+  isAllowedStoreUrl,
+  parseClientVersion,
+} from "./lib/client-version.js";
 
 /** Boot-validation stage mode. Only "prod" enables the strict tier. */
 export type BootStage = "prod" | "dev";
@@ -92,6 +102,27 @@ const jsonStringArray = z.string().refine(
   },
   { message: "must be a JSON array of strings" },
 );
+
+/**
+ * A client version string (`CLIENT_MIN_SUPPORTED_VERSION`,
+ * `CLIENT_RECOMMENDED_VERSION`). Uses the SAME bounded parser the request path
+ * uses (`lib/client-version.ts`), so a value that boots is a value the 426
+ * backstop and the policy endpoint will both honour — a version that parses
+ * here but not there would silently disable the mechanism.
+ */
+const clientVersionString = z.string().refine((raw) => parseClientVersion(raw) !== null, {
+  message: `must be a version of the form x.y.z (optionally with a -pre or +build suffix), at most ${MAX_CLIENT_VERSION_LENGTH} characters`,
+});
+
+/**
+ * A store URL (`CLIENT_STORE_URL_ANDROID`, `CLIENT_STORE_URL_IOS`). Must be
+ * https on an official store host: this URL is handed to a client that has
+ * been told it cannot proceed, so a typo'd or attacker-suggested origin here
+ * would be maximally effective. Boot-fail rather than serve it.
+ */
+const storeUrlString = z.string().refine(isAllowedStoreUrl, {
+  message: `must be an https:// URL whose host is one of: ${ALLOWED_STORE_URL_HOSTS.join(", ")}`,
+});
 
 /**
  * MEDIA_THRESHOLDS_JSON: a JSON object mapping category → { review, quarantine }
@@ -171,6 +202,14 @@ export function buildBootEnvSchema(stage: BootStage) {
       DB_SECRET_PASSWORD: z.string().min(1).optional(),
       DB_SECRET_HOST: z.string().min(1).optional(),
 
+      // WS-1 KV port: selects the backend for the typed KvStore hot-spot
+      // namespaces. Default (unset) = "dynamodb" — existing AWS deployments see
+      // ZERO change. "postgres" routes them to PostgresKvStore over the shared
+      // KV pool (DATABASE_URL is already required when postgres, so no new
+      // required var). The 13 Cloudflare-compat string-KV bindings are NOT
+      // affected — they stay on DynamoKv.
+      KV_PROVIDER: z.enum(["dynamodb", "postgres"]).optional(),
+
       SESSION_SECRET: z
         .string()
         .min(32, { message: "must be at least 32 characters" })
@@ -180,6 +219,28 @@ export function buildBootEnvSchema(stage: BootStage) {
 
       COGNITO_USER_POOL_ID: z.string().min(1).optional(),
       COGNITO_APP_CLIENT_ID: z.string().min(1).optional(),
+
+      // Generic OIDC verification (WS-3.1/3.3) — names per manifest D8 (FROZEN:
+      // OIDC_* canonical; the WS-3.1-interim AUTH_* spelling has been removed).
+      // Additive, default-derived from COGNITO_*. Requiredness/SSRF rules live
+      // in superRefine + the SEC-4 boot guard (lib/auth/auth-config.ts).
+      OIDC_ISSUER_URL: z
+        .string()
+        .url({ message: "must be a valid https:// URL" })
+        .optional(),
+      OIDC_APP_CLIENT_ID: z.string().min(1).optional(),
+      // Optional JWKS override (air-gapped / fixture tests); SSRF-guarded at
+      // boot. Not in the manifest D8 table (WS-3.1 addition) — follow-up: add it.
+      OIDC_JWKS_URL: z.string().url({ message: "must be a valid URL" }).optional(),
+      IDENTITY_PROVIDER: z.enum(["cognito", "keycloak"]).optional(),
+      IDENTITY_ADMIN_CLIENT_ID: z.string().min(1).optional(),
+      IDENTITY_ADMIN_CLIENT_SECRET: z.string().min(1).optional(),
+
+      // [F4] App domain — the base for the default magic-link redirect_uri and
+      // the sign-in email From. REQUIRED when IDENTITY_PROVIDER=keycloak and in
+      // prod (requiredness enforced in superRefine): an empty APP_DOMAIN would
+      // otherwise let the initiate path fall back to an empty redirect_uri.
+      APP_DOMAIN: z.string().min(1).optional(),
 
       // Tier 2/3 — media pipeline gate + format-checked optionals
       MEDIA_THRESHOLDS_JSON: mediaThresholdsJson(prod).optional(),
@@ -207,6 +268,15 @@ export function buildBootEnvSchema(stage: BootStage) {
       // Feature flags: fail-closed at runtime, but "TRUE"/"yes"/"1" is operator
       // misconfig (they meant to enable it) — reject at boot.
       ACTIVITYPUB_ENABLED: z.enum(["true", "false"]).optional(),
+
+      // Tier 3 — client version policy (all optional; unset = dormant). A
+      // malformed value here is the difference between "the forced-upgrade
+      // mechanism is armed" and "it silently does nothing", so it is operator
+      // misconfig and refuses the boot rather than degrading at runtime.
+      CLIENT_MIN_SUPPORTED_VERSION: clientVersionString.optional(),
+      CLIENT_RECOMMENDED_VERSION: clientVersionString.optional(),
+      CLIENT_STORE_URL_ANDROID: storeUrlString.optional(),
+      CLIENT_STORE_URL_IOS: storeUrlString.optional(),
     })
     .superRefine((env, ctx) => {
       // ── Database: one of the three accepted forms ─────────────────────────
@@ -238,20 +308,100 @@ export function buildBootEnvSchema(stage: BootStage) {
         });
       }
 
+      // ── Issuer resolution (WS-3.1 + WS-3.3) ──────────────────────────────
+      // OIDC_ISSUER_URL (manifest D8, canonical) names the issuer. A NON-Cognito
+      // issuer with an explicit audience is a fully configured generic-OIDC
+      // deployment (WS-3.3 live wiring) and lifts the Cognito-ids requirement
+      // below.
+      const cognitoIssuerRe = /^https:\/\/cognito-idp\.[a-z0-9-]+\.amazonaws\.com\/[^/]+$/;
+      const resolvedIssuer = env.OIDC_ISSUER_URL;
+      const explicitAudience = env.OIDC_APP_CLIENT_ID;
+      const genericIssuerConfigured =
+        resolvedIssuer !== undefined &&
+        !cognitoIssuerRe.test(resolvedIssuer) &&
+        explicitAudience !== undefined;
+
       // ── Cognito ids (matches the S1.4 post-build checks, but at boot) ─────
-      if (env.COGNITO_USER_POOL_ID === undefined) {
+      // WS-3.3 relaxation: not required when a non-Cognito issuer is FULLY
+      // configured (issuer + explicit audience) — that is the Keycloak-profile
+      // deployment WS-3.1 deferred to WS-3.3. A deployment that sets neither
+      // still fails closed here, exactly as before.
+      if (!genericIssuerConfigured) {
+        if (env.COGNITO_USER_POOL_ID === undefined) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["COGNITO_USER_POOL_ID"],
+            message: "required — Cognito user pool id (JWT verification cannot start without it)",
+          });
+        }
+        if (env.COGNITO_APP_CLIENT_ID === undefined) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["COGNITO_APP_CLIENT_ID"],
+            message: "required — Cognito app client id",
+          });
+        }
+      }
+
+      // ── [SEC-6] non-Cognito issuer requires an explicit audience ─────────
+      // The OIDC_APP_CLIENT_ID = COGNITO_APP_CLIENT_ID default is only correct
+      // for a Cognito issuer. A Keycloak/Zitadel issuer without an explicit
+      // OIDC_APP_CLIENT_ID would silently reject every token — fail closed at
+      // boot with a clear message instead.
+      if (
+        resolvedIssuer !== undefined &&
+        !cognitoIssuerRe.test(resolvedIssuer) &&
+        explicitAudience === undefined
+      ) {
         ctx.addIssue({
           code: "custom",
-          path: ["COGNITO_USER_POOL_ID"],
-          message: "required — Cognito user pool id (JWT verification cannot start without it)",
+          path: ["OIDC_APP_CLIENT_ID"],
+          message:
+            "required when the issuer is non-Cognito (set OIDC_APP_CLIENT_ID — the COGNITO_APP_CLIENT_ID default would reject every token)",
         });
       }
-      if (env.COGNITO_APP_CLIENT_ID === undefined) {
+
+      // ── [SEC-6b] non-Cognito issuer requires an explicit JWKS URI ────────
+      // Exactly the [SEC-6] failure mode one field over. Unset, the verifier
+      // derives `${issuer}/.well-known/jwks.json` — Cognito's layout. Keycloak
+      // serves `/protocol/openid-connect/certs`, so the derived URL 404s, the
+      // key is never found, and aws-jwt-verify reports `invalid_signature`:
+      // every token rejected, with the error naming crypto instead of config.
+      // Observed live on dev 2026-08-02 (plan 017 §10.7).
+      if (
+        resolvedIssuer !== undefined &&
+        !cognitoIssuerRe.test(resolvedIssuer) &&
+        env.OIDC_JWKS_URL === undefined
+      ) {
         ctx.addIssue({
           code: "custom",
-          path: ["COGNITO_APP_CLIENT_ID"],
-          message: "required — Cognito app client id",
+          path: ["OIDC_JWKS_URL"],
+          message:
+            "required when the issuer is non-Cognito — the derived default is Cognito-specific and 404s elsewhere, " +
+            `making every token fail as invalid_signature. Take jwks_uri from ${resolvedIssuer}/.well-known/openid-configuration`,
         });
+      }
+
+      // ── IDENTITY_PROVIDER=keycloak requires its full config ──────────────
+      if (env.IDENTITY_PROVIDER === "keycloak") {
+        for (const key of [
+          "OIDC_ISSUER_URL",
+          "OIDC_APP_CLIENT_ID",
+          "IDENTITY_ADMIN_CLIENT_ID",
+          "IDENTITY_ADMIN_CLIENT_SECRET",
+          // [F4] the magic-link default redirect_uri base — a keycloak
+          // deployment without APP_DOMAIN would fall back to an empty
+          // redirect_uri (now a 503 at runtime; refuse at boot instead).
+          "APP_DOMAIN",
+        ] as const) {
+          if (env[key] === undefined) {
+            ctx.addIssue({
+              code: "custom",
+              path: [key],
+              message: "required when IDENTITY_PROVIDER=keycloak (fail-closed identity wiring)",
+            });
+          }
+        }
       }
 
       // ── Prod-only tier (dev-only-overridable vars) ────────────────────────
@@ -269,6 +419,16 @@ export function buildBootEnvSchema(stage: BootStage) {
             path: ["MEDIA_THRESHOLDS_JSON"],
             message:
               "required in prod — the media-moderation gate thresholds (optional in dev, where absence fail-closes every category to review)",
+          });
+        }
+        // [F4] APP_DOMAIN must be present in prod regardless of identity
+        // provider — it is the base for the magic-link redirect_uri and the
+        // sign-in email From; an empty value fails the initiate path closed.
+        if (env.APP_DOMAIN === undefined) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["APP_DOMAIN"],
+            message: "required in prod — app domain (magic-link redirect_uri base and email From)",
           });
         }
       }

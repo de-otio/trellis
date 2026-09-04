@@ -1,26 +1,22 @@
+/**
+ * Thin AWS entrypoint for the followers-events queue (WS-2 T5).
+ *
+ * The fail-closed contract lives in `lib/workers/followers-events.ts`: the
+ * core throws on any payload, so the WHOLE BATCH returns to the queue
+ * (nothing acked), retries, and dead-letters onto the DLQ.
+ */
+
 import type { SQSHandler } from "aws-lambda";
 import { Logger } from "@aws-lambda-powertools/logger";
+import { getLogger } from "../lib/logger.js";
+import { runFollowersEvents } from "../lib/workers/followers-events.js";
 
 const logger = new Logger({ serviceName: "followers-events-worker" });
 
-/**
- * Followers-events worker — NOT YET IMPLEMENTED.
- *
- * Nothing currently enqueues to this queue (the FOLLOWERS_EVENTS_QUEUE env
- * binding exists but has no producer), so this handler should never run.
- * If a producer is added before the worker is implemented, this handler
- * FAILS CLOSED: it throws, so the batch returns to the queue, is retried,
- * and dead-letters onto the DLQ where the DLQ alarm pages — instead of
- * silently acking follower events, which is what this stub used to do.
- *
- * Do NOT replace the throw with a silent return.
- */
 export const handler: SQSHandler = async (event) => {
   logger.error(
     "followers-events-worker is not implemented — failing closed; batch will retry and dead-letter",
     { messageIds: event.Records.map((r) => r.messageId) },
   );
-  throw new Error(
-    "followers-events-worker: not implemented — failing closed so follower events are not silently dropped",
-  );
+  await runFollowersEvents(event.Records, { logger: getLogger() });
 };

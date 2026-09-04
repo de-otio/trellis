@@ -57,8 +57,8 @@ export class RouteHelpers {
       const token = authHeader.slice(7);
       if (token.split(".").length === 3) {
         try {
-          const { verifyCognitoJwt } = await import("./auth/cognito-jwt.js");
-          const claims = await verifyCognitoJwt(token);
+          const { verifyJwt } = await import("./auth/cognito-jwt.js");
+          const claims = await verifyJwt(token);
           this.logger.debug("[RouteHelpers] Cognito JWT verified", {
             sub: claims.sub,
             username: claims.username,
@@ -72,7 +72,7 @@ export class RouteHelpers {
             // such lookup for JWT-Bearer clients (e.g. media tenant resolution
             // → 500 "Tenant resolution failed"). Fall back to `sub` only for
             // legacy tokens minted without the claim.
-            userId: claims["custom:userId"] || claims.sub,
+            userId: claims.userId || claims.sub,
             email: claims.email || claims.username,
           };
         } catch (err) {

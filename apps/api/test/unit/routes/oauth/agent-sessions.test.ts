@@ -63,7 +63,7 @@ const ENV = {
 } as Env;
 
 const AUTH = {
-  cognitoSub: "sub-alice",
+  sub: "sub-alice",
   userId: "u_alice",
   globalRole: "B2B_PARTNER",
   activeTenantId: "t_one",
@@ -112,7 +112,7 @@ describe("GET /api/users/me/agent-sessions", () => {
       {
         sessionId: "s_a",
         userId: "u_alice",
-        cognitoSub: "sub-alice",
+        sub: "sub-alice",
         tenantId: "t_one",
         currentJti: "j_a",
         status: "active",
@@ -157,7 +157,7 @@ describe("POST /api/users/me/agent-sessions/{id}/revoke", () => {
     mockGetAgentSession.mockResolvedValue({
       sessionId: "s_b",
       userId: "u_bob",
-      cognitoSub: "sub-bob",
+      sub: "sub-bob",
       tenantId: "t_two",
       currentJti: "j_b",
       status: "active",
@@ -180,7 +180,7 @@ describe("POST /api/users/me/agent-sessions/{id}/revoke", () => {
     mockGetAgentSession.mockResolvedValue({
       sessionId: "s_a",
       userId: "u_alice",
-      cognitoSub: "sub-alice",
+      sub: "sub-alice",
       tenantId: "t_one",
       currentJti: "j_a",
       status: "active",

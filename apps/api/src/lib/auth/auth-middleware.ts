@@ -9,8 +9,9 @@
 
 import type { TenantRole, UserRole, TenantMember, Tenant } from "@prisma/client";
 import type { Env } from "../../env.js";
+import { resolveJitClaims } from "../identity/jit-claims.js";
 import type { AuthContext } from "./auth-context.js";
-import { extractBearerToken, verifyCognitoJwt } from "./cognito-jwt.js";
+import { extractBearerToken, verifyJwt } from "./cognito-jwt.js";
 import { CUID_RE } from "./cuid.js";
 
 /**
@@ -31,29 +32,44 @@ export async function authMiddleware(
 
   let claims;
   try {
-    claims = await verifyCognitoJwt(token);
+    claims = await verifyJwt(token);
   } catch {
     return null;
   }
 
-  const userId = claims["custom:userId"];
-  const activeTenantId = claims["custom:activeTenantId"];
+  let userId = claims.userId;
+  let activeTenantId = claims.activeTenantId;
+  // globalRole normalization already folds the T2-era "custom:role" into the
+  // T3+ "custom:globalRole"; default to END_USER when neither was present.
+  let globalRole = (claims.globalRole ?? "END_USER") as UserRole;
+  // Default to GUEST (least privilege) when the tenantRole claim is missing,
+  // so a malformed token never silently confers MEMBER capabilities.
+  let tenantRole = (claims.tenantRole ?? "GUEST") as TenantRole;
+  let tenantSlug = claims.tenantSlug ?? "";
+  let handle = claims.handle ?? "";
+  const sub = claims.sub;
 
-  // Both are non-negotiable — pre-token-gen Lambda always writes them.
-  if (!userId || !activeTenantId) return null;
+  // Both userId and activeTenantId are non-negotiable. On Cognito the
+  // pre-token-gen Lambda always writes them into the token; on Keycloak no
+  // such hook exists, so a verified-but-claimless token goes through the
+  // server-side JIT resolution (cache → DB → first-contact provisioning —
+  // WS-0, plan 016). resolveJitClaims is a no-op (null) on non-Keycloak
+  // deployments, so the Cognito path stays byte-identical: missing claims
+  // still yield 401.
+  if (!userId || !activeTenantId) {
+    const jit = await resolveJitClaims(claims, env);
+    if (!jit || !jit.userId || !jit.activeTenantId) return null;
+    userId = jit.userId;
+    activeTenantId = jit.activeTenantId;
+    globalRole = (jit.globalRole || "END_USER") as UserRole;
+    tenantRole = (jit.tenantRole || "GUEST") as TenantRole;
+    tenantSlug = jit.tenantSlug;
+    handle = jit.handle;
+  }
 
   // Reject malformed claim values: cuid v1 is c[a-z0-9]{24}. We accept up
   // to 40 chars to leave headroom for the slug-max widening done in T3.
   if (!CUID_RE.test(userId) || !CUID_RE.test(activeTenantId)) return null;
-
-  // Support both the T2-era single "custom:role" and the T3+ "custom:globalRole".
-  const globalRole = (claims["custom:globalRole"] ?? claims["custom:role"] ?? "END_USER") as UserRole;
-  // Default to GUEST (least privilege) when the tenantRole claim is missing,
-  // so a malformed token never silently confers MEMBER capabilities.
-  const tenantRole = (claims["custom:tenantRole"] ?? "GUEST") as TenantRole;
-  const tenantSlug = claims["custom:tenantSlug"] ?? "";
-  const handle = claims["custom:handle"] ?? "";
-  const cognitoSub = claims.sub;
 
   // Memberships are loaded lazily — most requests don't need the full list.
   let membershipsCache: (TenantMember & { tenant: Tenant })[] | null = null;
@@ -70,7 +86,7 @@ export async function authMiddleware(
   };
 
   return {
-    cognitoSub,
+    sub,
     userId,
     globalRole,
     activeTenantId,
@@ -96,19 +112,28 @@ export async function authMiddleware(
  */
 export async function extractVerifiedTenantId(
   request: Request,
-  _env: Env,
+  env: Env,
 ): Promise<string | null> {
   const token = extractBearerToken(request.headers.get("Authorization"));
   if (!token) return null;
 
   let claims;
   try {
-    claims = await verifyCognitoJwt(token);
+    claims = await verifyJwt(token);
   } catch {
     return null;
   }
 
-  const activeTenantId = claims["custom:activeTenantId"];
+  let activeTenantId = claims.activeTenantId;
+  if (!activeTenantId) {
+    // Keycloak claimless-token fallback (WS-0) — this middleware runs BEFORE
+    // the per-handler authMiddleware, so without the same resolution the
+    // first request after JIT provisioning would execute with no ambient
+    // tenant context. Resolution is cache-first, so the cost after first
+    // contact is one KV read. No-op (null) on non-Keycloak deployments.
+    const jit = await resolveJitClaims(claims, env);
+    activeTenantId = jit?.activeTenantId;
+  }
   if (!activeTenantId || !CUID_RE.test(activeTenantId)) return null;
   return activeTenantId;
 }

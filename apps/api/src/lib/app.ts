@@ -32,7 +32,12 @@ import { mintTenantId } from "./mint-tenant-id.js";
 import { resolveTenantScopeMode } from "./tenant-scope.js";
 import type { Env } from "../env.js";
 import { wrapExtensionRoutes } from "./extension-route-wrapper.js";
-import { corsMiddleware, type Middleware, type MiddlewareContext } from "./middleware.js";
+import {
+  clientVersionMiddleware,
+  corsMiddleware,
+  type Middleware,
+  type MiddlewareContext,
+} from "./middleware.js";
 import type { TrellisRequestContext } from "./request-context.js";
 import { actorRoutes } from "./routes/activitypub/actor.js";
 import { audienceRoutes } from "./routes/activitypub/audiences.js";
@@ -49,6 +54,7 @@ import { adminCostRoutes } from "./routes/admin-costs.js";
 import { agentAuthorizeRoutes } from "./routes/agent-authorize.js";
 import { agentSessionsRoutes } from "./routes/agent-sessions.js";
 import { adminRoutes } from "./routes/admin.js";
+import { appMetaRoutes } from "./routes/app-meta.js";
 import { buildAgentSurfaceRoutes } from "./routes/agent-surface.js";
 import { authRoutes } from "./routes/auth.js";
 import { authDiscoverRoutes } from "./routes/auth-discover.js";
@@ -77,6 +83,7 @@ import { moderationFeedbackRoutes } from "./routes/moderation-feedback.js";
 import { mapRoutes } from "./routes/map.js";
 import { mediaRoutes } from "./routes/media.js";
 import { mediaReviewRoutes } from "./routes/media-review.js";
+import { provenanceCorrectionRoutes } from "./routes/provenance-correction.js";
 import { mediaMetadataVisibilityRoutes } from "./routes/media-metadata-visibility.js";
 import { mfaRoutes } from "./routes/mfa.js";
 import { notificationsRoutes } from "./routes/notifications.js";
@@ -321,6 +328,10 @@ const wiredAgentSurfaceRoutes: Route[] = buildAgentSurfaceRoutes(
 
 const PORTED_ROUTE_SETS: ReadonlyArray<ReadonlyArray<Route>> = [
   healthRoutes,
+  // Client version policy (env-only, unauthenticated, cacheable). Mounted next
+  // to health because it is the other endpoint a client may call before it
+  // knows anything about its own state.
+  appMetaRoutes,
   // H3
   connectionCodeRoutes,
   deletionRoutes,
@@ -422,6 +433,7 @@ const PORTED_ROUTE_SETS: ReadonlyArray<ReadonlyArray<Route>> = [
   tenantDirectorySearchRoutes, // T4 — /api/directory/search
   platformCategoryAdminRoutes, // T5 — /api/admin/platform-categories[...]
   mediaReviewRoutes, // T9 — /api/admin/media-review[...] (MODERATOR-only)
+  provenanceCorrectionRoutes, // D12 — POST /api/admin/provenance-correction (MODERATOR-only)
   // H12 — open social web. All gated OFF-by-default via featureToggleMiddleware;
   // curatedCollectionRoutes is distinct from the AP `collectionRoutes` above.
   emailSubscriptionRoutes, // /api/subscriptions/email[...] + /api/entities/:id/subscribers/summary
@@ -499,6 +511,34 @@ export function buildHonoApp(): Hono<AppEnv> {
       return runWithTenantContext(mintTenantId(tid, "session"), () => next());
     });
   }
+
+  // Client-version backstop (426 Upgrade Required). Registered globally and
+  // BEFORE the route mounts so it applies to the whole surface, minus the
+  // exemptions in lib/client-version.ts.
+  //
+  // The gate is written as a legacy `Middleware` (its natural home is
+  // middleware.ts, and that shape is directly unit-testable). It is adapted
+  // here by hand rather than through `toHonoMiddleware` for one reason: the
+  // generic adapter re-wraps the downstream response on the way out, and this
+  // middleware runs on EVERY request — including media streaming. The
+  // `allowed` flag lets the allow-path fall through to Hono's own chain with
+  // the response untouched; only the block-path produces a Response.
+  const clientVersionGate = clientVersionMiddleware();
+  app.use("*", async (c, next) => {
+    let allowed = false;
+    const decisionResponse = await clientVersionGate(legacyContext(c), async () => {
+      allowed = true;
+      // Sentinel: the legacy contract requires `next()` to resolve to a
+      // Response. The real downstream is Hono's chain (which writes c.res),
+      // so this value is always discarded.
+      return new Response(null, { status: 204 });
+    });
+    if (allowed) {
+      await next();
+      return;
+    }
+    c.res = decisionResponse;
+  });
 
   // Mount every ported route file. `mount` reuses each legacy handler +
   // middleware unchanged and composes security headers innermost. Federation

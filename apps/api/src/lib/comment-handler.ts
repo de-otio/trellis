@@ -13,6 +13,8 @@ import { FeedHandler } from "./feed-handler.js";
 import { getLogger, Logger, generateRequestId } from "./logger.js";
 import type { TrellisRequestContext } from "./request-context.js";
 import type { Session } from "./session-cookie.js";
+import type { SyntheticSourceType } from "./provenance/types.js";
+import type { DisclosurePosture } from "./provenance/posture.js";
 
 export interface Env {
   DATABASE_URL: string;
@@ -25,6 +27,12 @@ export interface Env {
   COMMENTS_KV?: KVNamespace;
   LINK_CHECK_QUEUE?: any; // Cloudflare Queue binding for link checks
   DEFAULT_REGION?: string;
+  // Art. 50 disclosure-posture platform default. Mirrors `provenance` on the
+  // canonical Env (see ../env.ts). Optional because this is a structural subset
+  // that tests build by hand; absent resolves to DEFAULT_DISCLOSURE_POSTURE — the
+  // same value the canonical resolver falls back to, so a hand-built Env behaves
+  // like production rather than like "posture disabled".
+  provenance?: { defaultDisclosurePosture?: DisclosurePosture };
 }
 
 export interface CreateCommentRequest {
@@ -34,6 +42,25 @@ export interface CreateCommentRequest {
     alt?: string;
     mimeType: string;
   }>;
+}
+
+/**
+ * The single refusal for `GET /api/posts/:id/comments` (H3).
+ *
+ * "No such post", "another tenant's post" and "you are not in that post's
+ * audience" must be byte-identical, for the same reason the ActivityPub object
+ * routes were made identical: a distinguishable refusal is an existence oracle
+ * for exactly the private post ids an attacker is fishing for. This reuses the
+ * body the not-found branch already returned, so the refusal is not a new
+ * observable either.
+ *
+ * A new refusal branch on this endpoint must call this, not describe itself.
+ */
+function commentsDenyResponse(): Response {
+  return new Response(JSON.stringify({ error: "Post not found" }), {
+    status: 404,
+    headers: { "content-type": "application/json" },
+  });
 }
 
 export class CommentHandler {
@@ -65,6 +92,23 @@ export class CommentHandler {
         return validation.error;
       }
       const body = validation.data;
+
+      // Art. 50 disclosure POSTURE (D15) — same gate as post creation, before any
+      // other work so a refusal is cheap. A REQUIRED_FOR_AI tenant refuses an
+      // undeclared comment.
+      {
+        const { createPrisma } = await import("../db.js");
+        const { gateDeclarationOrRespond } = await import(
+          "./provenance/posture-gate.js"
+        );
+        const postureResponse = await gateDeclarationOrRespond(
+          createPrisma(env),
+          activeTenantId,
+          body.provenance?.sourceType,
+          env.provenance?.defaultDisclosurePosture,
+        );
+        if (postureResponse) return postureResponse;
+      }
 
       // Check rate limits BEFORE any other operations
       const { commentRateLimit } = await import(
@@ -383,6 +427,17 @@ export class CommentHandler {
               rootUri: rootUri,
               replyToUri: replyToUri,
               tenantId: activeTenantId,
+              // Art. 50 (D14): only `sourceType` crosses the request boundary;
+              // `basis` is minted HERE, server-side, so no client can forge
+              // PLATFORM_GENERATED. An omitted declaration leaves the column at
+              // its UNKNOWN default with a null basis — which is the honest
+              // encoding of "the author did not say", not of "human".
+              ...(body.provenance
+                ? {
+                    textSourceType: body.provenance.sourceType,
+                    textBasis: "AUTHOR_DECLARED" as const,
+                  }
+                : {}),
             },
           });
         },
@@ -513,6 +568,12 @@ export class CommentHandler {
         }
       }
 
+      // Art. 50 (D14): echo the provenance the server actually stored, resolved
+      // through the shared choke point. Echoing the *stored* value rather than the
+      // request's is deliberate — it is how a client learns what was recorded,
+      // including the `basis` it is not allowed to send.
+      const { textProvenanceView } = await import("./provenance/response.js");
+
       const responseData: any = {
         id: comment.id,
         uri: commentUri,
@@ -525,6 +586,7 @@ export class CommentHandler {
         links: linksResponse || [],
         rootUri: comment.rootUri || null,
         replyToUri: comment.replyToUri || null,
+        provenance: textProvenanceView(comment),
       };
 
       return new Response(JSON.stringify(responseData), {
@@ -621,6 +683,13 @@ export class CommentHandler {
    * Get comments for a post
    *
    * PREPARATORY: Uses DataRouter for region-aware operations.
+   *
+   * H3: the thread is gated by {@link canReadPost}, not by "does the post row
+   * exist". `DataRouter.getPost` is a bare `findUnique({ where: { id } })` — no
+   * tenant, no audience — so using it as the gate let any authenticated caller
+   * in any tenant read the full thread (author ids and comment text) of a
+   * WHISPER post by id. The comment query below is tenant-scoped but
+   * audience-blind, and always was.
    */
   async getComments(
     postId: string,
@@ -637,7 +706,26 @@ export class CommentHandler {
       const limit = Math.min(options.limit || 20, 100);
       const cursor = options.cursor ? new Date(options.cursor) : undefined;
 
-      // PREPARATORY: Verify post exists in correct region first
+      // AUTHORIZATION, before anything attached to the post is read. This is
+      // the same decision the single-post read makes — same tenant predicate,
+      // same audience predicate — so a viewer cannot be refused the post and
+      // handed its thread.
+      const { canReadPost } = await import("./post-read-authorizer.js");
+      const permitted = await canReadPost({
+        postId,
+        viewerUserId: session.userId,
+        tenantId: activeTenantId,
+        region,
+        env: env as any,
+      });
+      if (!permitted) {
+        return commentsDenyResponse();
+      }
+
+      // Cross-region check and the data-access audit entry. Kept AFTER the
+      // authorization gate and refusing with the identical body, so it can
+      // neither leak an existence signal of its own nor be reached by a caller
+      // the gate refused.
       const requestId = generateRequestId();
       const post = await DataRouter.getPost(
         postId,
@@ -645,12 +733,10 @@ export class CommentHandler {
         env,
         undefined,
         requestId,
+        session.userId,
       );
       if (!post) {
-        return new Response(JSON.stringify({ error: "Post not found" }), {
-          status: 404,
-          headers: { "content-type": "application/json" },
-        });
+        return commentsDenyResponse();
       }
 
       // Fetch comments (excluding hidden ones) - with timeout/retry
@@ -783,6 +869,11 @@ export class CommentHandler {
         }
       }
 
+      // Art. 50 (D14): the comment's text provenance travels on every comment in
+      // the list. Through the shared choke point, never re-derived here — the
+      // `findMany` above selects whole rows, so both columns are present.
+      const { textProvenanceView } = await import("./provenance/response.js");
+
       return new Response(
         JSON.stringify({
           comments: result.map((c) => {
@@ -794,6 +885,7 @@ export class CommentHandler {
               createdAt: c.createdAt.toISOString(),
               replyToUri: c.replyToUri,
               sentimentCounts: sentimentCounts[c.id] || {},
+              provenance: textProvenanceView(c),
             };
 
             if (commentLinkChecks[c.id] && commentLinkChecks[c.id].length > 0) {
@@ -1054,16 +1146,14 @@ export class CommentHandler {
     activeTenantId: string,
   ): Promise<Response> {
     try {
-      // Validate request body
+      // Validate request body. The schema moved to ./schemas.ts when provenance
+      // was added (D14) — an inline schema here would have been a second place to
+      // keep the declarable-sourceType vocabulary in sync, and it would have
+      // drifted. `.trim()` still runs BEFORE `.min()`/`.max()` so whitespace-only
+      // text fails length validation rather than passing min(1) and trimming to ""
+      // downstream (fail-closed: reject at the boundary, never persist empty).
       const { validateRequest } = await import("./validate-request.js");
-      const { z } = await import("zod");
-      // .trim() runs BEFORE .min()/.max() so whitespace-only text fails
-      // length validation instead of passing min(1) and then trimming to ""
-      // downstream (fail-closed: reject at the schema boundary, never
-      // persist empty content).
-      const editCommentSchema = z.object({
-        text: z.string().trim().min(1).max(3000),
-      });
+      const { editCommentSchema } = await import("./schemas.js");
 
       const validation = await validateRequest(request, editCommentSchema);
       if (!validation.success) {
@@ -1137,6 +1227,39 @@ export class CommentHandler {
         );
       }
 
+      // Art. 50 provenance MONOTONICITY (D14, mirroring post-handler.editPost).
+      //
+      // A declaration may be RAISED, never lowered. Placed AFTER the ownership
+      // check on purpose: reaching it before would let a non-owner tell 409 ("this
+      // comment carries a declaration") from 403 ("not yours") and probe which
+      // comments are declared AI — a disclosure field must not become an oracle
+      // about other people's content.
+      //
+      // Omitting `provenance` leaves the stored value untouched, so editing text
+      // never clears a declaration.
+      let provenanceTransition:
+        | { from: SyntheticSourceType; to: SyntheticSourceType }
+        | undefined;
+      if (body.provenance) {
+        const { disclosureStrength } = await import("./provenance/resolve.js");
+        const current = ((comment as Record<string, unknown>).textSourceType ??
+          "UNKNOWN") as SyntheticSourceType;
+        const next = body.provenance.sourceType as SyntheticSourceType;
+        if (disclosureStrength(next) < disclosureStrength(current)) {
+          return new Response(
+            JSON.stringify({
+              error: "PROVENANCE_NOT_REDUCIBLE",
+              message:
+                "A synthetic-content declaration cannot be reduced. Contact support if it was recorded in error.",
+            }),
+            { status: 409, headers: { "content-type": "application/json" } },
+          );
+        }
+        if (disclosureStrength(next) > disclosureStrength(current)) {
+          provenanceTransition = { from: current, to: next };
+        }
+      }
+
       // Sanitize new text
       const { InputSanitizer } = await import("./input-sanitizer.js");
       const sanitizedText = InputSanitizer.sanitizeText(body.text);
@@ -1180,6 +1303,14 @@ export class CommentHandler {
               editedAt: new Date(),
               // Preserve original text on first edit
               originalText: comment.originalText || comment.text,
+              // Only written on a RAISE (see the monotonicity gate above);
+              // `basis` is minted server-side.
+              ...(provenanceTransition
+                ? {
+                    textSourceType: provenanceTransition.to,
+                    textBasis: "AUTHOR_DECLARED" as const,
+                  }
+                : {}),
             },
           });
         },
@@ -1195,15 +1326,59 @@ export class CommentHandler {
         },
       );
 
+      // Art. 50: audit every provenance transition, through the audit-composer
+      // facade — one of the two sanctioned paths (CLAUDE.md rule 7). `userId`,
+      // never email; no ipAddress/userAgent, because a provenance change needs
+      // neither and this must not open a new client-metadata path.
+      //
+      // Off the critical path: a failed audit write must not fail the edit, but it
+      // is logged rather than swallowed.
+      if (provenanceTransition) {
+        try {
+          const { TrellisAuditLogger } = await import("./audit-composer.js");
+          const { PROVENANCE_CHANGED } = await import("./audit-actions.js");
+          await new TrellisAuditLogger(env).log(
+            {
+              type: "data_update",
+              action: PROVENANCE_CHANGED,
+              resource: "comment",
+              resourceId: commentId,
+              userId: session.userId,
+              region,
+              metadata: {
+                field: "textSourceType",
+                from: provenanceTransition.from,
+                to: provenanceTransition.to,
+                basis: "AUTHOR_DECLARED",
+              },
+              severity: "low",
+              success: true,
+            },
+            env,
+          );
+        } catch (auditError) {
+          getLogger().warn(
+            "[CommentHandler] provenance audit emission failed (edit still applied)",
+            auditError,
+          );
+        }
+      }
+
       // Invalidate cache
       await this.invalidateCommentCache(comment.post.id, env);
       await FeedHandler.invalidateFeedCache(env as any);
+
+      const { textProvenanceView } = await import("./provenance/response.js");
 
       return new Response(
         JSON.stringify({
           id: updatedComment.id,
           text: updatedComment.text,
           editedAt: updatedComment.editedAt?.toISOString(),
+          // Echo the stored provenance so a client can confirm a raise landed —
+          // and, on an omitted declaration, see that the previous value survived
+          // the edit rather than guessing.
+          provenance: textProvenanceView(updatedComment),
           message: "Comment updated successfully",
         }),
         { status: 200, headers: { "content-type": "application/json" } },

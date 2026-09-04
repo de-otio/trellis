@@ -299,6 +299,17 @@ describe("FeedHandler - Media Support", () => {
           width: 1920,
           height: 1080,
         },
+        // AI Act Art. 50 provenance is emitted on EVERY attachment, always
+        // present and never omitted. This fixture's media row carries no
+        // provenance columns, so it correctly resolves to UNKNOWN — which the
+        // client must render as NOTHING, never as "human-created".
+        provenance: {
+          sourceType: "UNKNOWN",
+          basis: null,
+          disclosureRequired: false,
+          labelKey: "provenance.unknown",
+          labelDetailKey: "provenance.unknown.detail",
+        },
       });
     });
 
@@ -1464,6 +1475,17 @@ describe("FeedHandler - Media Support", () => {
           width: 1920,
           height: 1080,
         },
+        // AI Act Art. 50 provenance is emitted on EVERY attachment, always
+        // present and never omitted. This fixture's media row carries no
+        // provenance columns, so it correctly resolves to UNKNOWN — which the
+        // client must render as NOTHING, never as "human-created".
+        provenance: {
+          sourceType: "UNKNOWN",
+          basis: null,
+          disclosureRequired: false,
+          labelKey: "provenance.unknown",
+          labelDetailKey: "provenance.unknown.detail",
+        },
       });
     });
 
@@ -1551,6 +1573,17 @@ describe("FeedHandler - Media Support", () => {
           width: 1920,
           height: 1080,
         },
+        // NO `provenance` here, deliberately — and this asymmetry is the point.
+        //
+        // A cache hit returns the stored payload verbatim (feed-handler.ts:245)
+        // and never runs enrichPosts, so a cache entry written by a build that
+        // predates Art. 50 provenance has no provenance field and will be served
+        // without one. This test pins that passthrough behaviour.
+        //
+        // OPERATIONAL CONSEQUENCE: on deploy, bump the KV-stored feed cache
+        // version (`feed:cache:version`, see getCacheVersion) or accept a
+        // TTL-length window in which warm-cache responses lack the field. There
+        // is no code constant to change — the version is runtime state.
       });
     });
 
@@ -1588,8 +1621,14 @@ describe("FeedHandler - Media Support", () => {
       expect(mockEnv.FEED_CACHE_KV.put).toHaveBeenCalled();
       const cacheKey = mockEnv.FEED_CACHE_KV.put.mock.calls[0][0];
 
-      // Cache key should follow format: feed:home:{region}:v{version}:{userId}:{entityRefs}:{cursor}:{limit}
-      expect(cacheKey).toMatch(/^feed:home:US:v\d+:user-123:.*:initial:20$/);
+      // Cache key format: feed:home:{region}:{tenantId}:v{version}:{userId}:{entityRefs}:{cursor}:{limit}
+      //
+      // The tenant segment is load-bearing, not cosmetic. A cache hit returns
+      // before the post query's tenant AND is ever applied, so a key without the
+      // tenant serves one tenant's feed to a viewer reading as another.
+      expect(cacheKey).toMatch(
+        new RegExp(`^feed:home:US:${TEST_TENANT_ID}:v\\d+:user-123:.*:initial:20$`),
+      );
     });
 
     it("should handle cache miss and query database with media", async () => {

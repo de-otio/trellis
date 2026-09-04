@@ -6,21 +6,19 @@
  */
 
 import type { ZodSchema } from "zod";
-import type { Route } from "./route-types";
+import type { Route } from "./route-types.js";
 import type {
   ExtensionCircleEntityStatus,
   ExtensionCircleMember,
   ExtensionCircleTierStatus,
-  ExtensionEntity,
   ExtensionEntityRelationship,
   ExtensionGlanceItem,
   ExtensionPaginatedResult,
-  ExtensionPost,
   ExtensionRecapPayload,
   ExtensionRecapSubject,
   ExtensionRelationship,
   ExtensionVisiblePost,
-} from "./dto";
+} from "./dto.js";
 
 // ---------------------------------------------------------------------------
 // Extension Context — the restricted runtime environment extensions receive
@@ -69,15 +67,77 @@ export interface ScopedDelegate {
 }
 
 /**
- * Tenant-scoped database surface — the ONLY way to touch data in request
- * context (O-1 design §5.1). Every delegate here is bound to the `TenantId`
- * passed to `ExtensionDb.tenant(tid)`; `findMany({})` returns only that tenant's
- * rows by construction. `queryRaw`/`executeRaw` are deliberately absent.
- *
- * Exposes the 9 core delegates (named) plus this extension's own (`ext_*`)
- * models via the index signature (keyed by camelCase model name).
+ * The operation names the scoped surface exposes, derived from
+ * {@link ScopedDelegate} so the two cannot drift. Used by {@link ScopedOf}.
  */
-export interface ScopedDb {
+export type ScopedOperation = keyof ScopedDelegate;
+
+/**
+ * Narrow a generated Prisma model delegate to the scoped surface.
+ *
+ * `ScopedOf<Prisma.ExtDogProfileDelegate>` keeps exactly the operations the
+ * proxy implements — with their real Prisma argument and result types — and
+ * structurally drops everything else, `$queryRaw` included. Operations the
+ * delegate does not have are simply absent from the result rather than an
+ * error — but note that the result must still satisfy
+ * {@link ExtensionModelMap} to be usable as a model map, so a Prisma upgrade
+ * that removes a scoped operation surfaces as a compile error on the map. That
+ * is deliberate: a delegate that can no longer serve the scoped surface should
+ * say so at build time, not at registration.
+ *
+ * This is how an extension gets typed access to its OWN models; see
+ * {@link ScopedDb}.
+ */
+export type ScopedOf<TDelegate> = Pick<TDelegate, Extract<keyof TDelegate, ScopedOperation>>;
+
+/**
+ * Constraint for the extension-owned half of {@link ScopedDb}: model name to
+ * delegate type.
+ *
+ * `ScopedDelegate` is not merely a sanity check here — it is *exactly* the
+ * condition for the extension to register into core's untyped registry, whose
+ * {@link OpenScopedModels} index signature is a full delegate. Declaring the
+ * constraint this way is what makes a violation fail on the map, naming the
+ * missing operations, instead of failing two packages away at the consumer's
+ * `registerExtension(...)` call with a message that names neither the map nor
+ * the fix.
+ *
+ * A *generated* Prisma delegate satisfies it: its method parameters are far
+ * more precise than this erased shape but compare bivariantly, and its refined
+ * return types are assignable covariantly. Verified against a real generated
+ * client, not assumed — see `type-tests/generic-scoped-db.test-d.ts` §7.
+ *
+ * A *hand-written* delegate must therefore declare all thirteen operations.
+ * Extend this interface and narrow only what you care about:
+ *
+ * ```ts
+ * interface DogPrivateDelegate extends ScopedDelegate {
+ *   findUnique(args: unknown): Promise<DogPrivateRow | null>;
+ * }
+ * ```
+ *
+ * Hand-written is a normal case, not a corner: an extension whose Prisma client
+ * is generated from a composed schema cannot import its own model types at the
+ * time its package builds.
+ */
+export type ExtensionModelMap = Record<string, ScopedDelegate>;
+
+/**
+ * The permissive default for {@link ScopedDb} — any model name resolves to an
+ * erased {@link ScopedDelegate}.
+ *
+ * This is what core itself uses, because core's registry holds extensions
+ * whose model sets it cannot know statically. It is also the default for
+ * extensions that have not declared their models, which keeps this whole
+ * change additive — but it means a misspelled model name typechecks. Declare
+ * a model map to close that.
+ */
+export interface OpenScopedModels {
+  [model: string]: ScopedDelegate;
+}
+
+/** The 9 core models every extension sees on the scoped surface. */
+export interface CoreScopedModels {
   entity: ScopedDelegate;
   post: ScopedDelegate;
   postEntity: ScopedDelegate;
@@ -87,9 +147,42 @@ export interface ScopedDb {
   taxonomyDimension: ScopedDelegate;
   productTaxonomyTag: ScopedDelegate;
   activity: ScopedDelegate;
-  /** Extension-owned models, keyed by camelCase model name. */
-  [model: string]: ScopedDelegate;
 }
+
+/**
+ * Tenant-scoped database surface — the ONLY way to touch data in request
+ * context (O-1 design §5.1). Every delegate here is bound to the `TenantId`
+ * passed to `ExtensionDb.tenant(tid)`; `findMany({})` returns only that tenant's
+ * rows by construction. `queryRaw`/`executeRaw` are deliberately absent.
+ *
+ * Exposes the 9 core delegates ({@link CoreScopedModels}) plus this
+ * extension's own (`ext_*`) models, keyed by camelCase model name.
+ *
+ * `TModels` is how an extension replaces `unknown` args and results on its own
+ * models with its generated Prisma types. Declare the map once and thread it
+ * through {@link TrellisExtension}:
+ *
+ * ```ts
+ * import type { Prisma } from "@prisma/client";
+ * import type { ScopedOf, TrellisExtension } from "@de-otio/trellis-extension-api";
+ *
+ * type DogModels = {
+ *   extDogProfile: ScopedOf<Prisma.ExtDogProfileDelegate>;
+ *   extDogWalk: ScopedOf<Prisma.ExtDogWalkDelegate>;
+ * };
+ *
+ * export const dogExtension: TrellisExtension<DogModels> = { ... };
+ * ```
+ *
+ * Inside a handler, `ctx.db.tenant(tid).extDogProfile.findMany({ where: … })`
+ * is then fully typed, and `extDogProfiles` (a typo) is a compile error rather
+ * than a runtime `undefined`.
+ *
+ * Omitting `TModels` keeps the previous behaviour exactly — see
+ * {@link OpenScopedModels} for what that costs.
+ */
+export type ScopedDb<TModels extends ExtensionModelMap = OpenScopedModels> = CoreScopedModels &
+  TModels;
 
 /**
  * Scoped Prisma access for extensions (O-1 design §5.1 / §5.3).
@@ -104,9 +197,9 @@ export interface ScopedDb {
  * Relationship data is available read-only via `ExtensionContext.graphService`;
  * extensions never query the social graph tables directly.
  */
-export interface ExtensionDb {
+export interface ExtensionDb<TModels extends ExtensionModelMap = OpenScopedModels> {
   /** The sanctioned, tenant-bound data surface (O-1 design §5.1). */
-  tenant(tenantId: TenantId): ScopedDb;
+  tenant(tenantId: TenantId): ScopedDb<TModels>;
 
   /**
    * Cross-tenant READ-ONLY access to the models declared in
@@ -166,11 +259,7 @@ export interface ExtensionGraphService {
     since: Date,
     pagination: unknown,
   ): Promise<ExtensionPaginatedResult<ExtensionVisiblePost>>;
-  getGlanceItems(
-    userId: string,
-    tier: number,
-    limit: number,
-  ): Promise<ExtensionGlanceItem[]>;
+  getGlanceItems(userId: string, tier: number, limit: number): Promise<ExtensionGlanceItem[]>;
   getDepthPostIds(
     userId: string,
     targetType: string,
@@ -179,26 +268,17 @@ export interface ExtensionGraphService {
     limit: number,
   ): Promise<string[]>;
   getCircleStatus(userId: string): Promise<ExtensionCircleTierStatus[]>;
-  getCircleEntityStatus(
-    userId: string,
-    tier: number,
-  ): Promise<ExtensionCircleEntityStatus[]>;
+  getCircleEntityStatus(userId: string, tier: number): Promise<ExtensionCircleEntityStatus[]>;
 
   // Entity relationships (read)
   getEntityRelationships(
     entityId: string,
     options?: { type?: string; status?: string },
   ): Promise<ExtensionEntityRelationship[]>;
-  getPendingEntityRelationships(
-    userId: string,
-  ): Promise<ExtensionEntityRelationship[]>;
+  getPendingEntityRelationships(userId: string): Promise<ExtensionEntityRelationship[]>;
 
   // Discovery
-  discoverByGraph(
-    userId: string,
-    hops: number,
-    filters?: unknown,
-  ): Promise<unknown[]>;
+  discoverByGraph(userId: string, hops: number, filters?: unknown): Promise<unknown[]>;
   discoverNearby(
     userId: string,
     lat: number,
@@ -213,9 +293,9 @@ export interface ExtensionGraphService {
  * Restricted context passed to extension code.
  * Core secrets (SESSION_SECRET, DATABASE_URL, API keys) are never exposed.
  */
-export interface ExtensionContext {
+export interface ExtensionContext<TModels extends ExtensionModelMap = OpenScopedModels> {
   /** Scoped database client — only extension-relevant tables */
-  db: ExtensionDb;
+  db: ExtensionDb<TModels>;
 
   /**
    * Read-only graph access.
@@ -235,62 +315,6 @@ export interface ExtensionContext {
 
   /** This extension's config values (populated from its configSchema keys) */
   config: Record<string, string>;
-}
-
-// ---------------------------------------------------------------------------
-// Extension Hooks — lifecycle events extensions can react to
-// ---------------------------------------------------------------------------
-
-/**
- * VERSIONED CONTRACT — any signature change to any hook in this interface
- * requires a semver bump of `@de-otio/trellis-extension-api`.
- *
- * Hooks are called by Trellis core after the named operation completes.
- * All hooks are optional; omit them if the extension has no interest in
- * the event.
- *
- * Compatibility rules:
- * - Adding a new optional hook → minor bump (e.g. 0.2.x → 0.3.0).
- * - Changing the signature of an existing hook (parameter type, order,
- *   return type) → major bump if 1.x, minor bump while still 0.x
- *   (breaking for consumers regardless — coordinate with consuming
- *   applications and any other known extension authors before merging).
- * - Removing a hook → same as a signature change.
- *
- * Keep this interface in sync with `EXTENSION_API_VERSION` (below) and
- * the `version` field in `packages/extension-api/package.json`.
- */
-export interface ExtensionHooks {
-  /** Called after a post is created */
-  onPostCreated?: (post: ExtensionPost, ctx: ExtensionContext) => Promise<void>;
-
-  /** Called after an entity is created */
-  onEntityCreated?: (
-    entity: ExtensionEntity,
-    ctx: ExtensionContext,
-  ) => Promise<void>;
-
-  /** Called after a relationship is created between users/entities */
-  onRelationshipCreated?: (
-    userId: string,
-    targetId: string,
-    targetType: string,
-    ctx: ExtensionContext,
-  ) => Promise<void>;
-
-  /** Called when relationship scores are recomputed */
-  onScoreRecompute?: (
-    userId: string,
-    scores: Array<{ targetId: string; score: number }>,
-    ctx: ExtensionContext,
-  ) => Promise<void>;
-
-  /** Called after an entity is deleted */
-  onEntityDeleted?: (
-    entityId: string,
-    entityType: string,
-    ctx: ExtensionContext,
-  ) => Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -333,7 +357,7 @@ export interface CrossTenantReadDelegate {
  *   once a scanned row identifies its tenant. This is the only path to core
  *   models and to any write.
  */
-export interface ExtensionJobContext {
+export interface ExtensionJobContext<TModels extends ExtensionModelMap = OpenScopedModels> {
   /**
    * Cross-tenant read access, keyed by model name. Contains exactly the models
    * the job declared in `crossTenantRead` — nothing else is present.
@@ -341,10 +365,23 @@ export interface ExtensionJobContext {
   read: Record<string, CrossTenantReadDelegate>;
 
   /** Bind a tenant for correctly-scoped per-row work (core + own models). */
-  tenant(tenantId: TenantId): ScopedDb;
+  tenant(tenantId: TenantId): ScopedDb<TModels>;
 
   /** Deployment stage (dev, prod) — for logging/metrics. */
   stage: string;
+
+  /**
+   * Aborts when the runner's job timeout fires.
+   *
+   * The runner cannot interrupt a running job body; it can only stop waiting
+   * on it. A long job should therefore check `signal.aborted` between batches
+   * (and forward `signal` to any fetch/query that accepts one) so a timed-out
+   * job stops doing work instead of running on unobserved.
+   *
+   * Always supplied by core. It was previously present at runtime but absent
+   * from this type, so cooperative cancellation required a cast.
+   */
+  readonly signal: AbortSignal;
 }
 
 /**
@@ -356,7 +393,7 @@ export interface ExtensionJobContext {
  * only cross-tenant reads a job may perform are the models listed in
  * `crossTenantRead`.
  */
-export interface ExtensionJobDecl {
+export interface ExtensionJobDecl<TModels extends ExtensionModelMap = OpenScopedModels> {
   /** Stable job id, unique within the extension (e.g. "reminder-sweep"). */
   id: string;
 
@@ -370,7 +407,7 @@ export interface ExtensionJobDecl {
   crossTenantRead: string[];
 
   /** The job body. Receives the restricted {@link ExtensionJobContext}. */
-  run(jobCtx: ExtensionJobContext): Promise<void>;
+  run(jobCtx: ExtensionJobContext<TModels>): Promise<void>;
 }
 
 /**
@@ -384,66 +421,16 @@ export interface ExtensionJobDecl {
  * the expected API version (useful during coordinated Trellis + extension
  * upgrades).
  *
+ * The sanctioned way to do that is to assign it to
+ * {@link TrellisExtension.extensionApiVersion} — core then performs the
+ * compatibility check itself at boot and fails startup on an incompatible
+ * pairing, instead of every extension hand-rolling the comparison.
+ *
  * When to update:
  *   - Bump alongside every `package.json` version change.
  *   - Never change one without changing the other.
  */
-export const EXTENSION_API_VERSION = "0.7.0" as const;
-
-// ---------------------------------------------------------------------------
-// Strategy Interfaces — pluggable domain-specific behavior
-// ---------------------------------------------------------------------------
-
-/** Signal provider for domain-specific relationship scoring */
-export interface RelationshipSignalProvider {
-  /**
-   * Compute additional score signals for a relationship.
-   * Return a value 0.0-1.0 that gets blended with the base score.
-   * Return null/undefined to not affect the score.
-   */
-  computeSignal(
-    userId: string,
-    targetId: string,
-    targetType: "user" | "entity",
-    context: RelationshipSignalContext,
-  ): Promise<number | null>;
-}
-
-/** Context passed to signal providers */
-export interface RelationshipSignalContext {
-  /** Current computed score */
-  currentScore: number;
-  /** Relationship tier (0-3) */
-  tier: number;
-  /** Entity metadata (if targetType is "entity") */
-  entityMetadata?: Record<string, unknown>;
-}
-
-/** A filterable entity property for discovery */
-export interface DiscoveryFacet {
-  /** Metadata field name */
-  field: string;
-  /** Filter type */
-  type: "exact" | "range" | "geo";
-  /** Human-readable label */
-  label: string;
-}
-
-export interface RecommendationStrategy {
-  /** Generate domain-specific product/content recommendations */
-  getRecommendations(
-    entityId: string,
-    ctx: ExtensionContext,
-  ): Promise<Recommendation[]>;
-}
-
-export interface Recommendation {
-  type: string;
-  title: string;
-  description: string;
-  url?: string;
-  metadata?: Record<string, unknown>;
-}
+export const EXTENSION_API_VERSION = "0.9.2" as const;
 
 // ---------------------------------------------------------------------------
 // ActivityPub Extension — display-only Actor enrichment
@@ -467,36 +454,6 @@ export interface ActorEnrichment {
    * @context, preferredUsername.
    */
   properties?: Record<string, string>;
-}
-
-// ---------------------------------------------------------------------------
-// Taxonomy Seed Data
-// ---------------------------------------------------------------------------
-
-export interface TaxonomySeedDimension {
-  code: string;
-  name: string;
-  description?: string;
-}
-
-export interface TaxonomySeedCategory {
-  code: string;
-  name: string;
-  dimensionCode: string;
-  description?: string;
-}
-
-export interface TaxonomySeedTaxon {
-  id: string;
-  name: string;
-  categoryCode: string;
-  description?: string;
-}
-
-export interface TaxonomySeedData {
-  dimensions: TaxonomySeedDimension[];
-  categories: TaxonomySeedCategory[];
-  taxons: TaxonomySeedTaxon[];
 }
 
 // ---------------------------------------------------------------------------
@@ -539,34 +496,99 @@ export interface ExtensionSession {
  * Receives parsed request, params, session, and scoped context.
  * Returns a data object — core handles HTTP wiring.
  */
-export type ExtensionHandler = (
+export type ExtensionHandler<TModels extends ExtensionModelMap = OpenScopedModels> = (
   request: Request,
   params: Record<string, string>,
   session: ExtensionSession | null,
-  ctx: ExtensionContext,
+  ctx: ExtensionContext<TModels>,
 ) => Promise<ExtensionResponse>;
 
 /**
  * Route definition provided by an extension.
  * Core wraps it with auth, CORS, security headers, and error handling.
  */
-export interface ExtensionRouteDefinition {
+export interface ExtensionRouteDefinition<TModels extends ExtensionModelMap = OpenScopedModels> {
   /** Path pattern — served at /api/ext/{extensionId}/{path} */
   path: string;
   method: string | string[];
   /** Auth requirement (default: "required") */
   auth?: "required" | "optional" | "none";
   description?: string;
-  handle: ExtensionHandler;
+  /**
+   * Declared as a METHOD, not as a `handle: ExtensionHandler<TModels>`
+   * property, and the difference is load-bearing.
+   *
+   * Under `strictFunctionTypes` a function-typed property compares its
+   * parameters contravariantly, so a route whose handler takes
+   * `ExtensionContext<DogModels>` would not be assignable to the
+   * `ExtensionContext<OpenScopedModels>` core's registry holds — which would
+   * make declaring a model map impossible for exactly the extensions that
+   * want one. TypeScript compares method parameters bivariantly, so this
+   * declaration form is what lets a typed extension register with untyped
+   * core. Verified in `extension-api-generic-scoped-db.test-d.ts`.
+   *
+   * The soundness this gives up is theoretical here: core supplies the
+   * context, and it supplies the same proxy either way.
+   */
+  handle(
+    request: Request,
+    params: Record<string, string>,
+    session: ExtensionSession | null,
+    ctx: ExtensionContext<TModels>,
+  ): Promise<ExtensionResponse>;
 }
 
 // ---------------------------------------------------------------------------
 // TrellisExtension — the main contract
 // ---------------------------------------------------------------------------
 
-export interface TrellisExtension {
+/**
+ * The main contract.
+ *
+ * `TModels` optionally declares this extension's OWN Prisma models so that
+ * `ctx.db.tenant(tid).myModel` is typed rather than `unknown` — see
+ * {@link ScopedDb} for the recipe and {@link ScopedOf} for the per-model
+ * helper. Omitting it is fully supported and changes nothing.
+ */
+export interface TrellisExtension<TModels extends ExtensionModelMap = OpenScopedModels> {
   /** Unique ID — must be lowercase alphanumeric, 2-32 chars, not a reserved word */
   id: string;
+
+  /**
+   * The semver of `@de-otio/trellis-extension-api` this extension was **built
+   * against** — normally `EXTENSION_API_VERSION` imported from this package,
+   * so a rebuild keeps it truthful automatically:
+   *
+   * ```ts
+   * import { EXTENSION_API_VERSION } from "@de-otio/trellis-extension-api";
+   * export const dogExtension: TrellisExtension = {
+   *   id: "dog",
+   *   extensionApiVersion: EXTENSION_API_VERSION,
+   *   // …
+   * };
+   * ```
+   *
+   * Core checks this at startup, before serving:
+   * - **Absent** → core logs one warning at boot and continues. Declaring it
+   *   is strongly recommended (an undeclared extension gets no protection
+   *   against a silently incompatible core), but it is never fatal — existing
+   *   extensions keep working across an upgrade.
+   * - **Declared and incompatible** → core **fails startup**, naming both
+   *   versions. Incompatible means a differing major, or (while the extension
+   *   API is still `0.x`, where minors are breaking) a differing minor.
+   * - **Declared and merely drifted** (same compatibility window, different
+   *   patch — or different minor once the API reaches `1.x`) → core logs;
+   *   rebuild at your convenience.
+   * - **Declared but unparseable** → core fails startup with a validation
+   *   error naming the offending value.
+   *
+   * Format: `<major>.<minor>.<patch>`, each part 1–4 digits, with an optional
+   * `-`/`+` suffix that is ignored for comparison (e.g. `"0.8.0"`,
+   * `"0.8.0-alpha.1"`). Values longer than 64 characters are rejected.
+   *
+   * Optional and additive — omitting it is valid.
+   */
+  extensionApiVersion?: string;
 
   /** Display terminology */
   terminology: {
@@ -580,18 +602,12 @@ export interface TrellisExtension {
   /** Zod schema for Entity.metadata when entityType matches this extension */
   metadataSchema: ZodSchema;
 
-  /** Taxonomy seed data */
-  taxonomySeed?: TaxonomySeedData;
-
-  /** Lifecycle hooks — core calls these after operations complete */
-  hooks?: ExtensionHooks;
-
   /**
    * Scheduled jobs this extension declares (O-1 design §5.2).
    * Run in-process in the API container with cluster-wide single-flight.
    * Additive/optional — omit if the extension has no scheduled work.
    */
-  jobs?: ExtensionJobDecl[];
+  jobs?: ExtensionJobDecl<TModels>[];
 
   /**
    * Models this extension may read cross-tenant from routes, hooks, and
@@ -603,31 +619,8 @@ export interface TrellisExtension {
    */
   crossTenantRead?: string[];
 
-  /**
-   * Domain-specific relationship scoring signals.
-   * Extensions can boost or adjust relationship scores based on
-   * domain-specific signals (e.g., breed similarity for dogs).
-   */
-  relationshipSignalProvider?: RelationshipSignalProvider;
-
-  /**
-   * Entity-to-entity relationship types this extension declares.
-   * These are registered globally and available for all entities of this type.
-   * Example: ["PACK_MATE", "WALK_BUDDY"] for a dog extension.
-   */
-  entityRelationshipTypes?: string[];
-
-  /**
-   * Searchable entity properties for discovery filtering.
-   * Extensions declare which metadata fields are filterable.
-   */
-  discoveryFacets?: DiscoveryFacet[];
-
-  /** Product recommendation strategy */
-  recommendationStrategy?: RecommendationStrategy;
-
   /** Core-wrapped extension routes — preferred over raw `routes` */
-  extensionRoutes?: ExtensionRouteDefinition[];
+  extensionRoutes?: ExtensionRouteDefinition<TModels>[];
 
   /** Zod schema declaring required env var keys — validated against scoped values only */
   configSchema?: ZodSchema;
@@ -668,14 +661,11 @@ export interface TrellisExtension {
    * Mirrors `activityPub.enrichActor`: display-only enrichment, no writes.
    * Optional — omit if the extension has no recap aggregates to attach.
    */
-  extendRecap?: (
+  extendRecap?(
     payload: ExtensionRecapPayload,
     subject: ExtensionRecapSubject,
-    ctx: ExtensionContext,
-  ) => Promise<Record<string, unknown>>;
-
-  /** Called once at startup with the extension's scoped context */
-  init?: (ctx: ExtensionContext) => Promise<void>;
+    ctx: ExtensionContext<TModels>,
+  ): Promise<Record<string, unknown>>;
 
   /** Called on server shutdown (SIGTERM/SIGINT) */
   shutdown?: () => Promise<void>;

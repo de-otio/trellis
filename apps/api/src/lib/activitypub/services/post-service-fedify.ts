@@ -20,6 +20,47 @@ import { UserActorDispatcher } from "../dispatchers/user-actor.js";
 import { ActivityService } from "../activity-service.js";
 import { getLogger, Logger } from "../../logger.js";
 import { fedifyCreateToActivityStreams } from "./fedify-converters.js";
+import {
+  provenanceToJsonLd,
+  withProvenanceContext,
+} from "../provenance-jsonld.js";
+import type { Provenance, SyntheticBasis, SyntheticSourceType } from "../../provenance/types.js";
+
+/**
+ * A post's TEXT provenance, as a {@link Provenance}, for federation (Art. 50).
+ *
+ * Reads the columns off the row the caller already has — no extra query. Tolerant
+ * of a partially-selected `Post`: a caller that did not select the columns gets
+ * `null`, which serialises to no terms at all rather than to a false `UNKNOWN`
+ * claim. Media provenance is per-attachment and does not federate yet; posts
+ * federate their text, and the attachment mapping is a separate piece of work.
+ */
+function postTextProvenance(post: Post): Provenance | null {
+  const columns = post as unknown as {
+    textSourceType?: SyntheticSourceType | null;
+    textBasis?: SyntheticBasis | null;
+  };
+  const sourceType = columns.textSourceType;
+  if (!sourceType) return null;
+  return { sourceType, basis: columns.textBasis ?? null };
+}
+
+/**
+ * Exhaustiveness check for the post-radius switch in `determineAudience`.
+ *
+ * The parameter is typed `never`, so adding a value to `PostRadius` without
+ * giving it an explicit ActivityPub audience becomes a COMPILE error here
+ * rather than a silent fall-through to "public". That is the point: federated
+ * delivery is irrevocable, so the failure mode this prevents — a new enum value
+ * quietly addressing the public collection — is not recoverable at runtime.
+ */
+function assertNeverRadius(radius: never): never {
+  throw new Error(
+    `determineAudience: unhandled post radius ${String(
+      radius,
+    )} — refusing to guess an ActivityPub audience`,
+  );
+}
 
 /**
  * Service for managing posts as Fedify ActivityPub activities
@@ -110,6 +151,19 @@ export class PostActivityServiceFedify {
           to: [new URL(`${actorUri}/followers`)],
         };
 
+      case "LOUD":
+        // LOUD previously fell through to the `default:` branch below and was
+        // addressed to the public collection — the same audience as SHOUT —
+        // even though no local read path has ever admitted a LOUD post to
+        // anyone but its author. Followers-only is the narrowest addressing
+        // that is still consistent with where LOUD is headed: the audience
+        // model maps it to CONNECTIONS (see trellis-internal
+        // plans/audience-and-reach, delta 6), and CONNECTIONS is what
+        // followers-only expresses in ActivityPub.
+        return {
+          to: [new URL(`${actorUri}/followers`)],
+        };
+
       case "WHISPER":
         // Whisper = private/friends-only, use bto (blind recipients)
         return {
@@ -117,10 +171,13 @@ export class PostActivityServiceFedify {
         };
 
       default:
-        // Default to public
-        return {
-          to: [PUBLIC_COLLECTION],
-        };
+        // NO FAIL-OPEN DEFAULT. This branch used to return the public
+        // collection for any unrecognised radius, which meant a new or
+        // mistyped enum value silently published to the whole fediverse — and
+        // federated delivery cannot be recalled. An unknown audience is a
+        // programming error, so it throws; the caller's federation attempt
+        // fails and the post is simply not delivered.
+        return assertNeverRadius(post.radius);
     }
   }
 
@@ -312,12 +369,16 @@ export class PostActivityServiceFedify {
       author.username || "",
       env,
     );
+    // Art. 50: carry the post's text provenance onto the federated object. Read
+    // off the Post row we already have — no extra query — and null-safe because
+    // callers may pass a partially-selected Post.
     const activityStreamsFormat = fedifyCreateToActivityStreams(
       activity,
       note,
       actorUri,
       uris.activityId.toString(),
       uris.objectId.toString(),
+      postTextProvenance(post),
     );
     await ActivityService.storeOutboxActivity(
       prisma,
@@ -358,6 +419,12 @@ export class PostActivityServiceFedify {
     const updated = post.editedAt || post.updatedAt;
     const note = await this.createNote(post, author, env, requestUrl);
 
+    const terms = provenanceToJsonLd(postTextProvenance(post));
+    const provenanceProps = {
+      terms,
+      hasAny: Object.keys(terms).length > 0,
+    };
+
     // Convert Date to Temporal.Instant for Fedify
     const updatedInstant = TemporalPolyfill.Instant.from(
       updated.toISOString(),
@@ -392,6 +459,12 @@ export class PostActivityServiceFedify {
       id: activity.id?.toString(),
       actor: actorUri,
       object: {
+        // Art. 50: an Update must carry provenance too. Omitting it here would
+        // make an edit silently strip the disclosure from every remote copy — the
+        // exact failure the monotonicity rule exists to prevent, on the wire.
+        "@context": provenanceProps.hasAny
+          ? withProvenanceContext("https://www.w3.org/ns/activitystreams")
+          : "https://www.w3.org/ns/activitystreams",
         type: "Note",
         id: uris.objectId.toString(),
         content: post.text || "",
@@ -400,6 +473,7 @@ export class PostActivityServiceFedify {
         updated: updated.toISOString(),
         to: audience.to?.map((r) => (typeof r === "string" ? r : r.toString())),
         cc: audience.cc?.map((r) => (typeof r === "string" ? r : r.toString())),
+        ...provenanceProps.terms,
       },
       published: updated.toISOString(),
       to: audience.to?.map((r) => (typeof r === "string" ? r : r.toString())),

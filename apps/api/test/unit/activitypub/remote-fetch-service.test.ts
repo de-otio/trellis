@@ -6,6 +6,10 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RemoteFetchService } from "../../../src/lib/activitypub/remote-fetch-service.js";
+import type {
+  DnsResolver,
+  Transport,
+} from "../../../src/lib/net/safe-fetch.js";
 import { getLogger } from "../../../src/lib/logger.js";
 import type { Env } from "../../../src/env.js";
 import { createFedifyTestEnv } from "../../utils/fedify-test-fixtures.js";
@@ -23,6 +27,38 @@ vi.mock("../../../src/lib/activitypub/standalone-mode", () => ({
 // Mock global fetch
 global.fetch = vi.fn();
 
+/**
+ * The service now fetches through the SSRF-safe helper rather than global
+ * `fetch`. To keep these tests' existing arrangements (`mockResolvedValue({
+ * ok, json })`) meaningful, we install a transport that DELEGATES to the
+ * mocked `global.fetch` and adapts its result into the helper's raw-response
+ * shape. The request therefore still travels through `assertUrlSafe` — scheme
+ * check, host classification, DNS, redirect policy, body cap — which is
+ * exactly what we want these tests to exercise.
+ */
+const publicResolver: DnsResolver = async () => ["93.184.216.34"];
+
+const fetchBackedTransport: Transport = async (req) => {
+  const mock: any = await (global.fetch as any)(req.target.url.href, {
+    method: req.method,
+    headers: req.headers,
+  });
+  const status =
+    typeof mock?.status === "number" ? mock.status : mock?.ok ? 200 : 500;
+  const payload =
+    typeof mock?.json === "function" ? await mock.json() : undefined;
+  const encoded =
+    payload === undefined ? "" : JSON.stringify(payload);
+  async function* body(): AsyncIterable<Uint8Array> {
+    if (encoded) yield Buffer.from(encoded, "utf8");
+  }
+  return {
+    status,
+    headers: (mock?.headers as Record<string, string>) ?? {},
+    body: body(),
+  };
+};
+
 describe("RemoteFetchService", () => {
   let mockEnv: Env;
 
@@ -31,6 +67,10 @@ describe("RemoteFetchService", () => {
 
     vi.clearAllMocks();
     RemoteFetchService.clearCache();
+    RemoteFetchService.defaultFetchOptions = {
+      resolver: publicResolver,
+      transport: fetchBackedTransport,
+    };
 
     // Reset standalone mode mocks
     const { isStandaloneModeEnabled, isRemoteUri } = await import(
@@ -46,6 +86,7 @@ describe("RemoteFetchService", () => {
   afterEach(() => {
     vi.clearAllMocks();
     RemoteFetchService.clearCache();
+    RemoteFetchService.defaultFetchOptions = {};
   });
 
   describe("fetchActor", () => {
@@ -75,8 +116,9 @@ describe("RemoteFetchService", () => {
         actorUri,
         expect.objectContaining({
           headers: expect.objectContaining({
-            Accept: expect.stringContaining("application/activity+json"),
-            "User-Agent": "Trellis ActivityPub Client/1.0",
+            // Lowercase: the SSRF-safe helper normalises header names.
+            accept: expect.stringContaining("application/activity+json"),
+            "user-agent": "Trellis ActivityPub Client/1.0",
           }),
         }),
       );
@@ -345,7 +387,8 @@ describe("RemoteFetchService", () => {
         objectUri,
         expect.objectContaining({
           headers: expect.objectContaining({
-            Accept: expect.stringContaining("application/activity+json"),
+            // Lowercase: the SSRF-safe helper normalises header names.
+            accept: expect.stringContaining("application/activity+json"),
           }),
         }),
       );
@@ -876,6 +919,157 @@ describe("RemoteFetchService", () => {
       await RemoteFetchService.fetchActor(actorUri2, mockEnv, getLogger());
 
       expect(global.fetch).toHaveBeenCalledTimes(4);
+    });
+  });
+
+  describe("SSRF hardening (lane 8 HIGH / lane 9 F5)", () => {
+    /** Transport that must never be reached. */
+    const forbidden: Transport = async (req) => {
+      throw new Error(`transport reached for ${req.target.url.href}`);
+    };
+
+    beforeEach(async () => {
+      const { isRemoteUri } = await import(
+        "../../../src/lib/activitypub/standalone-mode.js"
+      );
+      vi.mocked(isRemoteUri).mockReturnValue(true);
+    });
+
+    it.each([
+      ["http://169.254.169.254/users/x", "AWS/GCP metadata over http"],
+      ["https://169.254.169.254/users/x", "metadata over https"],
+      ["https://169.254.42.42/users/x", "Scaleway metadata"],
+      ["http://10.0.0.5:6379/users/x", "internal Redis"],
+      ["https://127.0.0.1/users/x", "loopback"],
+      ["https://[::1]/users/x", "IPv6 loopback"],
+      ["https://2130706433/users/x", "decimal-encoded loopback"],
+      ["https://[::ffff:169.254.169.254]/users/x", "metadata via IPv4-mapped"],
+      ["https://localhost/users/x", "localhost"],
+      ["https://100.100.100.200/users/x", "Alibaba metadata (CGNAT)"],
+    ])("refuses to dereference actor %s (%s)", async (uri) => {
+      const result = await RemoteFetchService.fetchActor(
+        uri,
+        mockEnv,
+        getLogger(),
+        { resolver: publicResolver, transport: forbidden },
+      );
+      expect(result).toBeNull();
+    });
+
+    it("refuses plaintext http even for a public host (F5: https-only)", async () => {
+      // A cleartext actor document means a network attacker chooses the public
+      // key we then trust for signature verification.
+      const result = await RemoteFetchService.fetchActor(
+        "http://mastodon.social/users/alice",
+        mockEnv,
+        getLogger(),
+        { resolver: publicResolver, transport: forbidden },
+      );
+      expect(result).toBeNull();
+    });
+
+    it("refuses a public NAME whose DNS answer is internal", async () => {
+      const result = await RemoteFetchService.fetchActor(
+        "https://cdn.attacker.example/users/x",
+        mockEnv,
+        getLogger(),
+        {
+          resolver: async () => ["169.254.169.254"],
+          transport: forbidden,
+        },
+      );
+      expect(result).toBeNull();
+    });
+
+    it("refuses a redirect from a public host into internal space", async () => {
+      let hops = 0;
+      const redirecting: Transport = async (req) => {
+        hops++;
+        if (hops === 1) {
+          async function* empty(): AsyncIterable<Uint8Array> {}
+          return {
+            status: 302,
+            headers: { location: "http://169.254.169.254/latest/meta-data/" },
+            body: empty(),
+          };
+        }
+        throw new Error("followed redirect into internal space");
+      };
+
+      const result = await RemoteFetchService.fetchActor(
+        "https://mastodon.social/users/alice",
+        mockEnv,
+        getLogger(),
+        { resolver: publicResolver, transport: redirecting },
+      );
+      expect(result).toBeNull();
+      expect(hops).toBe(1);
+    });
+
+    it("caps an oversized actor document before parsing it", async () => {
+      async function* flood(): AsyncIterable<Uint8Array> {
+        // 4 MiB, far past the 256 KiB document ceiling.
+        for (let i = 0; i < 16; i++) yield Buffer.alloc(256 * 1024, 0x41);
+      }
+      const bigTransport: Transport = async () => ({
+        status: 200,
+        headers: {},
+        body: flood(),
+      });
+
+      const result = await RemoteFetchService.fetchActor(
+        "https://mastodon.social/users/alice",
+        mockEnv,
+        getLogger(),
+        { resolver: publicResolver, transport: bigTransport },
+      );
+      expect(result).toBeNull();
+    });
+
+    it("refuses object dereferencing into internal space too", async () => {
+      const result = await RemoteFetchService.fetchObject(
+        "https://169.254.169.254/objects/1",
+        mockEnv,
+        getLogger(),
+        { resolver: publicResolver, transport: forbidden },
+      );
+      expect(result).toBeNull();
+    });
+  });
+
+  describe("cache is bounded by bytes, not entry count", () => {
+    it("keeps the cache under its byte ceiling as documents accumulate", async () => {
+      const { isRemoteUri } = await import(
+        "../../../src/lib/activitypub/standalone-mode.js"
+      );
+      vi.mocked(isRemoteUri).mockReturnValue(true);
+
+      // ~128 KiB per actor; 200 of them would be ~25 MiB under the old
+      // count-only cap of 1000 entries.
+      const padding = "x".repeat(128 * 1024);
+      for (let i = 0; i < 200; i++) {
+        const uri = `https://mastodon.social/users/u${i}`;
+        (global.fetch as any).mockResolvedValue({
+          ok: true,
+          json: async () => ({
+            id: uri,
+            type: "Person",
+            inbox: `${uri}/inbox`,
+            summary: padding,
+          }),
+        });
+        await RemoteFetchService.fetchActor(uri, mockEnv, getLogger());
+      }
+
+      expect(RemoteFetchService.getCacheBytes()).toBeLessThanOrEqual(
+        8 * 1024 * 1024,
+      );
+      expect(RemoteFetchService.getCacheBytes()).toBeGreaterThan(0);
+    });
+
+    it("resets the byte total on clearCache", () => {
+      RemoteFetchService.clearCache();
+      expect(RemoteFetchService.getCacheBytes()).toBe(0);
     });
   });
 });

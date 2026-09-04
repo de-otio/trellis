@@ -44,6 +44,16 @@ vi.mock("../../src/lib/data-router", () => ({
   },
 }));
 
+// Mock the shared read authorizer (H3), default ALLOW. Whether its predicate is
+// CORRECT is decided against real Postgres in
+// test/integration/post-attachment-read-authz.integration.test.ts.
+const mockCanReadPost = vi.fn();
+vi.mock("../../src/lib/post-read-authorizer", () => ({
+  canReadPost: (...args: any[]) => mockCanReadPost(...args),
+}));
+
+const TENANT = "tenant-123";
+
 describe("ReactionHandler - getPostSentimentUsers", () => {
   let handler: ReactionHandler;
   let mockEnv: any;
@@ -54,6 +64,7 @@ describe("ReactionHandler - getPostSentimentUsers", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     handler = new ReactionHandler();
+    mockCanReadPost.mockResolvedValue(true);
 
     mockDb = {
       $queryRaw: vi.fn(),
@@ -177,6 +188,7 @@ describe("ReactionHandler - getPostSentimentUsers", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(200);
@@ -209,6 +221,7 @@ describe("ReactionHandler - getPostSentimentUsers", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(200);
@@ -229,12 +242,44 @@ describe("ReactionHandler - getPostSentimentUsers", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(404);
       const data = await response.json();
       expect(data.type).toBe("https://api.example.com/errors/not-found");
       expect(data.title).toBe("Post Not Found");
+    });
+
+    // H3: this endpoint discloses WHO reacted — identities — and previously
+    // applied no tenant and no audience predicate at all (and required no
+    // session), so the reader list of a WHISPER post was public to anyone
+    // holding the id.
+    it("refuses, identically to not-found, when the viewer may not read the post", async () => {
+      mockCanReadPost.mockResolvedValue(false);
+      mockDb.$queryRaw.mockResolvedValue([
+        { sentiment: "joy", totalCount: 1, userId: "leaked-user", handle: "leaked" },
+      ]);
+
+      const refused = await handler.getPostSentimentUsers(
+        "post-123",
+        null,
+        20,
+        null,
+        mockSession,
+        mockEnv,
+        mockRequestContext,
+        TENANT,
+      );
+
+      expect(refused.status).toBe(404);
+      const body = await refused.text();
+      expect(refused.headers.get("content-type")).toBe(
+        "application/problem+json",
+      );
+      // No identity crosses the boundary, and the query never ran.
+      expect(body).not.toContain("leaked-user");
+      expect(mockDb.$queryRaw).not.toHaveBeenCalled();
     });
 
     it("should include cache headers", async () => {
@@ -248,6 +293,7 @@ describe("ReactionHandler - getPostSentimentUsers", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.headers.get("cache-control")).toBe(
@@ -292,6 +338,7 @@ describe("ReactionHandler - getPostSentimentUsers", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(200);
@@ -339,6 +386,7 @@ describe("ReactionHandler - getPostSentimentUsers", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(200);
@@ -399,6 +447,7 @@ describe("ReactionHandler - getPostSentimentUsers", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(200);
@@ -424,6 +473,7 @@ describe("ReactionHandler - getPostSentimentUsers", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(404);
@@ -444,6 +494,7 @@ describe("ReactionHandler - getPostSentimentUsers", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(500);

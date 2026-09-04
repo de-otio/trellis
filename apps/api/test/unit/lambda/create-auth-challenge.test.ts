@@ -43,6 +43,11 @@ describe("CreateAuthChallenge Lambda", () => {
     process.env.DYNAMODB_TABLE = "test-table";
     process.env.DOMAIN = "trellis.test";
     delete process.env.RECAPTCHA_SECRET_KEY;
+    // These are read once at module scope (like DOMAIN above) — clear them so
+    // an earlier test/suite's env doesn't leak into a case that expects the
+    // unset-var defaults.
+    delete process.env.FROM_EMAIL;
+    delete process.env.EMAIL_BRAND_NAME;
     // Default: rate limit check returns no existing item, DynamoDB writes succeed, SES succeeds
     mockDynamoSend.mockResolvedValue({});
     mockSesSend.mockResolvedValue({});
@@ -158,20 +163,24 @@ describe("CreateAuthChallenge Lambda", () => {
     await expect(handler(event)).rejects.toThrow("RATE_LIMIT_EXCEEDED");
   });
 
-  it("should proceed even if rate limit check fails (non-rate-limit DynamoDB error)", async () => {
-    // First call (rate limit GET) fails with a transient error
+  it("[F2] FAILS CLOSED when the rate-limit check errors (limiter outage lifts no limit)", async () => {
+    // The rate-limit GET fails with a transient/backend error (e.g. a DynamoDB
+    // outage or throttle). Previously the handler logged and PROCEEDED with
+    // token generation — a DynamoDB outage silently lifted the per-email limit,
+    // opening an email-flooding path. It must now FAIL CLOSED: abort challenge
+    // creation rather than send an unmetered magic link.
+    mockDynamoSend.mockReset();
     mockDynamoSend.mockRejectedValueOnce(new Error("DynamoDB transient error"));
-    // Subsequent calls succeed
     mockDynamoSend.mockResolvedValue({});
     mockSesSend.mockResolvedValue({});
 
     const handler = await loadHandler();
     const event = makeEvent();
 
-    const result = await handler(event);
-    // Should still succeed — transient rate limit errors are swallowed
-    expect(result.response.privateChallengeParameters.token).toBeDefined();
-    expect(result.response.challengeMetadata).toBe("MAGIC_LINK");
+    await expect(handler(event)).rejects.toThrow("DynamoDB transient error");
+    // Fail closed: no token stored (only the failed rate GET was attempted),
+    // and no email sent.
+    expect(mockSesSend).not.toHaveBeenCalled();
   });
 
   it("should throw when DynamoDB PutItem for token storage fails", async () => {
@@ -195,6 +204,41 @@ describe("CreateAuthChallenge Lambda", () => {
     const event = makeEvent();
 
     await expect(handler(event)).rejects.toThrow("SES failure");
+  });
+
+  it("[cutover fix] uses FROM_EMAIL as the sender when set (validated TEM domain, not noreply@DOMAIN)", async () => {
+    process.env.FROM_EMAIL = "noreply@mail.dev.skybber.com";
+
+    const handler = await loadHandler();
+    await handler(makeEvent());
+
+    const sesInput = mockSesSend.mock.calls[0][0].input;
+    // The Cognito flow sends through the SAME email-provider abstraction, so
+    // at the Scaleway TEM cutover this From must be the validated sending
+    // domain (FROM_EMAIL) — never the unvalidated `noreply@${DOMAIN}` guess,
+    // which TEM rejects outright.
+    expect(sesInput.Source).toBe("Trellis <noreply@mail.dev.skybber.com>");
+  });
+
+  it("[cutover fix] falls back to noreply@DOMAIN unchanged when FROM_EMAIL is unset", async () => {
+    const handler = await loadHandler();
+    await handler(makeEvent());
+
+    const sesInput = mockSesSend.mock.calls[0][0].input;
+    expect(sesInput.Source).toBe("Trellis <noreply@trellis.test>");
+  });
+
+  it("[branding] honors EMAIL_BRAND_NAME in the From display name and subject", async () => {
+    process.env.FROM_EMAIL = "noreply@mail.dev.skybber.com";
+    process.env.EMAIL_BRAND_NAME = "Skybber";
+
+    const handler = await loadHandler();
+    await handler(makeEvent());
+
+    const sesInput = mockSesSend.mock.calls[0][0].input;
+    expect(sesInput.Source).toBe("Skybber <noreply@mail.dev.skybber.com>");
+    expect(sesInput.Message.Subject.Data).toBe("Sign in to Skybber");
+    expect(sesInput.Message.Body.Html.Data).toContain("Sign in to Skybber");
   });
 
   it("should be idempotent — duplicate invocation generates a new token", async () => {

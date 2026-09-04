@@ -1,144 +1,100 @@
 /**
- * Fedify HTTP Signatures Integration
+ * Inbox HTTP-signature entry point.
  *
- * Uses Fedify's actor dispatcher for key management and implements HTTP signature
- * signing and verification directly using crypto, without relying on old services.
+ * This module used to carry a SECOND, weaker signature verifier. For a remote
+ * keyId it parsed `/users/{username}` out of the URL and did
+ * `db.user.findUnique({ where: { username } })` — a LOCAL user — then verified
+ * the remote signature against that local user's public key
+ * (`dispatchers/user-actor.ts` `getKeyPair`). Two consequences, both bad:
+ * legitimate remote federation could never verify, and a remote keyId whose
+ * final path segment collided with a local username was verified against our
+ * own key material. It also authenticated no body and bounded no date.
+ *
+ * That path is DELETED. Everything now goes through the single spec-compliant
+ * `HttpSignatureService.verifyRequest`, which fetches the remote actor
+ * document over TLS through the SSRF-safe fetcher, asserts
+ * `publicKey.id === keyId`, requires the signature to cover
+ * `(request-target)`, `host`, `date` and `digest`, verifies the digest against
+ * the raw body in constant time, and bounds `date` to ±5 minutes.
+ *
+ * `verifyHttpSignature` is kept as a boolean-returning shim for call sites
+ * that only need the yes/no. Anything that goes on to trust `activity.actor`
+ * must instead use `verifyInboxRequest`, which returns the authenticated key
+ * owner so the actor binding can be enforced.
  */
 
-import * as crypto from "crypto";
 import type { Env } from "../../../env.js";
-import { getLogger, Logger } from "../../logger.js";
-import { UserActorDispatcher } from "../dispatchers/user-actor.js";
+import { getLogger } from "../../logger.js";
+import {
+  HttpSignatureService,
+  InMemoryNonceStore,
+  type NonceStore,
+  type SignatureVerificationResult,
+  type VerifyOptions,
+} from "../http-signatures.js";
 
 /**
- * Verify HTTP signature using Fedify actor dispatcher
+ * Process-wide replay suppression for the inbox.
  *
- * Uses the UserActorDispatcher to get key pairs and verifies signatures directly.
+ * Single-replica scope, like any in-memory store. A multi-replica deployment
+ * should inject a shared store via `verifyInboxRequest`'s options; the ±5-min
+ * skew window remains the backstop either way.
+ */
+const inboxNonceStore: NonceStore = new InMemoryNonceStore();
+
+/**
+ * Verify an inbound inbox request and return the authenticated identity.
+ *
+ * On success the result carries `owner` (the actor URI that owns the signing
+ * key) and `body` (the exact bytes the digest authenticated). Callers must
+ * parse THAT body — not re-read the request — and must pass `owner` to
+ * `assertActorBinding` before trusting `activity.actor`.
  *
  * @param request - Incoming request
- * @param env - Cloudflare Workers environment
+ * @param env - Environment
+ * @param options - Overrides (tests, or a shared nonce store)
+ * @returns Verification result
+ */
+export async function verifyInboxRequest(
+  request: Request,
+  env: Env,
+  options: VerifyOptions = {},
+): Promise<SignatureVerificationResult> {
+  return HttpSignatureService.verifyRequest(request, env as any, {
+    nonceStore: inboxNonceStore,
+    ...options,
+  });
+}
+
+/**
+ * Boolean-only wrapper, for call sites that do not need the identity.
+ *
+ * Prefer {@link verifyInboxRequest}: a bare boolean is what allowed the
+ * original spoofing bug, because "the signature verified" was silently treated
+ * as "the body's claimed actor is genuine".
+ *
+ * @param request - Incoming request
+ * @param env - Environment
  * @returns True if signature is valid, false otherwise
  */
 export async function verifyHttpSignature(
   request: Request,
   env: Env,
 ): Promise<boolean> {
-  const logger = getLogger();
-
-  try {
-    // Check if Signature header exists
-    const signatureHeader = request.headers.get("Signature");
-    if (!signatureHeader) {
-      logger.warn("[Fedify HTTP Signatures] Missing Signature header");
-      return false;
-    }
-
-    // Parse signature parameters
-    const signatureParams: Record<string, string> = {};
-    signatureHeader.split(",").forEach((param) => {
-      const trimmed = param.trim();
-      const equalIndex = trimmed.indexOf("=");
-      if (equalIndex === -1) return;
-      const key = trimmed.substring(0, equalIndex).trim();
-      const value = trimmed
-        .substring(equalIndex + 1)
-        .trim()
-        .replace(/^"|"$/g, "");
-      signatureParams[key] = value;
-    });
-
-    const keyId = signatureParams.keyId;
-    const algorithm = signatureParams.algorithm;
-    const headers = signatureParams.headers;
-    const signature = signatureParams.signature;
-
-    if (!keyId || !algorithm || !headers || !signature) {
-      logger.warn(
-        "[Fedify HTTP Signatures] Missing required signature parameters",
-      );
-      return false;
-    }
-
-    // Validate algorithm
-    if (algorithm !== "rsa-sha256") {
-      logger.warn("[Fedify HTTP Signatures] Unsupported algorithm", {
-        algorithm,
-      });
-      return false;
-    }
-
-    // Extract actor URI from keyId
-    // Format: https://example.com/users/{username}#main-key
-    const keyIdUrl = new URL(keyId);
-    const actorUri = keyIdUrl.origin + keyIdUrl.pathname.replace(/#.*$/, "");
-
-    // Get actor dispatcher
-    const dispatcher = new UserActorDispatcher(env);
-
-    // Get key pair for actor
-    const keyPair = await dispatcher.getKeyPair(actorUri);
-    if (!keyPair) {
-      logger.warn("[Fedify HTTP Signatures] Key pair not found", { actorUri });
-      return false;
-    }
-
-    // Reconstruct signature string
-    const headerList = headers.split(" ");
-    const signatureParts: string[] = [];
-
-    for (const headerName of headerList) {
-      if (headerName === "(request-target)") {
-        const url = new URL(request.url);
-        signatureParts.push(
-          `(request-target): ${request.method.toLowerCase()} ${url.pathname}`,
-        );
-      } else {
-        const value = request.headers.get(headerName.toLowerCase());
-        if (!value) {
-          logger.warn("[Fedify HTTP Signatures] Missing required header", {
-            headerName,
-          });
-          return false;
-        }
-        signatureParts.push(`${headerName.toLowerCase()}: ${value}`);
-      }
-    }
-
-    const signatureString = signatureParts.join("\n");
-
-    // Verify signature
-    // Note: keyPair.publicKey is a string (PEM format) from our ActorKeyPair implementation
-    const verify = crypto.createVerify("RSA-SHA256");
-    verify.update(signatureString);
-    const isValid = verify.verify(
-      (keyPair as any).publicKey,
-      signature,
-      "base64",
-    );
-
-    if (!isValid) {
-      logger.warn("[Fedify HTTP Signatures] Signature verification failed", {
-        keyId,
-      });
-    }
-
-    return isValid;
-  } catch (error) {
-    logger.error("[Fedify HTTP Signatures] Error verifying signature", {
-      error: (error as Error).message,
-    });
-    return false;
-  }
+  const result = await verifyInboxRequest(request, env);
+  return result.valid;
 }
 
 /**
- * Sign outgoing request using Fedify actor dispatcher
+ * Sign an outgoing request with a local actor's key.
  *
- * Uses the UserActorDispatcher to get key pairs and signs requests directly.
+ * Delegates to the shared signer so outbound requests cover the same header
+ * set inbound requests are required to cover (`digest` included when there is
+ * a body) — we hold ourselves to the bar we hold peers to.
  *
  * @param request - Outgoing request
- * @param env - Cloudflare Workers environment
- * @param actorUri - Actor URI for signing
+ * @param env - Environment
+ * @param actorUri - Local actor URI to sign as
  * @returns Request with signature headers
  */
 export async function signRequest(
@@ -149,56 +105,37 @@ export async function signRequest(
   const logger = getLogger();
 
   try {
-    // Get actor dispatcher
+    const { UserActorDispatcher } = await import("../dispatchers/user-actor.js");
     const dispatcher = new UserActorDispatcher(env);
 
-    // Get key pair for actor
+    // Signing is the one legitimate use of the LOCAL key lookup: we are
+    // proving our own identity, not checking someone else's.
     const keyPair = await dispatcher.getKeyPair(actorUri);
     if (!keyPair) {
-      logger.warn("[Fedify HTTP Signatures] Key pair not found for signing", {
+      logger.warn("[HTTP Signatures] Key pair not found for signing", {
         actorUri,
       });
       return request; // Return original request if no key
     }
 
-    const keyId = `${actorUri}#main-key`;
-    const date = new Date().toUTCString();
-    const url = new URL(request.url);
+    const body = request.body
+      ? Buffer.from(await request.clone().arrayBuffer())
+      : undefined;
 
-    // Create signature string
-    const signatureString = [
-      `(request-target): ${request.method.toLowerCase()} ${url.pathname}`,
-      `host: ${url.host}`,
-      `date: ${date}`,
-    ].join("\n");
-
-    // Sign with private key
-    // Note: keyPair.privateKey is a string (PEM format) from our ActorKeyPair implementation
-    const sign = crypto.createSign("RSA-SHA256");
-    sign.update(signatureString);
-    sign.end();
-    const signatureValue = sign.sign((keyPair as any).privateKey, "base64");
-
-    // Create Signature header
-    const signatureHeader = [
-      `keyId="${keyId}"`,
-      'algorithm="rsa-sha256"',
-      'headers="(request-target) host date"',
-      `signature="${signatureValue}"`,
-    ].join(",");
-
-    // Clone request to add headers
-    const headers = new Headers(request.headers);
-    headers.set("Signature", signatureHeader);
-    headers.set("Date", date);
+    const headers = HttpSignatureService.addSignatureHeaders(
+      request,
+      (keyPair as any).privateKey,
+      `${actorUri}#main-key`,
+      body && body.length > 0 ? body : undefined,
+    );
 
     return new Request(request.url, {
       method: request.method,
       headers,
-      body: request.body,
+      body: body && body.length > 0 ? body : undefined,
     });
   } catch (error) {
-    logger.error("[Fedify HTTP Signatures] Error signing request", {
+    logger.error("[HTTP Signatures] Error signing request", {
       error: (error as Error).message,
       actorUri,
     });

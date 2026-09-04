@@ -1,4 +1,18 @@
+/**
+ * ClaimsCache behavior-comparison suite (WS-1 §3.6, §6.1.4).
+ *
+ * The pre-port ClaimsCache asserted DynamoDB command SHAPES. Post-port, the
+ * write path changed from a conditional PutItem to `putIfFresher` and the reads
+ * to `KvStore.get` — so this suite asserts OUTCOME EQUIVALENCE (best-practice
+ * split), not command identity: every observable result the DynamoDB-backed
+ * cache produced (fresh hit / stale miss / missing-ttl miss / empty-field fill /
+ * tenant-preference-past-ttl / monotonic-freshness swallow / transient rethrow)
+ * is reproduced against a `MemoryKvStore`. The frozen clock drives both the
+ * cache's `Date.now` (via fake timers) and the store's injected clock.
+ */
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { MemoryKvStore, type KvStore } from "@de-otio/saas-foundation/kv";
 import {
   ClaimsCache,
   DEFAULT_CACHE_TTL_SECONDS,
@@ -14,10 +28,9 @@ const sampleClaims: CachedClaims = {
   handle: "alice",
 };
 
-function makeCache() {
-  const send = vi.fn();
-  const cache = new ClaimsCache({ send } as any, "test-table");
-  return { cache, send };
+function makeCache(): { cache: ClaimsCache; store: MemoryKvStore } {
+  const store = new MemoryKvStore({ now: () => Date.now() });
+  return { cache: new ClaimsCache(store), store };
 }
 
 beforeEach(() => {
@@ -30,82 +43,33 @@ afterEach(() => {
 });
 
 describe("ClaimsCache.get", () => {
-  it("returns null when DDB has no item", async () => {
-    const { cache, send } = makeCache();
-    send.mockResolvedValueOnce({ Item: undefined });
-    const result = await cache.get("sub-1");
-    expect(result).toBeNull();
-    expect(send).toHaveBeenCalledTimes(1);
-    const cmd = send.mock.calls[0][0];
-    expect(cmd.input.TableName).toBe("test-table");
-    expect(cmd.input.Key.pk.S).toBe("claims:sub-1");
-    expect(cmd.input.Key.sk.S).toBe("meta");
-  });
-
-  it("returns cached claims when ttl is in the future", async () => {
-    const futureTtl = Math.floor(Date.now() / 1000) + 1800;
-    const { cache, send } = makeCache();
-    send.mockResolvedValueOnce({
-      Item: {
-        pk: { S: "claims:sub-1" },
-        sk: { S: "meta" },
-        userId: { S: "u_clxxx" },
-        globalRole: { S: "B2B_PARTNER" },
-        activeTenantId: { S: "t_clyyy" },
-        tenantSlug: { S: "acme" },
-        tenantRole: { S: "ADMIN" },
-        handle: { S: "alice" },
-        ttl: { N: String(futureTtl) },
-      },
-    });
-    expect(await cache.get("sub-1")).toEqual(sampleClaims);
-  });
-
-  it("returns null when ttl is in the past (stale entry)", async () => {
-    const pastTtl = Math.floor(Date.now() / 1000) - 100;
-    const { cache, send } = makeCache();
-    send.mockResolvedValueOnce({
-      Item: {
-        pk: { S: "claims:sub-1" },
-        sk: { S: "meta" },
-        userId: { S: "u_old" },
-        globalRole: { S: "B2B_PARTNER" },
-        activeTenantId: { S: "t_old" },
-        tenantSlug: { S: "old" },
-        tenantRole: { S: "MEMBER" },
-        handle: { S: "old" },
-        ttl: { N: String(pastTtl) },
-      },
-    });
+  it("returns null on a cache miss", async () => {
+    const { cache } = makeCache();
     expect(await cache.get("sub-1")).toBeNull();
   });
 
-  it("returns null when ttl is missing from the item", async () => {
-    const { cache, send } = makeCache();
-    send.mockResolvedValueOnce({
-      Item: {
-        pk: { S: "claims:sub-1" },
-        sk: { S: "meta" },
-        userId: { S: "u_clxxx" },
-      },
-    });
+  it("returns cached claims when the entry is fresh (ttl in the future)", async () => {
+    const { cache } = makeCache();
+    await cache.put("sub-1", sampleClaims, 1800);
+    expect(await cache.get("sub-1")).toEqual(sampleClaims);
+  });
+
+  it("returns null once the entry's ttl is in the past (stale entry)", async () => {
+    const { cache } = makeCache();
+    await cache.put("sub-1", sampleClaims, 100);
+    vi.advanceTimersByTime(101_000);
     expect(await cache.get("sub-1")).toBeNull();
   });
 
   it("fills missing string fields with empty strings", async () => {
-    const futureTtl = Math.floor(Date.now() / 1000) + 1800;
-    const { cache, send } = makeCache();
-    send.mockResolvedValueOnce({
-      Item: {
-        pk: { S: "claims:sub-1" },
-        sk: { S: "meta" },
-        userId: { S: "u_clxxx" },
-        globalRole: { S: "END_USER" },
-        ttl: { N: String(futureTtl) },
-      },
-    });
-    const result = await cache.get("sub-1");
-    expect(result).toEqual({
+    const { cache, store } = makeCache();
+    // A partial record written directly (drift sentinel shape).
+    await store.putIfFresher(
+      "sub-1",
+      { userId: "u_clxxx", globalRole: "END_USER" },
+      { expiresAt: Math.floor(Date.now() / 1000) + 1800 },
+    );
+    expect(await cache.get("sub-1")).toEqual({
       userId: "u_clxxx",
       globalRole: "END_USER",
       activeTenantId: "",
@@ -117,116 +81,97 @@ describe("ClaimsCache.get", () => {
 });
 
 describe("ClaimsCache.put", () => {
-  it("writes the claims with the default TTL when none specified", async () => {
-    const { cache, send } = makeCache();
-    send.mockResolvedValueOnce({});
+  it("writes with the default TTL when none specified (fresh for ~3600s)", async () => {
+    const { cache } = makeCache();
     await cache.put("sub-1", sampleClaims);
-    expect(send).toHaveBeenCalledTimes(1);
-    const cmd = send.mock.calls[0][0];
-    const expectedTtl = Math.floor(Date.now() / 1000) + DEFAULT_CACHE_TTL_SECONDS;
-    expect(parseInt(cmd.input.Item.ttl.N, 10)).toBe(expectedTtl);
-    expect(cmd.input.ConditionExpression).toContain("ttl");
+    expect(await cache.get("sub-1")).toEqual(sampleClaims);
+    // Just before the default TTL elapses it is still a hit...
+    vi.advanceTimersByTime((DEFAULT_CACHE_TTL_SECONDS - 1) * 1000);
+    expect(await cache.get("sub-1")).toEqual(sampleClaims);
+    // ...and just after, a miss.
+    vi.advanceTimersByTime(2_000);
+    expect(await cache.get("sub-1")).toBeNull();
   });
 
   it("uses the provided TTL when given", async () => {
-    const { cache, send } = makeCache();
-    send.mockResolvedValueOnce({});
+    const { cache } = makeCache();
     await cache.put("sub-1", sampleClaims, 60);
-    const cmd = send.mock.calls[0][0];
-    const expectedTtl = Math.floor(Date.now() / 1000) + 60;
-    expect(parseInt(cmd.input.Item.ttl.N, 10)).toBe(expectedTtl);
-  });
-
-  it("swallows ConditionalCheckFailedException (stale-overwrite protection)", async () => {
-    const { cache, send } = makeCache();
-    const condErr = new Error("conditional check failed");
-    condErr.name = "ConditionalCheckFailedException";
-    send.mockRejectedValueOnce(condErr);
-    await expect(cache.put("sub-1", sampleClaims)).resolves.toBeUndefined();
-  });
-
-  it("rethrows non-conditional errors", async () => {
-    const { cache, send } = makeCache();
-    send.mockRejectedValueOnce(new Error("network down"));
-    await expect(cache.put("sub-1", sampleClaims)).rejects.toThrow("network down");
+    vi.advanceTimersByTime(61_000);
+    expect(await cache.get("sub-1")).toBeNull();
   });
 
   it("round-trips: put then get returns the same claims", async () => {
-    const { cache, send } = makeCache();
-    let storedItem: any = null;
-    send.mockImplementation(async (cmd: any) => {
-      const ctorName = cmd.constructor.name;
-      if (ctorName === "PutItemCommand") {
-        storedItem = cmd.input.Item;
-        return {};
-      }
-      if (ctorName === "GetItemCommand") {
-        return { Item: storedItem };
-      }
-      return {};
-    });
+    const { cache } = makeCache();
     await cache.put("sub-1", sampleClaims, 600);
-    const result = await cache.get("sub-1");
-    expect(result).toEqual(sampleClaims);
+    expect(await cache.get("sub-1")).toEqual(sampleClaims);
+  });
+
+  it("swallows a not-fresher (stale) write without throwing — monotonic freshness (F2)", async () => {
+    const { cache } = makeCache();
+    // Fresh write with a long TTL.
+    await cache.put("sub-1", sampleClaims, 3600);
+    // A concurrent write that resolves to an OLDER expiry must not overwrite,
+    // and must not throw (best-effort cache).
+    const stale: CachedClaims = { ...sampleClaims, tenantRole: "MEMBER" };
+    await expect(cache.put("sub-1", stale, 60)).resolves.toBeUndefined();
+    // The fresher entry survives.
+    expect((await cache.get("sub-1"))?.tenantRole).toBe("ADMIN");
+  });
+
+  it("tenant-removal regression: a stale higher-privilege write cannot win after a fresher invalidating write (F2)", async () => {
+    const { cache } = makeCache();
+    // The invalidating write already landed with a NEWER expiry (viewer claim).
+    await cache.put("sub-1", { ...sampleClaims, tenantRole: "MEMBER" }, 3600);
+    // A stale higher-privilege claim the caller is mid-writing, shorter expiry.
+    await cache.put("sub-1", { ...sampleClaims, tenantRole: "OWNER" }, 60);
+    expect((await cache.get("sub-1"))?.tenantRole).toBe("MEMBER");
+  });
+
+  it("propagates transient backend errors (matches the pre-port non-conditional rethrow)", async () => {
+    const throwingStore: KvStore = {
+      ...new MemoryKvStore({ now: () => Date.now() }),
+      putIfFresher: () => Promise.reject(new Error("network down")),
+    } as unknown as KvStore;
+    const cache = new ClaimsCache(throwingStore);
+    await expect(cache.put("sub-1", sampleClaims)).rejects.toThrow("network down");
   });
 });
 
 describe("ClaimsCache.getActiveTenantPreference", () => {
-  it("returns null when DDB has no item", async () => {
-    const { cache, send } = makeCache();
-    send.mockResolvedValueOnce({ Item: undefined });
+  it("returns null on a cache miss", async () => {
+    const { cache } = makeCache();
     expect(await cache.getActiveTenantPreference("sub-1")).toBeNull();
   });
 
-  it("returns null when activeTenantId is missing", async () => {
-    const { cache, send } = makeCache();
-    send.mockResolvedValueOnce({
-      Item: {
-        pk: { S: "claims:sub-1" },
-        sk: { S: "meta" },
-      },
-    });
+  it("returns null when activeTenantId is empty/missing", async () => {
+    const { cache } = makeCache();
+    await cache.put("sub-1", { ...sampleClaims, activeTenantId: "" }, 1800);
     expect(await cache.getActiveTenantPreference("sub-1")).toBeNull();
   });
 
-  it("returns the activeTenantId even when ttl is in the past", async () => {
-    const pastTtl = Math.floor(Date.now() / 1000) - 100;
-    const { cache, send } = makeCache();
-    send.mockResolvedValueOnce({
-      Item: {
-        pk: { S: "claims:sub-1" },
-        sk: { S: "meta" },
-        activeTenantId: { S: "t_chosen" },
-        ttl: { N: String(pastTtl) },
-      },
-    });
+  it("returns the activeTenantId even when the ttl is in the past (includeExpired read)", async () => {
+    const { cache } = makeCache();
+    await cache.put("sub-1", { ...sampleClaims, activeTenantId: "t_chosen" }, 100);
+    vi.advanceTimersByTime(101_000);
+    // get() is now a miss, but the preference survives past TTL.
+    expect(await cache.get("sub-1")).toBeNull();
     expect(await cache.getActiveTenantPreference("sub-1")).toBe("t_chosen");
   });
 
   it("returns the activeTenantId for a fresh entry", async () => {
-    const futureTtl = Math.floor(Date.now() / 1000) + 1800;
-    const { cache, send } = makeCache();
-    send.mockResolvedValueOnce({
-      Item: {
-        pk: { S: "claims:sub-1" },
-        sk: { S: "meta" },
-        activeTenantId: { S: "t_chosen" },
-        ttl: { N: String(futureTtl) },
-      },
-    });
+    const { cache } = makeCache();
+    await cache.put("sub-1", { ...sampleClaims, activeTenantId: "t_chosen" }, 1800);
     expect(await cache.getActiveTenantPreference("sub-1")).toBe("t_chosen");
   });
 });
 
 describe("ClaimsCache.invalidate", () => {
-  it("issues a DeleteItemCommand on the right key", async () => {
-    const { cache, send } = makeCache();
-    send.mockResolvedValueOnce({});
+  it("removes the entry so the next get is a miss", async () => {
+    const { cache } = makeCache();
+    await cache.put("sub-1", sampleClaims, 1800);
     await cache.invalidate("sub-1");
-    expect(send).toHaveBeenCalledTimes(1);
-    const cmd = send.mock.calls[0][0];
-    expect(cmd.constructor.name).toBe("DeleteItemCommand");
-    expect(cmd.input.Key.pk.S).toBe("claims:sub-1");
-    expect(cmd.input.Key.sk.S).toBe("meta");
+    expect(await cache.get("sub-1")).toBeNull();
+    // And the preference is gone too (row deleted, not just expired).
+    expect(await cache.getActiveTenantPreference("sub-1")).toBeNull();
   });
 });

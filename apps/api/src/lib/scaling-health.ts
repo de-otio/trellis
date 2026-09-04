@@ -93,7 +93,20 @@ export interface ScalingPhaseStatus {
 export interface ScalingHealthResult {
   currentPhase: number;
   phaseName: string;
-  overallStatus: "healthy" | "attention" | "action-needed";
+  /**
+   * `"unknown"` when a data source failed. "healthy" is derived from the
+   * ABSENCE of red/yellow indicators, so a fetch failure — which removes the
+   * indicators entirely rather than making them red — used to read as health.
+   */
+  overallStatus: "unknown" | "healthy" | "attention" | "action-needed";
+  /**
+   * Which sources answered. When `degraded`, the indicator list is missing
+   * entries rather than reporting them as fine.
+   */
+  dataQuality: {
+    degraded: boolean;
+    unavailable: string[];
+  };
   indicators: ScalingIndicator[];
   phases: ScalingPhaseStatus[];
   recommendations: string[];
@@ -115,6 +128,12 @@ interface CloudWatchMetrics {
   rdsCpuPercent: number | null;
   rdsConnectionCount: number | null;
   rdsFreeMemoryBytes: number | null;
+  /**
+   * False when the fetch threw. Distinguishes "CloudWatch returned no
+   * datapoint for this metric" from "we never got to ask" — both leave the
+   * fields null, and only the second means the board is blind.
+   */
+  available: boolean;
 }
 
 async function getCloudWatchMetrics(
@@ -126,6 +145,7 @@ async function getCloudWatchMetrics(
     rdsCpuPercent: null,
     rdsConnectionCount: null,
     rdsFreeMemoryBytes: null,
+    available: true,
   };
 
   try {
@@ -207,6 +227,7 @@ async function getCloudWatchMetrics(
     logger.warn("[ScalingHealth] Failed to fetch CloudWatch metrics", {
       error: error?.message,
     });
+    result.available = false;
   }
 
   return result;
@@ -438,16 +459,32 @@ export async function evaluateScalingHealth(
     phases[0].status = "done";
   }
 
-  // Overall status
+  // Overall status. "healthy" is the ABSENCE of red/yellow, and a failed fetch
+  // produces that absence by removing the RDS indicators altogether — so
+  // without this check a blind board is indistinguishable from a healthy one.
+  // A surviving indicator that IS red or yellow still wins: degraded is a
+  // floor, not a ceiling.
+  const degraded = !cwMetrics.available;
+  const unavailable = degraded ? ["cloudwatch-rds"] : [];
   const hasRed = indicators.some((i) => i.status === "red");
   const hasYellow = indicators.some((i) => i.status === "yellow");
-  const overallStatus = hasRed
+  const overallStatus: ScalingHealthResult["overallStatus"] = hasRed
     ? "action-needed"
     : hasYellow
       ? "attention"
-      : "healthy";
+      : degraded
+        ? "unknown"
+        : "healthy";
 
-  if (recommendations.length === 0) {
+  if (degraded) {
+    // Precedes and suppresses the all-clear: with RDS metrics missing there is
+    // no basis for "all indicators are healthy" — three of them are absent.
+    recommendations.push(
+      "Scaling health is INCOMPLETE — RDS CPU, connection-count and free-memory " +
+        "metrics are unavailable, so those indicators are missing rather than green. " +
+        "Treat the phase assessment below as provisional.",
+    );
+  } else if (recommendations.length === 0) {
     recommendations.push("All scaling indicators are healthy. No action needed.");
   }
 
@@ -455,6 +492,7 @@ export async function evaluateScalingHealth(
     currentPhase,
     phaseName: SCALING_PHASES[currentPhase]?.name || "Unknown",
     overallStatus,
+    dataQuality: { degraded, unavailable },
     indicators,
     phases,
     recommendations,

@@ -9,7 +9,21 @@
     "resolveJsonModule": true,
     "declaration": true,
     "declarationMap": true,
-    "sourceMap": true
+    "sourceMap": true,
+    // NO EMIT, and this is load-bearing.
+    //
+    // This config has no `outDir`, so any `tsc` invoked at the repo root used to
+    // write .js/.d.ts NEXT TO every source file, inside src/. Those siblings then
+    // SHADOW the .ts for module resolution: vitest and node resolve
+    // `./thing.js` to the stale compiled file, so local tests silently run
+    // yesterday's code and both pass and fail for the wrong reasons. They were
+    // also untracked-but-not-ignored, so they turned up in `git status` waiting to
+    // be swept into a commit.
+    //
+    // The real build is `tsc --build` inside apps/api, which has outDir: dist.
+    // This root config exists for editors and for whole-repo typechecking, so
+    // emitting was never its job.
+    "noEmit": true
   },
   "exclude": ["node_modules", "**/dist", "**/coverage"]
 }

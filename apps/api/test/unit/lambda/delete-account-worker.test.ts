@@ -25,8 +25,18 @@ vi.mock("@aws-sdk/client-s3", () => {
   };
 });
 
-vi.mock("@aws-lambda-powertools/parameters/secrets", () => ({
-  getSecret: mockGetSecret,
+// WS-2 §5.3: lambda-prisma resolves the DB secret via the foundation port now.
+vi.mock("@de-otio/saas-foundation/secrets", () => ({
+  resolveSecret: mockGetSecret,
+  secretRef: vi.fn((arn: string) => ({ arn })),
+  SecretCache: class {
+    get() {
+      return null;
+    }
+    set() {}
+    invalidate() {}
+    clear() {}
+  },
 }));
 
 vi.mock("@aws-sdk/client-cognito-identity-provider", () => {
@@ -49,6 +59,9 @@ vi.mock("@prisma/client", () => {
 
 vi.mock("../../../src/lib/services/user-data-deletion", () => ({
   deleteUserData: mockDeleteUserData,
+  // WS-2 T1: the entrypoint resolves the pseudonym secret and passes it into
+  // the worker core (findings 2+7).
+  resolvePseudonymSecret: vi.fn().mockResolvedValue("test-pseudonym-secret"),
 }));
 
 describe("DeleteAccountWorker Lambda", () => {
@@ -60,8 +73,13 @@ describe("DeleteAccountWorker Lambda", () => {
     process.env.DB_SECRET_ARN = "arn:aws:secretsmanager:us-east-1:123:secret:db";
     process.env.COGNITO_USER_POOL_ID = "us-east-1_TestPool";
 
-    // Default: getSecret returns DB credentials (json-transformed)
-    mockGetSecret.mockResolvedValue({ username: "test", password: "pass", host: "localhost", port: 5432, dbname: "testdb" });
+    // Default: the foundation resolver returns DB credentials (JSON bytes)
+    mockGetSecret.mockResolvedValue(
+      Buffer.from(
+        JSON.stringify({ username: "test", password: "pass", host: "localhost", port: 5432, dbname: "testdb" }),
+        "utf-8",
+      ),
+    );
 
     // Default: user exists
     mockPrismaFindUnique.mockResolvedValue({ email: "user@test.com" });

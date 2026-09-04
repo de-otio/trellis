@@ -105,6 +105,84 @@ Tag-triggered npm publish (Trusted Publishing / OIDC). Two flows:
 See the **Release Checklist** in [`CLAUDE.md`](../../../../CLAUDE.md) for the
 pre-tag gate (versions match, lint+tests pass on `main`, lockfile updated).
 
+### Node 22 (`ci.yml`) vs Node 24 (`publish.yml`) — why, and when to reconsider
+
+> **Scope note added 2026-08-23.** Everything in this section is about the **CI
+> and publish lanes**, and its recommendation still stands unchanged. It does
+> **not** cover the **runtime image**: `apps/api/Dockerfile` shipped on
+> `node:22-alpine` while two dependencies declared `engines.node >= 24`, which is
+> the one place those packages actually execute. That image moved to
+> `node:24-alpine` on 2026-08-23 — image only, with `ci.yml`, `.nvmrc`,
+> `engines.node` and the lockfile all deliberately untouched, per this section.
+> Rationale and the dependency audit behind it: `doc/evaluation/node-engine-skew.md`.
+
+
+`ci.yml`'s 7 jobs run Node 22 (matching `.nvmrc` and root `engines: >=22`);
+`publish.yml` runs Node 24. This is deliberate, not drift: npm Trusted
+Publishing requires npm ≥ 11.5.1, which Node 24 ships (npm 11) and Node 22
+does not (npm 10) — Node 22 fails the OIDC publish with a misleading "404 Not
+Found" on the registry `PUT`, immediately after provenance is signed.
+
+**Two dependencies already declare `engines.node >= 24`**:
+`@de-otio/vestibulum` and `@de-otio/saas-foundation`. Verified 2026-08-16: on
+Node 22 (npm 10.9.8, matching `ci.yml`), `npm ci` prints `EBADENGINE` for
+both and installs anyway — advisory only, not a failure, today.
+
+**The sharp edge, verified 2026-08-16 (not merely relayed from the prior
+session's notes):**
+
+| | Node 22 / npm 10 (`ci.yml`) | Node 24 / npm 11 (`publish.yml`) |
+|---|---|---|
+| `npm ci` (scripts enabled) | Silent — no such warning exists on npm 10 | Prints `npm warn allow-scripts`: 4 packages (`@prisma/engines`, `esbuild`, `fsevents`, `prisma`) have install scripts "not yet covered by allowScripts" |
+| `npm ci --ignore-scripts` | No install scripts run; nothing to warn about | Same — no `allow-scripts` warning either, because nothing is uncovered when nothing runs |
+
+npm 11's `allow-scripts` check currently only **warns**; it still runs the
+scripts. If a future npm makes that gate **blocking**, `npm run
+prisma:generate` in a plain `npm ci` (scripts enabled) would fail wherever
+npm ≥ 11 runs it — today that is `publish.yml` only. Node 22/npm 10 has no
+such gate at all, so `ci.yml` would stay green through that change and never
+surface it — the two lanes install with genuinely different npm behavior,
+not just a different Node major.
+
+**This interacts directly with the `--ignore-scripts` fix in `publish.yml`
+(HIGH-1, 2026-08 security review, see the workflow's own comments): the
+`build` job's `npm ci` now runs with `--ignore-scripts` unconditionally,
+which was verified above to suppress the `allow-scripts` warning entirely
+(nothing runs, nothing is "uncovered"). Combined with `prisma:generate`
+already working correctly under `--ignore-scripts` on both npm 10 and npm 11
+(verified the same session), the publish lane no longer depends on any
+dependency's install script succeeding at all — so the specific failure mode
+above (`prisma:generate` breaking in the publish lane when npm's gate flips
+to blocking) is now closed for `publish.yml`, independent of when or whether
+npm makes that change.**
+
+**Recommendation: do not bump `ci.yml` to Node 24 preemptively.** The
+forcing functions that *would* justify it, in order of likelihood:
+
+1. `@de-otio/vestibulum` / `@de-otio/saas-foundation` (or a future dependency)
+   tighten `engines.node >= 24` from advisory (`EBADENGINE` warning) to a
+   hard requirement the package won't run under at all.
+2. npm's `allow-scripts` gate goes from warn to block, **and** by then
+   `ci.yml`'s plain `npm ci` (scripts enabled, no `--ignore-scripts`) still
+   depends on one of the 4 flagged packages' install script actually running
+   for something CI needs (today: Prisma's engine, obtained via the explicit
+   `prisma:generate` step regardless of whether the postinstall ran — see
+   above; esbuild's/fsevents' postinstalls fetch native binaries `tsc`-based
+   builds in this repo don't currently need). If CI ever starts depending on
+   one of those scripts, re-verify this cell of the table on the npm version
+   in use before assuming it still holds.
+3. A hard requirement to unify tooling versions across every workflow for its
+   own sake — not present today.
+
+None of the three currently apply. **Do not regenerate `package-lock.json`
+under Node 24/npm 11** as part of resolving this later without re-reading the
+existing note on npm-version lockfile skew (npm 10 vs npm 11 write different
+`"peer": true` annotations for platform-specific optional deps like
+`@esbuild/*`, producing tens of lines of unrelated diff) — regenerate on
+whichever npm version `ci.yml` will actually run, the same way the
+`@types/sharp` removal in this repo's history was done deliberately on Node
+22/npm 10 to keep the diff to the real change.
+
 ## Test Configs by Runner
 
 | npm script | Vitest config | What it includes | Runs in this repo's CI? |

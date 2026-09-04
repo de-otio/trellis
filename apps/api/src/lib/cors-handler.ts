@@ -8,6 +8,53 @@
 import type { Env } from "../env.js";
 import { getLogger, Logger } from "./logger.js";
 
+/**
+ * The single source of truth for `Access-Control-Allow-Headers`.
+ *
+ * Browsers preflight any non-simple request header, so a header the client
+ * sends but this list omits makes the *whole* request fail — for the web
+ * build only, which is exactly the kind of gap that ships unnoticed from a
+ * mobile-first test pass. `X-Client-Version` / `X-Client-Platform` are sent by
+ * the app on every call (see `lib/client-version.ts`), so they belong here.
+ *
+ * NEVER widen this to `*`: these responses are served with
+ * `Access-Control-Allow-Credentials: true`, and the wildcard is invalid (and
+ * silently ignored) in credentialed mode.
+ */
+export const CORS_ALLOWED_REQUEST_HEADERS =
+  "Content-Type, Authorization, X-CSRF-Token, X-Retry-Count, X-Client-Version, X-Client-Platform";
+
+/**
+ * SEC M4 — is this origin a loopback (local development) origin?
+ *
+ * Only `localhost`, `127.0.0.0/8` and `[::1]` count, on any port and on
+ * http/https. Deliberately hostname-exact: `localhost.attacker.example` and
+ * `notlocalhost` must NOT match, which is why this parses the URL instead of
+ * substring-matching.
+ */
+export function isLoopbackOrigin(origin: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(origin);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+  const host = url.hostname.toLowerCase();
+  if (host === "localhost") return true;
+  if (host === "::1" || host === "[::1]") return true;
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+}
+
+/**
+ * Prefix a bare host with `https://` if it has no scheme yet. `undefined`
+ * passes through as `undefined` so callers can chain `?.` / `||` unchanged.
+ */
+function withScheme(host: string | undefined): string | undefined {
+  if (!host) return host;
+  return /^https?:\/\//.test(host) ? host : `https://${host}`;
+}
+
 export class CorsHandler {
   /**
    * Get allowed CORS origin based on request origin and configured allowed origins
@@ -18,7 +65,7 @@ export class CorsHandler {
     if (!requestOrigin) {
       // No origin header (e.g., same-origin request or non-browser client)
       // CORS doesn't apply to same-origin requests, but we return APP_DOMAIN for safety
-      return env.APP_DOMAIN?.replace(/\/$/, "") || null;
+      return withScheme(env.APP_DOMAIN?.replace(/\/$/, "")) || null;
     }
 
     // Build list of allowed origins
@@ -34,7 +81,12 @@ export class CorsHandler {
 
     // Add APP_DOMAIN and its www/non-www variations
     if (env.APP_DOMAIN) {
-      const appDomain = env.APP_DOMAIN.replace(/\/$/, "");
+      // APP_DOMAIN is deployed as a bare host (OpenTofu's `local.app_domain`,
+      // e.g. "app.dev.skybber.com" — no scheme). A browser's Origin header
+      // always carries one, so without normalizing here this entry could
+      // never match and the operator's own APP_DOMAIN would be silently
+      // treated as not-allowed rather than as the origin it names.
+      const appDomain = withScheme(env.APP_DOMAIN.replace(/\/$/, ""))!;
       allowedOrigins.push(appDomain);
 
       // Also allow www and non-www variations
@@ -56,13 +108,28 @@ export class CorsHandler {
       return normalizedRequestOrigin;
     }
 
-    // If no APP_DOMAIN or ALLOWED_ORIGINS is configured (local dev), allow the request origin
-    // This is a safety fallback for local development
+    // SEC M4 — fail CLOSED when nothing is configured.
+    //
+    // This branch used to reflect the request origin verbatim whenever neither
+    // APP_DOMAIN nor ALLOWED_ORIGINS was set. Combined with
+    // `Access-Control-Allow-Credentials: true` (added unconditionally by
+    // `addCorsHeaders`), that let ANY site make credentialed cross-origin
+    // requests and read the responses — and for a published, reusable core,
+    // "the deployer set no origin config" is a realistic deployment.
+    //
+    // Local development still works: reflection is now limited to loopback
+    // origins, which no remote attacker can present.
     if (!env.APP_DOMAIN && !env.ALLOWED_ORIGINS) {
-      getLogger().info(
-        `[CORS] No APP_DOMAIN or ALLOWED_ORIGINS configured, allowing origin: ${normalizedRequestOrigin}`,
+      if (isLoopbackOrigin(normalizedRequestOrigin)) {
+        getLogger().info(
+          `[CORS] No origin config; allowing loopback dev origin: ${normalizedRequestOrigin}`,
+        );
+        return normalizedRequestOrigin;
+      }
+      getLogger().warn(
+        `[CORS] No APP_DOMAIN or ALLOWED_ORIGINS configured; denying non-loopback origin: ${normalizedRequestOrigin}`,
       );
-      return normalizedRequestOrigin;
+      return null;
     }
 
     // Allow Cloudflare Pages domains (only specific known projects)
@@ -94,7 +161,11 @@ export class CorsHandler {
     try {
       const originUrl = new URL(normalizedRequestOrigin);
       const host = originUrl.hostname;
-      const knownDomains = ["rkm1.de", "example.com"];
+      // SEC M4: `example.com` removed — it is the IANA reserved example
+      // domain, it shipped in the published core's allow-list, and anyone can
+      // stand up a subdomain of a domain they control that ends in it only by
+      // owning it. Nothing legitimate needed it.
+      const knownDomains = ["rkm1.de"];
       const isKnownDomain = knownDomains.some(
         (domain) => host === domain || host.endsWith(`.${domain}`),
       );
@@ -129,24 +200,15 @@ export class CorsHandler {
     requestContext?: { region: string },
   ): Promise<Response> {
     try {
-      const allowedOrigin = CorsHandler.getAllowedOrigin(request, env);
-      const corsHeaders: Record<string, string> = {
-        "Access-Control-Allow-Methods":
-          "GET, POST, PUT, DELETE, PATCH, OPTIONS",
-        "Access-Control-Allow-Headers":
-          "Content-Type, Authorization, X-CSRF-Token, X-Retry-Count",
-        "Access-Control-Allow-Credentials": "true",
-      };
-      if (allowedOrigin) {
-        corsHeaders["Access-Control-Allow-Origin"] = allowedOrigin;
-      } else {
-        // Log when origin is not allowed for debugging
+      const corsHeaders = CorsHandler.getCorsHeaders(request, env);
+      if (!corsHeaders["Access-Control-Allow-Origin"]) {
+        // Log when origin is not allowed for debugging. The remaining CORS
+        // headers are still added even without an allowed origin — the
+        // browser will reject it, but at least we tried.
         const requestOrigin = request.headers.get("Origin");
         getLogger().info(
           `[CORS] No allowed origin found. Request origin: ${requestOrigin}, APP_DOMAIN: ${env.APP_DOMAIN}, ALLOWED_ORIGINS: ${env.ALLOWED_ORIGINS}`,
         );
-        // Still add other CORS headers even if origin is not allowed
-        // The browser will reject it, but at least we tried
       }
 
       // CRITICAL: For binary responses (images, files), we must NOT read as text
@@ -235,17 +297,7 @@ export class CorsHandler {
     } catch (error: any) {
       // If adding CORS headers fails, at least return a response with CORS headers
       getLogger().error("[CORS] Error adding CORS headers:", error);
-      const allowedOrigin = CorsHandler.getAllowedOrigin(request, env);
-      const corsHeaders: Record<string, string> = {
-        "Access-Control-Allow-Methods":
-          "GET, POST, PUT, DELETE, PATCH, OPTIONS",
-        "Access-Control-Allow-Headers":
-          "Content-Type, Authorization, X-CSRF-Token",
-        "Access-Control-Allow-Credentials": "true",
-      };
-      if (allowedOrigin) {
-        corsHeaders["Access-Control-Allow-Origin"] = allowedOrigin;
-      }
+      const corsHeaders = CorsHandler.getCorsHeaders(request, env);
       // Return error response with CORS headers
       // Note: requestContext not available in error handler, so region headers won't be added
       return new Response(
@@ -271,8 +323,7 @@ export class CorsHandler {
     const allowedOrigin = CorsHandler.getAllowedOrigin(request, env);
     const corsHeaders: Record<string, string> = {
       "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, PATCH, OPTIONS",
-      "Access-Control-Allow-Headers":
-        "Content-Type, Authorization, X-CSRF-Token",
+      "Access-Control-Allow-Headers": CORS_ALLOWED_REQUEST_HEADERS,
       "Access-Control-Allow-Credentials": "true",
     };
     if (allowedOrigin) {

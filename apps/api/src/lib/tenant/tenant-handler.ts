@@ -17,6 +17,7 @@ import { requireActiveTenant, requireOwnTenant } from "../auth/auth-middleware.j
 import { requireRole } from "../auth/require.js";
 import { validateTenantSlug } from "./slug-validator.js";
 import { createClaimsCacheFromEnv } from "../auth/claims-cache.js";
+import { invalidateClaims } from "../auth/claims-invalidation.js";
 import { transferOwnership } from "./transfer-ownership.js";
 import { TenantAuditEmitter } from "../audit-composer.js";
 import { AuditEventType } from "../audit-actions.js";
@@ -100,6 +101,14 @@ export class TenantHandler {
 
         return tenant;
       });
+
+      // Claims-cache freshness audit: this transaction creates an OWNER
+      // membership AND may bump the caller's global role END_USER →
+      // B2B_PARTNER. Both are authorization state, and a cached entry would
+      // keep serving the pre-create claims (no tenant, old role) for up to one
+      // cache TTL — the new tenant would be invisible to the caller's own
+      // freshly-minted tokens. This call site was missing invalidation.
+      await invalidateClaims([auth.sub], "tenant.create");
 
       void auditEmitter.emit(
         {
@@ -362,8 +371,8 @@ export class TenantHandler {
     try {
       const cache = createClaimsCacheFromEnv();
       if (tenantWithRole) {
-        await cache.invalidate(auth.cognitoSub);
-        await cache.put(auth.cognitoSub, {
+        await cache.invalidate(auth.sub);
+        await cache.put(auth.sub, {
           userId: auth.userId,
           globalRole: auth.globalRole,
           activeTenantId: tenantId,
@@ -372,7 +381,7 @@ export class TenantHandler {
           handle: auth.handle,
         });
       } else {
-        await cache.invalidate(auth.cognitoSub);
+        await cache.invalidate(auth.sub);
       }
     } catch {
       // Cache write is best-effort: don't block the switch if DDB is
@@ -469,15 +478,10 @@ export class TenantHandler {
       db,
     );
 
-    try {
-      const cache = createClaimsCacheFromEnv();
-      await Promise.all([
-        result.oldOwnerCognitoSub ? cache.invalidate(result.oldOwnerCognitoSub) : Promise.resolve(),
-        result.newOwnerCognitoSub ? cache.invalidate(result.newOwnerCognitoSub) : Promise.resolve(),
-      ]);
-    } catch {
-      // Best-effort; don't block the transfer.
-    }
+    await invalidateClaims(
+      [result.oldOwnerCognitoSub, result.newOwnerCognitoSub],
+      "tenant.transfer_ownership",
+    );
 
     return new Response(
       JSON.stringify({ ok: true, newOwnerId: newOwnerUserId }),

@@ -13,7 +13,7 @@ import {
 } from "./db-query-helper.js";
 import { SecurityMonitor } from "./security-monitor.js";
 import { getLogger, Logger, type LoggerEnv } from "./logger.js";
-import { createClaimsCacheFromEnv } from "./auth/claims-cache.js";
+import { invalidateClaims } from "./auth/claims-invalidation.js";
 
 export interface Env {
   DATABASE_URL: string;
@@ -50,10 +50,10 @@ export class UserDeprovisioning {
     const db = createPrisma(env);
 
     try {
-      // Fetch cognitoSub before update so we can invalidate the claim cache.
+      // Fetch subject before update so we can invalidate the claim cache.
       const userRow = await db.user.findUnique({
         where: { id: userId },
-        select: { cognitoSub: true },
+        select: { subject: true },
       });
 
       // Update user to suspended
@@ -66,17 +66,11 @@ export class UserDeprovisioning {
         },
       });
 
-      // Invalidate DDB claim cache so the next token refresh reflects the suspension.
-      // Mitigation for G2 H3: suspended users that still have a cached token would
-      // bypass the suspension check for up to CACHE_TTL seconds without this call.
-      if (userRow?.cognitoSub) {
-        try {
-          const cache = createClaimsCacheFromEnv();
-          await cache.invalidate(userRow.cognitoSub);
-        } catch {
-          // Best-effort — don't block suspension if DDB is unavailable.
-        }
-      }
+      // Invalidate the claims cache so the next token refresh reflects the
+      // suspension. Mitigation for G2 finding H3: a pre-token cache HIT skips
+      // the RDS suspension check entirely, so without this a suspended user
+      // keeps minting fully-privileged JWTs for up to one cache TTL.
+      await invalidateClaims([userRow?.subject], "user.suspend");
 
       // Log security event
       await this.securityMonitor.logSecurityEvent(
@@ -171,10 +165,10 @@ export class UserDeprovisioning {
     const db = createPrisma(env);
 
     try {
-      // Fetch cognitoSub before update so we can invalidate the claim cache.
+      // Fetch subject before update so we can invalidate the claim cache.
       const userRow = await db.user.findUnique({
         where: { id: userId },
-        select: { cognitoSub: true },
+        select: { subject: true },
       });
 
       await db.user.update({
@@ -186,15 +180,9 @@ export class UserDeprovisioning {
         },
       });
 
-      // Invalidate DDB claim cache so the next token refresh can succeed with restored status.
-      if (userRow?.cognitoSub) {
-        try {
-          const cache = createClaimsCacheFromEnv();
-          await cache.invalidate(userRow.cognitoSub);
-        } catch {
-          // Best-effort.
-        }
-      }
+      // Invalidate the claims cache so the next token refresh can succeed with
+      // the restored status.
+      await invalidateClaims([userRow?.subject], "user.restore");
 
       // Log security event
       await this.securityMonitor.logSecurityEvent(

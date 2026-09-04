@@ -1,0 +1,90 @@
+# hatchet-lite — the local workflow engine Lanes B and C develop against.
+#
+# Deliberately a SEPARATE compose file, not services bolted onto
+# docker-compose.yml: this is opt-in for the Hatchet evaluation (plan 030) and
+# must not become a cost every `npm test` run pays. Bring it up with
+# `-f docker-compose.hatchet.yml`.
+#
+# "lite" is the whole engine — API, gRPC, dashboard, and the queue — in one
+# container, using Postgres as the message queue. That is the point: no cloud
+# dependency, so Lane B is not blocked on Lane A building the real cluster.
+#
+# ⚠ EVALUATION SCAFFOLDING, NOT A DEPLOYMENT TARGET. Plan 030 decides "run the
+# evaluation", not "adopt Hatchet". If the kill criteria fire, this file goes.
+#
+# ⚠ THE VERSION PIN IS LOAD-BEARING — do not relax it to `:latest`, and do not
+# re-derive "the newest tag" from a quick tag listing. GHCR's /tags/list
+# PAGINATES AT 100; the unpaginated answer looks authoritative and says the
+# newest is v0.34.4, which is two years stale. Following the Link header gives
+# 3427 tags and the real answer, v0.104.7. Running the stale one fails in a way
+# that reads as a code bug:
+#     Could not register workflow: /v1.AdminService/PutWorkflow
+#     UNIMPLEMENTED: unknown service v1.AdminService
+# because the v1 SDK needs a v1-capable engine. See
+# doc/evaluation/hatchet-lite-local.md.
+#
+# Arch: the v0.104.7 index carries linux/arm64 as well as amd64, so it runs
+# natively on Apple silicon AND matches the arm64 Kapsule pool. No QEMU either
+# way. Pinned by INDEX digest, so multi-arch selection still happens at pull
+# time while the bytes stay reproducible.
+
+services:
+  hatchet-postgres:
+    # Hatchet's own database. No host port published — nothing outside the
+    # compose network needs it, and 5432 is already taken by the dev Postgres
+    # in docker-compose.yml. Keeping them separate means bringing this stack
+    # down never touches dev data.
+    image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+    environment:
+      POSTGRES_DB: hatchet
+      POSTGRES_USER: hatchet
+      POSTGRES_PASSWORD: hatchet_local_only
+    volumes:
+      - hatchet_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hatchet -d hatchet"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  hatchet-lite:
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-lite:v0.104.7@sha256:cf61d84a68f71a050fa0c45389703f758acde43635541830cbefac63321cba17
+    depends_on:
+      hatchet-postgres:
+        condition: service_healthy
+    ports:
+      - "8888:8888" # dashboard + REST API
+      - "7077:7077" # gRPC — what the SDK worker connects to
+    environment:
+      DATABASE_URL: "postgresql://hatchet:hatchet_local_only@hatchet-postgres:5432/hatchet?sslmode=disable"
+      DATABASE_POSTGRES_HOST: hatchet-postgres
+      DATABASE_POSTGRES_PORT: "5432"
+      DATABASE_POSTGRES_USERNAME: hatchet
+      DATABASE_POSTGRES_PASSWORD: hatchet_local_only
+      DATABASE_POSTGRES_DB_NAME: hatchet
+      DATABASE_POSTGRES_SSL_MODE: disable
+
+      # Local-only posture. Every one of these would be wrong in a deployment:
+      # insecure cookies, insecure gRPC, and auto-verified email.
+      SERVER_AUTH_COOKIE_DOMAIN: localhost
+      SERVER_AUTH_COOKIE_INSECURE: "t"
+      SERVER_AUTH_SET_EMAIL_VERIFIED: "t"
+      SERVER_GRPC_INSECURE: "t"
+      SERVER_GRPC_BIND_ADDRESS: "0.0.0.0"
+      SERVER_GRPC_PORT: "7077"
+      # The address the engine hands BACK to connecting SDK workers. It must be
+      # reachable from where the worker runs — on the host, that is localhost.
+      # A worker inside the compose network would need `hatchet-lite:7077`.
+      SERVER_GRPC_BROADCAST_ADDRESS: "localhost:7077"
+      SERVER_URL: "http://localhost:8888"
+
+      SERVER_LOGGER_LEVEL: warn
+      SERVER_LOGGER_FORMAT: console
+      DATABASE_LOGGER_LEVEL: warn
+      DATABASE_LOGGER_FORMAT: console
+    volumes:
+      - hatchet_lite_config:/config
+
+volumes:
+  hatchet_postgres_data:
+  hatchet_lite_config:

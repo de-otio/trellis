@@ -38,6 +38,24 @@ export default defineConfig({
       // Run separately: npm run test:integration:ci (CI lane added in P1).
       "test/integration/interaction-events.integration.test.ts",
       "test/integration/report-migration.integration.test.ts",
+      // P0 post READ isolation — needs a real DATABASE_URL, which this config's
+      // test/setup.ts overrides to a fake hyperdrive URL. Runs in the Phase0
+      // integration lane instead (npm run test:integration:ci).
+      "test/integration/post-read-isolation.integration.test.ts",
+      // H3 post ATTACHMENT read authorization — same reason as above: it drives
+      // the real handlers against a real Postgres, which this config's
+      // test/setup.ts cannot provide. Runs in the Phase0 integration lane.
+      "test/integration/post-attachment-read-authz.integration.test.ts",
+      // P1.1a audience_class DB invariant — trigger behaviour, so it needs the
+      // real database. Runs in the Phase0 integration lane.
+      "test/integration/audience-class-invariant.integration.test.ts",
+      // H2 outbox audience gate and H1 circle read authorization — both assert
+      // what a real Postgres returns for a raw-SQL predicate, so both belong in
+      // the Phase0 lane only. Their hyperdrive guard falls back to the
+      // docker-compose URL rather than skipping, so without these two lines the
+      // default lane passes locally (Postgres is up) and fails in CI (it is not).
+      "test/integration/outbox-audience-gate.integration.test.ts",
+      "test/integration/circle-read-authz.integration.test.ts",
       // Events primitive integration tests — live Postgres only.
       // Run separately: npm run test:integration:ci (registered in PHASE0_INTEGRATION).
       "test/integration/events.integration.test.ts",
@@ -46,6 +64,16 @@ export default defineConfig({
       // (ephemeral shadow DBs). Self-skips without the env vars, but excluded
       // here too so the default suite never spawns the prisma CLI.
       "test/integration/extension-schema-baseline.integration.test.ts",
+      // P0 radius test needs a real DATABASE_URL (this config's test/setup.ts
+      // overrides it to a fake hyperdrive URL, so it falls back to the
+      // docker-compose credentials, which don't exist in the CI lint lane) —
+      // runs in the Phase0 integration lane instead (registered there).
+      "test/integration/post-create-radius.integration.test.ts",
+      // GDPR-erasure worker e2e needs the full docker-compose stack (Postgres
+      // admin URL + localstack S3 + dynamodb-local) — no CI lane provides
+      // localstack, so this is a LOCAL-ONLY suite. Run it with
+      // `docker compose up` and the default suite's test:integration script.
+      "test/integration/gdpr-erasure-worker.integration.test.ts",
     ],
     setupFiles: ["test/setup.ts"],
     globalTeardown: "test/teardown.ts",

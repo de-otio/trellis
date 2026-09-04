@@ -16,8 +16,10 @@ import * as fc from "fast-check";
 
 import {
   classifyWorkerError,
+  classifyWorkerErrorDetailed,
   type ErrorClass,
 } from "../../../src/lib/media/classify-worker-error";
+import { ModerationProviderError } from "../../../src/lib/media/moderation-provider.js";
 
 // Seed for determinism (CLAUDE.md: pin nondeterminism).
 const FC = { seed: 0xc1a5, numRuns: 2000 } as const;
@@ -470,4 +472,159 @@ describe("classifyWorkerError — HTTP status boundaries", () => {
       expect(result).toBe("retryable"); // default rule
     });
   }
+});
+
+describe("classifyWorkerErrorDetailed — a typed provider error wins", () => {
+  it("retries a typed retryable error", () => {
+    const err = new ModerationProviderError("provider throttled", {
+      retryable: true,
+    });
+    expect(classifyWorkerErrorDetailed(err)).toEqual({
+      klass: "retryable",
+      source: "typed",
+      infraFault: false,
+    });
+  });
+
+  it("holds a typed permanent error without retrying it", () => {
+    const err = new ModerationProviderError("provider rejected these bytes", {
+      retryable: false,
+    });
+    expect(classifyWorkerErrorDetailed(err)).toEqual({
+      klass: "poison",
+      source: "typed",
+      infraFault: false,
+    });
+  });
+
+  it("holds AND alerts when the adapter could not attribute the cause", () => {
+    // Otherwise an outage is indistinguishable from a busy moderation week.
+    const err = new ModerationProviderError("something went wrong", {
+      retryable: false,
+      unknownCause: true,
+    });
+    expect(classifyWorkerErrorDetailed(err)).toEqual({
+      klass: "poison",
+      source: "typed",
+      infraFault: true,
+    });
+  });
+
+  it("does not let the heuristic overrule the type", () => {
+    // The message says "timeout", which the heuristic reads as retryable; the
+    // adapter says permanent. The adapter knows, the heuristic guesses.
+    const err = new ModerationProviderError(
+      "request timeout while rejecting an unsupported format",
+      { retryable: false },
+    );
+    expect(classifyWorkerError(err)).toBe("poison");
+
+    // ...and the reverse direction: a permanent-sounding message the adapter
+    // declared transient.
+    const transient = new ModerationProviderError(
+      "corrupt response from an upstream shard",
+      { retryable: true },
+    );
+    expect(classifyWorkerError(transient)).toBe("retryable");
+  });
+
+  it("recognises a typed error from a differently-bundled copy of the package", () => {
+    // Structural, not instanceof: a duplicate package copy produces a different
+    // class object, and an instanceof check would silently demote it.
+    const foreign = Object.assign(new Error("permanent"), {
+      name: "ModerationProviderError",
+      retryable: false,
+      unknownCause: true,
+    });
+    expect(classifyWorkerErrorDetailed(foreign)).toEqual({
+      klass: "poison",
+      source: "typed",
+      infraFault: true,
+    });
+  });
+
+  it("falls back to the heuristic for untyped errors, default preserved", () => {
+    expect(classifyWorkerErrorDetailed(new Error("who knows"))).toEqual({
+      klass: "retryable",
+      source: "heuristic",
+      infraFault: false,
+    });
+    expect(
+      classifyWorkerErrorDetailed(new Error("failed to decode the frame")),
+    ).toEqual({ klass: "poison", source: "heuristic", infraFault: false });
+  });
+
+  it("never claims an infra fault from an untyped error", () => {
+    for (const err of [null, undefined, "string", 42, new Error("boom"), {}]) {
+      expect(classifyWorkerErrorDetailed(err).infraFault).toBe(false);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// infraFault is orthogonal to retryable (the 429 gap)
+// ---------------------------------------------------------------------------
+
+describe("infraFault on the RETRYABLE branch — the 429 gap", () => {
+  it("a retryable provider error CAN now report an infrastructure fault", () => {
+    // This is the whole fix. `infraFault` used to be hard-coded false on the
+    // retryable branch, and `unknownCause` — the only other route to the signal
+    // — is read only on the permanent branch. So a fault that was transient AND
+    // attributable could not raise the alarm by ANY combination of flags. A 429
+    // is exactly that: perfectly attributable, and usually fixed by the retry.
+    const err = new ModerationProviderError("endpoint transient error (429)", {
+      retryable: true,
+      infraFault: true,
+    });
+    expect(classifyWorkerErrorDetailed(err)).toEqual({
+      klass: "retryable",
+      source: "typed",
+      infraFault: true,
+    });
+  });
+
+  it("NEGATIVE CONTROL: a retryable error WITHOUT the flag still reports none", () => {
+    // Without this, the assertion above would pass on an implementation that
+    // hard-codes `infraFault: true`, and every transient blip would raise a
+    // fault — which is how an alarm gets muted by its own noise.
+    const err = new ModerationProviderError("some transient thing", { retryable: true });
+    expect(classifyWorkerErrorDetailed(err)).toEqual({
+      klass: "retryable",
+      source: "typed",
+      infraFault: false,
+    });
+  });
+
+  it("`unknownCause` still implies it, so no existing adapter changes behaviour", () => {
+    const permanent = new ModerationProviderError("cannot say", {
+      retryable: false,
+      unknownCause: true,
+    });
+    expect(classifyWorkerErrorDetailed(permanent).infraFault).toBe(true);
+  });
+
+  it("an untyped error never reports an infrastructure fault", () => {
+    // The heuristic is guessing. A guess must not raise an outage alarm.
+    expect(classifyWorkerErrorDetailed(new Error("429 Too Many Requests")).infraFault).toBe(
+      false,
+    );
+  });
+
+  it("the classification's retry decision is UNCHANGED by the flag", () => {
+    // The fix must add observability without altering what core does with the
+    // call — a 429 that stops being retried would be a regression dressed as a
+    // fix.
+    for (const infraFault of [true, false]) {
+      expect(
+        classifyWorkerErrorDetailed(
+          new ModerationProviderError("t", { retryable: true, infraFault }),
+        ).klass,
+      ).toBe("retryable");
+      expect(
+        classifyWorkerErrorDetailed(
+          new ModerationProviderError("p", { retryable: false, infraFault }),
+        ).klass,
+      ).toBe("poison");
+    }
+  });
 });

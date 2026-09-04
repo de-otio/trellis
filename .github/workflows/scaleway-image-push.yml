@@ -1,0 +1,124 @@
+# Build + push the app-tier container images (api, worker) to the Scaleway
+# Container Registry the WS-4 `foundation` root provisions
+# (rg.fr-par.scw.cloud/sky-<env>-registry). Consumed by the WS-4 `app` root
+# (var.api_image_tag / worker_image_tag).
+#
+# workflow_dispatch ONLY (not per-PR) — matches the flat-CI-cost posture of the
+# scaleway-profile-e2e lane; images are cut deliberately, not on every push.
+#
+# PRECONDITIONS (both hold once the migration lands, fail loudly otherwise):
+#   1. The coordinated @de-otio/saas-foundation / @de-otio/vestibulum 0.4.0
+#      publish — the Docker builds run `npm ci`, which resolves those from the
+#      registry (a clean CI checkout has no local file: overrides). Until 0.4.0
+#      is published the `npm ci` layer fails; that IS the version guard.
+#   2. The target project's registry namespace exists (foundation applied) and
+#      the SCW_SECRET_KEY secret holds a key with ContainerRegistryFullAccess on
+#      that project.
+#
+# PLATFORM: the consolidated dev cluster (plan 017) runs ARM64 Ampere nodes
+# (BASIC2-A2C-*), so images must be linux/arm64 — an amd64 image would fail
+# with `exec format error` on the nodes. (The pre-017 note here claiming
+# Scaleway is amd64 described the OLD cluster.) ubuntu-24.04-arm runners are
+# arm64-native and free for public repos; no buildx/qemu cross-build needed.
+
+name: Scaleway image push
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment (selects the registry namespace).
+        type: choice
+        options: [dev, prod]
+        default: dev
+      image_tag:
+        description: Image tag (default = short commit sha).
+        type: string
+        default: ""
+      push:
+        description: Push to the registry (false = build-only smoke test).
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scaleway-image-push-${{ inputs.environment }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: rg.fr-par.scw.cloud
+  PLATFORM: linux/arm64
+
+jobs:
+  build-push:
+    name: build + push (${{ inputs.environment }})
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Resolve tag + registry namespace
+        id: meta
+        run: |
+          tag="${{ inputs.image_tag }}"
+          if [ -z "$tag" ]; then tag="$(git rev-parse --short HEAD)"; fi
+          ns="${REGISTRY}/sky-${{ inputs.environment }}-registry"
+          {
+            echo "tag=${tag}"
+            echo "api_ref=${ns}/skybber-api"
+            echo "worker_ref=${ns}/skybber-worker"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Log in to the Scaleway registry
+        if: ${{ inputs.push }}
+        timeout-minutes: 2
+        env:
+          SCW_SECRET_KEY: ${{ secrets.SCW_SECRET_KEY }}
+        run: |
+          if [ -z "${SCW_SECRET_KEY}" ]; then
+            echo "::error::SCW_SECRET_KEY secret is not set (need a key with ContainerRegistryFullAccess on the sky-${{ inputs.environment }} project)."
+            exit 1
+          fi
+          # Scaleway registry auth: username is the literal 'nologin', password
+          # is the API secret key.
+          printf '%s' "${SCW_SECRET_KEY}" | docker login "${REGISTRY}" -u nologin --password-stdin
+
+      - name: Build api image
+        timeout-minutes: 25
+        run: |
+          docker build --platform "${PLATFORM}" \
+            -f apps/api/Dockerfile \
+            -t "${{ steps.meta.outputs.api_ref }}:${{ steps.meta.outputs.tag }}" \
+            -t "${{ steps.meta.outputs.api_ref }}:latest" \
+            .
+
+      - name: Build worker image
+        timeout-minutes: 25
+        run: |
+          docker build --platform "${PLATFORM}" \
+            -f apps/worker/Dockerfile \
+            -t "${{ steps.meta.outputs.worker_ref }}:${{ steps.meta.outputs.tag }}" \
+            -t "${{ steps.meta.outputs.worker_ref }}:latest" \
+            .
+
+      - name: Push images
+        if: ${{ inputs.push }}
+        timeout-minutes: 10
+        run: |
+          docker push "${{ steps.meta.outputs.api_ref }}:${{ steps.meta.outputs.tag }}"
+          docker push "${{ steps.meta.outputs.api_ref }}:latest"
+          docker push "${{ steps.meta.outputs.worker_ref }}:${{ steps.meta.outputs.tag }}"
+          docker push "${{ steps.meta.outputs.worker_ref }}:latest"
+
+      - name: Summary
+        run: |
+          {
+            echo "### Scaleway image push (${{ inputs.environment }})"
+            echo ""
+            echo "- tag: \`${{ steps.meta.outputs.tag }}\`"
+            echo "- api: \`${{ steps.meta.outputs.api_ref }}\`"
+            echo "- worker: \`${{ steps.meta.outputs.worker_ref }}\`"
+            echo "- pushed: \`${{ inputs.push }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

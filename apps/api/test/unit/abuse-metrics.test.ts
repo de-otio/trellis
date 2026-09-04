@@ -35,9 +35,22 @@ import { evaluateAbuseMetrics } from "../../src/lib/abuse-metrics.js";
 describe("evaluateAbuseMetrics", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    // Default: CloudWatch returns no data, logs return no query
+    // Default: CloudWatch returns no data; the log query STARTS and completes
+    // with no rows.
+    //
+    // The previous default resolved every logs call to `{ status: "Complete" }`
+    // with no `queryId`, so StartQuery appeared to fail and every test below
+    // ran through the query-never-started path. That was invisible while a
+    // failed query and an empty one both produced zeros; now that they differ,
+    // the fixture has to say which one it means. This is the empty one.
     mockCloudWatchSend.mockResolvedValue({ MetricDataResults: [] });
-    mockLogsSend.mockResolvedValue({ status: "Complete", results: [] });
+    mockLogsSend.mockImplementation((command: any) =>
+      Promise.resolve(
+        command?.input?.queryId
+          ? { status: "Complete", results: [] }
+          : { queryId: "query-default" },
+      ),
+    );
   });
 
   describe("with no abuse activity", () => {
@@ -254,7 +267,10 @@ describe("evaluateAbuseMetrics", () => {
   });
 
   describe("error handling", () => {
-    it("should gracefully handle CloudWatch failures", async () => {
+    // These two previously asserted `overallStatus === "low"` on a failed
+    // fetch — the defect, pinned by a test named "gracefully". Zeroed counters
+    // are not a clean bill of health; they are the absence of a reading.
+    it("reports unknown, not low, when CloudWatch is unavailable", async () => {
       mockCloudWatchSend.mockRejectedValue(new Error("Access denied"));
 
       const result = await evaluateAbuseMetrics(
@@ -262,11 +278,13 @@ describe("evaluateAbuseMetrics", () => {
         "24h",
       );
 
-      expect(result.overallStatus).toBe("low");
+      expect(result.overallStatus).toBe("unknown");
+      expect(result.dataQuality.degraded).toBe(true);
+      expect(result.dataQuality.unavailable).toContain("waf");
       expect(result.summary.totalBlocked).toBe(0);
     });
 
-    it("should gracefully handle Logs Insights failures", async () => {
+    it("marks auth-logs unavailable when Logs Insights fails", async () => {
       mockLogsSend.mockRejectedValue(new Error("Log group not found"));
 
       const result = await evaluateAbuseMetrics(
@@ -274,8 +292,73 @@ describe("evaluateAbuseMetrics", () => {
         "24h",
       );
 
+      expect(result.dataQuality.degraded).toBe(true);
+      expect(result.dataQuality.unavailable).toContain("auth-logs");
+      expect(result.overallStatus).toBe("unknown");
+      // The counters still read zero — but the board no longer claims that
+      // zero is a measurement.
       expect(result.authAbuse.rateLimitExceeded).toBe(0);
-      expect(result.authAbuse.magicLinkRequests).toBe(0);
+    });
+
+    it("never claims 'no abuse concerns' while a source is down", async () => {
+      mockCloudWatchSend.mockRejectedValue(new Error("Access denied"));
+
+      const result = await evaluateAbuseMetrics(
+        { STAGE: "dev", AWS_REGION: "us-east-1" },
+        "24h",
+      );
+
+      expect(result.recommendations).not.toContain(
+        "No abuse concerns detected in this time period.",
+      );
+      expect(
+        result.recommendations.some((r) => r.includes("INCOMPLETE")),
+      ).toBe(true);
+    });
+
+    it("still escalates on a surviving source's signal", async () => {
+      // WAF is down, but the auth logs report a real spike. The failure of one
+      // source must not mask the other's finding — "unknown" is the floor for
+      // a degraded board, not a ceiling.
+      mockCloudWatchSend.mockRejectedValue(new Error("Access denied"));
+      mockLogsSend
+        .mockResolvedValueOnce({ queryId: "query-123" })
+        .mockResolvedValueOnce({
+          status: "Complete",
+          results: [
+            [
+              { field: "rateLimited", value: "60" },
+              { field: "magicLinks", value: "80" },
+              { field: "failedVerify", value: "10" },
+            ],
+          ],
+        });
+
+      const result = await evaluateAbuseMetrics(
+        { STAGE: "dev", AWS_REGION: "us-east-1" },
+        "24h",
+      );
+
+      expect(result.overallStatus).toBe("critical");
+      expect(result.dataQuality.degraded).toBe(true);
+      expect(result.dataQuality.unavailable).toEqual(["waf"]);
+    });
+
+    it("reports a healthy board as not degraded", async () => {
+      const result = await evaluateAbuseMetrics(
+        { STAGE: "dev", AWS_REGION: "us-east-1" },
+        "24h",
+      );
+
+      expect(result.dataQuality.degraded).toBe(false);
+      expect(result.dataQuality.unavailable).toEqual([]);
+      expect(result.overallStatus).toBe("low");
+      // No all-clear here: with no WAF data `botControl` is null, so the
+      // "enable Bot Control" advice fires and the list is non-empty. What
+      // matters is that a healthy board carries no INCOMPLETE warning.
+      expect(
+        result.recommendations.some((r) => r.includes("INCOMPLETE")),
+      ).toBe(false);
     });
 
     it("should default to 24h when invalid time range given", async () => {

@@ -6,7 +6,10 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "../../src/env.js";
-import { CorsHandler } from "../../src/lib/cors-handler.js";
+import {
+  CorsHandler,
+  CORS_ALLOWED_REQUEST_HEADERS,
+} from "../../src/lib/cors-handler.js";
 
 describe("CorsHandler", () => {
   let mockEnv: Env;
@@ -91,6 +94,28 @@ describe("CorsHandler", () => {
       expect(origin).toBe("https://example.com");
     });
 
+    it("should match a bare-host APP_DOMAIN (no scheme) against a real Origin", () => {
+      // Deployed as a bare host by OpenTofu (infra-scaleway/app/locals.tf's
+      // `local.app_domain`, e.g. "app.dev.skybber.com") — a browser's Origin
+      // header always carries a scheme, so this must still match.
+      const env = { APP_DOMAIN: "app.dev.skybber.com" } as Env;
+      mockRequest = new Request("https://api.dev.skybber.com/test", {
+        method: "GET",
+        headers: { Origin: "https://app.dev.skybber.com" },
+      });
+      const origin = CorsHandler.getAllowedOrigin(mockRequest, env);
+      expect(origin).toBe("https://app.dev.skybber.com");
+    });
+
+    it("should return a scheme-qualified APP_DOMAIN when no Origin header and APP_DOMAIN is bare", () => {
+      const env = { APP_DOMAIN: "app.dev.skybber.com" } as Env;
+      mockRequest = new Request("https://api.dev.skybber.com/test", {
+        method: "GET",
+      });
+      const origin = CorsHandler.getAllowedOrigin(mockRequest, env);
+      expect(origin).toBe("https://app.dev.skybber.com");
+    });
+
     it("should normalize trailing slashes", () => {
       mockRequest = new Request("https://api.example.com/test", {
         method: "GET",
@@ -113,6 +138,127 @@ describe("CorsHandler", () => {
       const origin = CorsHandler.getAllowedOrigin(mockRequest, env);
       expect(origin).toBe("http://localhost:3000");
           });
+
+    // -------------------------------------------------------------------
+    // SEC M4 — CORS used to FAIL OPEN: with neither APP_DOMAIN nor
+    // ALLOWED_ORIGINS set, it reflected ANY request origin, and
+    // `addCorsHeaders` always sends `Access-Control-Allow-Credentials: true`.
+    // Any site could therefore make credentialed cross-origin requests and
+    // read the responses.
+    // -------------------------------------------------------------------
+    describe("SEC M4: unconfigured CORS fails closed", () => {
+      const unconfigured = {} as Env;
+
+      function originReq(origin: string) {
+        return new Request("https://api.example.com/test", {
+          method: "GET",
+          headers: { Origin: origin },
+        });
+      }
+
+      it("DENIES an arbitrary remote origin when unconfigured", () => {
+        expect(
+          CorsHandler.getAllowedOrigin(
+            originReq("https://evil.example.net"),
+            unconfigured,
+          ),
+        ).toBeNull();
+      });
+
+      it("emits no Access-Control-Allow-Origin for that origin", () => {
+        const headers = CorsHandler.getCorsHeaders(
+          originReq("https://evil.example.net"),
+          unconfigured,
+        );
+        expect(headers["Access-Control-Allow-Origin"]).toBeUndefined();
+        // Credentials are still declared, but with no ACAO the browser blocks.
+        expect(headers["Access-Control-Allow-Credentials"]).toBe("true");
+      });
+
+      it("still allows http://localhost:<port>", () => {
+        expect(
+          CorsHandler.getAllowedOrigin(
+            originReq("http://localhost:5173"),
+            unconfigured,
+          ),
+        ).toBe("http://localhost:5173");
+      });
+
+      it("still allows http://127.0.0.1:<port>", () => {
+        expect(
+          CorsHandler.getAllowedOrigin(
+            originReq("http://127.0.0.1:8080"),
+            unconfigured,
+          ),
+        ).toBe("http://127.0.0.1:8080");
+      });
+
+      it("allows the IPv6 loopback", () => {
+        expect(
+          CorsHandler.getAllowedOrigin(
+            originReq("http://[::1]:3000"),
+            unconfigured,
+          ),
+        ).toBe("http://[::1]:3000");
+      });
+
+      it("DENIES look-alike loopback hostnames", () => {
+        for (const origin of [
+          "https://localhost.evil.example",
+          "https://notlocalhost",
+          "https://127.0.0.1.evil.example",
+          "https://xn--localhost-.example",
+        ]) {
+          expect(
+            CorsHandler.getAllowedOrigin(originReq(origin), unconfigured),
+            `expected ${origin} to be denied`,
+          ).toBeNull();
+        }
+      });
+
+      it("DENIES a non-http(s) scheme claiming localhost", () => {
+        expect(
+          CorsHandler.getAllowedOrigin(
+            originReq("file://localhost"),
+            unconfigured,
+          ),
+        ).toBeNull();
+      });
+
+      it("DENIES a malformed Origin header", () => {
+        expect(
+          CorsHandler.getAllowedOrigin(originReq("not-a-url"), unconfigured),
+        ).toBeNull();
+      });
+
+      it("a configured deployment is unaffected by the loopback allowance", () => {
+        // With APP_DOMAIN set, an unlisted localhost origin is NOT reflected.
+        expect(
+          CorsHandler.getAllowedOrigin(
+            originReq("http://localhost:3000"),
+            { APP_DOMAIN: "https://app.example.org" } as Env,
+          ),
+        ).toBeNull();
+      });
+    });
+
+    it("SEC M4: example.com is no longer a shipped known-domain allow-list entry", () => {
+      // The published core carried `knownDomains = ["rkm1.de", "example.com"]`.
+      const env = { APP_DOMAIN: "https://app.example.org" } as Env;
+      for (const origin of [
+        "https://example.com",
+        "https://anything.example.com",
+      ]) {
+        const req = new Request("https://api.example.org/test", {
+          method: "GET",
+          headers: { Origin: origin },
+        });
+        expect(
+          CorsHandler.getAllowedOrigin(req, env),
+          `expected ${origin} to be denied`,
+        ).toBeNull();
+      }
+    });
 
     it("should allow Cloudflare Pages domains for whitelisted projects", () => {
       mockRequest = new Request("https://api.example.com/test", {
@@ -211,7 +357,7 @@ describe("CorsHandler", () => {
         "GET, POST, PUT, DELETE, PATCH, OPTIONS",
       );
       expect(response.headers.get("Access-Control-Allow-Headers")).toBe(
-        "Content-Type, Authorization, X-CSRF-Token, X-Retry-Count",
+        CORS_ALLOWED_REQUEST_HEADERS,
       );
       expect(response.headers.get("Access-Control-Allow-Credentials")).toBe(
         "true",
@@ -714,7 +860,7 @@ describe("CorsHandler", () => {
         "GET, POST, PUT, DELETE, PATCH, OPTIONS",
       );
       expect(headers["Access-Control-Allow-Headers"]).toBe(
-        "Content-Type, Authorization, X-CSRF-Token",
+        CORS_ALLOWED_REQUEST_HEADERS,
       );
       expect(headers["Access-Control-Allow-Credentials"]).toBe("true");
     });

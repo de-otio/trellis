@@ -1,0 +1,21 @@
+{
+  // Type-level tests for the published contract. Separate from tsconfig.json
+  // on purpose: `type-tests/` must NOT be compiled into `lib/` or shipped, and
+  // the package's own build is `composite` with `rootDir: ./src`.
+  //
+  // These tests import through the package name, so they exercise the built
+  // declarations and the `exports` map — run `npm run build` first.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "ignoreDeprecations": "6.0",
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["type-tests/**/*"]
+}

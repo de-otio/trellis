@@ -20,16 +20,27 @@
  *   analysis/algorithmic-norm-misperception/02-prelaunch-actions.md §3.
  */
 
-import { DynamoDBClient, UpdateItemCommand } from "@aws-sdk/client-dynamodb";
+import type { KvStore } from "@de-otio/saas-foundation/kv";
+import { getKvStore } from "./kv/kv-provider.js";
 import { getLogger } from "./logger.js";
 
-// Mirror exactly how openai-budget.ts obtains its client + table name.
-const dynamoClient = new DynamoDBClient({
-  region: process.env.AWS_REGION || "us-east-1",
-  ...(process.env.DYNAMODB_ENDPOINT ? { endpoint: process.env.DYNAMODB_ENDPOINT } : {}),
-});
+let _store: KvStore | null = null;
 
-const TABLE_NAME = process.env.DYNAMODB_TABLE || `${process.env.STAGE || "dev"}-trellis`;
+/**
+ * The `discexposure` KvStore, provider-selected (KV_PROVIDER, default DynamoDB).
+ * DURABLE monthly baseline counters — no ttl is ever written, so the KV sweep
+ * (which requires expires_at IS NOT NULL) never touches them (F10).
+ */
+function store(): KvStore {
+  if (_store !== null) return _store;
+  _store = getKvStore("discexposure");
+  return _store;
+}
+
+/** Test seam: inject a `KvStore` (e.g. `MemoryKvStore`) for outcome-equivalence tests. */
+export function __setDiscoveryExposureStoreForTest(s: KvStore | null): void {
+  _store = s;
+}
 
 /**
  * Returns the current UTC month bucket in "yyyy-mm" format.
@@ -51,18 +62,9 @@ export function currentMonthBucket(now: Date = new Date()): string {
  */
 async function incrementExposure(entityId: string): Promise<void> {
   const bucket = currentMonthBucket();
-  await dynamoClient.send(
-    new UpdateItemCommand({
-      TableName: TABLE_NAME,
-      Key: {
-        pk: { S: `discexposure:${bucket}:${entityId}` },
-        sk: { S: "v" },
-      },
-      UpdateExpression: "ADD #count :inc",
-      ExpressionAttributeNames: { "#count": "count" },
-      ExpressionAttributeValues: { ":inc": { N: "1" } },
-    }),
-  );
+  // Atomic add, NO TTL — durable monthly counter (matches the pre-port
+  // `ADD #count :inc` with no if_not_exists ttl clause).
+  await store().increment(`${bucket}:${entityId}`, "count", 1);
 }
 
 /**

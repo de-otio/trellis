@@ -29,6 +29,16 @@ vi.mock("../../../src/lib/security-headers", () => ({
   },
 }));
 
+// Mock authMiddleware — H1: every circle READ route now resolves the caller's
+// verified `activeTenantId` from the JWT and refuses without it. The cookie
+// session is deliberately NOT a source for it (session-cookie.ts strips it from
+// sealed material), so this is a second, independent auth step, not a duplicate
+// of getSession.
+const mockAuthMiddleware = vi.fn();
+vi.mock("../../../src/lib/auth/auth-middleware", () => ({
+  authMiddleware: (...args: unknown[]) => mockAuthMiddleware(...args),
+}));
+
 // Mock CircleHandler
 const mockHandleGetMembers = vi.fn();
 const mockHandleGetFeed = vi.fn();
@@ -81,6 +91,10 @@ describe("Circle Routes", () => {
     });
 
     mockGetSession.mockResolvedValue(mockSession);
+    mockAuthMiddleware.mockResolvedValue({
+      userId: "user-123",
+      activeTenantId: "tenant-123",
+    });
     mockCreateSecureResponse.mockImplementation((body, options) => {
       return new Response(body, options);
     });
@@ -243,6 +257,56 @@ describe("Circle Routes", () => {
       );
       expect(mockHandleGetEntityStatus).not.toHaveBeenCalled();
     });
+  });
+
+  describe("tenant requirement on the read routes (H1)", () => {
+    const readRoutes: Array<[string, ReturnType<typeof vi.fn>]> = [
+      ["/api/circles/members", mockHandleGetMembers],
+      ["/api/circles/feed", mockHandleGetFeed],
+      ["/api/circles/glance", mockHandleGetGlance],
+      ["/api/circles/depth", mockHandleGetDepth],
+      ["/api/circles/status", mockHandleGetStatus],
+      ["/api/circles/entities", mockHandleGetEntityStatus],
+    ];
+
+    it.each(readRoutes)(
+      "%s refuses a caller whose JWT carries no active tenant",
+      async (path, handlerMock) => {
+        mockAuthMiddleware.mockResolvedValue({ userId: "user-123" });
+        const route = circleRoutes.find(
+          (r) => r.method === "GET" && r.path === path,
+        );
+
+        await route!.handler(mockRequest, mockEnv, {
+          requestContext: mockRequestContext,
+        });
+
+        expect(mockCreateSecureResponse).toHaveBeenCalledWith(
+          JSON.stringify({ error: "Unauthorized" }),
+          { status: 401, headers: { "content-type": "application/json" } },
+        );
+        // The handler is never reached, so no query is built with an empty
+        // tenant — which is what the ambient filter used to do silently.
+        expect(handlerMock).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(readRoutes)(
+      "%s passes the verified activeTenantId through to the handler",
+      async (path, handlerMock) => {
+        const route = circleRoutes.find(
+          (r) => r.method === "GET" && r.path === path,
+        );
+
+        await route!.handler(mockRequest, mockEnv, {
+          requestContext: mockRequestContext,
+        });
+
+        // Last positional argument, in every case.
+        const args = handlerMock.mock.calls[0]!;
+        expect(args[args.length - 1]).toBe("tenant-123");
+      },
+    );
   });
 
   describe("POST /api/circles/read", () => {

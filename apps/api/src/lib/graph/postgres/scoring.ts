@@ -13,6 +13,16 @@
  *
  * Each is a non-negative integer count. A missing column / missing key reads
  * as 0 (see `zeroCounts` / `readCounts`).
+ *
+ * DELIBERATE EXCEPTION to tenant-guard.ts's fail-LOUD rule: the scoring
+ * methods no-op / return [] instead of throwing when no ambient tenant is
+ * active. Skipped scoring is a safe deny (no row is read or written across
+ * tenants — every query is additionally `tenant_id`-scoped), whereas throwing
+ * would break these paths on any deployment where TENANT_SCOPE_MODE is still
+ * "off" — the guard's own L3a-before-L3b sequencing note. When the estate
+ * completes L3a (shadow mode everywhere), switch these to
+ * `requireAmbientTenantId()` so this surface agrees with the graph writes.
+ * (Quality sweep 2026-08-30, G4 — same note in discovery.ts.)
  */
 import type { PrismaClient } from "@prisma/client";
 import { getCurrentTenantId } from "@de-otio/saas-foundation/tenant";
@@ -104,7 +114,11 @@ export class ScoringOps {
 
     const existing = await this.prisma.relationship.findUnique({
       where: {
-        userId_targetType_targetId: {
+        // Tenant is part of the unique key (M7), so the lookup is scoped by
+        // construction — the post-hoc `existing.tenantId !== tenantId` check
+        // below is now unreachable belt-and-braces rather than the only guard.
+        tenantId_userId_targetType_targetId: {
+          tenantId,
           userId: input.userId,
           targetType: input.targetType,
           targetId: input.targetId,

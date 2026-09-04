@@ -4,7 +4,47 @@
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { RedirectResolver } from "../../src/lib/redirect-resolver.js";
+import type {
+  DnsResolver,
+  RawResponse,
+  Transport,
+} from "../../src/lib/net/safe-fetch.js";
 import type { KVNamespace } from "@cloudflare/workers-types";
+
+/**
+ * The resolver now fetches through the SSRF-safe helper rather than global
+ * `fetch`, so these tests inject a transport and a resolver instead of
+ * stubbing `globalThis.fetch`. That is a strictly better arrangement: the
+ * request actually travels through `assertUrlSafe`, so a test that expects an
+ * internal destination to be refused is exercising the real guard.
+ */
+const publicResolver: DnsResolver = async () => ["93.184.216.34"];
+
+async function* emptyBody(): AsyncIterable<Uint8Array> {
+  // no chunks
+}
+
+function response(
+  status: number,
+  headers: Record<string, string> = {},
+): RawResponse {
+  return { status, headers, body: emptyBody() };
+}
+
+/** Transport that answers every request from a URL -> response map. */
+function mapTransport(
+  routes: Record<string, RawResponse | (() => RawResponse)>,
+): { transport: Transport; calls: string[] } {
+  const calls: string[] = [];
+  const transport: Transport = async (req) => {
+    const href = req.target.url.href;
+    calls.push(href);
+    const entry = routes[href] ?? routes["*"];
+    if (!entry) return response(200);
+    return typeof entry === "function" ? entry() : entry;
+  };
+  return { transport, calls };
+}
 
 // Mock LinkSecurityHandler
 vi.mock("../../src/lib/link-security-handler", () => ({
@@ -108,31 +148,19 @@ describe("RedirectResolver", () => {
     });
 
     it("should resolve single redirect", async () => {
-      // Mock cache miss
       vi.mocked(mockKv.get).mockResolvedValue(null);
 
-      // Mock fetch response with redirect
-      const mockHeaders1 = new Headers();
-      mockHeaders1.set("Location", "https://example.com");
-
-      const mockHeaders2 = new Headers();
-
-      global.fetch = vi
-        .fn()
-        .mockResolvedValueOnce({
-          ok: false,
-          status: 301,
-          headers: mockHeaders1,
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          headers: mockHeaders2,
-        });
+      const { transport } = mapTransport({
+        "https://bit.ly/test": response(301, {
+          location: "https://example.com",
+        }),
+        "https://example.com/": response(200),
+      });
 
       const result = await redirectResolver.resolveRedirects(
         "https://bit.ly/test",
         mockEnv,
+        { resolver: publicResolver, transport },
       );
 
       expect(result).toBeDefined();
@@ -143,25 +171,20 @@ describe("RedirectResolver", () => {
     });
 
     it("should stop at max redirects", async () => {
-      // Mock cache miss
       vi.mocked(mockKv.get).mockResolvedValue(null);
 
-      // Mock fetch to return redirects
       let callCount = 0;
-      global.fetch = vi.fn().mockImplementation(() => {
+      const transport: Transport = async () => {
         callCount++;
-        const mockHeaders = new Headers();
-        mockHeaders.set("Location", `https://example.com/redirect${callCount}`);
-        return Promise.resolve({
-          ok: false,
-          status: 301,
-          headers: mockHeaders,
+        return response(301, {
+          location: `https://example.com/redirect${callCount}`,
         });
-      });
+      };
 
       const result = await redirectResolver.resolveRedirects(
         "https://bit.ly/test",
         mockEnv,
+        { resolver: publicResolver, transport },
       );
 
       expect(result).toBeDefined();
@@ -169,87 +192,129 @@ describe("RedirectResolver", () => {
     });
 
     it("should detect redirect loops", async () => {
-      // Mock cache miss
       vi.mocked(mockKv.get).mockResolvedValue(null);
 
-      // Mock fetch to return same URL in redirect
-      const mockHeaders = new Headers();
-      mockHeaders.set("Location", "https://bit.ly/test");
-
-      global.fetch = vi.fn().mockResolvedValue({
-        ok: false,
-        status: 301,
-        headers: mockHeaders,
+      const { transport, calls } = mapTransport({
+        "*": response(301, { location: "https://bit.ly/test" }),
       });
 
       const result = await redirectResolver.resolveRedirects(
         "https://bit.ly/test",
         mockEnv,
+        { resolver: publicResolver, transport },
       );
 
       expect(result).toBeDefined();
-      // Should stop at loop detection
+      // Loop detection stops the chain after the first hop.
+      expect(calls).toHaveLength(1);
     });
 
-    it("should handle timeout", async () => {
-      // Mock cache miss
+    it("should handle transport errors gracefully", async () => {
       vi.mocked(mockKv.get).mockResolvedValue(null);
 
-      // Mock fetch to timeout
-      global.fetch = vi.fn().mockImplementation(() => {
-        return new Promise((_, reject) => {
-          setTimeout(() => reject(new Error("Request timeout")), 100);
-        });
-      });
+      const transport: Transport = async () => {
+        throw new Error("Request timeout");
+      };
 
-      // Use shorter timeout for test
       const result = await redirectResolver.resolveRedirects(
         "https://bit.ly/test",
         mockEnv,
+        { resolver: publicResolver, transport },
       );
 
-      // Should handle timeout gracefully
       expect(result).toBeNull();
     });
 
     it("should block redirects to internal IPs", async () => {
-      // Mock cache miss
       vi.mocked(mockKv.get).mockResolvedValue(null);
 
-      // Mock fetch to redirect to internal IP
-      const mockHeaders = new Headers();
-      mockHeaders.set("Location", "http://192.168.1.1");
-
-      global.fetch = vi.fn().mockResolvedValue({
-        ok: false,
-        status: 301,
-        headers: mockHeaders,
+      const { transport, calls } = mapTransport({
+        "https://bit.ly/test": response(301, {
+          location: "http://192.168.1.1",
+        }),
       });
 
       const result = await redirectResolver.resolveRedirects(
         "https://bit.ly/test",
         mockEnv,
+        { resolver: publicResolver, transport },
       );
 
-      // Should not follow redirect to internal IP
+      // The chain stops at the last safe hop; the internal address is never
+      // dialled.
       expect(result).toBeDefined();
+      expect(result?.finalUrl).toBe("https://bit.ly/test");
+      expect(calls).toEqual(["https://bit.ly/test"]);
+    });
+
+    it("should refuse to fetch an internal INITIAL url (M2)", async () => {
+      // The bug this closes: only redirect *destinations* were validated, so
+      // hop zero went to the network unchecked. A caller handing this resolver
+      // `http://169.254.169.254/` got a metadata fetch.
+      vi.mocked(mockKv.get).mockResolvedValue(null);
+
+      const { transport, calls } = mapTransport({ "*": response(200) });
+
+      const result = await redirectResolver.resolveRedirects(
+        "http://169.254.169.254/latest/meta-data/",
+        mockEnv,
+        { resolver: publicResolver, transport },
+      );
+
+      expect(result).toBeNull();
+      expect(calls).toEqual([]); // no socket was opened at all
+    });
+
+    it("should refuse an initial url whose DNS answer is internal (M2)", async () => {
+      vi.mocked(mockKv.get).mockResolvedValue(null);
+
+      const { transport, calls } = mapTransport({ "*": response(200) });
+      const internalResolver: DnsResolver = async () => ["169.254.169.254"];
+
+      const result = await redirectResolver.resolveRedirects(
+        "https://cdn.attacker.example/",
+        mockEnv,
+        { resolver: internalResolver, transport },
+      );
+
+      expect(result).toBeNull();
+      expect(calls).toEqual([]);
+    });
+
+    it("should cap the response body it will read (M2)", async () => {
+      vi.mocked(mockKv.get).mockResolvedValue(null);
+
+      async function* flood(): AsyncIterable<Uint8Array> {
+        // Far past the 64 KiB cap; the helper must abort rather than buffer.
+        for (let i = 0; i < 64; i++) yield Buffer.alloc(64 * 1024, 0x41);
+      }
+      const transport: Transport = async () => ({
+        status: 200,
+        headers: {},
+        body: flood(),
+      });
+
+      const result = await redirectResolver.resolveRedirects(
+        "https://bit.ly/test",
+        mockEnv,
+        { resolver: publicResolver, transport },
+      );
+
+      // Over-cap responses surface as a failed resolution, not an OOM.
+      expect(result).toBeNull();
     });
   });
 
   describe("caching", () => {
     it("should cache resolved redirects", async () => {
-      // Mock cache miss
       vi.mocked(mockKv.get).mockResolvedValue(null);
 
-      // Mock successful resolution
-      const mockHeaders = new Headers();
-      global.fetch = vi.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        headers: mockHeaders,
-      });
+      const { transport } = mapTransport({ "*": response(200) });
 
-      await redirectResolver.resolveRedirects("https://bit.ly/test", mockEnv);
+      await redirectResolver.resolveRedirects("https://bit.ly/test", mockEnv, {
+        resolver: publicResolver,
+        transport,
+      });
 
       expect(mockKv.put).toHaveBeenCalled();
       const putCall = vi.mocked(mockKv.put).mock.calls[0];
@@ -278,22 +343,21 @@ describe("RedirectResolver", () => {
 
       expect(result1?.cacheHit).toBe(true);
       expect(result2?.cacheHit).toBe(true);
-      // Should only call fetch once (or not at all if cached)
-      expect(global.fetch).not.toHaveBeenCalled();
     });
   });
 
   describe("error handling", () => {
     it("should handle fetch errors gracefully", async () => {
-      // Mock cache miss
       vi.mocked(mockKv.get).mockResolvedValue(null);
 
-      // Mock fetch to throw error
-      global.fetch = vi.fn().mockRejectedValue(new Error("Network error"));
+      const transport: Transport = async () => {
+        throw new Error("Network error");
+      };
 
       const result = await redirectResolver.resolveRedirects(
         "https://bit.ly/test",
         mockEnv,
+        { resolver: publicResolver, transport },
       );
 
       expect(result).toBeNull();
@@ -302,34 +366,29 @@ describe("RedirectResolver", () => {
     it("should handle cache read errors gracefully", async () => {
       vi.mocked(mockKv.get).mockRejectedValue(new Error("Cache error"));
 
+      const { transport } = mapTransport({ "*": response(200) });
+
       // Should not throw, should continue without cache
       const result = await redirectResolver.resolveRedirects(
         "https://bit.ly/test",
         mockEnv,
+        { resolver: publicResolver, transport },
       );
 
-      // Result may be null or attempt to resolve without cache
       expect(result).toBeDefined();
     });
 
     it("should handle cache write errors gracefully", async () => {
-      // Mock cache miss
       vi.mocked(mockKv.get).mockResolvedValue(null);
       vi.mocked(mockKv.put).mockRejectedValue(new Error("Cache write error"));
 
-      // Mock successful fetch
-      global.fetch = vi.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        headers: {
-          get: vi.fn().mockReturnValue(null),
-        },
-      });
+      const { transport } = mapTransport({ "*": response(200) });
 
       // Should not throw, should return result even if cache write fails
       const result = await redirectResolver.resolveRedirects(
         "https://bit.ly/test",
         mockEnv,
+        { resolver: publicResolver, transport },
       );
 
       expect(result).toBeDefined();

@@ -87,9 +87,11 @@ describe("validateSortField", () => {
 // ---------------------------------------------------------------------------
 
 describe("feed sort-field reproducibility invariant", () => {
-  it("ALLOWED_SORT_FIELDS contains exactly ['createdAt'] — engagement metrics are prohibited by design", () => {
-    // The feed is a fixed treatment; engagement-based or algorithmic fields
-    // must never be added without a research audit and version bump.
+  it("ALLOWED_SORT_FIELDS contains exactly ['createdAt'] — the chronological default; no covert engagement ordering", () => {
+    // The feed is a fixed treatment; sort fields must never be added without
+    // a research audit, a version bump, and the pluggable-ranking
+    // accountability contract (plans/pluggable-ranking/) — declared,
+    // versioned, user-chosen, no undeclared engagement inputs.
     expect(Array.from(ALLOWED_SORT_FIELDS)).toEqual(["createdAt"]);
   });
 
@@ -110,9 +112,11 @@ describe("feed sort-field reproducibility invariant", () => {
     }
   });
 
-  it("FEED_RANKING_VERSION is 1 (chronological-only, no engagement ranking)", () => {
-    // Version 1 = createdAt DESC, no personalisation.  Bump this if the
-    // ranking changes and update the provenance manifest in analysis/research-platform/.
+  it("FEED_RANKING_VERSION is 1 (chronological default, no engagement ranking)", () => {
+    // Version 1 = createdAt DESC, no personalisation — the permanent default
+    // ordering. Any future version is an additional user-chosen treatment,
+    // never a replacement: bump the version, update the provenance manifest
+    // in analysis/research-platform/, and satisfy plans/pluggable-ranking/.
     expect(FEED_RANKING_VERSION).toBe(1);
   });
 });

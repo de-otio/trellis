@@ -113,18 +113,48 @@ describe("RelationshipHandler", () => {
       });
     });
 
-    it("accepts an explicit connectionMethod", async () => {
+    // Inverted from "accepts an explicit connectionMethod" (V1). That test
+    // encoded the privilege escalation as intended behaviour: naming "code"
+    // scored the new edge 0.7, which is tier 0 — the target's inner circle —
+    // so one unilateral request granted the caller read access to a stranger's
+    // close-friends posts. The method is now server-decided.
+    it("rejects a client-supplied connectionMethod instead of trusting it", async () => {
       mockGraphService.createRelationship.mockResolvedValue({ id: "rel-2" });
 
+      const response = await handler.handleCreateRelationship(
+        postRequest({
+          targetType: "entity",
+          targetId: "ent-1",
+          connectionMethod: "code",
+        }),
+        session,
+        mockEnv,
+        mockRequestContext,
+      );
+
+      expect(response.status).toBe(400);
+      const body = await response.json();
+      expect(body.message).toMatch(/determined by the server/);
+      // The escalation must not reach the graph at all, not merely be
+      // downgraded on the way through.
+      expect(mockGraphService.createRelationship).not.toHaveBeenCalled();
+    });
+
+    it("always records a relationship it creates as discovery", async () => {
+      mockGraphService.createRelationship.mockResolvedValue({ id: "rel-3" });
+
       await handler.handleCreateRelationship(
-        postRequest({ targetType: "entity", targetId: "ent-1", connectionMethod: "code" }),
+        postRequest({ targetType: "entity", targetId: "ent-1" }),
         session,
         mockEnv,
         mockRequestContext,
       );
 
       expect(mockGraphService.createRelationship).toHaveBeenCalledWith(
-        expect.objectContaining({ connectionMethod: "code", targetType: "entity" }),
+        expect.objectContaining({
+          connectionMethod: "discovery",
+          targetType: "entity",
+        }),
       );
     });
 

@@ -31,6 +31,7 @@ vi.mock("../../src/lib/session-config", () => ({
 const mockVerifyCognitoJwt = vi.fn();
 vi.mock("../../src/lib/auth/cognito-jwt", () => ({
   verifyCognitoJwt: (...args: any[]) => mockVerifyCognitoJwt(...args),
+  verifyLegacyCognitoClaims: (...args: any[]) => mockVerifyCognitoJwt(...args),
 }));
 
 describe("SessionManager - Extended", () => {
@@ -49,6 +50,9 @@ describe("SessionManager - Extended", () => {
     it("should authenticate via Cognito JWT with dataRegion claim", async () => {
       mockVerifyCognitoJwt.mockResolvedValue({
         sub: "cognito-user-123",
+        // Carries the trellis cuid: this suite is about dataRegion/email/role
+        // defaults, not about where `userId` comes from.
+        "custom:userId": "cmqurmq7x000002i80nqmgfa1",
         email: "cognito@example.com",
         username: "cognitouser",
         "custom:role": "END_USER",
@@ -65,7 +69,7 @@ describe("SessionManager - Extended", () => {
       const session = await sessionManager.getSession(request, testSecret, testEnv);
 
       expect(session).not.toBeNull();
-      expect(session?.userId).toBe("cognito-user-123");
+      expect(session?.userId).toBe("cmqurmq7x000002i80nqmgfa1");
       expect(session?.email).toBe("cognito@example.com");
       expect(session?.dataRegion).toBe("US");
       expect(session?.role).toBe("END_USER");
@@ -75,6 +79,9 @@ describe("SessionManager - Extended", () => {
     it("should default dataRegion to EU when not in JWT claims", async () => {
       mockVerifyCognitoJwt.mockResolvedValue({
         sub: "cognito-user-456",
+        // Carries the trellis cuid: this suite is about dataRegion/email/role
+        // defaults, not about where `userId` comes from.
+        "custom:userId": "cmqurmq7x000002i80nqmgfb2",
         email: "user@example.com",
         username: "user456",
       });
@@ -96,6 +103,9 @@ describe("SessionManager - Extended", () => {
     it("should use username as email fallback when email is not in JWT", async () => {
       mockVerifyCognitoJwt.mockResolvedValue({
         sub: "cognito-user-789",
+        // Carries the trellis cuid: this suite is about dataRegion/email/role
+        // defaults, not about where `userId` comes from.
+        "custom:userId": "cmqurmq7x000002i80nqmgfc3",
         username: "fallbackuser",
       });
 

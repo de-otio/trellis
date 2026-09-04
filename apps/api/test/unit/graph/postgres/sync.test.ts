@@ -20,6 +20,7 @@ import {
   tenantId,
 } from "@de-otio/saas-foundation/tenant";
 import { SyncOps } from "../../../../src/lib/graph/postgres/sync.js";
+import { GraphAuthorizationError } from "../../../../src/lib/graph/errors.js";
 import type { EntityGeoLookup } from "../../../../src/lib/geo/entity-geo-repository.js";
 
 const TENANT = tenantId("tenant-1");
@@ -162,16 +163,33 @@ describe("removeUser cascade scope", () => {
     expect(entityOwnership.deleteMany).not.toHaveBeenCalled();
   });
 
-  it("is unscoped when there is no ambient tenant", async () => {
-    await ops.removeUser("user-1");
-    expect(relationship.deleteMany).toHaveBeenCalledWith({
-      where: {
-        OR: [
-          { userId: "user-1" },
-          { targetType: "user", targetId: "user-1" },
-        ],
-      },
-    });
+  // L3b (security review 2026-08, lane 7 HIGH-1). This test previously
+  // ASSERTED the defect: with no ambient tenant, `removeUser` issued a
+  // `deleteMany` with no tenant predicate — a cross-tenant mass delete of every
+  // relationship edge touching that user id, in every tenant. The old comment
+  // justified it as "so a hard user delete still fully detaches", but an
+  // incomplete detach is recoverable (re-run with the tenant set) and a
+  // cross-tenant delete is not. Refuse instead.
+  it("REFUSES rather than running unscoped when there is no ambient tenant", async () => {
+    await expect(ops.removeUser("user-1")).rejects.toBeInstanceOf(
+      GraphAuthorizationError,
+    );
+    expect(relationship.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("REFUSES removeEntity with no ambient tenant", async () => {
+    await expect(ops.removeEntity("entity-1")).rejects.toBeInstanceOf(
+      GraphAuthorizationError,
+    );
+    expect(relationship.deleteMany).not.toHaveBeenCalled();
+    expect(entityRelationship.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("REFUSES removeOwnership with no ambient tenant", async () => {
+    await expect(ops.removeOwnership("entity-1", "user-1")).rejects.toBeInstanceOf(
+      GraphAuthorizationError,
+    );
+    expect(entityOwnership.deleteMany).not.toHaveBeenCalled();
   });
 });
 
@@ -289,7 +307,11 @@ describe("syncOwnership", () => {
     expect(relationship.upsert).toHaveBeenCalledTimes(1);
     const pinArgs = relationship.upsert.mock.calls[0][0];
     expect(pinArgs.where).toEqual({
-      userId_targetType_targetId: {
+      // M7: the unique key now leads with tenantId, so the auto-pin upsert
+      // targets THIS tenant's edge and cannot collide with a same-pair edge in
+      // another tenant.
+      tenantId_userId_targetType_targetId: {
+        tenantId: "tenant-1",
         userId: "user-1",
         targetType: "entity",
         targetId: "entity-1",

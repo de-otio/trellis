@@ -91,9 +91,15 @@ vi.mock("../../src/lib/validate-request", () => ({
   validateRequest: (...args: any[]) => mockValidateRequest(...args),
 }));
 
-// Mock schemas
+// Mock schemas.
+//
+// `editCommentSchema` MUST be listed even though the value is unused: vitest
+// throws on access to an export a factory mock did not declare, and `editComment`
+// now imports its schema from here rather than defining one inline (it moved so
+// the declarable-sourceType vocabulary lives in exactly one place).
 vi.mock("../../src/lib/schemas", () => ({
   createCommentSchema: {},
+  editCommentSchema: {},
 }));
 
 // Mock FeatureToggleService
@@ -113,6 +119,14 @@ vi.mock("../../src/db", () => ({
   createPrisma: (...args: any[]) => mockCreatePrisma(...args),
 }));
 
+// Mock the shared read authorizer (H3), default ALLOW — see
+// test/integration/post-attachment-read-authz.integration.test.ts for the
+// assertions that actually decide whether its predicate is correct.
+const mockCanReadPost = vi.fn();
+vi.mock("../../src/lib/post-read-authorizer", () => ({
+  canReadPost: (...args: any[]) => mockCanReadPost(...args),
+}));
+
 // Mock comment rate limiter
 const mockCommentRateLimit = vi.fn().mockResolvedValue({ allowed: true });
 vi.mock("../../src/lib/middleware/comment-rate-limit", () => ({
@@ -126,10 +140,11 @@ vi.mock("../../src/lib/database-wrapper-helper", () => ({
 }));
 
 // Mock zod
-// Chain order matches the real editCommentSchema in comment-handler.ts:
-// z.string().trim().min(1).max(3000) — .trim() runs BEFORE .min()/.max() so
-// whitespace-only text fails length validation instead of passing min(1)
-// and trimming to "" downstream (fail-closed).
+// Chain order matches the real editCommentSchema, which now lives in
+// src/lib/schemas.ts (it was inline in comment-handler.ts until provenance was
+// added): z.string().trim().min(1).max(3000) — .trim() runs BEFORE .min()/.max()
+// so whitespace-only text fails length validation instead of passing min(1) and
+// trimming to "" downstream (fail-closed).
 vi.mock("zod", () => ({
   z: {
     object: vi.fn().mockReturnValue({}),
@@ -155,6 +170,7 @@ describe("CommentHandler - Extended", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     handler = new CommentHandler();
+    mockCanReadPost.mockResolvedValue(true);
 
     mockDb = {
       post: {

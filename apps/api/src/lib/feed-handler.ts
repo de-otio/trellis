@@ -20,6 +20,11 @@ import { getLogger } from "./logger.js";
 
 import { DataRouter } from "./data-router.js";
 import { getFriendUserIds } from "./friend-ids.js";
+import {
+  attachmentProvenanceView,
+  textProvenanceView,
+} from "./provenance/response.js";
+import type { ProvenanceView } from "./provenance/types.js";
 import { Logger, type LoggerEnv } from "./logger.js";
 import type { TrellisRequestContext } from "./request-context.js";
 import { getSentimentDisplayMode, SentimentDisplayMode } from "./sentiment-display.js";
@@ -63,6 +68,18 @@ export interface FeedPost {
     place?: string;
   };
   contentWarnings?: string[];
+  /**
+   * Synthetic-content provenance of the post TEXT (AI Act Art. 50).
+   *
+   * ALWAYS PRESENT, never omitted: an absent field is indistinguishable from an
+   * old client or a pre-migration row, and clients need to tell "we don't know"
+   * (`UNKNOWN`) from "we didn't ask".
+   *
+   * `UNKNOWN` MUST render as nothing — never as "human-created". Rendering a
+   * human claim we never made is the one client-side mistake that turns this
+   * field into misinformation. Per-attachment provenance is on `media[].provenance`.
+   */
+  provenance: ProvenanceView;
   sentimentCounts?: Record<string, number>;
   sentimentTypes?: string[];                    // only when display mode = DISTRIBUTION
   sentimentDisplayMode?: string;                // "full" | "distribution" | "hidden"
@@ -84,6 +101,12 @@ export interface FeedPost {
       width: number | null;
       height: number | null;
     };
+    /**
+     * Provenance of THIS attachment (AI Act Art. 50) — per-attachment, not
+     * per-post, because one post can mix a human photo with an AI-generated one.
+     * Always present; `UNKNOWN` renders as nothing, never as "human".
+     */
+    provenance: ProvenanceView;
   }>;
 }
 
@@ -137,6 +160,55 @@ function encodeFeedCursor(createdAt: Date, postId: string): string {
   return Buffer.from(
     JSON.stringify({ createdAt: createdAt.toISOString(), postId }),
   ).toString("base64");
+}
+
+/**
+ * The audience predicate for reading posts: public, or own, or a friend's
+ * connections-level post.
+ *
+ * ONE definition, deliberately. Both read paths in this file — the home feed
+ * and the single-post fetch — must agree, because a viewer who is denied a row
+ * in the feed and then granted the same row by id has no audience boundary at
+ * all. Keeping this in one function is what makes that agreement checkable.
+ *
+ * THREE call sites, and no more:
+ *
+ *   1. `getHomeFeed` (this file)
+ *   2. `getPost` (this file)
+ *   3. `canReadPost` (lib/post-read-authorizer.ts)
+ *
+ * The third was added for H3 and is the one to reuse. The post's ATTACHMENTS —
+ * comments, sentiment counts, the who-reacted list — were audience-blind, each
+ * testing only that the post row existed. Rather than give each endpoint its
+ * own predicate (three more places to diverge), they all call `canReadPost`,
+ * which calls this. So the rule is now: an endpoint that needs to decide
+ * whether a viewer may read a post calls `canReadPost`; it does not call this
+ * function directly, and it certainly does not write its own predicate.
+ *
+ * This is an interim home. It reproduces today's semantics only; it does not
+ * consult `LOUD` (which the feed has never admitted for anyone but the author),
+ * group membership, or blocks. It is scheduled to be replaced wholesale by the
+ * single audience resolver — see trellis-internal plans/audience-and-reach,
+ * task P1.4 — at which point this function and its three call sites go away
+ * together. Thread the resolver into those three; do not add a fourth.
+ *
+ * @param viewerUserId the cuid of the viewing user (never an OIDC `sub`)
+ * @param friendUserIds ids this viewer is connected to, resolved by the caller
+ */
+export function buildPostAudienceFilter(
+  viewerUserId: string,
+  friendUserIds: string[],
+) {
+  return {
+    OR: [
+      { radius: PostRadius.SHOUT },
+      { authorId: viewerUserId }, // Own posts
+      {
+        radius: PostRadius.NORMAL,
+        authorId: { in: friendUserIds },
+      },
+    ],
+  };
 }
 
 export class FeedHandler {
@@ -206,12 +278,30 @@ export class FeedHandler {
       const pageNumber = parseInt(url.searchParams.get("pageNumber") || "1", 10);
       const sessionDurationMinutes = parseInt(url.searchParams.get("sessionDurationMinutes") || "0", 10);
 
+      // The tenant guard runs BEFORE the cache is consulted, not after the
+      // database predicate is built. A cache hit returns without ever reaching
+      // the query, so a guard placed further down cannot protect the cached
+      // path — it would let a request with no active tenant be answered from
+      // whatever a previous request stored.
+      if (!activeTenantId) {
+        throw new Error(
+          "getHomeFeed: activeTenantId is required for tenant isolation",
+        );
+      }
+
       // PREPARATORY: Use region in cache key to ensure region-specific caching
       const region = requestContext.region;
       const cacheVersion = await FeedHandler.getCacheVersion(env);
       // Include entityRefs in cache key for proper cache invalidation
       const entityRefsKey = options.entityRefs?.sort().join(",") || "";
-      const cacheKey = `feed:home:${region}:v${cacheVersion}:${session.userId}:${entityRefsKey}:${options.cursor || "initial"}:${limit}`;
+      // EVERY input to the response body must appear in this key. The body is
+      // resolved per viewer AND per tenant: `activeTenantId` comes from a JWT
+      // claim that changes when a user switches tenant, and it is an AND in the
+      // post query below. Omitting it means a user who belongs to two tenants
+      // gets tenant A's posts served from cache while reading as tenant B —
+      // defeating the tenant predicate entirely for the cache TTL, with no
+      // error anywhere.
+      const cacheKey = `feed:home:${region}:${activeTenantId}:v${cacheVersion}:${session.userId}:${entityRefsKey}:${options.cursor || "initial"}:${limit}`;
 
       // PREPARATORY: Check aggressive caching feature flag
       // If enabled, use longer cache TTL and more aggressive cache strategies
@@ -223,10 +313,25 @@ export class FeedHandler {
           status: 200,
           headers: {
             "content-type": "application/json",
-            // Add cache headers if aggressive caching enabled
-            ...(aggressiveCaching && {
-              "Cache-Control": "public, max-age=300", // 5 minutes
-            }),
+            // MUST stay `private`, and must be present unconditionally. The
+            // response body is resolved per viewer and per tenant (the cache key
+            // carries both, and the visibility filter is built from this
+            // viewer's friend set), so a shared cache — CDN or proxy — that
+            // stored it would serve one viewer's feed to another.
+            //
+            // Emitting nothing when aggressive caching is off is NOT the safe
+            // default: under RFC 9111 a 200 with no explicit freshness is
+            // heuristically storable, and a cookie-authenticated request carries
+            // no `Authorization` header to suppress that. So the flag chooses
+            // the browser-side TTL it exists to buy; it does not choose whether
+            // to say `private`.
+            "Cache-Control": aggressiveCaching
+              ? "private, max-age=300" // 5 minutes
+              : "private, no-store",
+            // Identity lives in the cookie/header, not the URL — every viewer
+            // requests the same path, so a shared cache needs telling that the
+            // response varies by credential.
+            Vary: "Authorization, Cookie",
           },
         });
       }
@@ -241,21 +346,22 @@ export class FeedHandler {
       );
 
       // Get friend user IDs for visibility filtering (relationship edges,
-      // tier ≤ 1 — see lib/friend-ids.ts for the convergence definition)
-      const friendIds = await getFriendUserIds(db, session.userId);
+      // tier ≤ 1 — see lib/friend-ids.ts for the convergence definition).
+      // Tenant-scoped: the friend set must come from the SAME tenant as the
+      // posts it gates, or an edge created in another tenant widens this feed.
+      const friendIds = await getFriendUserIds(
+        db,
+        session.userId,
+        activeTenantId,
+      );
 
-      // Build visibility filter
+      // Build visibility filter (shared with getPost — see
+      // buildPostAudienceFilter; the two paths must not diverge).
       // Note: This OR condition is at the top level, not nested
-      const visibilityFilter = {
-        OR: [
-          { radius: PostRadius.SHOUT },
-          { authorId: session.userId }, // Own posts
-          {
-            radius: PostRadius.NORMAL,
-            authorId: { in: friendIds },
-          },
-        ],
-      };
+      const visibilityFilter = buildPostAudienceFilter(
+        session.userId,
+        friendIds,
+      );
 
       // Build entity filter for multi-entity tagging
       let entityFilter: any = undefined;
@@ -270,8 +376,23 @@ export class FeedHandler {
         };
       }
 
-      // Tenant ID comes from the authenticated caller's JWT (passed in by the route).
+      // Tenant ID comes from the authenticated caller's JWT (passed in by the
+      // route). Already proven non-empty above, before the cache was consulted:
+      // Prisma DROPS a `where` key whose value is `undefined`, so a falsy tenant
+      // would remove the tenant predicate from the post query below and return
+      // every tenant's posts with no error anywhere.
       const tenantId = activeTenantId;
+
+      // Fail loudly rather than silently widening. Prisma DROPS a `where` key
+      // whose value is `undefined`, so a falsy tenant here would remove the
+      // tenant predicate from the post query below and return every tenant's
+      // posts — with no error anywhere. Throwing keeps that failure mode
+      // impossible to reach silently.
+      if (!tenantId) {
+        throw new Error(
+          "getHomeFeed: activeTenantId is required for tenant isolation",
+        );
+      }
 
       // Build taxonomy filter
       let taxonomyFilter: any = undefined;
@@ -376,6 +497,15 @@ export class FeedHandler {
                 {
                   deletedAt: null,
                   hiddenByAuthor: false,
+                  // CRITICAL: tenant isolation. This predicate is the only thing
+                  // separating tenants on this path — it must not be removed and
+                  // must not be made optional. Ambient tenant scoping does NOT
+                  // cover this query: TENANT_SCOPE_MODE defaults to "off" (see
+                  // tenant-scope.ts), in which case runWithTenantContext never
+                  // runs and the Prisma tenant-scope extension is not attached,
+                  // and there is no PostgreSQL RLS backstop yet. So this is the
+                  // first line of defence, not a redundant second one.
+                  tenantId,
                   // CRITICAL: Only get posts from the correct region
                   // For empty database, this filter returns 0 results instantly
                   // For production, all posts should have dataRegion set
@@ -473,6 +603,10 @@ export class FeedHandler {
                       optimizedKey: true,
                       width: true,
                       height: true,
+                      // Art. 50 provenance. Adding a column to an existing
+                      // select on an already-joined row: no extra query, no
+                      // extra join (plan T3.0 join audit).
+                      embeddedSourceType: true,
                     },
                   },
                 },
@@ -495,8 +629,7 @@ export class FeedHandler {
       let result = hasMore ? posts.slice(0, limit) : posts;
 
       // Feed personalization via extension feedStrategy was removed in the
-      // redesign; recommendationStrategy (pull-model) replaces the push-model
-      // personalize hook. Leaving options.personalized as a no-op for now.
+      // redesign and nothing replaced it. `options.personalized` is a no-op.
 
       const nextCursor =
         hasMore && result.length > 0
@@ -558,7 +691,14 @@ export class FeedHandler {
 
       return new Response(JSON.stringify(feedResponse), {
         status: 200,
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          // Per-viewer body: mark it private even on the freshly-computed path.
+          // Absent a directive a shared cache may still store this
+          // heuristically, which is the same leak as the cached path above.
+          "Cache-Control": "private, no-store",
+          Vary: "Authorization, Cookie",
+        },
       });
     } catch (error: any) {
       this.logger.error("Error getting home feed:", error);
@@ -575,12 +715,17 @@ export class FeedHandler {
   /**
    * Get a single post by ID, enriched with sentiment counts and comment count.
    * Returns null if the post is not found or not accessible.
+   *
+   * "Not accessible" is indistinguishable from "not found" on purpose: the
+   * caller renders both as 404, so this method must never signal that a post it
+   * refuses to return exists.
    */
   async getPost(
     postId: string,
     session: Session,
     env: Env,
     requestContext: TrellisRequestContext,
+    activeTenantId: string,
   ): Promise<FeedPost | null> {
     const region = requestContext.region;
     const { sharedDatabaseConnectionManager } = await import(
@@ -591,13 +736,39 @@ export class FeedHandler {
     );
     const apiDomain = FeedHandler.getApiDomain(env);
 
+    // Same reasoning as getHomeFeed: Prisma drops an `undefined` where key, so a
+    // falsy tenant would silently remove tenant isolation from the query below.
+    if (!activeTenantId) {
+      throw new Error(
+        "getPost: activeTenantId is required for tenant isolation",
+      );
+    }
+
+    // Resolve the viewer's connections once, before the post lookup, so that
+    // "post absent" and "post denied" perform the same work and cannot be
+    // distinguished by timing.
+    const friendIds = await getFriendUserIds(
+      DataRouter.getDatabaseForRegion(region, env, undefined, session.userId),
+      session.userId,
+      activeTenantId,
+    );
+
     const post = await withQueryTimeoutAndRetry(
       sharedDatabaseConnectionManager,
       region,
       env,
       async (db) => {
         return db.post.findUnique({
-          where: { id: postId, deletedAt: null, hiddenByAuthor: false },
+          where: {
+            id: postId,
+            deletedAt: null,
+            hiddenByAuthor: false,
+            // V3: this path previously applied NO tenant and NO audience
+            // predicate, so any authenticated caller could read any post —
+            // including WHISPER — by id. Both are now required.
+            tenantId: activeTenantId,
+            ...buildPostAudienceFilter(session.userId, friendIds),
+          },
           include: {
             author: {
               select: {
@@ -623,6 +794,8 @@ export class FeedHandler {
                     optimizedKey: true,
                     width: true,
                     height: true,
+                    // Art. 50 provenance — see note above.
+                    embeddedSourceType: true,
                   },
                 },
               },
@@ -893,6 +1066,10 @@ export class FeedHandler {
         | { lat: number; lng: number; place?: string }
         | undefined,
       contentWarnings: post.contentWarnings || [],
+      // Art. 50 disclosure. Emitted on EVERY post in the feed, not just on post
+      // detail: the duty is disclosure "at the latest at the first interaction or
+      // exposure", and for most users first exposure is the scroll.
+      provenance: textProvenanceView(post),
       // Safer Social Design: Apply sentiment display mode based on age tier
       ...(() => {
         if (session.ageTier && session.ageTier !== "ADULT") {
@@ -938,6 +1115,7 @@ export class FeedHandler {
             width: pm.media.width,
             height: pm.media.height,
           },
+          provenance: attachmentProvenanceView(pm),
         })) || undefined,
     }));
   }

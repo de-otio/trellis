@@ -26,6 +26,7 @@ import { entityProfileRoutes } from "./activitypub/entity-profile.js";
 import { webfingerRoutes } from "./activitypub/webfinger.js";
 import { adminRoutes } from "./admin.js";
 import { adminCostRoutes } from "./admin-costs.js";
+import { appMetaRoutes } from "./app-meta.js";
 import { authRoutes } from "./auth.js";
 import { authDiscoverRoutes } from "./auth-discover.js";
 import { badgesRoutes } from "./badges.js";
@@ -59,6 +60,7 @@ import { moderationFeedbackRoutes } from "./moderation-feedback.js";
 import { mapRoutes } from "./map.js";
 import { mediaRoutes } from "./media.js";
 import { mediaReviewRoutes } from "./media-review.js";
+import { provenanceCorrectionRoutes } from "./provenance-correction.js";
 import { mfaRoutes } from "./mfa.js";
 import { mediaMetadataVisibilityRoutes } from "./media-metadata-visibility.js";
 import { uploadSessionRoutes } from "./upload-sessions.js";
@@ -130,6 +132,10 @@ const appOnly = (route: Route): boolean =>
 const coreRoutes: Route[] = [
   // Health and configuration (highest priority)
   ...healthRoutes,
+
+  // App metadata: client version policy (unauthenticated, env-only, cacheable).
+  // Already carries `publicSpec: true` in its own module.
+  ...appMetaRoutes,
 
   // Agent discovery surface (T9b-a): /llms.txt, /openapi.json, /security.txt
   ...markPublicSpec(agentSurfaceRoutes),
@@ -238,6 +244,11 @@ const coreRoutes: Route[] = [
 
   // Media REVIEW-queue moderator surface (T9 — MODERATOR-only)
   ...mediaReviewRoutes,
+
+  // Staff-reviewed provenance correction (D12 — MODERATOR-only). The only path
+  // that can REDUCE a synthetic-content disclosure; the author edit path is
+  // monotonic. Closes the GDPR Art. 16 gap that monotonicity alone created.
+  ...provenanceCorrectionRoutes,
 
   // Media metadata privacy controls
   ...mediaMetadataVisibilityRoutes,
@@ -354,7 +365,17 @@ import { getExtensions } from "../../extensions.js";
 import { wrapExtensionRoutes } from "../extension-route-wrapper.js";
 
 const extensionRoutes: Route[] = [
-  // Raw routes (legacy — app-side wired handlers)
+  // Raw routes (legacy — app-side wired handlers).
+  //
+  // SEC M5 / TRUST MODEL: extensions are NOT sandboxed. A raw route is spliced
+  // into the core table verbatim — core applies no auth, no CSRF and no
+  // security headers, and the handler is invoked with the full core `Env`
+  // (SESSION_SECRET, DATABASE_URL, every KV binding and queue). Registering an
+  // extension is therefore a decision to trust its code at the same level as
+  // core code. `validateExtensions` now REJECTS at startup any raw route with
+  // no auth middleware, so the unauthenticated-with-full-Env shape can no
+  // longer boot; the remaining exposure (a raw route's access to `Env`) is
+  // inherent to this legacy path. Prefer `extensionRoutes` below.
   ...getExtensions().flatMap((ext) => ext.routes as Route[]),
   // Core-wrapped routes (clean pattern — extension provides handler, core wraps)
   ...getExtensions().flatMap((ext) => wrapExtensionRoutes(ext)),

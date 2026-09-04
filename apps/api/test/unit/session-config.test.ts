@@ -159,6 +159,71 @@ describe("SessionConfigManager", () => {
     });
   });
 
+  describe("Malformed values fail CLOSED to the default (A3)", () => {
+    // Before the fix, "abc" → parseInt → NaN flowed into the config;
+    // every comparison against NaN is false, so calculateSessionExpiration
+    // returned NaN and the session silently never expired.
+    it("falls back to the default on a non-numeric env value", () => {
+      const manager = new SessionConfigManager({
+        SESSION_USER_TIMEOUT_DAYS: "abc",
+      });
+      const config = manager.getConfig();
+
+      expect(config.userSessionTimeoutDays).toBe(90);
+      expect(Number.isFinite(manager.calculateSessionExpiration("user"))).toBe(
+        true,
+      );
+    });
+
+    it("falls back to the default on an empty-string env value", () => {
+      const manager = new SessionConfigManager({ SESSION_SSO_TIMEOUT_DAYS: "" });
+      expect(manager.getConfig().ssoSessionTimeoutDays).toBe(7);
+    });
+
+    it("rejects zero and negative timeouts (would expire everything instantly or never)", () => {
+      const manager = new SessionConfigManager({
+        SESSION_USER_TIMEOUT_DAYS: "0",
+        SESSION_DASHBOARD_TIMEOUT_HOURS: "-5",
+      });
+      const config = manager.getConfig();
+
+      expect(config.userSessionTimeoutDays).toBe(90);
+      expect(config.dashboardSessionTimeoutHours).toBe(24);
+    });
+
+    it("still allows 0 for the inactivity timeout (documented disable value)", () => {
+      const manager = new SessionConfigManager({
+        SESSION_INACTIVITY_TIMEOUT_MINUTES: "0",
+      });
+      expect(manager.getConfig().inactivityTimeoutMinutes).toBe(0);
+    });
+
+    it("rejects garbage arriving via SESSION_CONFIG JSON too", () => {
+      const manager = new SessionConfigManager({
+        SESSION_CONFIG: JSON.stringify({
+          USER_SESSION_TIMEOUT_DAYS: "not-a-number",
+          SSO_SESSION_TIMEOUT_DAYS: -1,
+        }),
+      });
+      const config = manager.getConfig();
+
+      expect(config.userSessionTimeoutDays).toBe(90);
+      expect(config.ssoSessionTimeoutDays).toBe(7);
+    });
+
+    it("a session sealed under a corrupted timeout config still expires", () => {
+      const manager = new SessionConfigManager({
+        SESSION_USER_TIMEOUT_DAYS: "garbage",
+      });
+      const expiresAt = manager.calculateSessionExpiration("user");
+
+      // With the default applied, the expiry is a real timestamp in the
+      // future — and a past timestamp is recognized as expired.
+      expect(expiresAt).toBeGreaterThan(Date.now());
+      expect(manager.isSessionExpired(Date.now() - 1000)).toBe(true);
+    });
+  });
+
   describe("calculateSessionExpiration", () => {
     it("should calculate expiration for user session type", () => {
       const env = {

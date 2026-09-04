@@ -7,8 +7,18 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# MED-1 (2026-08 security review): id-token: write used to be granted here
+# at top level, to every job — including lint-and-test, which checks out and
+# runs `npm ci` + tests against untrusted fork-PR code on `pull_request`.
+# Nothing in this workflow exchanges an OIDC token (no configure-aws-credentials,
+# no npm Trusted Publishing here — that's publish.yml, tag-triggered, a separate
+# workflow with its own narrowly-scoped id-token job); the permission had no
+# consumer and was pure downside: a malicious test/postinstall on a fork PR could
+# mint an OIDC token scoped to this repo/workflow and try to exchange it against
+# whatever trust policy would accept a `workflow_ref` of `ci.yml`. Removed. If a
+# genuine future need arises, scope id-token to the single job that needs it —
+# never the job running PR-head code.
 permissions:
-  id-token: write
   contents: read
 
 concurrency:
@@ -42,10 +52,10 @@ jobs:
         options: --health-cmd "curl -s http://localhost:8000" --health-interval 5s
 
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node.js
-        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
           cache: "npm"
@@ -66,6 +76,16 @@ jobs:
 
       - name: Build workspace packages
         run: npm run build -w @de-otio/trellis
+
+      # The worker image compiles the api sources under apps/worker's OWN
+      # tsconfig (no DOM lib), which is stricter about fetch/Response types
+      # than the api build. Nothing else on PR CI exercises that compile —
+      # scaleway-image-push.yml is workflow_dispatch-only — so without this
+      # gate a DOM-only idiom in api code breaks the worker Docker build
+      # weeks later (found 2026-08-21: threat-intel-service.ts TS2322 at
+      # v0.25.0-alpha.9). noEmit typecheck, a few seconds.
+      - name: Typecheck worker (no-DOM lib compile of api sources)
+        run: npx tsc -p apps/worker/tsconfig.json
 
       - name: Lint (TypeScript)
         run: npm run lint -w @de-otio/trellis
@@ -161,10 +181,10 @@ jobs:
         options: --health-cmd "curl -s http://localhost:8000" --health-interval 5s
 
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node.js
-        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
           cache: "npm"
@@ -188,6 +208,64 @@ jobs:
       # The standalone-env defaults point at the service containers above.
       - name: Run standalone lane
         run: npm run test:standalone -w @de-otio/trellis
+
+  testkit:
+    name: Testkit lane
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # The same stack the standalone lane uses, because the testkit's job is to
+    # package exactly that. What differs is which copy of core it exercises:
+    # the standalone lane boots `src` (a pre-publish gate on the working tree),
+    # this one resolves `@de-otio/trellis` from node_modules and boots `dist`
+    # (a gate on what a consumer actually installs). Neither substitutes for
+    # the other, which is why both exist.
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_DB: trellis_dev
+          POSTGRES_USER: trellis
+          POSTGRES_PASSWORD: trellis_dev_password
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+      dynamodb:
+        image: amazon/dynamodb-local:latest
+        ports: ["8000:8000"]
+        options: --health-cmd "curl -s http://localhost:8000" --health-interval 5s
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npm run prisma:generate
+        env:
+          DATABASE_URL: postgresql://trellis:trellis_dev_password@localhost:5432/trellis_dev
+
+      # The testkit resolves `@de-otio/trellis` to apps/api/dist, so unlike
+      # every other lane this one genuinely needs the build. It deliberately
+      # does NOT run migrations here: applying them is the testkit's own job
+      # and this lane is what proves it does it.
+      - name: Build core
+        run: npm run build
+
+      - name: Typecheck the testkit (façade vs core's real API)
+        run: npm run test:types -w @de-otio/trellis-extension-testkit
+
+      - name: Run testkit lane
+        run: npm test -w @de-otio/trellis-extension-testkit
 
   graph:
     name: Graph lane (Postgres)
@@ -216,10 +294,10 @@ jobs:
           --health-retries 20
 
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node.js
-        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
           cache: "npm"
@@ -272,16 +350,25 @@ jobs:
           --health-retries 20
 
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node.js
-        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
           cache: "npm"
 
       - name: Install dependencies
         run: npm ci
+
+      # Runs BEFORE the migrations, and needs no database: `prisma migrate dev`
+      # proposes dropping the GiST / gin_trgm_ops indexes it cannot express in
+      # schema.prisma, and applying that generated SQL silently destroys
+      # geo-proximity and directory search. Two migrations have already hit it.
+      # See scripts/check-migration-sql.mjs.
+      - name: Guard against unjustified DROP INDEX in migrations
+        timeout-minutes: 2
+        run: node scripts/check-migration-sql.mjs
 
       - name: Run migrations
         timeout-minutes: 5
@@ -320,10 +407,10 @@ jobs:
           --health-retries 20
 
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node.js
-        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
           cache: "npm"
@@ -377,10 +464,10 @@ jobs:
         options: --health-cmd "curl -s http://localhost:8000" --health-interval 5s
 
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node.js
-        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
           cache: "npm"

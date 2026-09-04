@@ -14,6 +14,7 @@ import { createPrisma } from "../db.js";
 import { createEmailProvider } from "./email-provider.js";
 
 import { getLogger, Logger, type LoggerEnv } from "./logger.js";
+import { invalidateClaimsForUserId } from "./auth/claims-invalidation.js";
 import * as crypto from "node:crypto";
 
 export interface Env {
@@ -128,6 +129,24 @@ export class UserDeletionHandlerEnhanced {
       };
     }
 
+    // Storing the confirmation code must not be optional. A skipped write
+    // emails a code that nothing can ever validate, and since confirmDeletion
+    // now fails closed, the account would be left suspended with
+    // `deletionRequestedAt` set — which makes every retry take the "already
+    // requested, please confirm" branch above. That is a lockout, not a
+    // degradation.
+    //
+    // Checked BEFORE the row is touched, so an unavailable store leaves the
+    // account exactly as it was.
+    if (!env.DELETE_JOBS_KV) {
+      getLogger().error(
+        "[UserDeletion] DELETE_JOBS_KV binding is missing — refusing the request rather than suspending the account with an unusable code.",
+      );
+      throw new Error(
+        "Deletion requests are unavailable. Please try again later.",
+      );
+    }
+
     // Set grace period: request deletion, schedule hard delete in 7 days
     const now = new Date();
     const scheduledAt = new Date(
@@ -146,13 +165,42 @@ export class UserDeletionHandlerEnhanced {
       },
     });
 
-    // Generate 6-digit confirmation code and store with 24h TTL
+    // SEC (claims-cache freshness audit): this is a SUSPENSION path, and a
+    // pre-token-generation cache HIT skips the RDS suspension check entirely.
+    // Without this the account is suspended in Postgres yet keeps minting
+    // fully-privileged JWTs for up to one cache TTL (~1h) — the exact gap the
+    // "G2 finding H3" note in the Lambda warns about. This call site was
+    // missing it.
+    await invalidateClaimsForUserId(db, session.userId, "user.deletion_request");
+
+    // Generate 6-digit confirmation code and store with 24h TTL.
     const confirmationCode = crypto.randomInt(100000, 999999).toString();
-    if (env.DELETE_JOBS_KV) {
+    try {
       await env.DELETE_JOBS_KV.put(
         `deletion-confirm:${session.userId}`,
         JSON.stringify({ code: confirmationCode, createdAt: now.toISOString() }),
         { expirationTtl: 86400 }, // 24 hours
+      );
+    } catch (error) {
+      // The row is already marked. There is no transaction spanning Postgres
+      // and the KV store, so undo the mark by hand — otherwise the user is
+      // suspended, unable to confirm, and unable to re-request.
+      getLogger().error(
+        "[UserDeletion] Failed to store the confirmation code — reverting the deletion request so the account is not stranded.",
+        error,
+      );
+      await db.user.update({
+        where: { id: session.userId },
+        data: {
+          deletionRequestedAt: null,
+          deletionScheduledAt: null,
+          suspended: false,
+          suspendedAt: null,
+          suspendedReason: null,
+        },
+      });
+      throw new Error(
+        "Deletion requests are unavailable. Please try again later.",
       );
     }
 
@@ -210,19 +258,35 @@ export class UserDeletionHandlerEnhanced {
       };
     }
 
-    // Validate confirmation code from DynamoDB-backed KV
-    if (env.DELETE_JOBS_KV) {
-      const stored = await env.DELETE_JOBS_KV.get(`deletion-confirm:${userId}`);
-      if (!stored) {
-        throw new Error("Confirmation code expired or not found. Please request deletion again.");
-      }
-      const { code } = JSON.parse(stored) as { code: string };
-      if (code !== confirmationCode) {
-        throw new Error("Invalid confirmation code");
-      }
-      // One-time use: delete after successful validation
-      await env.DELETE_JOBS_KV.delete(`deletion-confirm:${userId}`);
+    // Validate the emailed confirmation code.
+    //
+    // This used to be wrapped in `if (env.DELETE_JOBS_KV)`, which made the
+    // check itself OPTIONAL: with no binding the whole block was skipped and
+    // the deletion was confirmed with no code validated at all. The email step
+    // exists to prove mailbox control before an irreversible action, so
+    // skipping it is not a degradation — it removes the second factor.
+    //
+    // Fail closed instead. A store we cannot read cannot confirm a code, and
+    // "cannot confirm" must never resolve to "confirmed".
+    if (!env.DELETE_JOBS_KV) {
+      getLogger().error(
+        "[UserDeletion] SECURITY: DELETE_JOBS_KV binding is missing — refusing to confirm deletion without validating the emailed code.",
+      );
+      throw new Error(
+        "Deletion confirmation is unavailable. Please try again later.",
+      );
     }
+
+    const stored = await env.DELETE_JOBS_KV.get(`deletion-confirm:${userId}`);
+    if (!stored) {
+      throw new Error("Confirmation code expired or not found. Please request deletion again.");
+    }
+    const { code } = JSON.parse(stored) as { code: string };
+    if (code !== confirmationCode) {
+      throw new Error("Invalid confirmation code");
+    }
+    // One-time use: delete after successful validation
+    await env.DELETE_JOBS_KV.delete(`deletion-confirm:${userId}`);
 
     await db.user.update({
       where: { id: userId },

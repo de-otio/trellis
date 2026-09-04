@@ -16,12 +16,47 @@ import type { RawPrismaLike } from "./lib/extension-scoped-db.js";
 import { buildEnv, validateEnv } from "./env.js";
 import { startExtensionJobRunners } from "./lib/extension-job-runner.js";
 import { validateBootEnv } from "./env-schema.js";
+import { verifyKeycloakProfileLockdownAtBoot } from "./lib/identity/identity-provider.js";
 import { buildHonoApp } from "./lib/app.js";
 import { getLogger, Logger } from "./lib/logger.js";
 import { TrellisRequestContextManager } from "./lib/request-context.js";
 import { SessionManager } from "./lib/session-cookie.js";
 import { getExtensions } from "./extensions.js";
+import { assertModerationProviderAllowed } from "./lib/media/moderation-provider.js";
+import { getMediaModerationProvider } from "./lib/media/request-moderation.js";
 import { validateExtensions } from "./lib/extension-validator.js";
+import {
+  setExtensionModelRegistry,
+  freezeExtensionModelRegistry,
+  type ExtensionModelRegistryEntry,
+} from "./lib/extension-model-registry.js";
+
+/** Options for {@link startServer}. */
+export interface StartServerOptions {
+  /**
+   * Composed extension-owned-model registry, produced by the schema composer
+   * for an app that owns `ext_*` tables. Injected at boot and frozen before the
+   * listener binds. Omit when no extension owns tables (the default).
+   */
+  readonly extensionModelRegistry?: readonly ExtensionModelRegistryEntry[];
+}
+
+/**
+ * Stages where running without a real moderation provider is expected rather
+ * than alarming: local development and the automated test lanes, which boot the
+ * server with no consuming application to inject one.
+ *
+ * Deliberately an ALLOW-list of three known names, not "anything that is not
+ * prod". A stage nobody thought about — `staging`, `preprod`, a typo — must
+ * land on the guarded side, because the failure this guard prevents is silent:
+ * every upload piling into review with no path to approval looks like a
+ * moderation backlog, not like an unwired deployment.
+ */
+const NON_PRODUCTION_STAGES: ReadonlySet<string> = new Set([
+  "dev",
+  "test",
+  "local",
+]);
 
 const MAX_BODY_SIZE = 10 * 1024 * 1024; // 10 MB
 const REQUEST_TIMEOUT_MS = 25_000; // 25 seconds
@@ -44,8 +79,20 @@ async function readBody(req: http.IncomingMessage): Promise<Buffer> {
   });
 }
 
-export async function startServer(): Promise<http.Server> {
+export async function startServer(
+  options?: StartServerOptions,
+): Promise<http.Server> {
   const PORT = parseInt(process.env.PORT || "3000", 10);
+
+  // O-1 boot seam (security F5): inject the composed extension-model registry
+  // (if the app owns ext_* tables), then FREEZE so it can never change while
+  // requests are served. Freeze unconditionally — even with no owned tables —
+  // so a late setExtensionModelRegistry() is a loud error, not a silent surface
+  // change. Must precede any request handling / job runner / listener bind.
+  if (options?.extensionModelRegistry) {
+    setExtensionModelRegistry(options.extensionModelRegistry);
+  }
+  freezeExtensionModelRegistry();
 
   // AR12 — boot-time env validation (Zod, src/env-schema.ts): fail fast,
   // naming the missing/invalid key, BEFORE any AWS client is constructed or
@@ -72,6 +119,57 @@ export async function startServer(): Promise<http.Server> {
     process.exit(1);
   }
   const logger = getLogger();
+
+  // [F3] Startup health-check (Keycloak only): verify the realm's User Profile
+  // config locks the privilege-bearing custom:* attributes admin-edit-only, so
+  // a user cannot self-assign roles / switch active tenant by editing their own
+  // profile. Fail boot otherwise. Bypassable ONLY via
+  // KC_SKIP_PROFILE_LOCKDOWN_CHECK=true (logs a loud warning). No-op on Cognito.
+  try {
+    await verifyKeycloakProfileLockdownAtBoot(logger);
+  } catch (err) {
+    console.error("Keycloak user-profile lockdown check failed at boot:");
+    console.error(`  - ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+
+  // Media-moderation seam guard. The seam's runtime fallback is a fail-closed
+  // Null provider, which is correct for a request that has already started —
+  // it sends media to review rather than 500-ing — but it is NOT an acceptable
+  // steady state outside dev: every upload would pile into the review queue
+  // with no path to approval, and the failure looks like a moderation backlog
+  // rather than an unwired deployment. So boot refuses instead.
+  //
+  // Gated on the environment, and skippable by an operator who genuinely means
+  // it (MEDIA_MODERATION_ALLOW_NULL=true), which logs loudly rather than
+  // failing silently.
+  // An ABSENT stage is guarded, not waved through. Defaulting it to "dev" would
+  // have made the commonest deployment mistake — a task definition that forgets
+  // STAGE — the one case that skips the check, which is exactly backwards from
+  // the allow-list's stated reasoning three lines up.
+  const moderationEnvironment = process.env.STAGE ?? "";
+  if (process.env.MEDIA_MODERATION_ALLOW_NULL === "true") {
+    logger.warn(
+      "MEDIA_MODERATION_ALLOW_NULL=true — the fail-closed Null moderation provider is permitted in this environment. Every upload will land in review with no path to approval.",
+      { environment: moderationEnvironment },
+    );
+  } else if (!NON_PRODUCTION_STAGES.has(moderationEnvironment)) {
+    try {
+      assertModerationProviderAllowed(
+        getMediaModerationProvider(),
+        moderationEnvironment,
+      );
+    } catch (err) {
+      console.error("Media moderation provider check failed at boot:");
+      console.error(`  - ${err instanceof Error ? err.message : String(err)}`);
+      if (moderationEnvironment === "") {
+        console.error(
+          "  - STAGE is not set. Set STAGE=dev for local development, or inject a moderation provider.",
+        );
+      }
+      process.exit(1);
+    }
+  }
 
   // Validate extensions
   const extensions = getExtensions();
@@ -107,6 +205,7 @@ export async function startServer(): Promise<http.Server> {
   // model metas are built once from the (currently empty) composed-model
   // registry; they carry only the tenant-scoped core delegates today.
   const { DynamoDBClient } = await import("@aws-sdk/client-dynamodb");
+  const { DynamoKvStore } = await import("@de-otio/saas-foundation/kv");
   const { sharedDatabaseConnectionManager: dbManager } = await import(
     "./lib/database-connection-manager.js"
   );
@@ -116,8 +215,19 @@ export async function startServer(): Promise<http.Server> {
   const scopedModelMetas = buildScopedModelMetas();
   const jobRunnerHandle = startExtensionJobRunners(
     {
-      dynamo: new DynamoDBClient({ region: env.AWS_REGION }),
-      tableName: process.env.DYNAMODB_TABLE ?? `${env.STAGE ?? "dev"}-trellis`,
+      // Single-flight lock via the KvStore port (WS-1 §3.9). Default DynamoKvStore
+      // over the byte-compat `job` layout (pk `job:{extId}:{jobId}`, sk `lock`)
+      // — zero AWS behavior change; only the additive `_v` version attribute.
+      kvStore: new DynamoKvStore(new DynamoDBClient({ region: env.AWS_REGION }), {
+        tableName: process.env.DYNAMODB_TABLE ?? `${env.STAGE ?? "dev"}-trellis`,
+        pkPrefix: "job",
+        pkSeparator: ":",
+        skName: "sk",
+        skValue: "lock",
+        ttlAttr: "ttl",
+        versionAttr: "_v",
+        allowSeparatorInKey: true,
+      }),
       now: () => Date.now(),
       uuid: () => randomUUID(),
       readDelegateSource: (model) => {

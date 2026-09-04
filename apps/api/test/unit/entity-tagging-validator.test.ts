@@ -14,8 +14,20 @@ import {
   EntityTaggingPermissionError,
 } from "../../src/lib/entity-tagging-errors.js";
 
-/** Build a friend-edge row as `relationship.findMany` would return it. */
-const friendEdge = (targetId: string) => ({ targetId });
+/**
+ * Build a friend-edge row as `relationship.findMany` would return it.
+ *
+ * The row carries `userId` — the AUTHOR of the edge — because the query reads the
+ * edge whose TARGET is the viewer. See friend-ids.ts on why the direction matters.
+ */
+const friendEdge = (userId: string) => ({ userId });
+
+/**
+ * L4: the friendship half of this check is tenant-scoped, so the validator now
+ * takes the post's tenant explicitly. `data-router.ts` passes the same value it
+ * stamps onto the post row.
+ */
+const TENANT = "tenant-1";
 
 describe("validateEntityTagging", () => {
   let mockDb: any;
@@ -35,7 +47,7 @@ describe("validateEntityTagging", () => {
 
   it("should allow tagging when no entities provided", async () => {
     await expect(
-      validateEntityTagging("user-123", [], mockDb as any),
+      validateEntityTagging("user-123", [], mockDb as any, TENANT),
     ).resolves.not.toThrow();
     // No queries at all for the empty case
     expect(mockDb.entity.findMany).not.toHaveBeenCalled();
@@ -48,7 +60,7 @@ describe("validateEntityTagging", () => {
     ]);
 
     await expect(
-      validateEntityTagging("user-123", ["entity-1"], mockDb as any),
+      validateEntityTagging("user-123", ["entity-1"], mockDb as any, TENANT),
     ).resolves.not.toThrow();
   });
 
@@ -59,14 +71,46 @@ describe("validateEntityTagging", () => {
     mockDb.relationship.findMany.mockResolvedValue([friendEdge("friend-456")]);
 
     await expect(
-      validateEntityTagging("user-123", ["entity-1"], mockDb as any),
+      validateEntityTagging("user-123", ["entity-1"], mockDb as any, TENANT),
     ).resolves.not.toThrow();
 
-    // Friend set must come from the caller's outgoing user-edges, tier ≤ 1
+    // The friend set must come from MUTUAL user-edges at tier ≤ 1 that the OTHER
+    // party authored — `targetId` is the caller, so the tier is the one the entity
+    // owner assigned. Both halves matter here:
+    //
+    // `reciprocated` was added when the one-directional read was found to be a
+    // self-grant (V1): without it, unilaterally adding a stranger was enough to
+    // tag that stranger's entities — their dog, their business — in your own
+    // posts, with no action by them.
+    //
+    // The direction was then flipped because `reciprocated` alone was not enough:
+    // `tier` is reader-writable via PATCH /api/relationships/score, so reading the
+    // caller's own edge let the caller promote themselves into a stranger's close
+    // circle after any follow-back. Tagging must require the other party's
+    // consent, so this validator inherits both constraints.
     expect(mockDb.relationship.findMany).toHaveBeenCalledWith({
-      where: { userId: "user-123", targetType: "user", tier: { lte: 1 } },
-      select: { targetId: true },
+      where: {
+        tenantId: TENANT,
+        targetId: "user-123",
+        targetType: "user",
+        tier: { lte: 1 },
+        reciprocated: true,
+      },
+      select: { userId: true },
     });
+  });
+
+  it("should refuse to tag the entity of a one-directional connection", async () => {
+    mockDb.entity.findMany.mockResolvedValue([
+      { id: "entity-1", owners: [{ userId: "stranger-789", role: "PRIMARY" }] },
+    ]);
+    // The query now constrains `reciprocated`, so a unilateral edge simply is
+    // not returned — the friend set comes back empty and the tag is refused.
+    mockDb.relationship.findMany.mockResolvedValue([]);
+
+    await expect(
+      validateEntityTagging("user-123", ["entity-1"], mockDb as any, TENANT),
+    ).rejects.toThrow(EntityTaggingPermissionError);
   });
 
   it("should allow tagging mix of own and friends entities", async () => {
@@ -81,6 +125,7 @@ describe("validateEntityTagging", () => {
         "user-123",
         ["entity-1", "entity-2"],
         mockDb as any,
+        TENANT,
       ),
     ).resolves.not.toThrow();
   });
@@ -89,7 +134,7 @@ describe("validateEntityTagging", () => {
     mockDb.entity.findMany.mockResolvedValue([]);
 
     await expect(
-      validateEntityTagging("user-123", ["entity-1"], mockDb as any),
+      validateEntityTagging("user-123", ["entity-1"], mockDb as any, TENANT),
     ).rejects.toThrow(InvalidEntitiesError);
   });
 
@@ -100,7 +145,7 @@ describe("validateEntityTagging", () => {
     mockDb.relationship.findMany.mockResolvedValue([]);
 
     await expect(
-      validateEntityTagging("user-123", ["entity-1"], mockDb as any),
+      validateEntityTagging("user-123", ["entity-1"], mockDb as any, TENANT),
     ).rejects.toThrow(EntityTaggingPermissionError);
   });
 
@@ -112,7 +157,7 @@ describe("validateEntityTagging", () => {
     mockDb.relationship.findMany.mockResolvedValue([]);
 
     await expect(
-      validateEntityTagging("user-123", ["entity-1"], mockDb as any),
+      validateEntityTagging("user-123", ["entity-1"], mockDb as any, TENANT),
     ).rejects.toThrow(EntityTaggingPermissionError);
   });
 
@@ -126,6 +171,7 @@ describe("validateEntityTagging", () => {
         "user-123",
         ["entity-1", "entity-1", "ENTITY-1"], // Duplicates and case variations
         mockDb as any,
+        TENANT,
       ),
     ).resolves.not.toThrow();
 
@@ -147,6 +193,7 @@ describe("validateEntityTagging", () => {
         "user-123",
         ["  ENTITY-1  ", "entity-2"],
         mockDb as any,
+        TENANT,
       ),
     ).resolves.not.toThrow();
 
@@ -167,6 +214,7 @@ describe("validateEntityTagging", () => {
         "user-123",
         ["entity-1", "", "   ", "entity-2"],
         mockDb as any,
+        TENANT,
       ),
     ).resolves.not.toThrow();
 
@@ -174,5 +222,41 @@ describe("validateEntityTagging", () => {
       where: { id: { in: ["entity-1", "entity-2"] } },
       select: { id: true, owners: { select: { userId: true, role: true }, where: { status: 'ACTIVE' } } },
     });
+  });
+});
+
+describe("validateEntityTagging tenant scoping (L4)", () => {
+  let mockDb: any;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockDb = {
+      entity: { findMany: vi.fn() },
+      relationship: { findMany: vi.fn().mockResolvedValue([]) },
+    };
+  });
+
+  it("resolves the friend set inside the post's tenant", async () => {
+    mockDb.entity.findMany.mockResolvedValue([
+      { id: "entity-1", owners: [{ userId: "user-123", role: "PRIMARY" }] },
+    ]);
+
+    await validateEntityTagging("user-123", ["entity-1"], mockDb as any, TENANT);
+
+    // Without this predicate a friendship formed in ANOTHER tenant would
+    // authorize tagging that tenant's members' entities here.
+    expect(mockDb.relationship.findMany.mock.calls[0][0].where.tenantId).toBe(
+      TENANT,
+    );
+  });
+
+  it("refuses rather than resolving a global friend set when the tenant is missing", async () => {
+    mockDb.entity.findMany.mockResolvedValue([
+      { id: "entity-1", owners: [{ userId: "other", role: "PRIMARY" }] },
+    ]);
+
+    await expect(
+      validateEntityTagging("user-123", ["entity-1"], mockDb as any, ""),
+    ).rejects.toThrow(/tenantId is required/);
   });
 });

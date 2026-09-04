@@ -8,6 +8,7 @@
 
 import type { Env } from "../env.js";
 import { CorsHandler } from "./cors-handler.js";
+import { handleMagicLinkInitiate } from "./identity/magic-link-initiate.js";
 import { getLogger, Logger } from "./logger.js";
 import type { RateLimiter } from "./rate-limit.js";
 import type { TrellisRequestContext } from "./request-context.js";
@@ -22,7 +23,7 @@ export class AuthHandler {
     request: Request,
     env: Env,
     url: URL,
-    _rateLimiter: RateLimiter,
+    rateLimiter: RateLimiter,
     securityHeaders: SecurityHeaders,
     _requestContext?: TrellisRequestContext,
   ): Promise<Response> {
@@ -55,6 +56,30 @@ export class AuthHandler {
     }
 
     try {
+      // WS-3.3: provider-neutral magic-link initiation through the
+      // IdentityProviderPort (IDENTITY_PROVIDER flag, default cognito).
+      // Per-email 5/900s rate limit + enumeration stance live inside the
+      // handler (inherited from G2 — see magic-link-initiate.ts).
+      if (pathname === "/auth/magic-link" && request.method === "POST") {
+        const response = await handleMagicLinkInitiate(
+          request,
+          env,
+          rateLimiter,
+          corsHeaders,
+        );
+        return securityHeaders.addSecurityHeaders(response);
+      }
+
+      // Invitation-gated registration. Only meaningful on a brokered IdP:
+      // the Cognito path registers client-side through Amplify with the
+      // PreSignUp trigger running the same gate, and this returns 501 there.
+      // See identity/register.ts for why it must be a server endpoint.
+      if (pathname === "/auth/register" && request.method === "POST") {
+        const { handleRegister } = await import("./identity/register.js");
+        const response = await handleRegister(request, env, rateLimiter, corsHeaders);
+        return securityHeaders.addSecurityHeaders(response);
+      }
+
       // Get reCAPTCHA site key (public endpoint)
       if (pathname === "/auth/recaptcha-site-key" && request.method === "GET") {
         const siteKey = env.RECAPTCHA_SITE_KEY || "";

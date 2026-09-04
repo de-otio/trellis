@@ -16,7 +16,11 @@ import {
   QueryTimeoutPresets,
 } from "../../db-query-helper.js";
 import { detectRegionSync } from "../../region-detection.js";
-import { verifyHttpSignature } from "../listeners/http-signatures.js";
+import { verifyInboxRequest } from "../listeners/http-signatures.js";
+import {
+  assertActorBinding,
+  type SignatureVerificationSuccess,
+} from "../http-signatures.js";
 import { getActivityPubBaseUrl } from "../fedify/context.js";
 import { isStandaloneModeEnabled, isRemoteUri } from "../standalone-mode.js";
 
@@ -30,6 +34,10 @@ import { isStandaloneModeEnabled, isRemoteUri } from "../standalone-mode.js";
  * @param request - Incoming request
  * @param inboxActorUri - Target actor's actor URI
  * @param env - Cloudflare Workers environment
+ * @param verified - A verification already performed by the caller. Pass this
+ *   whenever the caller has verified: re-verifying would (a) re-fetch the
+ *   remote actor and (b) trip replay suppression on our own request, since an
+ *   identical signature is exactly what the nonce cache is built to reject.
  * @returns True if processed successfully, false otherwise
  */
 export async function processRemoteActivity(
@@ -37,6 +45,7 @@ export async function processRemoteActivity(
   request: Request,
   inboxActorUri: string,
   env: Env,
+  verified?: SignatureVerificationSuccess,
 ): Promise<boolean> {
   const logger = getLogger();
 
@@ -58,13 +67,38 @@ export async function processRemoteActivity(
       return false;
     }
 
-    // Verify HTTP Signature (Fedify handles this)
-    const signatureValid = await verifyHttpSignature(request, env);
-    if (!signatureValid) {
-      logger.warn("[RemoteActivityHandler] Invalid HTTP signature", {
-        inboxActorUri,
-        activityType: activity.type,
-      });
+    // Verify the HTTP Signature unless the caller already did.
+    let verification: SignatureVerificationSuccess;
+    if (verified) {
+      verification = verified;
+    } else {
+      const result = await verifyInboxRequest(request, env);
+      if (!result.valid) {
+        logger.warn("[RemoteActivityHandler] Invalid HTTP signature", {
+          inboxActorUri,
+          activityType: activity.type,
+          reason: result.reason,
+          detail: result.detail,
+        });
+        return false;
+      }
+      verification = result;
+    }
+
+    // Bind keyId → owner → activity.actor before anything is stored. The
+    // signature proves who sent the request; only this proves the activity is
+    // theirs to send.
+    const binding = assertActorBinding(verification.owner, activity);
+    if (!binding.ok) {
+      logger.warn(
+        "[RemoteActivityHandler] Actor binding failed — possible spoofing",
+        {
+          inboxActorUri,
+          keyId: verification.keyId,
+          owner: verification.owner,
+          reason: binding.reason,
+        },
+      );
       return false;
     }
 

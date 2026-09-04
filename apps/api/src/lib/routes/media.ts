@@ -22,9 +22,13 @@ import {
   reviewRateWindowStart,
 } from "../media/review-rate-cap.js";
 import { quotaUsageWhere } from "../media/storage-accounting.js";
+import { describeError } from "../media/describe-error.js";
 import { decisionToStatus } from "../media/media-lifecycle.js";
 import type { MediaLifecycle } from "../media/media-lifecycle.js";
-import { getMediaModerationProvider } from "../media/request-moderation.js";
+import {
+  getMediaModerationProvider,
+  interpretVerdict,
+} from "../media/request-moderation.js";
 import {
   canonicalContentType,
   isServable,
@@ -981,8 +985,21 @@ export const mediaRoutes: Route[] = [
         if (ingestRoute.kind === "reject") {
           // Should not normally reach here (type check above is stricter), but
           // routeUpload is the authoritative gate — honor it fail-closed.
+          //
+          // Audio-only gets its own message rather than the generic one: the
+          // client is asking for something the pipeline genuinely does not do,
+          // and "unsupported media type" would read as a bug in their encoding.
+          const isAudio = ingestRoute.reason === "audio-not-supported";
           const errorResponse = securityHeaders.createSecureResponse(
-            JSON.stringify({ error: "Unsupported media type" }),
+            JSON.stringify(
+              isAudio
+                ? {
+                    error: "Unsupported media type",
+                    message:
+                      "Audio-only uploads are not accepted. Upload a video, or attach the audio to one.",
+                  }
+                : { error: "Unsupported media type" },
+            ),
             { status: 400, headers: { "content-type": "application/json" } },
           );
           return CorsHandler.addCorsHeaders(errorResponse, request, env);
@@ -1015,6 +1032,41 @@ export const mediaRoutes: Route[] = [
         // uploadBuffer is re-typed to ArrayBuffer for the upload service;
         // Buffer (a Uint8Array subclass) is structurally compatible at runtime
         // with all consumers (crypto.subtle.digest, R2 put, etc.).
+        // --- Art. 50 provenance: READ BEFORE THE STRIP ------------------------
+        // This MUST stay above reencodeImage. The re-encode drops EXIF/IPTC/XMP
+        // and any C2PA manifest — which is where the AI marking lives — and
+        // `assertNoExif` enforces that it did. Empirically verified: a JPEG
+        // carrying Iptc4xmpExt:DigitalSourceType loses it entirely after
+        // sharp(...).jpeg().
+        //
+        // Reads the ORIGINAL buffer, returns ONE enum's worth of provenance, and
+        // discards everything else. Never throws — provenance is a disclosure,
+        // not a safety gate, so it can never fail an upload. The strip itself is
+        // unchanged; we just look first.
+        const { readProvenance } = await import(
+          "../metadata/provenance-reader.js"
+        );
+        const provenance = await readProvenance(
+          new Uint8Array(fileBuffer),
+          mimeType,
+        );
+        if (provenance.examined) {
+          // Structured events, following the image_reencode.* convention below.
+          // `provenance.unrecognised` is the one worth alerting on once the
+          // programme has any observability: a rising rate means generators moved
+          // to a marking we do not parse, i.e. our coverage is silently decaying.
+          logger.info(
+            provenance.sourceType === "UNKNOWN"
+              ? "provenance.unrecognised"
+              : "provenance.recognised",
+            {
+              container: provenance.container,
+              sourceType: provenance.sourceType,
+              mimeType,
+            },
+          );
+        }
+
         let uploadBuffer: ArrayBuffer = fileBuffer;
         try {
           const reencoded = await reencodeImage(fileBuffer, env);
@@ -1062,7 +1114,7 @@ export const mediaRoutes: Route[] = [
             mimeType,
             errorType: metaError?.name,
             code: metaError?.code,
-            error: metaError?.message,
+            error: describeError(metaError),
           });
         }
 
@@ -1135,7 +1187,7 @@ export const mediaRoutes: Route[] = [
         } catch (stageError: any) {
           logger.error("[Media Upload] Staging write failed", {
             userId: session.userId,
-            error: stageError?.message,
+            error: describeError(stageError),
           });
           const errorResponse = securityHeaders.createSecureResponse(
             JSON.stringify({ error: "Upload failed" }),
@@ -1163,13 +1215,17 @@ export const mediaRoutes: Route[] = [
             bucket: moderationBucketName,
             key: stagingKey,
           });
-          decision = decisionToStatus(verdict.decision);
+          // The operator's label policy is authoritative when one is
+          // configured; otherwise the provider's own decision stands, as
+          // before. The policy can only ever degrade a verdict, so enabling it
+          // can never make this path more permissive than it already was.
+          decision = decisionToStatus(interpretVerdict(verdict));
         } catch (moderationError: any) {
           logger.warn(
             "[Media Upload] Image moderation failed — failing closed to REVIEW",
             {
               userId: session.userId,
-              error: moderationError?.message,
+              error: describeError(moderationError),
             },
           );
           decision = "REVIEW";
@@ -1190,7 +1246,7 @@ export const mediaRoutes: Route[] = [
             // rather than recording an APPROVED row with no servable cas/ object.
             logger.error("[Media Upload] CAS promotion failed", {
               userId: session.userId,
-              error: promoteError?.message,
+              error: describeError(promoteError),
             });
             const errorResponse = securityHeaders.createSecureResponse(
               JSON.stringify({ error: "Upload failed" }),
@@ -1205,7 +1261,7 @@ export const mediaRoutes: Route[] = [
           } catch (deleteError: any) {
             logger.warn("[Media Upload] Staging delete tolerated", {
               userId: session.userId,
-              error: deleteError?.message,
+              error: describeError(deleteError),
             });
           }
         }
@@ -1237,6 +1293,12 @@ export const mediaRoutes: Route[] = [
                   height: metadata?.height,
                   duration: metadata?.duration,
                   lifecycle: decision,
+                  // Art. 50: create-side only, like lifecycle. The dedup raise
+                  // happens below.
+                  ...(provenance.sourceType !== "UNKNOWN" && {
+                    embeddedSourceType: provenance.sourceType,
+                  }),
+                  provenanceExamined: provenance.examined,
                 }),
               );
             },
@@ -1249,6 +1311,58 @@ export const mediaRoutes: Route[] = [
               },
             },
           );
+          // --- Art. 50: monotonic raise on a dedup hit ------------------------
+          // contentHash is computed from the RE-ENCODED bytes, so two DIFFERENT
+          // originals — one carrying an AI marking, one not — hash identically
+          // and dedup onto the SAME row. The upsert's `update` payload is
+          // deliberately empty (T9: a dedup hit must not mutate the shared row),
+          // so without this a marking would be lost whenever the unmarked copy
+          // happened to land first.
+          //
+          // Expressed as an atomic guarded update rather than read-then-write:
+          // the `in: weakerThan(...)` predicate means the raise only applies
+          // where the stored value is strictly weaker, so it is idempotent and
+          // safe against two concurrent uploads of the same bytes. It touches
+          // neither uploadedBy nor lifecycle, so T9's invariant holds.
+          if (provenance.sourceType !== "UNKNOWN") {
+            try {
+              const { weakerThan } = await import("../provenance/resolve.js");
+              await withQueryTimeoutAndRetry(
+                sharedDatabaseConnectionManager,
+                uploadRegion,
+                env as any,
+                async (db) =>
+                  await (db as any).mediaFile.updateMany({
+                    where: {
+                      tenantId,
+                      contentHash,
+                      embeddedSourceType: {
+                        in: weakerThan(provenance.sourceType),
+                      },
+                    },
+                    data: {
+                      embeddedSourceType: provenance.sourceType,
+                      provenanceExamined: true,
+                    },
+                  }),
+                {
+                  ...QueryTimeoutPresets.USER_FACING,
+                  maxRetries: 1,
+                  context: {
+                    operation: "mediaUpload_raiseProvenance",
+                    userId: session.userId,
+                  },
+                },
+              );
+            } catch (provError: any) {
+              // Non-fatal: the upload and its verdict stand. A missed raise means
+              // a weaker (never a wrong-direction) label on shared bytes.
+              logger.warn("provenance.raise_failed", {
+                contentHash,
+                error: describeError(provError),
+              });
+            }
+          }
         } catch (dbError: any) {
           // DB record is required for post creation to validate media ownership.
           // If this fails, the upload must fail so the frontend can retry.

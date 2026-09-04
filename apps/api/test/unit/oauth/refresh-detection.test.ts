@@ -1,56 +1,21 @@
 /**
- * Unit tests: refresh-detection.ts
+ * Unit tests: refresh-detection.ts — behavior-comparison suite (WS-1 §3.7).
  *
- * Coverage floor: 100% lines.
- *
- * Covers:
+ * The pre-port suite mocked `@aws-sdk/client-dynamodb` and asserted command
+ * shapes. Post-port the status transitions are read(consistent)→compareAndSet,
+ * so this suite asserts OUTCOME EQUIVALENCE against injected `MemoryKvStore`s
+ * (one for jti rows, one for session rows) — the same observable results the
+ * DynamoDB code produced:
  *  - First refresh: jti flips to consumed, new jti issued.
- *  - Replay: same jti seen twice → AdminUserGlobalSignOut called +
- *    `auth.refresh_replay` audit event emitted.
- *  - Unknown jti: returns `unknown` outcome.
- *  - listAgentSessions filters by user.
+ *  - Replay: same jti seen twice → AdminUserGlobalSignOut + `auth.refresh_replay`.
+ *  - Unknown jti: `unknown` outcome.
+ *  - listAgentSessions filters by user + status=active.
  *  - revokeAgentSession invokes Cognito + audit + tombstones row.
+ *  - F6: the consume read is strongly consistent (asserted structurally below).
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
-
-const { mockSend, store } = vi.hoisted(() => ({
-  mockSend: vi.fn(),
-  store: new Map<string, Record<string, unknown>>(),
-}));
-
-vi.mock("@aws-sdk/client-dynamodb", () => {
-  class FakeCmd {
-    input: Record<string, unknown>;
-    constructor(input: Record<string, unknown>) {
-      this.input = input;
-    }
-  }
-  return {
-    DynamoDBClient: class {
-      send = mockSend;
-    },
-    GetItemCommand: class extends FakeCmd {},
-    PutItemCommand: class extends FakeCmd {},
-    DeleteItemCommand: class extends FakeCmd {},
-    UpdateItemCommand: class extends FakeCmd {},
-    QueryCommand: class extends FakeCmd {},
-    ConditionalCheckFailedException: class extends Error {
-      constructor(msg = "cond-failed") {
-        super(msg);
-        this.name = "ConditionalCheckFailedException";
-      }
-    },
-  };
-});
-
-vi.mock("@aws-sdk/util-dynamodb", async () => {
-  const actual =
-    await vi.importActual<typeof import("@aws-sdk/util-dynamodb")>("@aws-sdk/util-dynamodb");
-  return actual;
-});
-
-import { ConditionalCheckFailedException } from "@aws-sdk/client-dynamodb";
+import { MemoryKvStore, type KvStore } from "@de-otio/saas-foundation/kv";
 
 import {
   consumeRefreshJti,
@@ -61,97 +26,26 @@ import {
   revokeAgentSession,
   rotateRefreshJti,
   _deleteAgentSessionForTest,
+  _setRefreshStoresForTest,
   type AgentSessionRecord,
   type CognitoRevoker,
   type RefreshJtiRecord,
 } from "../../../src/lib/oauth/refresh-detection.js";
 
-function key(input: Record<string, unknown>): string {
-  const obj = input.Key as Record<string, { S?: string; N?: string }>;
-  const parts: string[] = [];
-  for (const k of Object.keys(obj).sort()) {
-    parts.push(`${k}=${obj[k]?.S ?? obj[k]?.N ?? ""}`);
-  }
-  return parts.join("|");
-}
+let jtiStore: MemoryKvStore;
+let sessionStore: MemoryKvStore;
 
 beforeEach(() => {
-  store.clear();
-  mockSend.mockReset();
-
-  mockSend.mockImplementation(async (cmd: { constructor: { name: string }; input: Record<string, unknown> }) => {
-    const name = cmd.constructor.name;
-    const input = cmd.input;
-
-    if (name.includes("PutItemCommand")) {
-      const item = input.Item as Record<string, { S?: string; N?: string }>;
-      const pk = (item.pk as { S?: string }).S ?? "";
-      const sk = (item.sk as { S?: string }).S ?? "";
-      const k = `pk=${pk}|sk=${sk}`;
-      const cond = input.ConditionExpression as string | undefined;
-      if (cond?.includes("attribute_not_exists") && store.has(k)) {
-        throw new ConditionalCheckFailedException();
-      }
-      store.set(k, item);
-      return { Attributes: item };
-    }
-    if (name.includes("GetItemCommand")) {
-      const k = key(input);
-      const item = store.get(k);
-      return item ? { Item: item } : {};
-    }
-    if (name.includes("DeleteItemCommand")) {
-      store.delete(key(input));
-      return {};
-    }
-    if (name.includes("UpdateItemCommand")) {
-      const k = key(input);
-      const existing = store.get(k);
-      const cond = input.ConditionExpression as string | undefined;
-      if (cond?.includes("attribute_exists") && !existing) {
-        throw new ConditionalCheckFailedException();
-      }
-      // Conditional status check: jti must be active.
-      if (cond?.includes("#status = :active")) {
-        const status = (existing?.status as { S?: string } | undefined)?.S;
-        if (status !== "active") throw new ConditionalCheckFailedException();
-      }
-      const expr = (input.UpdateExpression as string) ?? "";
-      const values = (input.ExpressionAttributeValues ?? {}) as Record<string, { S?: string; N?: string; NULL?: boolean }>;
-      const names = ((input.ExpressionAttributeNames ?? {}) as Record<string, string>) || {};
-      const obj = existing ? { ...existing } : {};
-
-      const setMatch = expr.match(/SET\s+(.+?)(?:\s+ADD|\s+REMOVE|$)/);
-      if (setMatch) {
-        const parts = setMatch[1]!.split(",").map((s) => s.trim());
-        for (const p of parts) {
-          const [lhs, rhs] = p.split("=").map((s) => s.trim());
-          const attr = lhs!.startsWith("#") ? names[lhs!] ?? lhs : lhs!;
-          obj[attr] = values[rhs!];
-        }
-      }
-      store.set(k, obj as Record<string, { S?: string; N?: string }>);
-      return { Attributes: obj };
-    }
-    if (name.includes("QueryCommand")) {
-      const values = (input.ExpressionAttributeValues ?? {}) as Record<string, { S?: string }>;
-      const target = values[":u"]?.S;
-      const items: Record<string, unknown>[] = [];
-      for (const v of store.values()) {
-        const gsi1pk = (v.gsi1pk as { S?: string } | undefined)?.S;
-        if (gsi1pk === target) items.push(v);
-      }
-      return { Items: items };
-    }
-    return {};
-  });
+  jtiStore = new MemoryKvStore();
+  sessionStore = new MemoryKvStore();
+  _setRefreshStoresForTest(jtiStore, sessionStore);
 });
 
 function makeSession(over: Partial<AgentSessionRecord> = {}): AgentSessionRecord {
   return {
     sessionId: "s_one",
     userId: "u_alice",
-    cognitoSub: "sub-alice",
+    sub: "sub-alice",
     tenantId: "t_one",
     currentJti: "j_initial",
     status: "active",
@@ -170,6 +64,13 @@ describe("recordAgentSession", () => {
     expect(session?.userId).toBe("u_alice");
     expect(session?.currentJti).toBe("j_initial");
   });
+
+  it("rejects a duplicate session create (attribute_not_exists equivalent)", async () => {
+    await recordAgentSession({ session: makeSession(), initialJti: "j_initial" });
+    await expect(
+      recordAgentSession({ session: makeSession(), initialJti: "j_other" }),
+    ).rejects.toThrow(/already exists/);
+  });
 });
 
 describe("consumeRefreshJti", () => {
@@ -178,6 +79,7 @@ describe("consumeRefreshJti", () => {
     const out = await consumeRefreshJti("j_initial");
     expect(out.outcome).toBe("ok");
     expect(out.record?.userId).toBe("u_alice");
+    expect(out.record?.status).toBe("consumed");
 
     // Second consume of the same jti must report replay.
     const replay = await consumeRefreshJti("j_initial");
@@ -188,6 +90,17 @@ describe("consumeRefreshJti", () => {
     const out = await consumeRefreshJti("never-issued");
     expect(out.outcome).toBe("unknown");
   });
+
+  it("F6: the consume read is strongly consistent", async () => {
+    await recordAgentSession({ session: makeSession(), initialJti: "j_initial" });
+    const spy = vi.spyOn(jtiStore, "get");
+    await consumeRefreshJti("j_initial");
+    // Every jti read on the consume path must request a consistent read.
+    expect(spy).toHaveBeenCalled();
+    for (const call of spy.mock.calls) {
+      expect(call[1]).toMatchObject({ consistent: true });
+    }
+  });
 });
 
 describe("rotateRefreshJti", () => {
@@ -197,7 +110,7 @@ describe("rotateRefreshJti", () => {
     await rotateRefreshJti({
       sessionId: "s_one",
       userId: "u_alice",
-      cognitoSub: "sub-alice",
+      sub: "sub-alice",
       newJti: "j_two",
     });
     const session = await getAgentSession("s_one");
@@ -211,7 +124,6 @@ describe("rotateRefreshJti", () => {
 describe("handleRefreshReplay", () => {
   it("calls AdminUserGlobalSignOut + emits auth.refresh_replay (sec finding RFC 6819)", async () => {
     await recordAgentSession({ session: makeSession(), initialJti: "j_initial" });
-    // First consume → ok; second → replay.
     await consumeRefreshJti("j_initial");
     const replay = await consumeRefreshJti("j_initial");
     expect(replay.outcome).toBe("replay");
@@ -242,13 +154,10 @@ describe("handleRefreshReplay", () => {
 
     const session = await getAgentSession("s_one");
     expect(session?.status).toBe("revoked");
+    expect(session?.currentJti).toBeNull();
   });
 
   it("CRITICAL-1: sources cognitoUsername from the jti record, ignoring caller-supplied alternates", async () => {
-    // Even if a caller forwards a request-scoped value via a `cognitoUsername`
-    // property, the function must not honour it. The signature itself no
-    // longer accepts that field; this test pins the contract by passing
-    // an extra property and asserting Cognito sees only the record value.
     await recordAgentSession({ session: makeSession(), initialJti: "j_initial" });
     await consumeRefreshJti("j_initial");
     const replay = await consumeRefreshJti("j_initial");
@@ -256,8 +165,6 @@ describe("handleRefreshReplay", () => {
     const cognito: CognitoRevoker = { globalSignOut: vi.fn(async () => undefined) };
     const audit = { emit: vi.fn(async () => undefined) };
 
-    // TypeScript would block the extra prop directly; cast to bypass and
-    // simulate a caller mistake forwarding a stale identity value.
     await handleRefreshReplay({
       jtiRecord: replay.record as RefreshJtiRecord,
       tenantId: "t_one",
@@ -351,10 +258,12 @@ describe("revokeAgentSession", () => {
 });
 
 describe("consumeRefreshJti error rethrow", () => {
-  it("rethrows non-conditional-check errors", async () => {
-    mockSend.mockImplementationOnce(async () => {
-      throw new Error("dynamodb network failure");
-    });
+  it("rethrows non-conditional store errors", async () => {
+    const failing: KvStore = {
+      ...new MemoryKvStore(),
+      get: () => Promise.reject(new Error("dynamodb network failure")),
+    } as unknown as KvStore;
+    _setRefreshStoresForTest(failing, sessionStore);
     await expect(consumeRefreshJti("anything")).rejects.toThrow(/dynamodb network/);
   });
 });

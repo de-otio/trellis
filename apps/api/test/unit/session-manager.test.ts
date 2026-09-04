@@ -20,6 +20,16 @@ const { mockVerifyCognitoJwt } = vi.hoisted(() => ({
 }));
 vi.mock("../../src/lib/auth/cognito-jwt", () => ({
   verifyCognitoJwt: mockVerifyCognitoJwt,
+  verifyLegacyCognitoClaims: mockVerifyCognitoJwt,
+}));
+
+// Mock the Keycloak JIT claim resolution the Bearer path falls back to when a
+// verified token carries no usable `custom:userId`.
+const { mockResolveJitClaims } = vi.hoisted(() => ({
+  mockResolveJitClaims: vi.fn(),
+}));
+vi.mock("../../src/lib/identity/jit-claims", () => ({
+  resolveJitClaims: mockResolveJitClaims,
 }));
 
 // Mock session-config - simple mock that returns default config
@@ -78,7 +88,45 @@ describe("SessionManager", () => {
         testSecret,
         testSalt,
       );
-      expect(decrypted).toBe(sessionData);
+      // SEC L2: the seal chokepoint stamps `sessionEpoch` (seal time) onto
+      // every session-shaped payload, so the round-trip is equal modulo that
+      // one added field — which must be present.
+      const parsed = JSON.parse(decrypted!);
+      expect(typeof parsed.sessionEpoch).toBe("number");
+      delete parsed.sessionEpoch;
+      expect(JSON.stringify(parsed)).toBe(sessionData);
+    });
+
+    it("SEC L2: does not overwrite an explicit sessionEpoch on re-seal", async () => {
+      const sessionData = JSON.stringify({
+        userId: "u1",
+        email: "u1@example.com",
+        expiresAt: Date.now() + 3600000,
+        sessionEpoch: 1234,
+      });
+      const encrypted = await sessionManager.encryptSession(
+        sessionData,
+        testSecret,
+        testSalt,
+      );
+      const decrypted = await sessionManager.decryptSession(
+        encrypted,
+        testSecret,
+        testSalt,
+      );
+      expect(JSON.parse(decrypted!).sessionEpoch).toBe(1234);
+    });
+
+    it("SEC L2: leaves a non-session JSON payload untouched", async () => {
+      const payload = JSON.stringify({ some: "other", shape: 1 });
+      const encrypted = await sessionManager.encryptSession(
+        payload,
+        testSecret,
+        testSalt,
+      );
+      expect(
+        await sessionManager.decryptSession(encrypted, testSecret, testSalt),
+      ).toBe(payload);
     });
 
     it("should fail to decrypt with wrong secret", async () => {
@@ -150,8 +198,15 @@ describe("SessionManager", () => {
         testSecret,
         saltB,
       );
-      expect(decrypted1).toBe(sessionData);
-      expect(decrypted2).toBe(sessionData);
+      // Equal modulo the seal-time `sessionEpoch` stamp (SEC L2).
+      const strip = (s: string | null) => {
+        const o = JSON.parse(s!);
+        expect(typeof o.sessionEpoch).toBe("number");
+        delete o.sessionEpoch;
+        return JSON.stringify(o);
+      };
+      expect(strip(decrypted1)).toBe(sessionData);
+      expect(strip(decrypted2)).toBe(sessionData);
     });
   });
 
@@ -177,16 +232,115 @@ describe("SessionManager", () => {
       expect(session?.userId).toBe("cmqurmq7x000002i80nqmgfr8");
     });
 
-    it("JWT Bearer: falls back to sub when custom:userId is absent (legacy tokens)", async () => {
+    it("JWT Bearer: does NOT fall back to sub when custom:userId is absent", async () => {
+      // Regression, reopened by Keycloak: a verified token that carries no
+      // trellis cuid used to seat the IdP `sub` as `session.userId`. That is a
+      // UUID, matches no `User.id`, and surfaced as "User not found" (404) on
+      // every getSession route. Fail closed (401) instead — auth-middleware
+      // has always behaved this way; the two Bearer paths now agree.
+      mockResolveJitClaims.mockResolvedValue(null); // non-Keycloak → no-op
       mockVerifyCognitoJwt.mockResolvedValue({
-        sub: "legacy-sub-123",
+        sub: "23643892-00c1-7057-551c-aed44aed1f13",
         email: "legacy@example.com",
         username: "legacy@example.com",
       });
 
       const session = await sessionManager.getSession(bearerReq(), testSecret, testEnv);
 
-      expect(session?.userId).toBe("legacy-sub-123");
+      expect(session).toBeNull();
+    });
+
+    it("JWT Bearer: rejects a custom:userId that is not a cuid", async () => {
+      // The claim is validated, not trusted — Strategy 1a previously applied
+      // no CUID_RE check at all (unlike auth-middleware.ts).
+      mockResolveJitClaims.mockResolvedValue(null);
+      mockVerifyCognitoJwt.mockResolvedValue({
+        sub: "23643892-00c1-7057-551c-aed44aed1f13",
+        "custom:userId": "not-a-cuid",
+        email: "user@example.com",
+        username: "user@example.com",
+      });
+
+      const session = await sessionManager.getSession(bearerReq(), testSecret, testEnv);
+
+      expect(session).toBeNull();
+    });
+
+    it("JWT Bearer: resolves a Keycloak-shaped token (no custom:* claims) via JIT", async () => {
+      // Keycloak issues no `custom:userId` — the realm's protocol mappers emit
+      // their own claim names and nothing populates them for a new user. The
+      // JIT resolver derives the identity from the DB by `sub`, which is how
+      // auth-middleware has worked since WS-0.
+      mockResolveJitClaims.mockResolvedValue({
+        userId: "cmqurmq7x000002i80nqmgfr8",
+        globalRole: "SUPER_ADMIN",
+        activeTenantId: "cmqurmq7x000002i80nqmgfr9",
+        tenantSlug: "acme",
+        tenantRole: "OWNER",
+        handle: "someone",
+      });
+      mockVerifyCognitoJwt.mockResolvedValue({
+        sub: "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+        email: "kc@example.com",
+        username: "kc@example.com",
+      });
+
+      const session = await sessionManager.getSession(bearerReq(), testSecret, testEnv);
+
+      expect(session?.userId).toBe("cmqurmq7x000002i80nqmgfr8");
+      expect(session?.activeTenantId).toBe("cmqurmq7x000002i80nqmgfr9");
+      // The role comes from the DB, not the absent `custom:role` claim.
+      expect(session?.role).toBe("SUPER_ADMIN");
+    });
+
+    it("JWT Bearer: ignores a JIT result whose userId is not a cuid", async () => {
+      mockResolveJitClaims.mockResolvedValue({
+        userId: "still-not-a-cuid",
+        globalRole: "END_USER",
+        activeTenantId: "",
+        tenantSlug: "",
+        tenantRole: "",
+        handle: "",
+      });
+      mockVerifyCognitoJwt.mockResolvedValue({
+        sub: "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+        email: "kc@example.com",
+        username: "kc@example.com",
+      });
+
+      const session = await sessionManager.getSession(bearerReq(), testSecret, testEnv);
+
+      expect(session).toBeNull();
+    });
+
+    it("JWT Bearer: fails closed when JIT resolution throws", async () => {
+      mockResolveJitClaims.mockRejectedValue(new Error("db unreachable"));
+      mockVerifyCognitoJwt.mockResolvedValue({
+        sub: "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+        email: "kc@example.com",
+        username: "kc@example.com",
+      });
+
+      const session = await sessionManager.getSession(bearerReq(), testSecret, testEnv);
+
+      expect(session).toBeNull();
+    });
+
+    it("JWT Bearer: skips JIT entirely when the token already carries a cuid", async () => {
+      // Cognito's hot path must not pay a resolution it does not need.
+      mockResolveJitClaims.mockResolvedValue(null);
+      mockVerifyCognitoJwt.mockResolvedValue({
+        sub: "23643892-00c1-7057-551c-aed44aed1f13",
+        "custom:userId": "cmqurmq7x000002i80nqmgfr8",
+        "custom:activeTenantId": "cmqurmq7x000002i80nqmgfr9",
+        email: "user@example.com",
+        username: "user@example.com",
+      });
+
+      const session = await sessionManager.getSession(bearerReq(), testSecret, testEnv);
+
+      expect(session?.userId).toBe("cmqurmq7x000002i80nqmgfr8");
+      expect(mockResolveJitClaims).not.toHaveBeenCalled();
     });
 
     it("should return null for missing Cookie header", async () => {

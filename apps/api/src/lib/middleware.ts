@@ -59,43 +59,100 @@ export function corsMiddleware(): Middleware {
 
     // Handle OPTIONS requests
     if (request.method === "OPTIONS") {
-      const allowedOrigin = CorsHandler.getAllowedOrigin(request, env);
-      const headers: Record<string, string> = {
-        "Access-Control-Allow-Methods":
-          "GET, POST, PUT, DELETE, PATCH, OPTIONS",
-        "Access-Control-Allow-Headers":
-          "Content-Type, Authorization, X-CSRF-Token, X-Retry-Count",
-        "Access-Control-Allow-Credentials": "true",
-      };
-
-      if (allowedOrigin) {
-        headers["Access-Control-Allow-Origin"] = allowedOrigin;
-      }
-
       return new Response(null, {
         status: 204,
-        headers,
+        headers: CorsHandler.getCorsHeaders(request, env),
       });
     }
 
     const response = await next();
 
-    // Add CORS headers to response
-    const allowedOrigin = CorsHandler.getAllowedOrigin(request, env);
-    if (allowedOrigin) {
-      response.headers.set("Access-Control-Allow-Origin", allowedOrigin);
+    // Add CORS headers to response — same origin-gated set as the preflight.
+    for (const [key, value] of Object.entries(
+      CorsHandler.getCorsHeaders(request, env),
+    )) {
+      response.headers.set(key, value);
     }
-    response.headers.set(
-      "Access-Control-Allow-Methods",
-      "GET, POST, PUT, DELETE, PATCH, OPTIONS",
-    );
-    response.headers.set(
-      "Access-Control-Allow-Headers",
-      "Content-Type, Authorization, X-CSRF-Token, X-Retry-Count",
-    );
-    response.headers.set("Access-Control-Allow-Credentials", "true");
 
     return response;
+  };
+}
+
+/**
+ * Client-version backstop middleware (426 Upgrade Required).
+ *
+ * The forced-upgrade mechanism is primarily a CLIENT concern: the app fetches
+ * `/api/app/version-policy` and blocks itself. This middleware is the server
+ * backstop for the case where the client's own check did not run (an old
+ * build that predates the policy code, a client with a stale cached policy).
+ *
+ * It is deliberately the narrowest thing that can work:
+ *
+ *   - it returns EITHER a 426 OR `next()` — it never produces a 2xx of its
+ *     own, authenticates nothing, and can bypass nothing;
+ *   - it acts only when a policy is configured AND the header is present AND
+ *     the header parses AND the parsed version is strictly older than the
+ *     minimum. Absent/garbage headers (curl, federation peers, health probes,
+ *     agents) pass through untouched;
+ *   - it NEVER intercepts `OPTIONS`: a browser whose preflight fails sees an
+ *     opaque network error, so an outdated web client could never even learn
+ *     that it is outdated;
+ *   - exempt paths (`/api/app/version-policy`, `/.well-known/*`, the public
+ *     ActivityPub object surface, `/health`) are listed in
+ *     `lib/client-version.ts`.
+ *
+ * LOG HYGIENE: the raw header value is never logged — only the decision token
+ * (`parsed` / `invalid` / …). The 426 body carries NO URL (a client must never
+ * navigate to a link supplied by an error response).
+ *
+ * @see lib/client-version.ts for the bounded semver rule and the telemetry cap
+ */
+export function clientVersionMiddleware(): Middleware {
+  return async (context, next) => {
+    const { request, env } = context;
+
+    const {
+      evaluateClientVersionGate,
+      recordClientVersionDecision,
+      UPGRADE_REQUIRED_BODY,
+    } = await import("./client-version.js");
+
+    const decision = evaluateClientVersionGate({
+      method: request.method,
+      pathname: context.pathname,
+      versionHeader: request.headers.get("X-Client-Version"),
+      platformHeader: request.headers.get("X-Client-Platform"),
+      env,
+    });
+
+    // Telemetry is emitted only for a strictly parsed version, with the
+    // dimension re-serialized from the parsed triple (never the raw header).
+    recordClientVersionDecision(decision);
+
+    if (decision.outcome === "allow") {
+      return next();
+    }
+
+    getLogger().info("[ClientVersion] Refusing request: client below minimum", {
+      pathname: context.pathname,
+      method: request.method,
+      // Tokens only — never the raw X-Client-Version value.
+      clientVersion: "parsed",
+      clientPlatform: decision.platform,
+    });
+
+    // CORS headers are attached here because this middleware short-circuits
+    // ahead of the per-route CORS middleware; without them a browser client
+    // could not read the 426 and would show a generic network failure.
+    const { CorsHandler } = await import("./cors-handler.js");
+    return new Response(JSON.stringify(UPGRADE_REQUIRED_BODY), {
+      status: 426,
+      headers: {
+        "content-type": "application/json",
+        "cache-control": "no-store",
+        ...CorsHandler.getCorsHeaders(request, env),
+      },
+    });
   };
 }
 
@@ -243,17 +300,31 @@ export function csrfMiddleware(): Middleware {
       return next();
     }
 
-    // Skip CSRF for JWT-authenticated requests (Bearer token with 3 dot-separated parts).
-    // CSRF protection is only needed for cookie-based auth where the browser auto-sends cookies.
-    // JWT in Authorization header is not vulnerable to CSRF since the attacker cannot set headers.
-    // SECURITY INVARIANT: This bypass is safe because all state-changing routes
-    // require authentication and reject unauthenticated requests BEFORE performing
-    // any side effects. An invalid JWT (e.g., "a.b.c") will pass CSRF but fail auth.
-    const bearerHeader = request.headers.get("Authorization");
-    if (bearerHeader?.startsWith("Bearer ")) {
-      const bearerToken = bearerHeader.slice(7);
-      if (bearerToken.split(".").length === 3) {
-        return next();
+    // Phase 8 — the CSRF bypass is now derived from COOKIE PRESENCE, not from
+    // the shape of the Authorization header.
+    //
+    // It used to skip CSRF for any `Authorization: Bearer a.b.c` — three
+    // dot-separated segments, no verification. An attacker's cross-origin form
+    // cannot set that header, but their *script* can, and the browser still
+    // attaches the session cookie: any origin that CORS lets through could send
+    // a junk Bearer, skip CSRF, and be authenticated by the cookie. The two
+    // findings compounded (see the CORS fail-open fix in cors-handler.ts).
+    //
+    // The correct predicate is "is this request authenticated by something the
+    // browser attaches automatically?" — i.e. does it carry a session cookie.
+    // If it does, CSRF applies no matter what else is on the request. A pure
+    // Bearer client (mobile, server-to-server) sends no cookie and still skips.
+    const cookieHeader = request.headers.get("Cookie");
+    const carriesSessionCookie =
+      !!cookieHeader && /(?:^|;\s*)(?:trellis_session|session)=/.test(cookieHeader);
+
+    if (!carriesSessionCookie) {
+      const bearerHeader = request.headers.get("Authorization");
+      if (bearerHeader?.startsWith("Bearer ")) {
+        const bearerToken = bearerHeader.slice(7);
+        if (bearerToken.length > 0) {
+          return next();
+        }
       }
     }
 

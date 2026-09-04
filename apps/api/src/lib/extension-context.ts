@@ -19,8 +19,46 @@ import {
   type RawPrismaLike,
 } from "./extension-scoped-db.js";
 import { createDiscoverDb } from "./extension-discover-db.js";
+import { getCurrentTenantId } from "@de-otio/saas-foundation/tenant";
 import type { GraphService } from "./graph/index.js";
+import type {
+  CircleTier,
+  GraphNodeType,
+  PaginationInput,
+} from "./graph/types.js";
 import type { Env } from "../env.js";
+
+/**
+ * The tenant an extension's circle read runs in.
+ *
+ * The core circle reads now REQUIRE an explicit tenant (H1 — see
+ * lib/graph/postgres/circles.ts): the ambient filter they used to build silently
+ * evaluated to nothing under the default `TENANT_SCOPE_MODE=off`, so those
+ * queries carried no tenant predicate at all.
+ *
+ * `ExtensionGraphService` is the PUBLISHED `@de-otio/trellis-extension-api`
+ * surface and its circle signatures carry no tenant, so this bridge is the only
+ * place one can come from. It reads the ambient tenant and THROWS when there is
+ * none, rather than passing an empty string through to a query — fail closed,
+ * loudly, at the boundary.
+ *
+ * This leaves extensions unable to call the circle reads in the default
+ * configuration. That is deliberate and is the correct interim state: the
+ * alternative is serving them cross-tenant results. Giving extensions a
+ * tenant-carrying graph surface is a breaking change to the published package
+ * and is left to that package's next major (`db.tenant(tid)` already models the
+ * shape it should take).
+ */
+function extensionTenant(): string {
+  const tenantId = getCurrentTenantId();
+  if (!tenantId) {
+    throw new Error(
+      "ExtensionGraphService: circle reads require an active tenant; " +
+        "none is established (TENANT_SCOPE_MODE is off?)",
+    );
+  }
+  return tenantId;
+}
 
 /**
  * Build a read-only proxy over GraphService.
@@ -34,12 +72,30 @@ function createReadOnlyGraphService(graph: GraphService): ExtensionGraphService 
     getRelationship: graph.getRelationship.bind(graph),
     getRelationships: graph.getRelationships.bind(graph),
     getRelationshipGraph: graph.getRelationshipGraph.bind(graph),
-    getCircleMembers: graph.getCircleMembers.bind(graph),
-    getVisiblePostIds: graph.getVisiblePostIds.bind(graph),
-    getGlanceItems: graph.getGlanceItems.bind(graph),
-    getDepthPostIds: graph.getDepthPostIds.bind(graph),
-    getCircleStatus: graph.getCircleStatus.bind(graph),
-    getCircleEntityStatus: graph.getCircleEntityStatus.bind(graph),
+    getCircleMembers: (userId, tier) =>
+      graph.getCircleMembers(userId, tier as CircleTier, extensionTenant()),
+    getVisiblePostIds: (userId, tier, since, pagination) =>
+      graph.getVisiblePostIds(
+        userId,
+        tier as CircleTier,
+        since,
+        pagination as PaginationInput,
+        extensionTenant(),
+      ),
+    getGlanceItems: (userId, tier, limit) =>
+      graph.getGlanceItems(userId, tier as CircleTier, limit, extensionTenant()),
+    getDepthPostIds: (userId, targetType, targetId, since, limit) =>
+      graph.getDepthPostIds(
+        userId,
+        targetType as GraphNodeType,
+        targetId,
+        since,
+        limit,
+        extensionTenant(),
+      ),
+    getCircleStatus: (userId) => graph.getCircleStatus(userId, extensionTenant()),
+    getCircleEntityStatus: (userId, tier) =>
+      graph.getCircleEntityStatus(userId, tier as CircleTier, extensionTenant()),
     getEntityRelationships: graph.getEntityRelationships.bind(graph),
     getPendingEntityRelationships: graph.getPendingEntityRelationships.bind(graph),
     discoverByGraph: graph.discoverByGraph.bind(graph),

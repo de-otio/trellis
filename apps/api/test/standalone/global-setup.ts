@@ -12,11 +12,7 @@
  */
 
 import type { Server } from "node:http";
-import {
-  CreateTableCommand,
-  DescribeTableCommand,
-  DynamoDBClient,
-} from "@aws-sdk/client-dynamodb";
+import { CreateTableCommand, DescribeTableCommand, DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { applyStandaloneEnv, STANDALONE_API_URL } from "./standalone-env.js";
 
 let server: Server | undefined;
@@ -63,10 +59,7 @@ async function ensureDynamoTable(): Promise<void> {
  * deployed environment seeds via `npm run seed:feature-toggles`.
  */
 async function seedFeatureToggles(): Promise<void> {
-  const enabled = [
-    "entity_profiles_enabled",
-    "global_public_posting_enabled",
-  ];
+  const enabled = ["entity_profiles_enabled", "global_public_posting_enabled"];
   const { PrismaClient } = await import("@prisma/client");
   // Prisma 7 removed the `datasourceUrl` constructor option; the URL is supplied
   // via a driver adapter (matches the lambda clients).
@@ -127,9 +120,7 @@ export async function setup(): Promise<void> {
   await ensureDynamoTable();
 
   // Import the boot harness AFTER env is applied so module-level reads see it.
-  const { bootStandaloneServer } = await import(
-    "../fixtures/example-extension/boot.js"
-  );
+  const { bootStandaloneServer } = await import("../fixtures/example-extension/boot.js");
   server = await bootStandaloneServer();
 
   await waitForHealth();
@@ -146,23 +137,13 @@ export async function teardown(): Promise<void> {
     await new Promise<void>((resolve) => server!.close(() => resolve()));
     server = undefined;
   }
-  // Release DB pools and the shared Neo4j driver so the process exits cleanly.
-  try {
-    const { sharedDatabaseConnectionManager } = await import(
-      "../../src/lib/database-connection-manager.js"
-    );
-    await sharedDatabaseConnectionManager.shutdown();
-  } catch {
-    // best-effort
-  }
-  try {
-    const { closeSharedGraphService } = await import(
-      "../../src/lib/graph/index.js"
-    );
-    await closeSharedGraphService();
-  } catch {
-    // best-effort
-  }
+  // Release DB pools and the shared graph driver so the process exits cleanly.
+  // This is the PUBLIC hook consumers get (`shutdownTrellis`), used here rather
+  // than reaching into lib/ so core's own lane exercises the same path an
+  // extension author's lane takes. Best-effort by construction — it reports
+  // failures instead of throwing.
+  const { shutdownTrellis } = await import("../../src/index.js");
+  await shutdownTrellis();
 
   // The booted server's AWS SDK clients (DynamoDB/S3/SQS) hold keep-alive
   // sockets with no public dispose hook, so vitest would otherwise wait ~10s

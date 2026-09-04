@@ -6,6 +6,13 @@
  */
 
 import { DynamoKv, createDefaultDynamoClient } from "@de-otio/saas-foundation/kv";
+import {
+  resolveKvProvider,
+  setKvSqlExecutor,
+  getKvSqlExecutor,
+  makeKvSqlExecutor,
+} from "./lib/kv/kv-provider.js";
+import { PostgresKv } from "./lib/kv/postgres-kv-namespace.js";
 import { S3Storage, createDefaultS3Client } from "@de-otio/saas-foundation/storage";
 import { SqsQueue, createDefaultSqsClient } from "@de-otio/saas-foundation/queue";
 import {
@@ -21,6 +28,7 @@ import type {
   AnalyticsEngineDataset,
 } from "./types/cloudflare-compat.js";
 import type { NotificationType } from "@prisma/client";
+import { validateThreatIntelEnv } from "./lib/threat-intel-service.js";
 import type { RealtimeTransport } from "./lib/realtime/index.js";
 import {
   PollTransport,
@@ -33,14 +41,21 @@ import type { DirectoryProfileConfig } from "./lib/org-category/directory-profil
 import { resolveDirectoryProfileConfig } from "./lib/org-category/directory-profile-config.js";
 import type { DirectorySearchConfig } from "./lib/org-category/directory-search-config.js";
 import { resolveDirectorySearchEnv } from "./lib/org-category/directory-search-config.js";
+import type { DisclosurePosture } from "./lib/provenance/posture.js";
+import {
+  DEFAULT_DISCLOSURE_POSTURE,
+  parseDisclosurePosture,
+} from "./lib/provenance/posture.js";
 import { validateEmailEnv } from "./lib/email-provider.js";
+import { buildSqsUrl } from "./lib/sqs-url.js";
 
 const stage = process.env.STAGE || "dev";
 
+// Delegates to the shared builder (lib/sqs-url.ts) so the request path and the
+// worker container use ONE queue-URL convention — incl. SQS_QUEUE_URL_PREFIX,
+// which points at the real (name-prefixed) Scaleway MNQ queues.
 function sqsUrl(queueName: string): string {
-  const base = process.env.SQS_ENDPOINT || `https://sqs.${process.env.AWS_REGION || "us-east-1"}.amazonaws.com`;
-  const accountId = process.env.AWS_ACCOUNT_ID || "000000000000";
-  return `${base}/${accountId}/${stage}-${queueName}`;
+  return buildSqsUrl(queueName, stage);
 }
 
 /** Application environment — available to all route handlers */
@@ -64,6 +79,24 @@ export interface Env {
   COGNITO_REGION?: string;
   COGNITO_HOSTED_UI_DOMAIN?: string;
   COGNITO_REDIRECT_URI?: string;
+
+  // Generic OIDC verification (WS-3.1/3.3). Names per manifest D8 (FROZEN:
+  // OIDC_* canonical). All default-derived from COGNITO_* so existing
+  // deployments need ZERO config change (see lib/auth/auth-config.ts). D8
+  // renames COGNITO_USER_POOL_ID → OIDC_ISSUER_URL and COGNITO_APP_CLIENT_ID →
+  // OIDC_APP_CLIENT_ID; the WS-3.1-interim AUTH_* spelling has been removed.
+  /** Full issuer URL to pin + JWKS discovery base. Default: the Cognito issuer. */
+  OIDC_ISSUER_URL?: string;
+  /** App client id / expected `aud`. Default: COGNITO_APP_CLIENT_ID. */
+  OIDC_APP_CLIENT_ID?: string;
+  /** Explicit JWKS override (air-gapped / fixture tests). Default: unset. */
+  OIDC_JWKS_URL?: string;
+  /** Identity adapter selection: "cognito" (default) | "keycloak" (WS-3.3). */
+  IDENTITY_PROVIDER?: string;
+  /** Keycloak service-account client id (proposed D8 addition). */
+  IDENTITY_ADMIN_CLIENT_ID?: string;
+  /** Keycloak service-account client secret (proposed D8 addition). */
+  IDENTITY_ADMIN_CLIENT_SECRET?: string;
 
   // OAuth device-authorization adapter (T9b-d)
   /** Public Cognito app client used by `trellis-agent-cli` (no secret, PKCE). */
@@ -138,6 +171,60 @@ export interface Env {
   ACTIVITYPUB_ENABLED: boolean;
 
   /**
+   * Defederation list: comma- or whitespace-separated instance domains whose
+   * activities are refused at inbox admission, before any rate-limit budget is
+   * spent. A leading `.`/`*.` is optional — matching is on label boundaries,
+   * so `example.com` also blocks `mastodon.example.com` but never
+   * `notexample.com`. Unset means "federate with everyone".
+   */
+  ACTIVITYPUB_BLOCKED_DOMAINS?: string;
+
+  /**
+   * Per-minute inbox request ceiling per remote INSTANCE DOMAIN (not per
+   * actor — actor URIs are free to mint). Defaults to 60. Enforced through the
+   * shared distributed token bucket, so it holds across replicas and restarts.
+   */
+  ACTIVITYPUB_INSTANCE_RATE_LIMIT?: string;
+
+  /**
+   * KEK wrapping actor private keys at rest. MUST be 32 bytes of real key
+   * material (64 hex chars, or base64/base64url of 32 bytes) — there is
+   * deliberately no `SESSION_SECRET` fallback, because session signing and
+   * federation identity are different trust domains and must not share a
+   * secret. Required whenever `ACTIVITYPUB_ENABLED` is true.
+   */
+  ACTIVITYPUB_KEY_ENCRYPTION_KEY?: string;
+
+  /**
+   * Migration only: the secret existing wrapped keys were written under, so
+   * the legacy `SHA-256(secret)` format stays readable until the rewrap
+   * backfill completes.
+   */
+  ACTIVITYPUB_LEGACY_KEY_ENCRYPTION_KEY?: string;
+
+  /**
+   * Set to `"false"` AFTER the rewrap backfill to close the legacy read path.
+   * Defaults to enabled — closing it early would lock actors out of their keys.
+   */
+  ACTIVITYPUB_LEGACY_KEY_DECRYPT?: string;
+
+  // ── Client version policy (served by GET /api/app/version-policy) ─────────
+  // All four are OPTIONAL and all four are DORMANT by default: unset means the
+  // endpoint returns nulls and the 426 backstop is a no-op. Values are
+  // operational configuration, never compiled constants — the npm tarball is
+  // public, so a hard-coded minimum version would be a published one.
+  // Formats are enforced at boot in env-schema.ts (bounded semver; store URLs
+  // must be https on an allow-listed store host).
+  /** Oldest client version the server still accepts; older ones get 426. */
+  CLIENT_MIN_SUPPORTED_VERSION?: string;
+  /** Version the client should nudge users toward (never enforced). */
+  CLIENT_RECOMMENDED_VERSION?: string;
+  /** Android store URL (https, play.google.com). */
+  CLIENT_STORE_URL_ANDROID?: string;
+  /** iOS store URL (https, apps.apple.com). */
+  CLIENT_STORE_URL_IOS?: string;
+
+  /**
    * Trusted-proxy mode for client-IP derivation. See
    * `lib/net/trusted-client-ip.ts`. Values: "none" (default), "alb",
    * "cloudflare". Trellis sets this to "alb" via CDK because the API
@@ -164,9 +251,25 @@ export interface Env {
   RECAPTCHA_SECRET_KEY?: string;
 
   // Email
-  EMAIL_SERVICE?: "aws-ses" | "resend" | "alibaba-directmail" | "tencent-ses";
+  EMAIL_SERVICE?:
+    | "aws-ses"
+    | "resend"
+    | "alibaba-directmail"
+    | "tencent-ses"
+    // WS-5 Scaleway profile (manifest D8a draft): TEM HTTP API / generic SMTP.
+    | "scaleway-tem"
+    | "smtp";
   EMAIL_SERVICE_REGION?: string;
   FROM_EMAIL?: string;
+  /**
+   * Display/product name used in the app-owned email templates (magic-link
+   * S-8 subject/body/From display name — see `lib/identity/magic-link-email.ts`).
+   * Optional; defaults to "Trellis" everywhere it's read, so an unset var
+   * preserves today's behavior exactly. A consumer (e.g. skybber) sets this
+   * to its own product name to brand outbound email without forking the
+   * shared template.
+   */
+  EMAIL_BRAND_NAME?: string;
   AWS_SES_REGION?: string;
   /** SES configuration set applied to every send (event publishing/tracking). */
   SES_CONFIGURATION_SET?: string;
@@ -216,6 +319,15 @@ export interface Env {
   CI?: string;
   GITHUB_ACTIONS?: string;
   STAGE?: string;
+  /**
+   * SEC L1 — explicit opt-in for the `/api/admin/test/*` seam (see
+   * `lib/routes/admin.ts`). The seam is OFF unless STAGE is `dev`, the process
+   * is in CI, or this is exactly `"true"`; `prod`/`production` can never enable
+   * it. Surfaced on `Env` (rather than read from `process.env` inside the
+   * route) so the gate reads its input from the same place as every other
+   * config value, and so it is greppable.
+   */
+  ENABLE_TEST_ROUTES?: string;
 
   // AWS
   AWS_REGION?: string;
@@ -247,6 +359,17 @@ export interface Env {
   FOLLOWERS_EVENTS_QUEUE: CloudflareQueue;
   LINK_CHECK_QUEUE: CloudflareQueue;
   MEDIA_PROCESSING_QUEUE: CloudflareQueue;
+  /**
+   * WS-2 §4 media control inversion: when true, `completeSession` enqueues
+   * the media-processing job explicitly (native `{ objectKey }` message)
+   * BEFORE flipping the session to "uploaded". Source:
+   * `MEDIA_ENQUEUE_ON_COMPLETE === "true"`. DEFAULT OFF on AWS — zero
+   * behavior change until the explicit TWO-DEPLOY cutover (enqueue ON with
+   * the S3 notification still live → monitoring gate → notification
+   * removal; finding 1 — a single-deploy swap is forbidden). Scaleway (no
+   * bucket notifications) runs with this ON from the start.
+   */
+  MEDIA_ENQUEUE_ON_COMPLETE: boolean;
 
   // Storage (S3-backed, same interface as Cloudflare R2)
   MEDIA_BUCKET_R2: R2Bucket;
@@ -506,6 +629,29 @@ export interface Env {
   };
   // --- end Collections config seam ---------------------------------------------
 
+  // --- Comment rate-limit config seam ------------------------------------------
+  // Threshold-secrecy seam (CLAUDE.md rule 8): these were compiled-in constants
+  // (`const maxPerMinute = 10`, `const waitTime = 30000`) sitting in a public
+  // npm tarball — i.e. published limits, telling anyone who reads them exactly
+  // how to pace an abuse campaign to stay under the ceiling. Resolved by
+  // resolveCommentRateLimitEnv(); the middleware reads env.commentRateLimit.*
+  // and never hardcodes.
+  commentRateLimit: {
+    /** Max comments per user per minute. Source: COMMENT_RATE_LIMIT_PER_MINUTE. */
+    perMinute: number;
+    /** Cooldown between a user's comments on ONE post, in seconds. Source: COMMENT_RATE_LIMIT_POST_COOLDOWN_SECONDS. */
+    postCooldownSeconds: number;
+    /**
+     * What to do when the rate-limit store THROWS. "closed" denies (the
+     * default: an abuse control that cannot count must not wave traffic
+     * through); "open" restores the previous allow-everything behaviour for
+     * operators who would rather lose the control than the endpoint.
+     * Source: COMMENT_RATE_LIMIT_FAIL_MODE.
+     */
+    failMode: "closed" | "open";
+  };
+  // --- end Comment rate-limit config seam --------------------------------------
+
   // --- Events primitive config seam (events-primitive/README.md §4.8) ---------
   // Threshold-secrecy seam (CLAUDE.md rule 8): every operational cap/threshold
   // is runtime config, never a compiled constant, so no number ships in the
@@ -535,6 +681,23 @@ export interface Env {
     listPageMax: number;
   };
   // --- end Events primitive config seam ---------------------------------------
+
+  // --- Synthetic-content provenance config seam (AI Act Art. 50, D15) --------
+  // Resolved by resolveProvenanceEnv(). NOT a threshold-secrecy value — a
+  // disclosure posture is published policy, not a detection parameter — but it
+  // follows the same env-with-fallback seam so the consumer's deployment can set
+  // it per environment without a code change.
+  provenance: {
+    /**
+     * Platform-default disclosure posture for tenants with no override in
+     * `Tenant.disclosurePosture`. Source: PROVENANCE_DEFAULT_DISCLOSURE_POSTURE.
+     * Default: PROMPTED. An unrecognised value falls back to the default rather
+     * than throwing — a typo must not take the API down, and the fallback is the
+     * middle posture, so the failure is neither over- nor under-strict.
+     */
+    defaultDisclosurePosture: DisclosurePosture;
+  };
+  // --- end provenance config seam ---------------------------------------------
 }
 
 /**
@@ -949,6 +1112,57 @@ export function resolveCollectionEnv(
 }
 
 /**
+ * Resolve the comment rate-limit config block (threshold-secrecy, rule 8).
+ *
+ * Single-writer: the ONLY place that reads COMMENT_RATE_LIMIT_* env vars. The
+ * defaults reproduce the previous compiled-in behaviour exactly (10/min, 30s
+ * per-post cooldown) so this is a config seam, not a policy change — except
+ * `failMode`, which deliberately flips: see the middleware for why.
+ */
+export function resolveCommentRateLimitEnv(
+  source: NodeJS.ProcessEnv = process.env,
+): {
+  commentRateLimit: {
+    perMinute: number;
+    postCooldownSeconds: number;
+    failMode: "closed" | "open";
+  };
+} {
+  return {
+    commentRateLimit: {
+      perMinute: parsePositiveInt(source.COMMENT_RATE_LIMIT_PER_MINUTE, 10),
+      postCooldownSeconds: parsePositiveInt(
+        source.COMMENT_RATE_LIMIT_POST_COOLDOWN_SECONDS,
+        30,
+      ),
+      // Anything other than an explicit "open" is closed. An unset, misspelt
+      // or empty value must not silently disable the control — that is the
+      // failure mode this whole change exists to remove.
+      failMode: source.COMMENT_RATE_LIMIT_FAIL_MODE === "open" ? "open" : "closed",
+    },
+  };
+}
+
+/**
+ * Resolve the synthetic-content provenance config block (AI Act Art. 50, D15).
+ *
+ * Single-writer: the ONLY place that reads PROVENANCE_* env vars. An
+ * unrecognised posture string resolves to {@link DEFAULT_DISCLOSURE_POSTURE}
+ * rather than throwing — see the field doc on `Env.provenance`.
+ */
+export function resolveProvenanceEnv(
+  source: NodeJS.ProcessEnv = process.env,
+): { provenance: { defaultDisclosurePosture: DisclosurePosture } } {
+  return {
+    provenance: {
+      defaultDisclosurePosture:
+        parseDisclosurePosture(source.PROVENANCE_DEFAULT_DISCLOSURE_POSTURE) ??
+        DEFAULT_DISCLOSURE_POSTURE,
+    },
+  };
+}
+
+/**
  * Resolve the events-primitive config block from `source` (defaults to
  * `process.env`; tests can inject a fixture object).
  *
@@ -1086,12 +1300,37 @@ export function validateEnv(env: Env): string[] {
     errors.push("SESSION_SECRET must be at least 32 characters");
   }
 
-  if (!env.COGNITO_USER_POOL_ID) {
-    errors.push("COGNITO_USER_POOL_ID is required");
+  // Auth issuer + audience must be resolvable. This mirrors resolveAuthConfig()
+  // (lib/auth/auth-config.ts) rather than hard-requiring Cognito: the neutral
+  // OIDC_* vars (WS-3.3 Keycloak / any generic OIDC issuer) satisfy it, and the
+  // legacy COGNITO_* derivation still satisfies it byte-identically. Requiring
+  // COGNITO_* unconditionally here would fail-closed every non-Cognito (e.g.
+  // Scaleway/Keycloak) deployment even though the verifier itself is happy.
+  if (!env.OIDC_ISSUER_URL && !env.COGNITO_USER_POOL_ID) {
+    errors.push(
+      "auth issuer is required — set OIDC_ISSUER_URL (generic OIDC / Keycloak) or COGNITO_USER_POOL_ID (Cognito)",
+    );
   }
-
-  if (!env.COGNITO_APP_CLIENT_ID) {
-    errors.push("COGNITO_APP_CLIENT_ID is required");
+  if (!env.OIDC_APP_CLIENT_ID && !env.COGNITO_APP_CLIENT_ID) {
+    errors.push(
+      "auth audience is required — set OIDC_APP_CLIENT_ID (generic OIDC / Keycloak) or COGNITO_APP_CLIENT_ID (Cognito)",
+    );
+  }
+  // A non-Cognito issuer must also name its JWKS URI: the fallback the verifier
+  // derives is Cognito's `/.well-known/jwks.json`, which 404s on Keycloak and
+  // friends, and the resulting missing key is reported as `invalid_signature`
+  // — every token rejected, with the error pointing at crypto instead of at
+  // config (observed live on dev, 2026-08-02). Mirrors resolveAuthConfig()
+  // [SEC-6b]; kept here too so `validateEnv` alone catches a bad deploy.
+  if (
+    env.OIDC_ISSUER_URL &&
+    !/^https:\/\/cognito-idp\.[a-z0-9-]+\.amazonaws\.com\/[^/]+$/.test(env.OIDC_ISSUER_URL) &&
+    !env.OIDC_JWKS_URL
+  ) {
+    errors.push(
+      "OIDC_JWKS_URL is required for a non-Cognito issuer — take jwks_uri from " +
+        `${env.OIDC_ISSUER_URL}/.well-known/openid-configuration`,
+    );
   }
 
   // SECURITY (T17): the invitation gate fails closed without this binding —
@@ -1104,6 +1343,19 @@ export function validateEnv(env: Env): string[] {
     );
   }
 
+  // SECURITY (WS-2 §4 finding 1, test-critique F1): the media control-
+  // inversion flag ON with no queue binding would otherwise let
+  // `completeSession` flip sessions to "uploaded" WITHOUT enqueuing a
+  // moderation job — permanently unmoderated media once Deploy 2 removes the
+  // S3 notification. Flag on ⇒ queue REQUIRED; refuse to start otherwise.
+  // (`completeSession` also carries a runtime fail-closed guard for
+  // hand-built Envs that bypass this startup check.)
+  if (env.MEDIA_ENQUEUE_ON_COMPLETE && !env.MEDIA_PROCESSING_QUEUE) {
+    errors.push(
+      "MEDIA_ENQUEUE_ON_COMPLETE is true but MEDIA_PROCESSING_QUEUE is missing — completions could flip sessions without enqueuing moderation (unmoderated media). Wire the queue or turn the flag off.",
+    );
+  }
+
   // Email provider config — validate ONLY when a provider is explicitly
   // selected via the RAW env var. buildEnv() defaults EMAIL_SERVICE to
   // "aws-ses", so reading env.EMAIL_SERVICE here would fire for every
@@ -1112,6 +1364,39 @@ export function validateEnv(env: Env): string[] {
   if (process.env.EMAIL_SERVICE) {
     errors.push(...validateEmailEnv(process.env));
   }
+
+  // SECURITY (Phase 7 F7): enabling federation without a real 32-byte actor-key
+  // KEK is not a degraded mode — actor private keys would be unwrappable (or,
+  // before this change, wrapped under the reused session secret). Only checked
+  // when ACTIVITYPUB_ENABLED, so non-federating deployments are unaffected.
+  if (env.ACTIVITYPUB_ENABLED) {
+    const kek = env.ACTIVITYPUB_KEY_ENCRYPTION_KEY;
+    if (!kek) {
+      errors.push(
+        "ACTIVITYPUB_KEY_ENCRYPTION_KEY is required when ACTIVITYPUB_ENABLED is true — 32 bytes (64 hex chars or base64). There is no SESSION_SECRET fallback.",
+      );
+    } else if (
+      !/^[0-9a-fA-F]{64}$/.test(kek.trim()) &&
+      !/^[A-Za-z0-9+/]{43}=?$/.test(kek.trim()) &&
+      !/^[A-Za-z0-9\-_]{43}$/.test(kek.trim())
+    ) {
+      errors.push(
+        "ACTIVITYPUB_KEY_ENCRYPTION_KEY must decode to exactly 32 bytes (64 hex chars, or base64/base64url of 32 bytes) — a passphrase is not a key.",
+      );
+    }
+  }
+
+  // SECURITY (Phase 6 M3): in production a missing Safe Browsing key means
+  // every uncached link check fails to UNKNOWN and the interstitial fires on
+  // everything — a link-safety feature that silently does nothing. Refuse the
+  // deploy instead. Non-prod stages are unaffected.
+  errors.push(
+    ...validateThreatIntelEnv({
+      GOOGLE_SAFE_BROWSING_API_KEY: env.GOOGLE_SAFE_BROWSING_API_KEY,
+      STAGE: env.STAGE,
+      NODE_ENV: env.NODE_ENV,
+    }),
+  );
 
   return errors;
 }
@@ -1234,18 +1519,49 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     );
   }
 
-  const kvCursorSecret = sessionSecret || process.env.CURSOR_SECRET;
-  const kv = (namespace: string) =>
-    new DynamoKv(dynamoClient, {
-      tableName: kvTableName,
-      namespace,
-      ...(kvCursorSecret ? { cursorSecret: kvCursorSecret } : {}),
-    });
-
   // Resolve DB URL: local DATABASE_URL wins; else fetch from Secrets Manager at
   // runtime. The resulting string stays on the returned Env object only — we do
   // NOT write it to process.env so it can't leak through env-var exposure.
   const databaseUrl = await resolveDatabaseUrl();
+
+  // WS-1 KV port provider wiring (§5). Default (unset) = "dynamodb": the typed
+  // KvStore hot-spot namespaces resolve to DynamoKvStore over their byte-compat
+  // layouts — existing AWS deployments see ZERO change. "postgres" builds a
+  // small dedicated KV pool (bypassing the tenant-scoped Prisma pool) and
+  // registers it so the same namespaces resolve to PostgresKvStore.
+  //
+  // MUST stay above the `kv()` helper below: the string-KV bindings now read
+  // the same executor, and a `kv()` call that ran first would fail closed.
+  const kvProvider = resolveKvProvider();
+  if (kvProvider === "postgres") {
+    setKvSqlExecutor(await makeKvSqlExecutor(databaseUrl));
+  }
+
+  const kvCursorSecret = sessionSecret || process.env.CURSOR_SECRET;
+  // The 13 Cloudflare-compat string-KV bindings. These used to construct a
+  // DynamoKv UNCONDITIONALLY while the typed `getKvStore()` honoured
+  // KV_PROVIDER — a split-brain in which, on a Postgres deployment, the
+  // invitation pre-signup record went to `kv_entries` and the invitation
+  // session token went to a DynamoDB endpoint that does not resolve. Both
+  // ports now follow the same switch. See lib/kv/postgres-kv-namespace.ts.
+  const kv = (namespace: string): KVNamespace => {
+    if (kvProvider === "postgres") {
+      const executor = getKvSqlExecutor();
+      if (executor === undefined) {
+        // Fail closed, loudly. Serving with a silently-absent KV would disable
+        // the invitation gate, CSRF-token validation and the session blocklist.
+        throw new Error(
+          `KV_PROVIDER=postgres but the KV SQL executor is not wired (buildEnv) for namespace=${namespace}`,
+        );
+      }
+      return new PostgresKv(executor, { namespace });
+    }
+    return new DynamoKv(dynamoClient, {
+      tableName: kvTableName,
+      namespace,
+      ...(kvCursorSecret ? { cursorSecret: kvCursorSecret } : {}),
+    });
+  };
 
   return {
     // Realtime transport seam: resolveRealtimeEnv() reads the REALTIME_* vars
@@ -1269,8 +1585,12 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     ...resolveEmailSubscriptionEnv(),
     // Collections config seam (§3): resolveCollectionEnv() reads COLLECTION_* vars.
     ...resolveCollectionEnv(),
+    // Comment rate-limit seam (rule 8): reads COMMENT_RATE_LIMIT_* vars.
+    ...resolveCommentRateLimitEnv(),
     // Events-primitive config seam (§4.8): resolveEventEnv() reads EVENT_* vars.
     ...resolveEventEnv(),
+    // Provenance config seam (D15): reads PROVENANCE_* vars.
+    ...resolveProvenanceEnv(),
     DATABASE_URL: databaseUrl,
     DATABASE_URL_CN: process.env.DATABASE_URL_CN,
     DIRECT_URL: process.env.DIRECT_URL,
@@ -1289,6 +1609,15 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     COGNITO_REGION: process.env.COGNITO_REGION || process.env.AWS_REGION || "us-east-1",
     COGNITO_HOSTED_UI_DOMAIN: process.env.COGNITO_HOSTED_UI_DOMAIN,
     COGNITO_REDIRECT_URI: process.env.COGNITO_REDIRECT_URI,
+
+    // Generic OIDC verification (WS-3.1/3.3) — per manifest D8 (OIDC_* canonical);
+    // additive, default-derived from COGNITO_*.
+    OIDC_ISSUER_URL: process.env.OIDC_ISSUER_URL,
+    OIDC_APP_CLIENT_ID: process.env.OIDC_APP_CLIENT_ID,
+    OIDC_JWKS_URL: process.env.OIDC_JWKS_URL,
+    IDENTITY_PROVIDER: process.env.IDENTITY_PROVIDER,
+    IDENTITY_ADMIN_CLIENT_ID: process.env.IDENTITY_ADMIN_CLIENT_ID,
+    IDENTITY_ADMIN_CLIENT_SECRET: process.env.IDENTITY_ADMIN_CLIENT_SECRET,
 
     // OAuth device-authorization adapter (T9b-d)
     COGNITO_AGENT_CLIENT_ID: process.env.COGNITO_AGENT_CLIENT_ID,
@@ -1330,6 +1659,23 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     // Federation master switch — fail closed: anything other than the exact
     // string "true" leaves federation disabled.
     ACTIVITYPUB_ENABLED: process.env.ACTIVITYPUB_ENABLED === "true",
+    ACTIVITYPUB_BLOCKED_DOMAINS: process.env.ACTIVITYPUB_BLOCKED_DOMAINS,
+    ACTIVITYPUB_INSTANCE_RATE_LIMIT:
+      process.env.ACTIVITYPUB_INSTANCE_RATE_LIMIT,
+    ACTIVITYPUB_KEY_ENCRYPTION_KEY:
+      process.env.ACTIVITYPUB_KEY_ENCRYPTION_KEY,
+    ACTIVITYPUB_LEGACY_KEY_ENCRYPTION_KEY:
+      process.env.ACTIVITYPUB_LEGACY_KEY_ENCRYPTION_KEY,
+    ACTIVITYPUB_LEGACY_KEY_DECRYPT:
+      process.env.ACTIVITYPUB_LEGACY_KEY_DECRYPT,
+
+    // Client version policy — raw passthrough; boot validation (env-schema.ts)
+    // has already rejected malformed values, and resolveVersionPolicy() treats
+    // anything unparseable as "unset" (dormant) as defense in depth.
+    CLIENT_MIN_SUPPORTED_VERSION: process.env.CLIENT_MIN_SUPPORTED_VERSION,
+    CLIENT_RECOMMENDED_VERSION: process.env.CLIENT_RECOMMENDED_VERSION,
+    CLIENT_STORE_URL_ANDROID: process.env.CLIENT_STORE_URL_ANDROID,
+    CLIENT_STORE_URL_IOS: process.env.CLIENT_STORE_URL_IOS,
 
     // Trusted-proxy hint for client-IP derivation; defaults to "none".
     TRUSTED_PROXY: process.env.TRUSTED_PROXY,
@@ -1356,6 +1702,7 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     EMAIL_SERVICE: (process.env.EMAIL_SERVICE as any) || "aws-ses",
     EMAIL_SERVICE_REGION: process.env.EMAIL_SERVICE_REGION,
     FROM_EMAIL: process.env.FROM_EMAIL,
+    EMAIL_BRAND_NAME: process.env.EMAIL_BRAND_NAME,
     AWS_SES_REGION: process.env.AWS_SES_REGION || process.env.AWS_REGION || "us-east-1",
     SES_CONFIGURATION_SET: process.env.SES_CONFIGURATION_SET,
     RESEND_API_KEY: process.env.RESEND_API_KEY,
@@ -1392,6 +1739,7 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     CI: process.env.CI,
     GITHUB_ACTIONS: process.env.GITHUB_ACTIONS,
     STAGE: stage,
+    ENABLE_TEST_ROUTES: process.env.ENABLE_TEST_ROUTES,
 
     // AWS
     AWS_REGION: process.env.AWS_REGION,
@@ -1423,6 +1771,8 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     FOLLOWERS_EVENTS_QUEUE: new SqsQueue(sqsClient, sqsUrl("followers-events")),
     LINK_CHECK_QUEUE: new SqsQueue(sqsClient, sqsUrl("link-check")),
     MEDIA_PROCESSING_QUEUE: new SqsQueue(sqsClient, sqsUrl("media-processing")),
+    // WS-2 §4 inversion flag — default OFF (zero AWS change; finding 1).
+    MEDIA_ENQUEUE_ON_COMPLETE: process.env.MEDIA_ENQUEUE_ON_COMPLETE === "true",
 
     // S3 buckets (R2 interface)
     MEDIA_BUCKET_R2: new S3Storage(s3Client, mediaBucket),

@@ -48,7 +48,11 @@ describe("Fedify Converters", () => {
     mockPost = {
       id: "post-123",
       text: "Hello, world!",
-      visibility: "PUBLIC",
+      // `radius`, not the long-dead `visibility` field. Post.radius is
+      // non-nullable with a default in the schema, so an unset radius does not
+      // occur in production — and it used to exercise determineAudience's
+      // removed fail-open branch.
+      radius: "SHOUT",
       authorId: mockUser.id,
       createdAt: new Date("2024-01-01T00:00:00Z"),
       published: new Date("2024-01-01T00:00:00Z"),
@@ -230,12 +234,12 @@ describe("Fedify Converters", () => {
     it("should extract audience fields", async () => {
       const createActivity =
         await PostActivityServiceFedify.createCreateActivity(
-          { ...mockPost, visibility: "PUBLIC" },
+          { ...mockPost, radius: "SHOUT" },
           mockUser,
           mockEnv,
         );
       const note = await PostActivityServiceFedify.createNote(
-        { ...mockPost, visibility: "PUBLIC" },
+        { ...mockPost, radius: "SHOUT" },
         mockUser,
         mockEnv,
       );
@@ -440,12 +444,12 @@ describe("Fedify Converters", () => {
     it("should handle recipients as strings", async () => {
       const createActivity =
         await PostActivityServiceFedify.createCreateActivity(
-          { ...mockPost, visibility: "PUBLIC" },
+          { ...mockPost, radius: "SHOUT" },
           mockUser,
           mockEnv,
         );
       const note = await PostActivityServiceFedify.createNote(
-        { ...mockPost, visibility: "PUBLIC" },
+        { ...mockPost, radius: "SHOUT" },
         mockUser,
         mockEnv,
       );
@@ -472,12 +476,12 @@ describe("Fedify Converters", () => {
     it("should handle empty recipient arrays", async () => {
       const createActivity =
         await PostActivityServiceFedify.createCreateActivity(
-          { ...mockPost, visibility: "PRIVATE" },
+          { ...mockPost, radius: "WHISPER" },
           mockUser,
           mockEnv,
         );
       const note = await PostActivityServiceFedify.createNote(
-        { ...mockPost, visibility: "PRIVATE" },
+        { ...mockPost, radius: "WHISPER" },
         mockUser,
         mockEnv,
       );

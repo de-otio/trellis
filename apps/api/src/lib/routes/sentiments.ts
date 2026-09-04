@@ -3,6 +3,7 @@
  */
 
 import { ageGateMiddleware } from "../age-gate-middleware.js";
+import { authMiddleware } from "../auth/auth-middleware.js";
 import { getLogger, Logger } from "../logger.js";
 import { corsMiddleware, csrfMiddleware, rateLimitMiddleware } from "../middleware.js";
 import { ReactionHandler } from "../reaction-handler.js";
@@ -144,6 +145,27 @@ export const sentimentsRoutes: Route[] = [
         env,
       );
 
+      // H3: this endpoint used to accept `session || null` — no session
+      // required at all — while the post it describes requires one. An
+      // attachment cannot be more readable than the thing it hangs off, and the
+      // audience check needs both a viewer identity and the caller's active
+      // tenant (there is no ambient tenant to fall back on:
+      // TENANT_SCOPE_MODE defaults to `off` and there is no RLS backstop).
+      if (!session) {
+        return securityHeaders.createSecureResponse(
+          JSON.stringify({ error: "Unauthorized" }),
+          { status: 401, headers: { "content-type": "application/json" } },
+        );
+      }
+
+      const auth = await authMiddleware(request, env);
+      if (!auth || !auth.activeTenantId) {
+        return securityHeaders.createSecureResponse(
+          JSON.stringify({ error: "Unauthorized" }),
+          { status: 401, headers: { "content-type": "application/json" } },
+        );
+      }
+
       try {
         if (!requestContext) {
           return securityHeaders.createSecureResponse(
@@ -155,9 +177,10 @@ export const sentimentsRoutes: Route[] = [
         const postId = pathname.split("/api/posts/")[1].split("/sentiments")[0];
         const response = await reactionHandler.getPostSentiments(
           postId,
-          session || null,
+          session,
           env as any,
           requestContext,
+          auth.activeTenantId,
         );
         return securityHeaders.addSecurityHeaders(response);
       } catch (error) {
@@ -192,6 +215,25 @@ export const sentimentsRoutes: Route[] = [
         return securityHeaders.createSecureResponse(
           JSON.stringify({ error: "FORBIDDEN", message: "This feature is not available for your account" }),
           { status: 403, headers: { "content-type": "application/json" } },
+        );
+      }
+
+      // H3: this endpoint discloses WHO reacted, and accepted `session || null`
+      // — so the reader list of a private post was available anonymously. A
+      // viewer identity and an active tenant are both required before the
+      // audience check can be made at all.
+      if (!session) {
+        return securityHeaders.createSecureResponse(
+          JSON.stringify({ error: "Unauthorized" }),
+          { status: 401, headers: { "content-type": "application/json" } },
+        );
+      }
+
+      const auth = await authMiddleware(request, env);
+      if (!auth || !auth.activeTenantId) {
+        return securityHeaders.createSecureResponse(
+          JSON.stringify({ error: "Unauthorized" }),
+          { status: 401, headers: { "content-type": "application/json" } },
         );
       }
 
@@ -242,13 +284,19 @@ export const sentimentsRoutes: Route[] = [
           sentiment,
           validation.data.limit,
           cursor,
-          session || null,
+          session,
           env as any,
           requestContext,
+          auth.activeTenantId,
         );
 
-        // Safer Social Design: TEEN users see sentiment types only, no user identities
-        if (session?.ageTier === "TEEN") {
+        // Safer Social Design: TEEN users see sentiment types only, no user identities.
+        //
+        // `response.ok` is load-bearing: without it a refusal (404) or an error
+        // (500) is parsed as if it were a user list and re-emitted as a 200 with
+        // an empty `sentimentTypes` array — laundering the deny into a success
+        // for exactly the accounts the platform is most careful with.
+        if (response.ok && session?.ageTier === "TEEN") {
           const responseBody = await response.json() as any;
           // Strip user identities, keep only sentiment types
           const sentimentTypes = [...new Set(

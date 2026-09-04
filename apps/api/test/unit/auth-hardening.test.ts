@@ -274,6 +274,7 @@ const { mockVerifyCognitoJwt } = vi.hoisted(() => ({
 }));
 vi.mock("../../src/lib/auth/cognito-jwt", () => ({
   verifyCognitoJwt: (...args: any[]) => mockVerifyCognitoJwt(...args),
+  verifyLegacyCognitoClaims: (...args: any[]) => mockVerifyCognitoJwt(...args),
 }));
 
 describe("S1.3 — Session secret minimum length", () => {
@@ -351,6 +352,9 @@ describe("S1.7 — JWT exp claim for session expiration", () => {
 
     mockVerifyCognitoJwt.mockResolvedValue({
       sub: "user-123",
+      // The trellis cuid must be present: this suite asserts exp handling, and
+      // a token carrying no resolvable user id is now rejected outright.
+      "custom:userId": "cmqurmq7x000002i80nqmgfa1",
       email: "test@example.com",
       username: "test@example.com",
       "custom:role": "END_USER",
@@ -378,6 +382,7 @@ describe("S1.7 — JWT exp claim for session expiration", () => {
 
     mockVerifyCognitoJwt.mockResolvedValue({
       sub: "user-123",
+      "custom:userId": "cmqurmq7x000002i80nqmgfa1",
       email: "test@example.com",
       username: "test@example.com",
     });
@@ -420,24 +425,52 @@ describe("S1.4 — validateEnv", () => {
     expect(errors).toContain("SESSION_SECRET must be at least 32 characters");
   });
 
-  it("should return errors when COGNITO_USER_POOL_ID is missing", async () => {
+  it("should return an auth-issuer error when neither OIDC_ISSUER_URL nor COGNITO_USER_POOL_ID is set", async () => {
     const { validateEnv } = await import("../../src/env.js");
     const errors = validateEnv({
       SESSION_SECRET: "a".repeat(32),
       COGNITO_USER_POOL_ID: "",
       COGNITO_APP_CLIENT_ID: "client-id",
     } as any);
-    expect(errors).toContain("COGNITO_USER_POOL_ID is required");
+    expect(errors.some((e) => e.startsWith("auth issuer is required"))).toBe(true);
   });
 
-  it("should return errors when COGNITO_APP_CLIENT_ID is missing", async () => {
+  it("should return an auth-audience error when neither OIDC_APP_CLIENT_ID nor COGNITO_APP_CLIENT_ID is set", async () => {
     const { validateEnv } = await import("../../src/env.js");
     const errors = validateEnv({
       SESSION_SECRET: "a".repeat(32),
       COGNITO_USER_POOL_ID: "us-east-1_abc",
       COGNITO_APP_CLIENT_ID: "",
     } as any);
-    expect(errors).toContain("COGNITO_APP_CLIENT_ID is required");
+    expect(errors.some((e) => e.startsWith("auth audience is required"))).toBe(true);
+  });
+
+  // WS-3.3: a generic OIDC / Keycloak deployment (OIDC_* set, no COGNITO_*)
+  // must pass validateEnv — the auth check is provider-neutral and mirrors
+  // resolveAuthConfig().
+  it("should accept OIDC_* (Keycloak) auth with no COGNITO_* vars", async () => {
+    const { validateEnv } = await import("../../src/env.js");
+    const errors = validateEnv({
+      SESSION_SECRET: "a".repeat(32),
+      OIDC_ISSUER_URL: "https://id.example.com/realms/skybber",
+      OIDC_APP_CLIENT_ID: "skybber-api",
+      // [SEC-6b] non-Cognito issuers must name their JWKS URI — the derived
+      // Cognito default 404s on Keycloak and fails every token.
+      OIDC_JWKS_URL: "https://id.example.com/realms/skybber/protocol/openid-connect/certs",
+      INVITATIONS_KV: {},
+    } as any);
+    expect(errors).toEqual([]);
+  });
+
+  it("[SEC-6b] rejects a Keycloak deployment that omits OIDC_JWKS_URL", async () => {
+    const { validateEnv } = await import("../../src/env.js");
+    const errors = validateEnv({
+      SESSION_SECRET: "a".repeat(32),
+      OIDC_ISSUER_URL: "https://id.example.com/realms/skybber",
+      OIDC_APP_CLIENT_ID: "skybber-api",
+      INVITATIONS_KV: {},
+    } as any);
+    expect(errors.some((e: string) => e.includes("OIDC_JWKS_URL is required"))).toBe(true);
   });
 
   it("should return empty array when all required vars are valid", async () => {
@@ -599,11 +632,15 @@ describe("S1.6 — CORS strict domain matching", () => {
     expect(CorsHandler.getAllowedOrigin(request, mockEnv)).toBeNull();
   });
 
-  it("should allow api.example.com as subdomain", () => {
+  it("SEC M4: api.example.com is NO LONGER allowed as a known-domain subdomain", () => {
+    // This used to pass only because the shipped `knownDomains` list contained
+    // the IANA reserved `example.com`, which meant the published core allowed
+    // every `*.example.com` origin out of the box. The entry is gone; an
+    // arbitrary subdomain of it is denied unless explicitly configured.
     const request = new Request("https://api.example.com/test", {
       headers: { Origin: "https://api.example.com" },
     });
-    expect(CorsHandler.getAllowedOrigin(request, mockEnv)).toBe("https://api.example.com");
+    expect(CorsHandler.getAllowedOrigin(request, mockEnv)).toBeNull();
   });
 
   it("should reject fakeexample.com", () => {
@@ -634,8 +671,11 @@ describe("T2 — Pre-token-generation cache TTL and suspension", () => {
   it("should include suspendedAt in Prisma select clause", async () => {
     const fs = await import("node:fs");
     const path = await import("node:path");
+    // The claims derivation (incl. the select) moved to the shared
+    // lib/identity/load-claims.ts (WS-0, plan 016 — reused by the Keycloak
+    // JIT path); the Lambda keeps the suspension POLICY, checked below.
     const source = fs.readFileSync(
-      path.resolve(process.cwd(), "src/lambda/pre-token-generation.ts"),
+      path.resolve(process.cwd(), "src/lib/identity/load-claims.ts"),
       "utf-8",
     );
     expect(source).toContain("suspendedAt: true");

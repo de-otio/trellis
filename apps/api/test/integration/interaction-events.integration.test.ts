@@ -121,7 +121,11 @@ describe("InteractionEvent erasure (GDPR Art. 17, P2)", () => {
       ],
     });
 
-    const result = await deleteUserData(prisma, subject);
+    const result = await deleteUserData(prisma, subject, {
+      // Any non-empty key satisfies the fail-closed gate; the tombstone's
+      // irreversibility is proven by the unit HMAC-seam tests, not here.
+      pseudonymSecret: "integration-test-tombstone-key",
+    });
     expect(result.interactionEventsAsTarget).toBe(1);
 
     const asActor = await prisma.interactionEvent.count({ where: { actorUserId: subject } });

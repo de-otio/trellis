@@ -15,8 +15,14 @@
 
 import {
   type MediaModerationProvider,
+  type ModerationVerdict,
   NullModerationProvider,
 } from "./moderation-provider.js";
+import type {
+  LabelPolicy,
+  LabelPolicyContext,
+} from "./label-policy.js";
+import type { ModerationDecision } from "./media-lifecycle.js";
 
 // ---------------------------------------------------------------------------
 // Provider-injection hook (mirrors setRealtimeProvider). A consuming app calls
@@ -52,4 +58,55 @@ export function getMediaModerationProvider(): MediaModerationProvider {
 /** Test-only: clear the injected provider so tests don't leak across cases. */
 export function __resetMediaModerationProviderForTests(): void {
   injected = undefined;
+  injectedPolicy = undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Label-policy hook.
+//
+// A provider returns BOTH a decision and its labels. Trusting the decision
+// means the provider owns the policy; supplying a label policy means the
+// OPERATOR owns it — which category tokens matter, at what confidence, and
+// against which taxonomy version. The two are not equivalent, and the second is
+// the one an operator can audit and change without asking a vendor.
+//
+// Optional: with no policy the provider's own decision stands, exactly as
+// before. When a policy IS set it is authoritative, and because the policy can
+// only ever degrade a verdict (unmapped categories quarantine, an unverifiable
+// taxonomy floors at review), turning it on cannot make anything more
+// permissive than the provider already was.
+// ---------------------------------------------------------------------------
+
+let injectedPolicy: LabelPolicy | undefined;
+
+/**
+ * Consuming app calls this at startup to make the operator's label policy
+ * authoritative over the provider's own decision. Re-exported from
+ * `@de-otio/trellis`.
+ */
+export function setMediaLabelPolicy(policy: LabelPolicy): void {
+  injectedPolicy = policy;
+}
+
+/** The operator's label policy, or undefined when the provider's decision stands. */
+export function getMediaLabelPolicy(): LabelPolicy | undefined {
+  return injectedPolicy;
+}
+
+/**
+ * Apply the operator's policy to a verdict, or pass the provider's own decision
+ * through when no policy is configured. Total: a policy that somehow throws is
+ * treated as doubt, and doubt reviews.
+ */
+export function interpretVerdict(
+  verdict: ModerationVerdict,
+  context?: LabelPolicyContext,
+): ModerationDecision {
+  const policy = injectedPolicy;
+  if (policy === undefined) return verdict.decision;
+  try {
+    return policy.decide(verdict, context);
+  } catch {
+    return "review";
+  }
 }

@@ -1,0 +1,121 @@
+# Scaleway-profile compose stack for trellis local/CI e2e (WS-5).
+#
+# Boots the Scaleway-shaped substitute infrastructure from 02-trellis-redesign
+# §6: Postgres carries BOTH the app DB and the WS-1 KV port (kv_entries —
+# KV_PROVIDER=postgres), Keycloak 26.6.3 + the phasetwo magic-link provider is
+# the identity substitute (LocalStack has no Cognito emulation), Mailpit is
+# the SMTP sink (EMAIL_SERVICE=smtp → SMTP_HOST=127.0.0.1 SMTP_PORT=1025) —
+# the same capture server the G2 spike harness used.
+#
+# Conventions inherited from the G2 spike stack (spikes/keycloak-magic-link
+# on branch scaleway-g2-keycloak):
+# - All images pinned BY DIGEST (security F1); tags are informational.
+# - NO `internal: true` on the network: on Docker Desktop it also suppresses
+#   host port publishing (G2 spike-run finding), so SMTP-egress containment is
+#   by config instead — Keycloak's realm SMTP may only point at mailpit, and
+#   e2e fixtures use @example.test addresses only.
+# - Keycloak healthcheck via bash /dev/tcp against the management port (the
+#   KC image ships no curl).
+#
+# Host ports are offset from the AWS-shaped docker-compose.yml (5432/8000/4566)
+# so both stacks can run side by side: PG 5433, Keycloak 8081 (mgmt 9001),
+# Mailpit UI/API 8025, SMTP 1025.
+#
+# Before first `up`: run scripts/scaleway-profile/fetch-keycloak-provider.sh
+# (verified download of the p2 magic-link JAR; the JAR itself is gitignored).
+#
+# Usage:
+#   docker compose -f docker-compose.scaleway.yml up -d --wait
+#   docker compose -f docker-compose.scaleway.yml down -v
+
+services:
+  postgres:
+    # PostGIS-enabled PG 16 — same major as the dev/CI compose (entity-location
+    # needs the postgis extension control files). Digest pin resolved from
+    # Docker Hub for postgis/postgis:16-3.4 (2026-07-20).
+    image: postgis/postgis:16-3.4@sha256:44126d872ac91993766c341e369c539e8196614321765d36a6f1bab0419a5fa5
+    environment:
+      POSTGRES_DB: trellis_scaleway
+      POSTGRES_USER: trellis
+      POSTGRES_PASSWORD: trellis_scaleway_ci
+    ports:
+      - "127.0.0.1:5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trellis -d trellis_scaleway"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [scwnet]
+
+  kc-postgres:
+    # Keycloak's own DB — separate instance (G2 pattern), PG 17 like the
+    # target Scaleway Managed PostgreSQL.
+    image: postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: keycloak_ci_throwaway
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak -d keycloak"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [scwnet]
+
+  mailpit:
+    # The CI/e2e mail sink. UI + REST API on 8025 (assertions read captured
+    # mail there), SMTP on 1025.
+    image: axllent/mailpit:v1.20@sha256:7eef0f38dbc85e4e264f2edf5d70fbb694826791e05cb2cae4fc9e3282f968f5
+    environment:
+      MP_SMTP_AUTH_ALLOW_INSECURE: "true" # CI-only; plaintext SMTP on loopback
+    ports:
+      - "127.0.0.1:8025:8025"
+      - "127.0.0.1:1025:1025"
+    healthcheck:
+      # Mailpit's liveness endpoint; busybox wget is present in the image.
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8025/livez || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [scwnet]
+
+  keycloak:
+    # KC 26.6.3, digest-pinned (G2: repinned 26.7.0→26.6.3 to match the p2
+    # provider's keycloak.version). Realm provisioning is NOT done here — the
+    # magic-link realm-as-code lives in the G2 tofu (continuation-flow.tf) and
+    # lands productized with the WS-4 identity module; this service proves the
+    # pinned stack + provider JAR boot for the e2e lane.
+    image: quay.io/keycloak/keycloak:26.6.3@sha256:9b0330756022422149aa6502eb2def8cd47c6e1b000c7c65cdb13e7c0133e992
+    command: ["start-dev", "--http-enabled=true", "--hostname=localhost"]
+    depends_on:
+      kc-postgres:
+        condition: service_healthy
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin_ci_throwaway
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://kc-postgres:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: keycloak_ci_throwaway
+      KC_HEALTH_ENABLED: "true"
+      KC_HTTP_MANAGEMENT_PORT: "9000"
+    volumes:
+      # Verified JAR — run scripts/scaleway-profile/fetch-keycloak-provider.sh first.
+      - ./scripts/scaleway-profile/providers/keycloak-magic-link-0.73.jar:/opt/keycloak/providers/keycloak-magic-link-0.73.jar:ro
+    ports:
+      - "127.0.0.1:8081:8080"
+      - "127.0.0.1:9001:9000"
+    healthcheck:
+      # KC image ships no curl; bash /dev/tcp against the mgmt health port.
+      test:
+        - "CMD-SHELL"
+        - "exec 3<>/dev/tcp/localhost/9000; printf 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3; grep -q '200 OK' <&3"
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 40s
+    networks: [scwnet]
+
+networks:
+  scwnet:
+    driver: bridge

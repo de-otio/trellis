@@ -25,6 +25,16 @@
  *    tenant up front and return [] when absent, and every table touch is
  *    `tenant_id = $tenant` scoped (defence in depth; the graph DB had no
  *    tenant labels at all).
+ *
+ * DELIBERATE EXCEPTION to tenant-guard.ts's fail-LOUD rule: these read-only
+ * recommendation paths return [] instead of throwing when no ambient tenant is
+ * active. An empty recommendation list is a safe deny (nothing is served, no
+ * cross-tenant row can leak — every query is additionally `tenant_id`-scoped),
+ * whereas throwing would break discovery on any deployment where
+ * TENANT_SCOPE_MODE is still "off" — the guard's own L3a-before-L3b sequencing
+ * note. When the estate completes L3a (shadow mode everywhere), switch these
+ * to `requireAmbientTenantId()` so the read surface agrees with the writes.
+ * (Quality sweep 2026-08-30, G4 — same note in scoring.ts.)
  */
 import type { PrismaClient } from "@prisma/client";
 import { getCurrentTenantId } from "@de-otio/saas-foundation/tenant";

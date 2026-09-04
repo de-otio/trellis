@@ -12,6 +12,7 @@ import type { KVNamespace, R2Bucket, CloudflareQueue, Queue } from "../types/clo
  */
 
 import { DataRouter } from "./data-router.js";
+import { getExtensionModelRegistry } from "./extension-model-registry.js";
 import { Session } from "./session-cookie.js";
 import type { TrellisRequestContext } from "./request-context.js";
 
@@ -163,6 +164,13 @@ export interface UserExportData {
     createdAt: string;
     acceptedAt?: string | null;
   }>;
+
+  // Extension-owned rows where this user is the erasure subject (O-1), keyed by
+  // model name. GDPR Art. 15/20 completeness for extension tables — symmetric to
+  // deleteUserData's registry-driven erasure (Art. 17). Present only when an
+  // extension owns such a table AND the user has rows in it (e.g. a dog's
+  // ext_dog__private microchip/passport belong to the keeper who entered them).
+  extensionData?: Record<string, unknown[]>;
 }
 
 export class UserExportHandler {
@@ -196,31 +204,45 @@ export class UserExportHandler {
       expiresAt: expiresAt.toISOString(),
     };
 
-    // Store job in KV
-    if (env.EXPORT_JOBS_KV) {
-      await env.EXPORT_JOBS_KV.put(
-        `job:${jobId}`,
-        JSON.stringify(job),
-        { expirationTtl: 7 * 24 * 60 * 60 }, // 7 days TTL
+    // Both writes below used to be wrapped in `if (env.X)`, so a deployment
+    // missing either binding returned a `pending` job that was never stored
+    // and never queued. The caller sees success; `getJobStatus` then reports
+    // "not found"; the export never happens. This is the GDPR Art. 15 access
+    // right, so reporting an accepted request that does not exist is the one
+    // outcome that must not be possible.
+    //
+    // (The old `else` branch here claimed a "process immediately" fallback for
+    // development. There was no fallback — it logged a warning and returned.)
+    if (!env.EXPORT_JOBS_KV) {
+      getLogger().error(
+        "[UserExportHandler] EXPORT_JOBS_KV binding is missing — refusing rather than reporting an export that cannot be tracked.",
       );
+      throw new Error("Data export is unavailable. Please try again later.");
+    }
+    if (!env.EXPORT_QUEUE) {
+      getLogger().error(
+        "[UserExportHandler] EXPORT_QUEUE binding is missing — refusing rather than reporting an export that will never run.",
+      );
+      throw new Error("Data export is unavailable. Please try again later.");
     }
 
-    // Queue the job for processing
-    if (env.EXPORT_QUEUE) {
-      await env.EXPORT_QUEUE.send({
-        jobId,
-        userId: session.userId,
-        email: session.email,
-        format,
-        region, // PREPARATORY: Include region in queue message
-      });
-    } else {
-      // Fallback: process immediately if queue not available (for development)
-      getLogger().warn(
-        "[UserExportHandler] EXPORT_QUEUE not configured, processing immediately",
-      );
-      // Note: In production, this should not happen
-    }
+    // Store job in KV
+    await env.EXPORT_JOBS_KV.put(
+      `job:${jobId}`,
+      JSON.stringify(job),
+      { expirationTtl: 7 * 24 * 60 * 60 }, // 7 days TTL
+    );
+
+    // Queue the job for processing. Ordered after the KV write on purpose: a
+    // queued job whose status row is missing looks to the user like an export
+    // that was never requested.
+    await env.EXPORT_QUEUE.send({
+      jobId,
+      userId: session.userId,
+      email: session.email,
+      format,
+      region, // PREPARATORY: Include region in queue message
+    });
 
     return job;
   }
@@ -250,6 +272,40 @@ export class UserExportHandler {
     }
 
     return job;
+  }
+
+  /**
+   * Collect extension-owned rows where the user is the erasure subject (O-1),
+   * for GDPR Art. 15/20 export completeness. Symmetric to deleteUserData's
+   * registry-driven erasure (Art. 17): any `ext_*` model that declares an
+   * `erasureSubjectField` holds that user's personal data and must be exported.
+   * Resilient per-model — a single model's failure is logged, never fatal to
+   * the whole export. Returns a map of model name → rows (only non-empty ones).
+   */
+  private async collectExtensionData(
+    db: any,
+    userId: string,
+  ): Promise<Record<string, unknown[]>> {
+    const out: Record<string, unknown[]> = {};
+    for (const entry of getExtensionModelRegistry()) {
+      if (!entry.erasureSubjectField) continue;
+      const delegate = db?.[entry.model];
+      if (!delegate || typeof delegate.findMany !== "function") continue;
+      try {
+        const rows = await delegate.findMany({
+          where: { [entry.erasureSubjectField]: userId },
+        });
+        if (Array.isArray(rows) && rows.length > 0) {
+          out[entry.model] = rows;
+        }
+      } catch (error) {
+        getLogger().warn(
+          `[UserExportHandler] extension export failed for model ${entry.model}`,
+          { error: error instanceof Error ? error.message : String(error) },
+        );
+      }
+    }
+    return out;
   }
 
   /**
@@ -401,6 +457,11 @@ export class UserExportHandler {
         orderBy: { createdAt: "desc" },
       }) as unknown as Promise<any[]>);
 
+      // Extension-owned data where the user is the erasure subject (O-1 / GDPR
+      // Art. 15/20). Empty unless an extension owns such a table (e.g. dogs'
+      // ext_dog__private) and the user has rows.
+      const extensionData = await this.collectExtensionData(db, userId);
+
       // Format the export data
       const exportData: UserExportData = {
         exportedAt: new Date().toISOString(),
@@ -506,6 +567,7 @@ export class UserExportHandler {
           labels: geo.labels,
           createdAt: geo.createdAt.toISOString(),
         })),
+        ...(Object.keys(extensionData).length > 0 ? { extensionData } : {}),
       };
 
       // Transform to AT Protocol format if needed

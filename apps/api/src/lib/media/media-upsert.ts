@@ -13,6 +13,7 @@
  * `db.mediaFile.upsert(buildMediaUpsertArgs(...))`.
  */
 
+import type { SyntheticSourceType } from "../provenance/types.js";
 import type { MediaLifecycle } from "./media-lifecycle.js";
 
 export interface MediaUpsertInput {
@@ -35,6 +36,18 @@ export interface MediaUpsertInput {
    * fail-closed) stands.
    */
   lifecycle?: MediaLifecycle;
+  /**
+   * Intrinsic Art. 50 provenance read from the ORIGINAL bytes before the T7
+   * re-encode stripped them (lib/metadata/provenance-reader.ts).
+   *
+   * Applied to `create` only, like `lifecycle` — the `update` payload stays
+   * empty so a dedup hit never mutates the shared row. A dedup hit that carries
+   * a STRONGER marking is raised by a separate, atomic guarded update at the
+   * call site; it cannot be expressed as a max() in an upsert payload.
+   */
+  embeddedSourceType?: SyntheticSourceType;
+  /** True when the bytes were examined for a provenance container, whatever it said. */
+  provenanceExamined?: boolean;
 }
 
 /**
@@ -93,6 +106,14 @@ export function buildMediaUpsertArgs(
       // absent ⇒ the schema default (AWAITING_UPLOAD) stands. NEVER on `update`.
       ...(input.lifecycle !== undefined && {
         lifecycle: input.lifecycle,
+      }),
+      // Art. 50 provenance — `create` only, same rule as `lifecycle`. NEVER on
+      // `update`: an unconditional write there could LOWER an existing marking.
+      ...(input.embeddedSourceType !== undefined && {
+        embeddedSourceType: input.embeddedSourceType,
+      }),
+      ...(input.provenanceExamined !== undefined && {
+        provenanceExamined: input.provenanceExamined,
       }),
     },
     update: {},

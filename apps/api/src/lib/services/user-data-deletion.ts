@@ -1,8 +1,11 @@
 import { createHmac } from "node:crypto";
-import { getParameter } from "@aws-lambda-powertools/parameters/ssm";
-import { resolveSecret, secretRef } from "@de-otio/saas-foundation/secrets";
+import {
+  resolveParameter,
+  resolveSecret,
+  secretRef,
+} from "@de-otio/saas-foundation/secrets";
 import type { PrismaClient } from "@prisma/client";
-import { EXTENSION_MODEL_REGISTRY } from "../extension-model-registry.js";
+import { getExtensionModelRegistry } from "../extension-model-registry.js";
 import { getLogger } from "../logger.js";
 
 /**
@@ -41,6 +44,13 @@ export function pseudonymizeUserId(userId: string, secret: string): string {
  * Never reads the HMAC key from `process.env` for production secrets — the app
  * resolves those onto Env and deliberately leaves process.env empty.
  * Caches the SSM value across deletions (Powertools default cache).
+ *
+ * FAIL-CLOSED (WS-2 security finding 2): an unresolvable key is a hard error,
+ * never an empty-string default. `HMAC("", userId)` tombstones are reversible
+ * (CUID user ids are rainbow-tableable) and mutually correlatable, defeating
+ * pseudonymized erasure — so a deployment without a resolvable key must FAIL
+ * the deletion (message redelivers / cron retries), not silently erase with
+ * an unkeyed tombstone.
  */
 export async function resolvePseudonymSecret(): Promise<string> {
   if (process.env.REPORT_PSEUDONYM_SECRET) {
@@ -48,17 +58,26 @@ export async function resolvePseudonymSecret(): Promise<string> {
   }
   const ssmParam = process.env.REPORT_PSEUDONYM_SECRET_PARAM;
   if (ssmParam) {
-    const value = await getParameter(ssmParam, { decrypt: true });
+    // Foundation resolver (WS-2 §5.3 — the ONE secrets port): SSM
+    // SecureString with decryption (the default). How the key is USED is
+    // unchanged; only the fetch path moved off powertools. A missing
+    // parameter throws (fail-closed), exactly as before.
+    const value = (await resolveParameter(ssmParam)).toString("utf-8");
     if (value) return value;
   }
   // Fallback: the session secret (Secrets Manager ARN or plaintext).
   if (process.env.SESSION_SECRET) return process.env.SESSION_SECRET;
   if (process.env.SESSION_SECRET_ARN) {
-    return (
+    const resolved = (
       await resolveSecret(secretRef(process.env.SESSION_SECRET_ARN))
     ).toString("utf-8");
+    if (resolved) return resolved;
   }
-  return "";
+  throw new Error(
+    "resolvePseudonymSecret: no erasure-tombstone HMAC key resolvable " +
+      "(REPORT_PSEUDONYM_SECRET / REPORT_PSEUDONYM_SECRET_PARAM / session secret) — " +
+      "failing closed; an unkeyed tombstone would be reversible",
+  );
 }
 
 /**
@@ -127,6 +146,18 @@ export interface DeletionResult {
   extensionRowsErased: number;
 }
 
+export interface DeleteUserDataOptions {
+  /**
+   * The GDPR-erasure tombstone HMAC key (WS-2 findings 2 + 7). REQUIRED and
+   * resolved by the CALLER (Lambda entrypoint / worker context / route) —
+   * this service never reads `process.env` or a secret store itself, so it is
+   * hostable in the provider-neutral worker container. An empty value is a
+   * hard error before any deletion (fail-closed; see the H1 note on
+   * {@link pseudonymizeUserId}).
+   */
+  readonly pseudonymSecret: string;
+}
+
 /**
  * Cascade-deletes all data owned by a user from the database.
  *
@@ -148,7 +179,20 @@ export interface DeletionResult {
 export async function deleteUserData(
   db: PrismaClient,
   userId: string,
+  options: DeleteUserDataOptions,
 ): Promise<DeletionResult> {
+  // FAIL-CLOSED gate (finding 2): assert the tombstone key BEFORE any
+  // deletion, so an unkeyed run can never delete data and then write a
+  // reversible `HMAC("", …)` tombstone in step 15c. Re-asserted here (not
+  // only at caller startup) because a secret can rotate to empty mid-process.
+  const pseudonymSecret = options.pseudonymSecret;
+  if (typeof pseudonymSecret !== "string" || pseudonymSecret.trim().length === 0) {
+    throw new Error(
+      "deleteUserData: empty/absent/whitespace pseudonym tombstone secret — refusing erasure " +
+        "(fail-closed; an unkeyed tombstone would be reversible)",
+    );
+  }
+
   // Delete related records first to avoid foreign key constraint violations.
   // Order matters: delete child records before parent records.
 
@@ -274,7 +318,6 @@ export async function deleteUserData(
   //      reports exist until Phase 1, but the erasure path ships with the model
   //      so Phase 1 cannot forget it.) Reports filed BY the user cascade via the
   //      reporter FK on user.delete().
-  const pseudonymSecret = await resolvePseudonymSecret();
   const accountReports = await db.report.updateMany({
     where: { reportType: "ACCOUNT", resourceType: "user", resourceId: userId },
     data: { resourceId: pseudonymizeUserId(userId, pseudonymSecret) },
@@ -290,7 +333,7 @@ export async function deleteUserData(
   //      empty today — no extension owns a table yet (O-1 is infra ahead of
   //      its first table-owner) — so this loop is a clean no-op until then.
   let extensionRowsErased = 0;
-  for (const entry of EXTENSION_MODEL_REGISTRY) {
+  for (const entry of getExtensionModelRegistry()) {
     if (!entry.erasureSubjectField) continue;
     const delegate = getExtensionDeleteManyDelegate(db, entry.model);
     const result = await delegate.deleteMany({

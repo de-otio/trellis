@@ -46,7 +46,110 @@ const PHASE0_NEW_FILES = [
   "src/lib/extension-schema-composer.ts",
   "src/lib/extension-job-runner.ts",
   "src/lib/mint-tenant-id.ts",
+  // AI Act Art. 50 — synthetic-content provenance. The pure cores, all of which
+  // are at or near 100%; listing them here is what stops that eroding, since a
+  // disclosure that silently stops being computed is the failure mode with legal
+  // consequences rather than merely a broken feature.
+  //
+  // `src/lib/routes/provenance-correction.ts` is deliberately NOT here: it is a
+  // route shell (auth preamble + Prisma writes + audit) with no route-level test
+  // yet, so adding it would fail the gate rather than protect anything. Its pure
+  // decision logic lives in provenance/correction.ts, which IS covered.
+  "src/lib/provenance/types.ts",
+  "src/lib/provenance/resolve.ts",
+  "src/lib/provenance/response.ts",
+  "src/lib/provenance/posture.ts",
+  "src/lib/provenance/posture-gate.ts",
+  "src/lib/provenance/correction.ts",
+  "src/lib/provenance/metrics.ts",
+  "src/lib/metadata/provenance-reader.ts",
+  "src/lib/activitypub/provenance-jsonld.ts",
+  // Evolvability mechanisms — forced-upgrade version policy (T7). T9's
+  // feature-flags `platform` block and T5's extensionApiVersion startup
+  // check are existing-file edits (routes/feature-flags.ts,
+  // feature-flags.ts, extension-validator.ts, extension.ts) — the whole-file
+  // `include` mechanism here isn't diff-aware, so whitelisting an
+  // already-large existing file would gate on code this plan didn't touch;
+  // those edits are covered by their own suites but not added to this list.
+  "src/lib/client-version.ts",
+  "src/lib/routes/app-meta.ts",
+  // Media-moderation seam flexibility — the NEW modules only. Each carries its
+  // own per-file bar below rather than hiding inside the aggregate, because
+  // these are the modules that decide whether media is served: an aggregate
+  // that stays green while one of them rots is not a gate.
+  //
+  // The CHANGED existing files (media-completion.ts, media-ports.ts,
+  // media-review-handler.ts, classify-worker-error.ts, routes/media.ts,
+  // workers/media-processing.ts) are deliberately NOT listed: this mechanism
+  // is whole-file, not diff-aware, so adding them would gate on a great deal of
+  // code this change never touched.
+  "src/lib/media/label-policy.ts",
+  "src/lib/media/frame-aggregation.ts",
+  "src/lib/media/frame-sampling-adapter.ts",
+  "src/lib/media/completion-envelope.ts",
+  "src/lib/media/moderation-deadline.ts",
+  "src/lib/media/moderation-metrics.ts",
+  "src/lib/media/media-bytes-access.ts",
+  "src/lib/media/promote-staging.ts",
 ];
+
+/**
+ * Per-file bars for the modules above, stricter than the repo-wide aggregate
+ * (which sits at 80/80/80/78). The three PURE decision modules — how labels
+ * become a verdict, how frames become a video's verdict, how an untrusted body
+ * becomes a pointer — are held higher still: they have no I/O to excuse a gap,
+ * and an untested branch in one of them is an untested way to approve media.
+ */
+const DECISION_MODULE_THRESHOLDS = {
+  "src/lib/media/label-policy.ts": {
+    lines: 90,
+    functions: 90,
+    branches: 90,
+    statements: 90,
+  },
+  "src/lib/media/frame-aggregation.ts": {
+    lines: 90,
+    functions: 90,
+    branches: 90,
+    statements: 90,
+  },
+  "src/lib/media/completion-envelope.ts": {
+    lines: 90,
+    functions: 90,
+    branches: 90,
+    statements: 90,
+  },
+  "src/lib/media/frame-sampling-adapter.ts": {
+    lines: 80,
+    functions: 80,
+    branches: 80,
+    statements: 80,
+  },
+  "src/lib/media/moderation-deadline.ts": {
+    lines: 80,
+    functions: 80,
+    branches: 80,
+    statements: 80,
+  },
+  "src/lib/media/moderation-metrics.ts": {
+    lines: 80,
+    functions: 80,
+    branches: 80,
+    statements: 80,
+  },
+  "src/lib/media/media-bytes-access.ts": {
+    lines: 80,
+    functions: 80,
+    branches: 80,
+    statements: 80,
+  },
+  "src/lib/media/promote-staging.ts": {
+    lines: 80,
+    functions: 80,
+    branches: 80,
+    statements: 80,
+  },
+};
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const baseTest = (base as any).test ?? {};
@@ -64,6 +167,7 @@ export default defineConfig({
         branches: 80,
         statements: 80,
         autoUpdate: false,
+        ...DECISION_MODULE_THRESHOLDS,
       },
     },
   },

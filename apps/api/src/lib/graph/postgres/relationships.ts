@@ -4,9 +4,9 @@
  * Phase 1 · B1. PORT from neo4j-graph-service.ts (relationship methods).
  * Single-hop edge CRUD + per-user edge list + the visualization aggregation.
  */
-import type { PrismaClient } from "@prisma/client";
-import { getCurrentTenantId } from "@de-otio/saas-foundation/tenant";
+import { Prisma, type PrismaClient } from "@prisma/client";
 import { GraphConflictError, GraphNotFoundError } from "../errors.js";
+import { requireAmbientTenantId } from "./tenant-guard.js";
 import {
   CONNECTION_BONUSES,
   effectiveScore,
@@ -44,6 +44,29 @@ type RelationshipRow = {
   reciprocated: boolean;
   createdAt: Date;
 };
+
+/**
+ * The effective-score ordering key, as a SQL fragment. Fixed text over trusted
+ * column names — no interpolation, nothing caller-derived.
+ */
+const EFFECTIVE_SCORE_COL = Prisma.sql`COALESCE(manual_score, computed_score)`;
+
+/**
+ * The `relationships` columns {@link rowToRelationship} needs, aliased back to
+ * the camelCase property names Prisma Client would have produced. Fixed text.
+ */
+const RELATIONSHIP_ROW_COLUMNS = Prisma.sql`
+  user_id AS "userId",
+  target_type AS "targetType",
+  target_id AS "targetId",
+  computed_score AS "computedScore",
+  manual_score AS "manualScore",
+  interaction_count AS "interactionCount",
+  last_interaction_at AS "lastInteractionAt",
+  connection_method AS "connectionMethod",
+  reciprocated,
+  created_at AS "createdAt"
+`;
 
 /**
  * Map a `relationships` row to the Relationship DTO.
@@ -87,6 +110,36 @@ const TIER_NAMES: Record<CircleTier, TierName> = {
  * just the fallback).
  */
 export const DEFAULT_MAX_EDGES_PER_USER = 1000;
+
+/**
+ * Hard ceiling on a caller-supplied `pagination.limit` for the edge-list reads.
+ *
+ * `getRelationships` used the caller's `limit` verbatim after loading the whole
+ * edge set, so a single request could ask for — and get — every edge a user
+ * has. The write-side cap ({@link DEFAULT_MAX_EDGES_PER_USER}) bounded that at
+ * 1000, but that is a coincidence of two unrelated numbers, not a read-path
+ * bound. Clamped here and pushed into a Prisma `take` so the DATABASE, not the
+ * app, decides how many rows travel.
+ */
+export const MAX_RELATIONSHIP_PAGE_SIZE = 100;
+
+/** Default page size when the caller supplies none. */
+export const DEFAULT_RELATIONSHIP_PAGE_SIZE = 50;
+
+/**
+ * Clamp a caller-supplied page size into `[1, MAX_RELATIONSHIP_PAGE_SIZE]`.
+ * Non-finite / non-positive / absent values fall back to the default rather
+ * than erroring — the caller asked for a page, not for a validation lecture,
+ * and a clamp cannot be forgotten at a call site the way a validator can.
+ */
+export function clampRelationshipLimit(limit: number | undefined): number {
+  if (limit === undefined || !Number.isFinite(limit)) {
+    return DEFAULT_RELATIONSHIP_PAGE_SIZE;
+  }
+  const floored = Math.floor(limit);
+  if (floored < 1) return 1;
+  return Math.min(floored, MAX_RELATIONSHIP_PAGE_SIZE);
+}
 
 /** Resolve the per-user edge cap from env, falling back to the default. */
 export function resolveMaxEdgesPerUser(
@@ -164,10 +217,17 @@ export class RelationshipOps {
   ): Promise<Relationship> {
     const { userId, targetType, targetId, connectionMethod = "discovery" } =
       input;
-    const tenantId = getCurrentTenantId();
-    if (!tenantId) {
-      throw new GraphNotFoundError(
-        `No tenant context for relationship from user ${userId} to ${targetType} ${targetId}`,
+    const tenantId = requireAmbientTenantId("RelationshipOps.createRelationship");
+
+    // Self-edges are rejected: `reciprocated` is the consent bit of the
+    // audience model, and a user→user edge to oneself would satisfy its own
+    // "reverse edge" lookup on any later re-derivation — a self-consenting
+    // row. Nothing downstream expects self-loops in the relationship graph
+    // (traversals seeded from this table assume source ≠ target), so refuse
+    // loudly instead of leaving the precondition implicit.
+    if (targetType === "user" && targetId === userId) {
+      throw new GraphConflictError(
+        "Cannot create a relationship from a user to themself",
       );
     }
 
@@ -175,11 +235,20 @@ export class RelationshipOps {
     const initialScore = CONNECTION_BONUSES[connectionMethod] ?? 0.3;
 
     const created = await this.prisma.$transaction(async (tx) => {
-      // Idempotent on (userId, targetType, targetId): if the edge already
-      // exists, return it (mirrors the Neo4j MERGE ON MATCH behavior).
+      // Idempotent on (tenantId, userId, targetType, targetId): if the edge
+      // already exists IN THIS TENANT, return it (mirrors the Neo4j MERGE ON
+      // MATCH behavior). The tenant is part of the unique key (M7) precisely so
+      // that "this pair already has an edge" is a per-tenant question — the
+      // tenant-blind key made an edge in tenant B suppress the create in
+      // tenant A and return B's row.
       const existing = await tx.relationship.findUnique({
         where: {
-          userId_targetType_targetId: { userId, targetType, targetId },
+          tenantId_userId_targetType_targetId: {
+            tenantId,
+            userId,
+            targetType,
+            targetId,
+          },
         },
       });
       if (existing) {
@@ -197,12 +266,24 @@ export class RelationshipOps {
       }
 
       // For user→user targets, reciprocity is determined by the presence of the
-      // reverse edge (target → source).
+      // reverse edge (target → source) IN THE SAME TENANT.
+      //
+      // The tenant predicate here is the SET half of the set/clear pair, and it
+      // was missing (lane 7 MEDIUM-3). `removeRelationship` clears the reverse
+      // flag tenant-scoped, so an asymmetric pair leaked a permanent grant:
+      // A→B in T1, then B→A in T2 flipped BOTH rows to `reciprocated = true`
+      // (T1 now treats B as having consented back, with no T1 edge from B at
+      // all); B then deleting B→A in T2 cleared only T2 rows, leaving A→B in T1
+      // reciprocated forever with nothing to revoke. `reciprocated` is the
+      // load-bearing consent bit of the audience model, so that is an
+      // authorization defect, not a bookkeeping one. Set and clear must scope
+      // identically or the pair cannot round-trip.
       let reciprocated = false;
       if (targetType === "user") {
         const reverse = await tx.relationship.findUnique({
           where: {
-            userId_targetType_targetId: {
+            tenantId_userId_targetType_targetId: {
+              tenantId,
               userId: targetId,
               targetType: "user",
               targetId: userId,
@@ -243,13 +324,19 @@ export class RelationshipOps {
    * Remove a relationship. If a reciprocated user→user edge is removed, the
    * reverse edge's `reciprocated` flag is cleared. Throws GraphNotFoundError
    * when no edge exists.
+   *
+   * Refuses without an ambient tenant: `tenantId: undefined` is DROPPED by
+   * Prisma, so the "scoped" `findFirst` below would have matched — and then
+   * DELETED — another tenant's edge. See ./tenant-guard.ts.
    */
   async removeRelationship(
     userId: string,
     targetType: GraphNodeType,
     targetId: string,
   ): Promise<void> {
-    const tenantId = getCurrentTenantId();
+    const tenantId = requireAmbientTenantId(
+      "RelationshipOps.removeRelationship",
+    );
 
     await this.prisma.$transaction(async (tx) => {
       const existing = await tx.relationship.findFirst({
@@ -289,7 +376,9 @@ export class RelationshipOps {
     input: UpdateRelationshipScoreInput,
   ): Promise<Relationship> {
     const { userId, targetType, targetId, manualScore } = input;
-    const tenantId = getCurrentTenantId();
+    const tenantId = requireAmbientTenantId(
+      "RelationshipOps.updateRelationshipScore",
+    );
 
     const existing = await this.prisma.relationship.findFirst({
       where: { userId, targetType, targetId, tenantId },
@@ -323,7 +412,7 @@ export class RelationshipOps {
     targetType: GraphNodeType,
     targetId: string,
   ): Promise<Relationship | null> {
-    const tenantId = getCurrentTenantId();
+    const tenantId = requireAmbientTenantId("RelationshipOps.getRelationship");
     const row = await this.prisma.relationship.findFirst({
       where: { userId, targetType, targetId, tenantId },
     });
@@ -339,6 +428,24 @@ export class RelationshipOps {
    * Ordering and the cursor are over the EFFECTIVE score (manual override wins
    * over computed). There is no stored effective-score column, so the ordering
    * key is computed as `COALESCE(manual_score, computed_score)` in SQL.
+   *
+   * ## Why raw SQL rather than `findMany`
+   *
+   * This used to be `findMany({ where })` with NO `take`, sorted and
+   * keyset-filtered in application memory, then sliced to a caller-supplied and
+   * unclamped `limit`. Two problems: every request materialized the user's
+   * entire edge set regardless of page size, and the page size itself was
+   * whatever the client asked for. It happened to be survivable only because
+   * the WRITE path caps edges per user ({@link DEFAULT_MAX_EDGES_PER_USER}) —
+   * an unrelated number doing an unowned job.
+   *
+   * `COALESCE(manual_score, computed_score)` cannot be expressed in a Prisma
+   * `orderBy`, and ordering must be identical to the cursor predicate or pages
+   * silently drop rows — so the bound cannot be pushed down while keeping the
+   * Prisma-Client query. The ordering, the keyset predicate and the `LIMIT` all
+   * move into one tagged `Prisma.sql` statement instead: every user value is a
+   * bound parameter, and the database returns at most
+   * {@link MAX_RELATIONSHIP_PAGE_SIZE}+1 rows.
    */
   async getRelationships(
     userId: string,
@@ -348,55 +455,49 @@ export class RelationshipOps {
       pagination?: PaginationInput;
     },
   ): Promise<PaginatedResult<Relationship>> {
-    const limit = options?.pagination?.limit ?? 50;
+    const limit = clampRelationshipLimit(options?.pagination?.limit);
     const rawCursor = options?.pagination?.cursor ?? null;
     const cursor = rawCursor !== null ? decodeCursor(rawCursor) : null;
-    const tenantId = getCurrentTenantId();
+    const tenantId = requireAmbientTenantId("RelationshipOps.getRelationships");
 
-    const where: {
-      userId: string;
-      tenantId?: string;
-      targetType?: GraphNodeType;
-      tier?: CircleTier;
-    } = { userId };
-    if (tenantId !== undefined) where.tenantId = tenantId;
-    if (options?.targetType !== undefined)
-      where.targetType = options.targetType;
+    const filters: Prisma.Sql[] = [
+      Prisma.sql`tenant_id = ${tenantId}`,
+      Prisma.sql`user_id = ${userId}`,
+    ];
+    if (options?.targetType !== undefined) {
+      filters.push(Prisma.sql`target_type = ${options.targetType}`);
+    }
     // The persisted `tier` column is kept in sync on writes, so a tier filter
     // can use it directly (matches the Neo4j `r.tier = $tier` predicate).
-    if (options?.tier !== undefined) where.tier = options.tier;
-
-    // Fetch a page ordered by effective score. Prisma cannot order/filter by a
-    // COALESCE expression, so order by (manualScore desc nulls last, computed
-    // desc) is not equivalent — instead fetch the user's edges (filtered) and
-    // sort/paginate on the computed effective score in-app. Edge counts per
-    // user are bounded (a user's circle), so this is acceptable and exact.
-    const rows = await this.prisma.relationship.findMany({ where });
-
-    // Sort must match the cursor predicate exactly: score DESC, then targetId
-    // ASC as the deterministic tiebreak (plain code-unit comparison — no
-    // locale dependence).
-    const mapped = rows.map(rowToRelationship).sort((a, b) => {
-      if (b.score !== a.score) return b.score - a.score;
-      return a.targetId < b.targetId ? -1 : a.targetId > b.targetId ? 1 : 0;
-    });
+    if (options?.tier !== undefined) {
+      filters.push(Prisma.sql`tier = ${options.tier}`);
+    }
 
     // Keyset pagination: strictly below the cursor score, OR tied with it and
-    // past the boundary targetId. (Legacy score-only cursors have targetId
-    // null and keep the old strict-< behavior.)
-    const afterCursor =
-      cursor !== null
-        ? mapped.filter(
-            (r) =>
-              r.score < cursor.score ||
-              (cursor.targetId !== null &&
-                r.score === cursor.score &&
-                r.targetId > cursor.targetId),
-          )
-        : mapped;
+    // past the boundary targetId. (Legacy score-only cursors carry a null
+    // targetId and keep the old strict-< behavior.)
+    if (cursor !== null) {
+      filters.push(
+        cursor.targetId !== null
+          ? Prisma.sql`(${EFFECTIVE_SCORE_COL} < ${cursor.score}
+              OR (${EFFECTIVE_SCORE_COL} = ${cursor.score} AND target_id > ${cursor.targetId}))`
+          : Prisma.sql`${EFFECTIVE_SCORE_COL} < ${cursor.score}`,
+      );
+    }
 
-    const hasMore = afterCursor.length > limit;
-    const items = hasMore ? afterCursor.slice(0, limit) : afterCursor;
+    // limit + 1 is the standard has-more probe: one row past the page tells us
+    // whether a next page exists without a second COUNT query.
+    const rows = await this.prisma.$queryRaw<RelationshipRow[]>(Prisma.sql`
+      SELECT ${RELATIONSHIP_ROW_COLUMNS}
+      FROM relationships
+      WHERE ${Prisma.join(filters, " AND ")}
+      ORDER BY ${EFFECTIVE_SCORE_COL} DESC, target_id ASC
+      LIMIT ${limit + 1}
+    `);
+
+    const mapped = rows.map(rowToRelationship);
+    const hasMore = mapped.length > limit;
+    const items = hasMore ? mapped.slice(0, limit) : mapped;
     const lastItem = items[items.length - 1];
     const nextCursor =
       hasMore && lastItem ? encodeCursor(lastItem.score, lastItem.targetId) : null;
@@ -411,13 +512,30 @@ export class RelationshipOps {
    * a coarse `closeness` value bucketed to the nearest 10 in [0, 100]
    * (`round(score * 10) * 10`). Recent-auth, rate-limiting, and audit-logging
    * are enforced by the caller; the score coarsening is applied here.
+   *
+   * BOUNDED: the edge fetch carries an explicit `LIMIT` at the per-user write
+   * cap ({@link resolveMaxEdgesPerUser}) and orders by effective score DESC, so
+   * a user whose edge set somehow exceeds the write cap (cap lowered after the
+   * fact, rows imported around the API, a concurrent-burst overshoot) yields a
+   * truncated graph rather than an unbounded read. Truncation drops the
+   * WEAKEST edges, which is the right end to lose for a visualization. In
+   * normal operation the write cap makes this a no-op.
+   *
+   * Refuses without an ambient tenant: the previous ternary omitted the
+   * `tenantId` key entirely, returning every tenant's edges for the user.
    */
   async getRelationshipGraph(userId: string): Promise<GraphData> {
-    const tenantId = getCurrentTenantId();
+    const tenantId = requireAmbientTenantId(
+      "RelationshipOps.getRelationshipGraph",
+    );
 
-    const rows = await this.prisma.relationship.findMany({
-      where: tenantId !== undefined ? { userId, tenantId } : { userId },
-    });
+    const rows = await this.prisma.$queryRaw<RelationshipRow[]>(Prisma.sql`
+      SELECT ${RELATIONSHIP_ROW_COLUMNS}
+      FROM relationships
+      WHERE tenant_id = ${tenantId} AND user_id = ${userId}
+      ORDER BY ${EFFECTIVE_SCORE_COL} DESC, target_id ASC
+      LIMIT ${this.maxEdgesPerUser}
+    `);
 
     // Resolve node display names from the user/entity tables by id+type.
     // targetId is polymorphic with no FK, so look each set up separately.
@@ -437,7 +555,11 @@ export class RelationshipOps {
         : Promise.resolve([]),
       entityIds.length > 0
         ? this.prisma.entity.findMany({
-            where: { id: { in: entityIds } },
+            // Tenant-scoped: an edge whose target is an entity in another
+            // tenant must not resolve that entity's NAME into this payload.
+            // The edges are already tenant-scoped, so in a consistent database
+            // this changes nothing — which is the point of a backstop.
+            where: { id: { in: entityIds }, tenantId },
             select: { id: true, name: true },
           })
         : Promise.resolve([]),

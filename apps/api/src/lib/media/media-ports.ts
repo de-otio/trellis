@@ -13,6 +13,8 @@
 // (e.g. maxDurationSeconds) are *arguments*, never literals baked into these
 // interfaces — this file ships in the PUBLIC npm tarball.
 
+import { expectedFrameCount } from "./frame-aggregation.js";
+
 // ---------------------------------------------------------------------------
 // TranscodePort — re-encode/normalize video & audio to a known-clean form,
 // strip active content, generate a poster frame. The shell drives this from a
@@ -55,6 +57,43 @@ export interface TranscodeAudioResult {
   readonly durationSeconds: number;
 }
 
+// ---------------------------------------------------------------------------
+// Frame sampling — the input to core's frame-sampling video moderation, which
+// lets an IMAGE-ONLY classifier moderate video.
+// ---------------------------------------------------------------------------
+
+/**
+ * A request to extract still frames from a video.
+ *
+ * Both numbers are OPERATOR-SUPPLIED and arrive as arguments (never literals in
+ * this public tarball):
+ *
+ * - `framesPerSecond` — how densely to sample.
+ * - `maxFrames` — an ABSOLUTE ceiling on frames for this one job, independent
+ *   of `framesPerSecond × duration`. It is a cost and disk bound, not a
+ *   sampling preference: without it a long clip at a high rate turns one upload
+ *   into an unbounded number of paid classifier calls and an unbounded number
+ *   of temp files. The adapter must never emit more than `maxFrames`.
+ *
+ * The adapter writes frames to `outputDir` and returns their paths. Emitted
+ * frames must carry NO inherited metadata (the container dictionary strip that
+ * the transcode argv applies) — a sampled frame is a derivative of user media
+ * and must not resurrect the GPS coordinates the transcode removed.
+ */
+export interface SampleFramesInput {
+  readonly inputPath: string;
+  readonly outputDir: string;
+  readonly framesPerSecond: number;
+  readonly maxFrames: number;
+  /** Hard cap on accepted duration; injected from Env.media (never a literal). */
+  readonly maxDurationSeconds: number;
+}
+
+export interface SampleFramesResult {
+  /** Paths of the extracted frames, in temporal order. Never longer than `maxFrames`. */
+  readonly framePaths: ReadonlyArray<string>;
+}
+
 export interface TranscodePort {
   /** Probe the duration of an input without transcoding it. */
   probeDurationSeconds(inputPath: string): Promise<number>;
@@ -62,6 +101,33 @@ export interface TranscodePort {
   transcodeVideo(input: TranscodeVideoInput): Promise<TranscodeVideoResult>;
   /** Re-encode audio to a clean form. */
   transcodeAudio(input: TranscodeAudioInput): Promise<TranscodeAudioResult>;
+  /**
+   * Extract still frames for frame-sampled video moderation.
+   *
+   * OPTIONAL, so an existing consumer adapter still satisfies this interface —
+   * this is a published package and a required method would be a breaking
+   * change (same reasoning as `MediaPersistencePort.recordEmbeddedProvenance`).
+   * The consequence is stated rather than hidden: frame-sampled moderation
+   * REFUSES to run without it and fails the visual track closed to `review`.
+   * It never degrades to "moderate nothing and approve".
+   *
+   * IF THIS THROWS, the adapter owns whatever it already wrote. Core deletes
+   * the frames it is TOLD about, and a rejected call reports none — so an
+   * extractor that fails partway must clean its own `outputDir` before
+   * throwing. These are stills of media that may be about to be quarantined,
+   * and core cannot delete files it never learned the names of.
+   */
+  sampleFrames?(input: SampleFramesInput): Promise<SampleFramesResult>;
+  /**
+   * Delete a previously-extracted frame. Called on EVERY path — success,
+   * classifier error, deadline, ceiling breach — so sampled stills never
+   * outlive the decision they informed. Must tolerate an already-absent file.
+   *
+   * OPTIONAL for the same published-package reason; when absent the adapter is
+   * responsible for its own `outputDir` lifecycle, and core says so in a log
+   * line rather than assuming cleanup happened.
+   */
+  deleteFrame?(framePath: string): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -71,8 +137,21 @@ export interface TranscodePort {
 
 export interface StoragePort {
   /** Read an object. `options.versionId` pins the read to that EXACT stored
-   * version (AR-SEC F3) — S3 `GetObject` with `VersionId`. */
-  getObject(key: string, options?: { versionId?: string }): Promise<Buffer>;
+   * version (AR-SEC F3) — S3 `GetObject` with `VersionId`.
+   *
+   * `options.range` reads only `[start, end]` INCLUSIVE (S3 `Range:
+   * bytes=start-end`). Added for the Art. 50 provenance sniff on video/audio
+   * originals, which must inspect a few hundred bytes of a possibly
+   * hundreds-of-megabytes object and must not pull the whole thing into a
+   * worker's memory to do it. An implementation MAY return fewer bytes than
+   * requested (short object) but must never return more. */
+  getObject(
+    key: string,
+    options?: {
+      versionId?: string;
+      range?: { readonly start: number; readonly end: number };
+    },
+  ): Promise<Buffer>;
   putObject(key: string, body: Buffer, contentType: string): Promise<void>;
   /** Copy an object. `options.fromVersionId` pins the SOURCE to that exact
    * version (AR-SEC F3) — on S3 a versioned `CopySource`; without it the
@@ -95,7 +174,18 @@ export interface StoragePort {
   headObject(
     key: string,
     options?: { versionId?: string },
-  ): Promise<{ exists: boolean; versionId?: string }>;
+  ): Promise<{
+    exists: boolean;
+    versionId?: string;
+    /**
+     * Object size in bytes, when the adapter reports it (S3 `HeadObject`
+     * `ContentLength`). OPTIONAL so an existing consumer adapter still satisfies
+     * this interface. Used by the Art. 50 provenance sniff to locate the TAIL
+     * range of a video original; when absent the sniff simply skips the tail read
+     * and inspects the head slice only.
+     */
+    size?: number;
+  }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -111,6 +201,26 @@ export interface TranscribePort {
     key: string;
     jobName: string;
   }): Promise<{ jobId: string }>;
+  /**
+   * Poll a transcription job.
+   *
+   * **No model echo, deliberately absent rather than forgotten.** Transcription
+   * APIs commonly return only the text and a usage figure — one checked backend
+   * returns exactly `{ text, usage }` — with no identifier for the model that
+   * produced it. So there is nothing here to pin a model version *against*.
+   *
+   * The consequence for whoever designs the audio lane: the audio leg's version
+   * pin can only ever be REQUEST-side — you record what you asked for, not what
+   * answered. That is strictly weaker than the visual path, where a provider
+   * reports `modelVersion` on its verdict and a pinned label policy floors an
+   * unverifiable version at `review`. A request-side pin cannot detect a silent
+   * vendor-side model swap, which is the exact failure a response-side pin
+   * exists to catch.
+   *
+   * Do not add a `modelVersion` field here expecting a backend to fill it, and
+   * do not treat a request-side record as equivalent to the visual pin when
+   * reasoning about taxonomy drift on this track.
+   */
   getTranscription(jobId: string): Promise<{
     status: TranscriptionStatus;
     transcript?: string;
@@ -135,17 +245,31 @@ export interface TranscribePort {
 export class MockTranscodePort implements TranscodePort {
   private duration: number;
   private hasAudio: boolean;
+  /**
+   * How many frames extraction ACTUALLY yields, when that differs from what
+   * (rate × duration, capped) asks for — the shortfall case a real decoder hits
+   * on a partly-undecodable clip. `undefined` means "yield what was asked for".
+   */
+  private extractableFrames?: number;
 
   /** Records of each call, for assertions. */
   readonly probeCalls: string[] = [];
   readonly videoCalls: TranscodeVideoInput[] = [];
   readonly audioCalls: TranscodeAudioInput[] = [];
+  readonly sampleCalls: SampleFramesInput[] = [];
+  /** Frame paths passed to `deleteFrame`, in call order — cleanup assertions. */
+  readonly deletedFrames: string[] = [];
 
   constructor(opts: { duration?: number; hasAudio?: boolean } = {}) {
     this.duration = opts.duration ?? 0;
     // Default to true: the common case is a video WITH audio, and existing
     // tests assert the AUDIO-track-started path.
     this.hasAudio = opts.hasAudio ?? true;
+  }
+
+  /** Program a partial extraction: only this many frames actually decode. */
+  setExtractableFrames(count: number | undefined): void {
+    this.extractableFrames = count;
   }
 
   /** Program the duration returned by subsequent calls. */
@@ -179,6 +303,34 @@ export class MockTranscodePort implements TranscodePort {
       cleanedPath: input.outputPath,
       durationSeconds: this.duration,
     };
+  }
+
+  /**
+   * Deterministic frame extraction: yields `expectedFrameCount(duration, rate,
+   * maxFrames)` paths under `outputDir`, or fewer when `setExtractableFrames`
+   * programmed a partial decode. Never exceeds `maxFrames` — a mock that could
+   * would let a ceiling bug pass its own test.
+   */
+  async sampleFrames(input: SampleFramesInput): Promise<SampleFramesResult> {
+    this.sampleCalls.push(input);
+    const wanted = expectedFrameCount(
+      this.duration,
+      input.framesPerSecond,
+      input.maxFrames,
+    );
+    const yielded =
+      this.extractableFrames === undefined
+        ? wanted
+        : Math.min(wanted, Math.max(0, this.extractableFrames));
+    const framePaths: string[] = [];
+    for (let i = 0; i < yielded; i += 1) {
+      framePaths.push(`${input.outputDir}/frame-${i}.jpg`);
+    }
+    return { framePaths };
+  }
+
+  async deleteFrame(framePath: string): Promise<void> {
+    this.deletedFrames.push(framePath);
   }
 }
 
@@ -232,8 +384,22 @@ export class MockStoragePort implements StoragePort {
 
   async getObject(
     key: string,
-    options?: { versionId?: string },
+    options?: {
+      versionId?: string;
+      range?: { readonly start: number; readonly end: number };
+    },
   ): Promise<Buffer> {
+    // Honour `range` rather than ignoring it: a mock that returned the WHOLE
+    // object for a ranged read would let a test pass while the production path
+    // (which really does get a slice) finds nothing.
+    const slice = (body: Buffer): Buffer =>
+      options?.range === undefined
+        ? body
+        : body.subarray(
+            Math.max(0, options.range.start),
+            Math.min(body.length, options.range.end + 1),
+          );
+
     if (options?.versionId !== undefined) {
       const v = this.objects
         .get(key)
@@ -243,13 +409,13 @@ export class MockStoragePort implements StoragePort {
           `MockStoragePort: no version "${options.versionId}" at key "${key}"`,
         );
       }
-      return v.body;
+      return slice(v.body);
     }
     const obj = this.current(key);
     if (!obj) {
       throw new Error(`MockStoragePort: no object at key "${key}"`);
     }
-    return obj.body;
+    return slice(obj.body);
   }
 
   async putObject(key: string, body: Buffer, contentType: string): Promise<void> {
@@ -285,17 +451,19 @@ export class MockStoragePort implements StoragePort {
   async headObject(
     key: string,
     options?: { versionId?: string },
-  ): Promise<{ exists: boolean; versionId?: string }> {
+  ): Promise<{ exists: boolean; versionId?: string; size?: number }> {
     if (options?.versionId !== undefined) {
-      const found = this.objects
+      const v = this.objects
         .get(key)
-        ?.versions.some((x) => x.versionId === options.versionId);
-      return found
-        ? { exists: true, versionId: options.versionId }
+        ?.versions.find((x) => x.versionId === options.versionId);
+      return v
+        ? { exists: true, versionId: options.versionId, size: v.body.length }
         : { exists: false };
     }
     const obj = this.current(key);
-    return obj ? { exists: true, versionId: obj.versionId } : { exists: false };
+    return obj
+      ? { exists: true, versionId: obj.versionId, size: obj.body.length }
+      : { exists: false };
   }
 
   /** Test helper: read the content-type a key was stored with. */

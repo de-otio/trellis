@@ -190,7 +190,7 @@ model RoleMetadata {
 }
 
 // User model for feed posts
-// Using Cognito sub (UUID) as primary key via cognitoSub field
+// The opaque IdP subject (`sub`) is stored on the `subject` field.
 // actorUri is the ActivityPub actor identifier
 model User {
   id        String   @id @default(cuid())
@@ -207,8 +207,11 @@ model User {
   handle    String   @unique
   createdAt DateTime @default(now()) @map("created_at")
 
-  // Cognito Auth integration
-  cognitoSub String? @unique @map("cognito_sub") // Cognito user pool sub (UUID), nullable for migration safety
+  // IdP identity: opaque subject (`sub`). Code-only rename cognitoSub→subject
+  // (WS-3.1); the physical column stays `cognito_sub` via @map so there is NO
+  // SQL migration and no data movement. `sub` is treated as opaque — no format
+  // assumption — so a non-Cognito issuer's sub round-trips unchanged.
+  subject String? @unique @map("cognito_sub") // opaque IdP subject, nullable for migration safety
 
   // User Deprovisioning
   suspended       Boolean   @default(false)
@@ -389,7 +392,7 @@ model User {
   acceptedInvitations  TenantInvitation[] @relation("TenantInvitationAcceptedBy")
 
   // AR10 prune: dropped the single-column indexes duplicating @unique fields
-  // (username, actorUri, anonymousId, cognitoSub, personalTenantId — a unique
+  // (username, actorUri, anonymousId, subject, personalTenantId — a unique
   // constraint already creates the index), the low-cardinality boolean/flag
   // indexes never used as scan predicates (suspended, emailVerified,
   // identityVerified), the region/dataRegion indexes (no user-table scan
@@ -512,11 +515,66 @@ model Consent {
 }
 
 // Posting radius — how far content radiates on the author's social graph
+//
+// DEPRECATED, and retained deliberately during the audience-model migration.
+// `radius` conflates three independent questions (who may read, may this be
+// promoted to strangers, may this leave the server) into one ordered scale that
+// cannot express any of them precisely. It is superseded by the three axes
+// below: `Post.audienceScopes`/`audienceClass`, `Post.discoverability`, and
+// `Post.federate`.
+//
+// It still exists because the read paths flip to the new columns in ONE merge
+// rather than lane by lane — a window in which some endpoints believed `radius`
+// and others believed `audienceClass` would let a caller take the union of both.
+// Until that flip, `radius` is written as a DERIVED SHADOW of `audienceScopes`
+// (one direction only: scopes are authoritative, radius follows). It is dropped
+// in a separate destructive migration once every read path is adopted.
 enum PostRadius {
   WHISPER // Inner circle only (tier 0)
   NORMAL // Close friends + inner circle (tiers 0-1)
   LOUD // Community and closer (tiers 0-2)
   SHOUT // Everyone (all tiers)
+}
+
+// AXIS 1 (coarse) — a denormalised summary of `Post.audienceScopes`, used ONLY
+// to shrink the candidate set on the feed's hot path before the precise
+// per-post check runs. It is a cache, never the authority.
+//
+// It is maintained by a database TRIGGER derived from `audience_scopes`, not by
+// application code. A stale value here is a DISCLOSURE, not a slow query, and
+// the write path cannot be trusted to keep it fresh: `DataRouter.createPost`
+// builds its payload as `Record<string, any>` and casts it `as any`, so the
+// compiler cannot enforce that a scope change also updates the class. The
+// trigger makes the invariant hold for raw SQL, migrations and backfills too.
+//
+// Values are intentionally MINIMAL. `CONTAINER`, `TENANT` and
+// `CONNECTIONS_OF_CONNECTIONS` are deliberately ABSENT rather than unused:
+// group membership admission is currently a no-op (an unauthenticated inbox
+// Follow adds a member to a PRIVATE group regardless), so a container audience
+// would be self-granted — strictly worse than the scoring hole it replaces.
+// `RESTRICTED` (a hand-curated list) is absent because the list scope itself is
+// deferred. Adding an enum value later is a one-line additive migration; having
+// one present-but-unenforced is how a half-built gate ships.
+enum AudienceClass {
+  SELF // Only the author
+  CONNECTIONS // Mutually-connected users (bilateral, server-attested)
+  PUBLIC // Anyone who may reach it — readability only, NOT amplification
+}
+
+// AXIS 2 — may this be pushed to people who did not ask for it?
+//
+// Independent of audience: "anyone may read this, nobody will have it pushed at
+// them" is a coherent and frequently-wanted state that no point on a single
+// ordered scale can name. This is also the only correct place to attach a reach
+// credential, because charging for readability breaks legitimate open
+// publishing while charging for amplification targets exactly the capability
+// that abuse needs.
+//
+// Unlike the audience axis this IS a total order, so an enum is right.
+enum Discoverability {
+  UNLISTED // Readable per the audience; never injected into a stranger's feed, search or recommendations
+  CONNECTIONS_FEED // Appears in the feeds of people already in the audience
+  DISCOVERABLE // May be surfaced to people with no relationship to the author
 }
 
 // Privacy levels for follow relationships
@@ -526,6 +584,54 @@ enum Privacy {
   PRIVATE
 }
 
+// --- Synthetic-content provenance (AI Act Art. 50 transparency) -------------
+// Spec: trellis-internal analysis/ai-act-transparency/03-data-model-and-api.md
+//
+// These MIRROR the TS unions in apps/api/src/lib/provenance/types.ts, which are
+// the pure core's source of truth. The guard against drift is
+// test/unit/provenance/prisma-alignment.test.ts — a BIDIRECTIONAL test, not a
+// compile-time assertion: the core module stays Prisma-free on purpose (see the
+// note at the foot of lib/provenance/resolve.ts), so importing the generated
+// client to assert alignment would defeat that. Add a member here and you must
+// add it there, or that test fails.
+//
+// DELIBERATELY not a boolean: "is it AI?" has at least four answers with
+// different legal weight, and collapsing them is the likeliest way to ship a
+// wrong label. UNKNOWN is the default and is NOT a synonym for HUMAN_CREATED —
+// absence of a marking is absence of evidence, never evidence of human origin.
+
+/// What the content is, aligned with the IPTC DigitalSourceType vocabulary.
+enum SyntheticSourceType {
+  UNKNOWN // no signal, or a signal we could not interpret. The default.
+  HUMAN_CREATED // affirmatively declared or attested as not AI-generated
+  AI_EDITED // AI applied to human-captured content beyond standard editing
+  AI_ASSISTED // human-authored, AI in the loop (compositeWithTrainedAlgorithmicMedia)
+  AI_GENERATED // wholly synthetic (trainedAlgorithmicMedia)
+}
+
+/// How we came to believe the source type — this is what carries legal weight.
+enum SyntheticBasis {
+  AUTHOR_DECLARED // the posting author said so
+  PLATFORM_GENERATED // our own generation feature produced it; never downgradable
+  EMBEDDED_METADATA // read from IPTC/XMP/C2PA before the ingest metadata strip
+  CLASSIFIER_INFERRED // a detector guessed. Advisory ONLY; never renders as a claim
+}
+
+/// Per-tenant disclosure posture (D15). Tenants sit on BOTH sides of the Art. 3(4)
+/// line: a B2B tenant posting professionally is a deployer with a live Art. 50(4)
+/// duty, while a B2C consumer posting personally falls in the personal
+/// non-professional carve-out. One global posture is therefore wrong for one of
+/// the two populations.
+///
+/// This governs the WRITE path and the compose hint, NOT the rendered
+/// `disclosureRequired` — see lib/provenance/posture.ts for why those turned out
+/// to be the same value under all three postures.
+enum TenantDisclosurePosture {
+  OPTIONAL // declaration accepted, never required. Fits B2C consumer tenants.
+  REQUIRED_FOR_AI // a declaration is MANDATORY and may not be UNKNOWN. Fits B2B/professional.
+  PROMPTED // the client must ask; "prefer not to say" -> UNKNOWN is a valid answer.
+}
+
 // Post model (unified for all visibility levels)
 model Post {
   id              String     @id @default(cuid())
@@ -533,8 +639,62 @@ model Post {
   tenantId        String     @map("tenant_id")
   authorId        String     @map("author_id")
   text            String     @db.Text
-  radius          PostRadius @default(NORMAL)
+  radius          PostRadius @default(NORMAL) // DEPRECATED — derived shadow of audienceScopes; see the enum's doc
   geoData         Json?      @map("geo_data")
+
+  // ── The three audience axes ────────────────────────────────────────────────
+  // Replacing `radius`. Separate columns because the three questions are not
+  // ordered with respect to each other: "readable by anyone, promoted to
+  // nobody, never federated" is coherent and desirable, and no point on a
+  // four-value scale can express it.
+
+  // AXIS 1 — who may read this. A set of scope components, OR'd together.
+  // Shape: [{"k":"CONNECTIONS"}] — an array of tagged objects, so a scope that
+  // needs a parameter (a list id, later) is expressible without a schema change.
+  // Parsed at the write boundary with a Zod discriminated union; an unknown
+  // discriminant is REJECTED, and an unparseable blob resolves to deny.
+  //
+  // The `[]` default is TRANSITIONAL and load-bearing. Every writer that exists
+  // today omits this column, and the column is NOT NULL — so without a default
+  // this migration would break post creation outright rather than being
+  // additive. An empty set admits nobody and is therefore never a meaningful
+  // authored intent, so the DB trigger reads it as "not specified" and derives
+  // the scopes from `radius`. That keeps existing writers correct, unchanged,
+  // and fail-closed. Removed once the write path always supplies scopes.
+  audienceScopes Json @default("[]") @map("audience_scopes")
+
+  // Gates, AND'd on top of the scopes. Each is a property the VIEWER must
+  // satisfy (minimum age tier, an entitlement, …). Nullable because having no
+  // gates is the common case, and because a gate can only ever narrow: an
+  // absent gate list cannot grant anything, so NULL is fail-safe here in a way
+  // it would not be for the scopes above.
+  audienceGates Json? @map("audience_gates")
+
+  // Denormalised coarse summary of audienceScopes, maintained by a DB trigger.
+  // A cache for the feed's index, never the authority — the precise per-post
+  // check still runs over the rows the index returns.
+  //
+  // The default is the NARROWEST class, and it exists so callers can OMIT this
+  // field rather than pass a value the trigger will overwrite: setting the
+  // scopes is the only way to set the class. If a caller does send one it is
+  // silently corrected, not honoured.
+  audienceClass AudienceClass @default(SELF) @map("audience_class")
+
+  // AXIS 2 — may this be pushed at people who did not ask for it?
+  // Column default is the NARROWEST value, so a row that somehow reaches the DB
+  // without an explicit choice is unpromoted rather than broadcast. This is
+  // distinct from the product default for a NEW post (CONNECTIONS_FEED), which
+  // the write path sets explicitly — a fail-closed storage default and a
+  // sensible authoring default are different decisions.
+  discoverability Discoverability @default(UNLISTED)
+
+  // AXIS 3 — may this leave this server? Federation was previously DERIVED from
+  // radius, and derived wrongly: NORMAL ("close friends") mapped to ActivityPub
+  // followers-only, and remote followers are unilateral, unverifiable, and hold
+  // no relationship, score or tier — a strictly weaker bar than the local rule
+  // it was supposed to mirror. Now an explicit author choice, defaulting off,
+  // because delivery is irrevocable per post: a wrong `true` cannot be undone.
+  federate Boolean @default(false)
   uri             String? // ActivityPub URI (for public posts)
   contentWarnings String[]   @map("content_warnings")
   deletedAt       DateTime?  @map("deleted_at")
@@ -574,6 +734,16 @@ model Post {
   // Link security fields
   hasBlockedLinks Boolean @default(false) @map("has_blocked_links")
 
+  // Synthetic-content provenance of the post TEXT only (AI Act Art. 50).
+  // Media provenance lives on PostMedia (author declaration) and MediaFile
+  // (intrinsic reading) — see analysis/ai-act-transparency 03 §3. Text has no
+  // embedded metadata to read, so this is only ever AUTHOR_DECLARED or
+  // PLATFORM_GENERATED. Deliberately NOT indexed: read on an already-selected
+  // row, never a query predicate, and posts is the hottest write path (AR10
+  // pruned it 17 indexes -> 7 on purpose).
+  textSourceType SyntheticSourceType @default(UNKNOWN) @map("text_source_type")
+  textBasis      SyntheticBasis?     @map("text_basis")
+
   // AR10 prune: the dormant classification columns (sensitivityLevel,
   // ownerContext, screeningRiskLevel, contentCategory) were written-by-default
   // and read by nothing; removed pre-launch. Border-Safety / context-aware
@@ -601,6 +771,15 @@ model Post {
   @@index([tenantId, createdAt])
   @@index([authorId, createdAt])
   @@index([authorId, radius, createdAt])
+  // The feed's predicate, in selectivity order: tenant is a hard equality and
+  // the most selective, then the audience class, then residency, then the
+  // keyset scan on createdAt. `audienceClass` leading (as originally sketched)
+  // loses to the existing [tenantId, createdAt] index, which would leave the
+  // denormalisation earning nothing — the whole justification for carrying a
+  // cached column is that it shrinks this query. P8 checks an EXPLAIN actually
+  // uses this index; if it does not, the honest conclusion is that
+  // audienceClass should not exist and scopes belong in a child table.
+  @@index([tenantId, audienceClass, dataRegion, createdAt(sort: Desc)])
   @@index([primaryEntityId])
   @@index([createdAt])
   @@index([groupId]) // Index for group posts
@@ -642,7 +821,17 @@ model MediaFile {
   height   Int? // Image/video height in pixels
   duration Int? @map("duration") // Video duration in seconds
 
-  // Raw metadata payloads (JSON)
+  // Raw metadata payloads (JSON).
+  //
+  // NEAR-EMPTY ON THE SYNC-IMAGE PATH, by construction. Extraction runs on the
+  // RE-ENCODED bytes (routes/media.ts: reencodeImage at ~:1020, extractAll at
+  // ~:1058 reading uploadBuffer), and the re-encode has already dropped
+  // EXIF/GPS/ICC/IPTC/XMP. So for uploaded images these hold little beyond
+  // dimensions; they populate only on paths that bypass the re-encode.
+  // Recorded, NOT fixed — the `metadataVisible` feature that surfaces them is a
+  // separate decision (analysis/ai-act-transparency 02 §2.2, 03 §7).
+  // This is also WHY provenance needs its own pre-strip reader rather than a
+  // widened pick-list here: by the time this runs, the marking is gone.
   exifData      Json? @map("exif_data")
   iptcData      Json? @map("iptc_data")
   videoMetadata Json? @map("video_metadata")
@@ -695,6 +884,24 @@ model MediaFile {
   attachedToPost Boolean   @default(false) @map("attached_to_post") // Whether media is attached to a post
   orphanedAt     DateTime? @map("orphaned_at") // When media was marked as orphaned
   lastAccessedAt DateTime  @default(now()) @map("last_accessed_at") // Last time media was accessed
+
+  // --- Synthetic-content provenance: INTRINSIC only (AI Act Art. 50) --------
+  // Read from the ORIGINAL bytes BEFORE the T7 re-encode strips them
+  // (lib/metadata/provenance-reader.ts). NEVER author input — an author's
+  // declaration goes on PostMedia, because this row is SHARED: dedup is
+  // @@unique([tenantId, contentHash]).
+  //
+  // CONTESTED STATE — write with mergeProvenance(), never a bare overwrite.
+  // contentHash is computed from the RE-ENCODED bytes, so two different
+  // originals (one carrying an AI marking, one not) re-encode to identical
+  // bytes, hash identically, and dedup onto THIS row. A bare write would let
+  // whichever upload lands second erase the other's marking. See
+  // analysis/ai-act-transparency 03 §3.0.
+  embeddedSourceType SyntheticSourceType @default(UNKNOWN) @map("embedded_source_type")
+  // True once any upload of these bytes examined them for a provenance
+  // container, whatever it said. Distinguishes "looked, found nothing" from
+  // "never looked" — needed for coverage metrics and any future backfill.
+  provenanceExamined Boolean             @default(false) @map("provenance_examined")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -772,6 +979,15 @@ enum ModerationTrack {
   AUDIO
 }
 
+// Scheduling intent for a moderation job (plan 031). `interactive` is an
+// upload someone is waiting on; `deferred` is an escalation row the deferred
+// lane resolves later. Mirrors the ModerationJobPriority type in
+// lib/workers/media-processing.ts.
+enum ModerationJobPriority {
+  interactive
+  deferred
+}
+
 // One row per (media, track) moderation job submitted to an external provider.
 // decision is String (not an enum) so the schema stays decoupled from
 // ModerationDecision evolution; app code validates the value on read.
@@ -787,7 +1003,22 @@ model MediaModerationJob {
   // decision: resolved ModerationDecision value, or null while the job is in flight.
   decision          String?
   // thresholdSnapshot: a copy of env.media.thresholds at submission time (JSON).
+  // For a `deferred` row this is the DEFERRED lane's own policy snapshot —
+  // the escalation runs a different model reporting a different taxonomy, so
+  // interpreting its verdict through the inline snapshot would floor every
+  // deferred verdict at `review` via the pin (plan 031 §status).
   thresholdSnapshot Json            @map("threshold_snapshot")
+  // priority: `interactive` for provider-submitted jobs, `deferred` for an
+  // escalation row spawned by the cascade route (plan 031). The completion
+  // worker re-fetches `deferred` rows from the escalation-result port instead
+  // of the media provider.
+  priority          ModerationJobPriority @default(interactive)
+  // parentJobId: for a `deferred` row, the jobId of the interactive row whose
+  // uncertain verdict spawned it. UNIQUE — at most one escalation per parent —
+  // which is what makes creating the escalation row idempotent (a retried
+  // trigger finds the existing row instead of minting a second jobId, so the
+  // engine's idempotency key stays stable).
+  parentJobId       String?         @unique @map("parent_job_id")
   createdAt         DateTime        @default(now()) @map("created_at")
   updatedAt         DateTime        @updatedAt @map("updated_at")
 
@@ -818,6 +1049,25 @@ model PostMedia {
   alt      String?
   order    Int     @default(0)
 
+  // --- Synthetic-content provenance: the AUTHOR'S DECLARATION (Art. 50) -----
+  // Lives here, NOT on MediaFile, because MediaFile is deduped within-tenant:
+  // two authors uploading identical bytes share one MediaFile row, so a
+  // declaration there would be cross-author shared state — one author's
+  // silence could erase another's disclosure, or worse, one author's AI
+  // declaration could attach to another's post. That is data corruption, not
+  // a modelling preference (analysis/ai-act-transparency 03 §3, D5).
+  //
+  // MONOTONIC: may move toward more disclosure, never less, on the author edit
+  // path. Downward correction is a staff-reviewed audited action only, and
+  // PLATFORM_GENERATED is never downgradable by anyone (03 §6).
+  //
+  // RE-ATTACHMENT INHERITS: these rows are destroyed and recreated by edits
+  // (@@unique([postId, mediaId])), so detach + re-attach would otherwise reset
+  // a declaration to UNKNOWN and launder the disclosure. Use
+  // mergeProvenance() against any prior value for this (postId, mediaId).
+  declaredSourceType SyntheticSourceType @default(UNKNOWN) @map("declared_source_type")
+  declaredBasis      SyntheticBasis?     @map("declared_basis")
+
   post   Post      @relation(fields: [postId], references: [id], onDelete: Cascade)
   media  MediaFile @relation(fields: [mediaId], references: [id], onDelete: Restrict)
   tenant Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -829,7 +1079,14 @@ model PostMedia {
   @@map("post_media")
 }
 
-// Post sentiment reactions
+// Post sentiment reactions.
+//
+// NOT an AI emotion-recognition system, despite the name. This is a USER'S OWN
+// REACTION to a post — one row per (post, author), self-selected. AI Act
+// Art. 50(3) covers emotion inference from BIOMETRIC data; a self-selected
+// reaction is neither inferred nor biometric, so this model is outside Art. 50
+// entirely. Recorded because the name invites the misreading
+// (analysis/ai-act-transparency 02 §6 F1).
 model PostSentiment {
   id        String   @id @default(cuid())
   // Multi-tenancy — denormalized from the owning post; same scope.
@@ -882,6 +1139,16 @@ model PostComment {
   // Link security fields
   hasBlockedLinks Boolean @default(false) @map("has_blocked_links")
 
+  // Synthetic-content provenance of the comment TEXT (AI Act Art. 50, D14).
+  // Exactly parallel to Post.textSourceType — comment text is at least as
+  // AI-generatable as post text, and a labelled post carrying an unlabelled AI
+  // comment is the same defect one nesting level down. Only ever
+  // AUTHOR_DECLARED or PLATFORM_GENERATED (text has no embedded metadata to
+  // read). MONOTONIC on the author edit path; downward correction is a
+  // staff-reviewed audited action only. Deliberately NOT indexed.
+  textSourceType SyntheticSourceType @default(UNKNOWN) @map("text_source_type")
+  textBasis      SyntheticBasis?     @map("text_basis")
+
   // AR10 prune: dormant classification columns removed (see Post model note).
 
   post       Post               @relation(fields: [postId], references: [id], onDelete: Cascade)
@@ -911,6 +1178,22 @@ model PostCommentMedia {
   mediaId   String  @map("media_id")
   alt       String?
   order     Int     @default(0)
+
+  // NO provenance columns here, deliberately (AI Act Art. 50, D14).
+  //
+  // Nothing in the codebase CREATES a PostCommentMedia row — the only references
+  // are user-data-deletion.ts and user-media-erasure.ts, i.e. cleanup for a
+  // feature that was never built. Comment media does not exist, so it has no
+  // disclosure gap, and columns nothing can write would assert coverage we do
+  // not have (the exact failure mode D8 exists to prevent) while contradicting
+  // the AR10 prune, which removed columns that were "written by default and read
+  // by nothing".
+  //
+  // WHEN COMMENT MEDIA IS BUILT: add `declaredSourceType`/`declaredBasis` here,
+  // mirroring PostMedia — same reasoning about why it cannot live on the deduped
+  // MediaFile — and resolve against MediaFile.embeddedSourceType. Note this
+  // model declares no `media` relation, only the scalar `mediaId`, so the
+  // response site must join MediaFile explicitly.
 
   comment PostComment @relation(fields: [commentId], references: [id], onDelete: Cascade)
 
@@ -1940,6 +2223,17 @@ model Tenant {
   storageQuotaBytes   BigInt? @map("storage_quota_bytes")
   storageQuotaObjects Int?    @map("storage_quota_objects")
 
+  // ── Per-tenant synthetic-content disclosure posture (AI Act Art. 50, D15) ──
+  // NULL = the tenant is on the platform default, which arrives via env
+  // (PROVENANCE_DEFAULT_DISCLOSURE_POSTURE) exactly like the quota columns
+  // above — a non-null value is a per-tenant OVERRIDE. Resolution:
+  // effective = override ?? env default (lib/provenance/posture.ts).
+  //
+  // FAIL-OPEN on resolution, FAIL-CLOSED on the label: if this cannot be read
+  // the post still goes through on the platform default, but no posture ever
+  // suppresses a resolved label (analysis 06 §3).
+  disclosurePosture TenantDisclosurePosture? @map("disclosure_posture")
+
   members          TenantMember[]
   domains          TenantDomain[]
   identityProvider TenantIdentityProvider?
@@ -2320,7 +2614,19 @@ model Relationship {
   // AR10 prune: dropped [userId] (prefix of the composite unique and of
   // [userId, tier]) and the bare [targetId] (polymorphic reverse lookups are
   // always type-qualified → [targetType, targetId] carries them).
-  @@unique([userId, targetType, targetId])
+  //
+  // M7 (security review 2026-08, lane 7 MEDIUM-3): tenantId LEADS the unique
+  // key. The key was tenant-blind while `tenant_id` is NOT NULL, so one pair of
+  // users could hold exactly one edge across the whole installation — a
+  // relationship created in tenant B blocked the same relationship in tenant A
+  // and made `findUnique` on that key return another tenant's row. That is what
+  // let `createRelationship`'s reverse-edge lookup flip `reciprocated` across a
+  // tenant boundary while `removeRelationship`'s clear (tenant-scoped) could
+  // never take it back. tenantId leads so the key doubles as the tenant-scoped
+  // lookup index, which also makes the separate @@index([tenantId]) redundant —
+  // kept anyway: dropping an index is a separate, independently-reviewable
+  // change from fixing a correctness key.
+  @@unique([tenantId, userId, targetType, targetId])
   @@index([targetType, targetId]) // reverse: who relates to X (FoF, recompute)
   @@index([userId, tier]) // circle-tier membership
   @@index([tenantId])
@@ -2649,4 +2955,40 @@ model ShiftSignup {
   @@unique([shiftId, userId])
   @@index([tenantId, shiftId])
   @@map("event_shift_signups")
+}
+
+// WS-1 KV port (ws1-kv-port-plan §4.2). Backs the PostgresKvStore adapter
+// (@de-otio/saas-foundation/kv/postgres) for the 10 hot-spot namespaces when
+// KV_PROVIDER=postgres. GLOBAL, not tenant-scoped: the KV pool bypasses the
+// tenant-scoping Prisma extension (KV keys are namespace-scoped, never
+// tenant-scoped). `value` holds the record object; `version` is the CAS token;
+// `expires_at` (timestamptz) is the port's epoch-seconds expiry; `indexed_key`
+// powers queryByIndex. Expired rows are filtered on read and reclaimed by the
+// sweep (sweepExpiredKvEntries) — the expires_at index powers that sweep.
+model KvEntry {
+  namespace  String
+  key        String
+  value      Json
+  version    BigInt    @default(1)
+  expiresAt  DateTime? @map("expires_at") @db.Timestamptz(6)
+  indexedKey String?   @map("indexed_key")
+
+  @@id([namespace, key])
+  @@index([namespace, indexedKey]) // powers queryByIndex
+  @@index([expiresAt]) // powers the TTL sweep
+  @@map("kv_entries")
+}
+
+/// WS-1 rate-limit port (ws1-kv-port-plan §3.10/§4.2, security fix F5). Backs the
+/// PostgresTokenBucketLimiter (@de-otio/saas-foundation/rate-limit). GLOBAL, NOT
+/// tenant-scoped — every bucket_key is `<namespace>#<key>`-scoped, and the
+/// dedicated KV/rate-limit pool bypasses the tenant Prisma extension. No RLS.
+model RateLimitBucket {
+  bucketKey    String    @id @map("bucket_key")
+  tokens       Float
+  lastRefillMs BigInt    @map("last_refill_ms")
+  expiresAt    DateTime? @map("expires_at") @db.Timestamptz(6)
+
+  @@index([expiresAt]) // powers the TTL sweep
+  @@map("rate_limit_buckets")
 }

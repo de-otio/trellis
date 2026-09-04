@@ -19,6 +19,21 @@ import {
 
 const cog = mockClient(CognitoIdentityProviderClient);
 
+/** The pool/client the adapter administers — its own config, not per-call args. */
+const CFG = { userPoolId: "pool", appClientId: "client" };
+
+/** Records the advisory lock the adapter takes on the caller's transaction. */
+function lockRecorder(): AdvisoryLockClient & { statements: string[] } {
+  const statements: string[] = [];
+  return {
+    statements,
+    async $executeRaw(query: TemplateStringsArray, ...values: unknown[]) {
+      statements.push(query.join("?") + " :: " + values.join(","));
+      return 1;
+    },
+  };
+}
+
 beforeEach(() => {
   cog.reset();
 });
@@ -36,9 +51,8 @@ describe("defaultOidcAttributeMapping", () => {
 describe("CognitoIdpSdk.createOidcProvider", () => {
   it("sends a CreateIdentityProviderCommand with OIDC details", async () => {
     cog.on(CreateIdentityProviderCommand).resolves({});
-    const sdk = new CognitoIdpSdk(new CognitoIdentityProviderClient({}));
+    const sdk = new CognitoIdpSdk(new CognitoIdentityProviderClient({}), CFG);
     await sdk.createOidcProvider({
-      userPoolId: "pool",
       providerName: "tenant-abc12",
       details: {
         clientId: "client",
@@ -67,16 +81,16 @@ describe("CognitoIdpSdk.createOidcProvider", () => {
     cog.on(CreateIdentityProviderCommand).rejects(
       Object.assign(new Error("invalid"), { name: "InvalidParameterException" }),
     );
-    const sdk = new CognitoIdpSdk(new CognitoIdentityProviderClient({}));
+    const sdk = new CognitoIdpSdk(new CognitoIdentityProviderClient({}), CFG);
     await expect(
       sdk.createOidcProvider({
-        userPoolId: "pool",
         providerName: "tenant-abc12",
         details: {
           clientId: "client",
           clientSecret: "shh",
           issuerUrl: "https://idp.example.com/",
         },
+        endpoints: { authorizationUrl: "a", tokenUrl: "t", jwksUrl: "j" },
         attributeMapping: defaultOidcAttributeMapping(),
         idpIdentifiers: [],
       }),
@@ -87,9 +101,8 @@ describe("CognitoIdpSdk.createOidcProvider", () => {
 describe("CognitoIdpSdk.updateOidcProvider", () => {
   it("only sets ProviderDetails when at least one OIDC field changes", async () => {
     cog.on(UpdateIdentityProviderCommand).resolves({});
-    const sdk = new CognitoIdpSdk(new CognitoIdentityProviderClient({}));
+    const sdk = new CognitoIdpSdk(new CognitoIdentityProviderClient({}), CFG);
     await sdk.updateOidcProvider({
-      userPoolId: "pool",
       providerName: "tenant-abc12",
       details: { clientSecret: "rotated" },
     });
@@ -102,9 +115,8 @@ describe("CognitoIdpSdk.updateOidcProvider", () => {
 
   it("sends only the fields the caller specified (e.g. attribute mapping only)", async () => {
     cog.on(UpdateIdentityProviderCommand).resolves({});
-    const sdk = new CognitoIdpSdk(new CognitoIdentityProviderClient({}));
+    const sdk = new CognitoIdpSdk(new CognitoIdentityProviderClient({}), CFG);
     await sdk.updateOidcProvider({
-      userPoolId: "pool",
       providerName: "tenant-abc12",
       attributeMapping: { email: "mail", given_name: undefined },
     });
@@ -115,9 +127,8 @@ describe("CognitoIdpSdk.updateOidcProvider", () => {
 
   it("supports updating the IdpIdentifiers list (verified-domain change)", async () => {
     cog.on(UpdateIdentityProviderCommand).resolves({});
-    const sdk = new CognitoIdpSdk(new CognitoIdentityProviderClient({}));
+    const sdk = new CognitoIdpSdk(new CognitoIdentityProviderClient({}), CFG);
     await sdk.updateOidcProvider({
-      userPoolId: "pool",
       providerName: "tenant-abc12",
       idpIdentifiers: ["a.example.com", "b.example.com"],
     });
@@ -129,8 +140,8 @@ describe("CognitoIdpSdk.updateOidcProvider", () => {
 describe("CognitoIdpSdk.deleteProvider", () => {
   it("calls DeleteIdentityProviderCommand", async () => {
     cog.on(DeleteIdentityProviderCommand).resolves({});
-    const sdk = new CognitoIdpSdk(new CognitoIdentityProviderClient({}));
-    await sdk.deleteProvider("pool", "tenant-abc12");
+    const sdk = new CognitoIdpSdk(new CognitoIdentityProviderClient({}), CFG);
+    await sdk.deleteProvider("tenant-abc12");
     const call = cog.commandCalls(DeleteIdentityProviderCommand)[0]!;
     expect(call.args[0].input).toEqual({
       UserPoolId: "pool",
@@ -139,31 +150,31 @@ describe("CognitoIdpSdk.deleteProvider", () => {
   });
 });
 
-describe("CognitoIdpSdk.describeProvider", () => {
+describe("CognitoIdpSdk.providerExists", () => {
   it("returns true when the provider exists", async () => {
     cog.on(DescribeIdentityProviderCommand).resolves({ IdentityProvider: { ProviderName: "x" } });
-    const sdk = new CognitoIdpSdk(new CognitoIdentityProviderClient({}));
-    expect(await sdk.describeProvider("pool", "tenant-abc12")).toBe(true);
+    const sdk = new CognitoIdpSdk(new CognitoIdentityProviderClient({}), CFG);
+    expect(await sdk.providerExists("tenant-abc12")).toBe(true);
   });
 
   it("returns false on ResourceNotFoundException", async () => {
     cog.on(DescribeIdentityProviderCommand).rejects(
       Object.assign(new Error("missing"), { name: "ResourceNotFoundException" }),
     );
-    const sdk = new CognitoIdpSdk(new CognitoIdentityProviderClient({}));
-    expect(await sdk.describeProvider("pool", "tenant-abc12")).toBe(false);
+    const sdk = new CognitoIdpSdk(new CognitoIdentityProviderClient({}), CFG);
+    expect(await sdk.providerExists("tenant-abc12")).toBe(false);
   });
 
   it("rethrows other errors", async () => {
     cog.on(DescribeIdentityProviderCommand).rejects(
       Object.assign(new Error("denied"), { name: "AccessDeniedException" }),
     );
-    const sdk = new CognitoIdpSdk(new CognitoIdentityProviderClient({}));
-    await expect(sdk.describeProvider("pool", "tenant-abc12")).rejects.toThrow(/denied/);
+    const sdk = new CognitoIdpSdk(new CognitoIdentityProviderClient({}), CFG);
+    await expect(sdk.providerExists("tenant-abc12")).rejects.toThrow(/denied/);
   });
 });
 
-describe("CognitoIdpSdk.setSupportedIdentityProvider", () => {
+describe("CognitoIdpSdk.setProviderEnabled", () => {
   it("adds the provider name to a fresh client config", async () => {
     cog.on(DescribeUserPoolClientCommand).resolves({
       UserPoolClient: {
@@ -174,8 +185,8 @@ describe("CognitoIdpSdk.setSupportedIdentityProvider", () => {
       },
     });
     cog.on(UpdateUserPoolClientCommand).resolves({});
-    const sdk = new CognitoIdpSdk(new CognitoIdentityProviderClient({}));
-    await sdk.setSupportedIdentityProvider("pool", "client", "tenant-abc12", "add");
+    const sdk = new CognitoIdpSdk(new CognitoIdentityProviderClient({}), CFG);
+    await sdk.setProviderEnabled({ providerName: "tenant-abc12", enabled: true, tx: lockRecorder() });
     const call = cog.commandCalls(UpdateUserPoolClientCommand)[0]!;
     expect(call.args[0].input.SupportedIdentityProviders).toEqual([
       "COGNITO",
@@ -190,8 +201,8 @@ describe("CognitoIdpSdk.setSupportedIdentityProvider", () => {
       UserPoolClient: { SupportedIdentityProviders: ["tenant-abc12", "COGNITO"] },
     });
     cog.on(UpdateUserPoolClientCommand).resolves({});
-    const sdk = new CognitoIdpSdk(new CognitoIdentityProviderClient({}));
-    await sdk.setSupportedIdentityProvider("pool", "client", "tenant-abc12", "add");
+    const sdk = new CognitoIdpSdk(new CognitoIdentityProviderClient({}), CFG);
+    await sdk.setProviderEnabled({ providerName: "tenant-abc12", enabled: true, tx: lockRecorder() });
     const call = cog.commandCalls(UpdateUserPoolClientCommand)[0]!;
     expect(call.args[0].input.SupportedIdentityProviders).toEqual([
       "tenant-abc12",
@@ -199,23 +210,78 @@ describe("CognitoIdpSdk.setSupportedIdentityProvider", () => {
     ]);
   });
 
-  it("removes the provider on op=remove", async () => {
+  it("removes the provider when enabled=false", async () => {
     cog.on(DescribeUserPoolClientCommand).resolves({
       UserPoolClient: { SupportedIdentityProviders: ["tenant-abc12", "COGNITO"] },
     });
     cog.on(UpdateUserPoolClientCommand).resolves({});
-    const sdk = new CognitoIdpSdk(new CognitoIdentityProviderClient({}));
-    await sdk.setSupportedIdentityProvider("pool", "client", "tenant-abc12", "remove");
+    const sdk = new CognitoIdpSdk(new CognitoIdentityProviderClient({}), CFG);
+    await sdk.setProviderEnabled({ providerName: "tenant-abc12", enabled: false, tx: lockRecorder() });
     const call = cog.commandCalls(UpdateUserPoolClientCommand)[0]!;
     expect(call.args[0].input.SupportedIdentityProviders).toEqual(["COGNITO"]);
   });
 
   it("throws when DescribeUserPoolClient returns no client", async () => {
     cog.on(DescribeUserPoolClientCommand).resolves({});
-    const sdk = new CognitoIdpSdk(new CognitoIdentityProviderClient({}));
+    const sdk = new CognitoIdpSdk(new CognitoIdentityProviderClient({}), CFG);
     await expect(
-      sdk.setSupportedIdentityProvider("pool", "client", "x", "add"),
+      sdk.setProviderEnabled({ providerName: "x", enabled: true, tx: lockRecorder() }),
     ).rejects.toThrow(/no client/);
+  });
+
+  // The reason the lock moved inside the adapter (WS-2b step 10). It used to be
+  // the caller's job, at three separate call sites, and a missed one is
+  // invisible: it works until two admins connect an IdP in the same second, and
+  // then a read-modify-write on the shared SupportedIdentityProviders list
+  // drops one tenant's federation with no error anywhere.
+  it("takes the advisory lock BEFORE reading the client config", async () => {
+    const order: string[] = [];
+    const tx = {
+      async $executeRaw(query: TemplateStringsArray, ...values: unknown[]) {
+        order.push(`lock:${query.join("?")}${values.join("")}`);
+        return 1;
+      },
+    };
+    cog.on(DescribeUserPoolClientCommand).callsFake(() => {
+      order.push("describe");
+      return { UserPoolClient: { SupportedIdentityProviders: ["COGNITO"] } };
+    });
+    cog.on(UpdateUserPoolClientCommand).callsFake(() => {
+      order.push("update");
+      return {};
+    });
+
+    const sdk = new CognitoIdpSdk(new CognitoIdentityProviderClient({}), CFG);
+    await sdk.setProviderEnabled({ providerName: "t", enabled: true, tx });
+
+    // A lock taken after the read would serialize nothing: both racers would
+    // already hold the same stale list.
+    expect(order[0]).toMatch(/^lock:/);
+    expect(order.slice(1)).toEqual(["describe", "update"]);
+    expect(order[0]).toContain("pg_advisory_xact_lock");
+  });
+
+  it("locks on the pool it administers, not on the provider name", async () => {
+    // Per-provider keys would let two tenants race on the SHARED client list,
+    // which is the exact thing being serialized.
+    const seen: unknown[] = [];
+    const tx = {
+      async $executeRaw(_q: TemplateStringsArray, ...values: unknown[]) {
+        seen.push(values[0]);
+        return 1;
+      },
+    };
+    cog.on(DescribeUserPoolClientCommand).resolves({
+      UserPoolClient: { SupportedIdentityProviders: [] },
+    });
+    cog.on(UpdateUserPoolClientCommand).resolves({});
+    const sdk = new CognitoIdpSdk(new CognitoIdentityProviderClient({}), CFG);
+
+    await sdk.setProviderEnabled({ providerName: "tenant-a", enabled: true, tx });
+    await sdk.setProviderEnabled({ providerName: "tenant-b", enabled: true, tx });
+
+    expect(seen[0]).toBe(userPoolAdvisoryLockKey(CFG.userPoolId));
+    expect(seen[1]).toBe(seen[0]);
   });
 });
 

@@ -5,8 +5,13 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ThreatIntelService } from "../../src/lib/threat-intel-service.js";
+import {
+  THREAT_INTEL_FAIL_OPEN_METRIC,
+  ThreatIntelService,
+  validateThreatIntelEnv,
+} from "../../src/lib/threat-intel-service.js";
 import type { ThreatIntelEnv } from "../../src/lib/threat-intel-service.js";
+import { CapturingMetrics } from "../../src/lib/workers/metrics-port.js";
 
 // Mock fetch
 global.fetch = vi.fn();
@@ -32,17 +37,24 @@ describe("ThreatIntelService", () => {
   });
 
   describe("checkSafeBrowsing", () => {
-    it("should return safe result when API key is not configured", async () => {
+    it("should return UNKNOWN, not safe, when the API key is not configured", async () => {
+      // Phase 6 M3: this previously returned `safe: true`. An unconfigured key
+      // is "we did not check", and an uncached link we did not check must get
+      // the interstitial, not a clean bill of health.
       const envWithoutKey = {
         ...mockEnv,
         GOOGLE_SAFE_BROWSING_API_KEY: undefined,
       };
+      mockKv.get.mockResolvedValue(null);
+
       const result = await service.checkSafeBrowsing(
         "https://example.com",
         envWithoutKey,
       );
 
-      expect(result.safe).toBe(true);
+      expect(result.status).toBe("unknown");
+      expect(result.safe).toBe(false);
+      expect(result.failOpenReason).toBe("api-key-missing");
       expect(result.cacheHit).toBe(false);
       expect(global.fetch).not.toHaveBeenCalled();
     });
@@ -111,33 +123,79 @@ describe("ThreatIntelService", () => {
       expect(mockKv.get).toHaveBeenCalled();
     });
 
-    it("should handle API errors gracefully (fail open)", async () => {
+    it("should return UNKNOWN on an API error, and emit the fail-open metric", async () => {
+      // The attack this closes: an attacker who wants a malware link to pass
+      // only has to make the call fail — flood the quota, or trip a 500.
       (global.fetch as any).mockResolvedValue({
         ok: false,
         status: 500,
         statusText: "Internal Server Error",
         text: async () => "API Error",
       });
+      const metrics = new CapturingMetrics();
 
-      const result = await service.checkSafeBrowsing(
-        "https://example.com",
-        mockEnv,
-      );
+      const result = await service.checkSafeBrowsing("https://example.com", {
+        ...mockEnv,
+        METRICS: metrics,
+      });
 
-      expect(result.safe).toBe(true); // Fail open
+      expect(result.status).toBe("unknown");
+      expect(result.safe).toBe(false);
+      expect(result.failOpenReason).toBe("api-error");
       expect(result.cacheHit).toBe(false);
+      expect(metrics.emitted).toEqual([
+        {
+          dimensions: { reason: "api-error" },
+          metrics: [{ name: THREAT_INTEL_FAIL_OPEN_METRIC, value: 1 }],
+        },
+      ]);
     });
 
-    it("should handle network errors gracefully (fail open)", async () => {
+    it("should return UNKNOWN on a network error, and emit the fail-open metric", async () => {
       (global.fetch as any).mockRejectedValue(new Error("Network error"));
+      const metrics = new CapturingMetrics();
 
-      const result = await service.checkSafeBrowsing(
-        "https://example.com",
-        mockEnv,
-      );
+      const result = await service.checkSafeBrowsing("https://example.com", {
+        ...mockEnv,
+        METRICS: metrics,
+      });
 
-      expect(result.safe).toBe(true); // Fail open
-      expect(result.cacheHit).toBe(false);
+      expect(result.status).toBe("unknown");
+      expect(result.safe).toBe(false);
+      expect(result.failOpenReason).toBe("api-exception");
+      expect(metrics.emitted[0].dimensions).toEqual({ reason: "api-exception" });
+    });
+
+    it("should still trust a cached verdict when the key is later removed", async () => {
+      // A key rotation must not interstitial the entire cached corpus.
+      mockKv.get.mockResolvedValue({
+        safe: true,
+        cachedAt: new Date().toISOString(),
+      });
+
+      const result = await service.checkSafeBrowsing("https://example.com", {
+        ...mockEnv,
+        GOOGLE_SAFE_BROWSING_API_KEY: undefined,
+      });
+
+      expect(result.status).toBe("safe");
+      expect(result.cacheHit).toBe(true);
+    });
+
+    it("should not let a metrics-sink failure change the disposition", async () => {
+      (global.fetch as any).mockRejectedValue(new Error("Network error"));
+      const explodingMetrics = {
+        emitCounts: () => {
+          throw new Error("metrics backend down");
+        },
+      };
+
+      const result = await service.checkSafeBrowsing("https://example.com", {
+        ...mockEnv,
+        METRICS: explodingMetrics,
+      });
+
+      expect(result.status).toBe("unknown");
     });
 
     it("should handle multiple threat types", async () => {
@@ -264,6 +322,27 @@ describe("ThreatIntelService", () => {
       await expect(
         service.cacheResult("https://example.com", result, mockEnv),
       ).resolves.not.toThrow();
+    });
+  });
+
+  describe("validateThreatIntelEnv (startup assert)", () => {
+    it("fails the deploy when the key is missing in prod", () => {
+      expect(validateThreatIntelEnv({ STAGE: "prod" })).toHaveLength(1);
+      expect(validateThreatIntelEnv({ NODE_ENV: "production" })).toHaveLength(1);
+    });
+
+    it("passes when the key is present in prod", () => {
+      expect(
+        validateThreatIntelEnv({
+          STAGE: "prod",
+          GOOGLE_SAFE_BROWSING_API_KEY: "k",
+        }),
+      ).toEqual([]);
+    });
+
+    it("does not block non-prod stages", () => {
+      expect(validateThreatIntelEnv({ STAGE: "dev" })).toEqual([]);
+      expect(validateThreatIntelEnv({})).toEqual([]);
     });
   });
 });

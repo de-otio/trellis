@@ -7,6 +7,9 @@
     "apps/*",
     "packages/*"
   ],
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "npm run dev -w @de-otio/trellis",
     "build": "npm run build -w @de-otio/trellis",
@@ -25,12 +28,14 @@
     "test:agents": "STAGE=dev AWS_REGION=eu-central-1 AWS_PROFILE=dot-dev npx vitest run --config apps/api/vitest.agents.config.ts"
   },
   "devDependencies": {
-    "@types/node": "^26.1.0",
-    "prettier": "^3.9.4",
-    "typescript": "^6.0.3"
+    "@types/node": "^26.2.0",
+    "prettier": "^3.9.6",
+    "typescript": "^7.0.2"
   },
   "dependencies": {},
   "overrides": {
-    "@hono/node-server": "^1.19.13"
+    "@hono/node-server": "^1.19.13",
+    "@opentelemetry/sdk-metrics": "2.10.0",
+    "deepmerge-ts": "^8.0.1"
   }
 }

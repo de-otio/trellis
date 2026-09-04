@@ -2,16 +2,34 @@ import type { KVNamespace, R2Bucket, CloudflareQueue } from "../../types/cloudfl
 /**
  * Comment Rate Limiting Middleware
  *
- * Implements distributed rate limiting for comment creation using Cloudflare KV.
+ * Distributed rate limiting for comment creation, over the KV binding.
  *
- * Rate Limits:
- * - Per-post: 1 comment per user per 30 seconds (prevents rapid duplicate posts)
- * - Per-user global: 10 comments per minute (prevents spam across posts)
+ * Rate limits: a per-post cooldown and a per-user-per-minute ceiling. Both
+ * numbers are RUNTIME CONFIG (`env.commentRateLimit.*`, threshold-secrecy rule
+ * 8) — they used to be compiled-in constants shipping in a public npm tarball,
+ * which published the exact pacing needed to stay under them.
  *
- * Design:
- * - Uses Cloudflare KV for distributed state across Workers
- * - Fail-open strategy: If KV is unavailable, allow the request (don't block legitimate users)
- * - Returns retry-after time for HTTP 429 responses
+ * ── Failure policy (was: unconditionally fail-open) ─────────────────────────
+ * This module used to end in `catch { return { allowed: true } }`. That is
+ * defensible when the store fails occasionally and the alternative is blocking
+ * real users. It is indefensible when the store fails ALWAYS — which is what a
+ * half-migrated platform produces: the binding is constructed against a host
+ * that does not resolve, every call throws, and comment rate limiting is
+ * therefore not "degraded" but entirely absent, silently, with no 5xx and no
+ * signal beyond a log line on a path nobody watches.
+ *
+ * The failing guard was `if (!kv)` — a test of PRESENCE, not REACHABILITY. The
+ * binding is present (a live client object), so the "not configured" branch
+ * never fires and the call throws into the catch instead. Every `if (env.X)` in
+ * this codebase has the same shape; on a fully-migrated platform presence and
+ * reachability were the same question, and they no longer are.
+ *
+ * So: a store ERROR now denies by default (`failMode: "closed"`) — an abuse
+ * control that cannot count must not wave traffic through. A store that is
+ * ABSENT still allows, because absence is a deployment shape (local dev, unit
+ * tests) rather than a malfunction, but it is logged at error rather than warn.
+ * Operators who would rather lose the control than the endpoint set
+ * COMMENT_RATE_LIMIT_FAIL_MODE=open.
  */
 
 
@@ -25,7 +43,20 @@ export interface RateLimitResult {
 
 export interface CommentRateLimitEnv {
   RATE_LIMIT_KV?: KVNamespace;
+  /**
+   * Threshold-secrecy config (rule 8). Optional so callers holding a partial
+   * env still typecheck; absent fields fall back to the same numbers the
+   * compiled-in constants used, and to the SAFE fail mode.
+   */
+  commentRateLimit?: {
+    perMinute?: number;
+    postCooldownSeconds?: number;
+    failMode?: "closed" | "open";
+  };
 }
+
+/** Retry-After offered when the store is broken and we deny. */
+const FAIL_CLOSED_RETRY_AFTER_SECONDS = 30;
 
 /**
  * Check rate limits for comment creation
@@ -41,10 +72,15 @@ export async function commentRateLimit(
   env: CommentRateLimitEnv,
 ): Promise<RateLimitResult> {
   const kv = env.RATE_LIMIT_KV;
+  const perMinute = env.commentRateLimit?.perMinute ?? 10;
+  const postCooldownMs = (env.commentRateLimit?.postCooldownSeconds ?? 30) * 1000;
+  const failMode = env.commentRateLimit?.failMode ?? "closed";
 
-  // Fail-open if KV not available - don't block users due to infrastructure issues
+  // ABSENT, not broken: a deployment that wired no store at all (local dev,
+  // unit tests). Distinct from the catch below, and logged at error because a
+  // production deployment reaching this line has silently no rate limiting.
   if (!kv) {
-    getLogger().warn(
+    getLogger().error(
       "[CommentRateLimit] RATE_LIMIT_KV not configured - rate limiting disabled",
     );
     return { allowed: true };
@@ -60,10 +96,8 @@ export async function commentRateLimit(
     if (lastPostComment) {
       const lastTime = parseInt(lastPostComment, 10);
       const timeSince = now - lastTime;
-      const waitTime = 30000; // 30 seconds in milliseconds
-
-      if (timeSince < waitTime) {
-        const retryAfter = Math.ceil((waitTime - timeSince) / 1000);
+      if (timeSince < postCooldownMs) {
+        const retryAfter = Math.ceil((postCooldownMs - timeSince) / 1000);
         getLogger().info(
           `[CommentRateLimit] Per-post limit hit for user ${userId} on post ${postId}. Wait ${retryAfter}s`,
           { userId, postId, timeSince, retryAfter },
@@ -107,13 +141,12 @@ export async function commentRateLimit(
       }
     }
 
-    const maxPerMinute = 10;
-    if (commentCount >= maxPerMinute) {
+    if (commentCount >= perMinute) {
       const windowAge = now - windowStart;
       const retryAfter = Math.ceil((60000 - windowAge) / 1000);
       getLogger().info(
         `[CommentRateLimit] Per-user global limit hit for user ${userId}. Wait ${retryAfter}s`,
-        { userId, commentCount, maxPerMinute, retryAfter },
+        { userId, commentCount, maxPerMinute: perMinute, retryAfter },
       );
       return {
         allowed: false,
@@ -143,14 +176,28 @@ export async function commentRateLimit(
 
     return {
       allowed: true,
-      remaining: maxPerMinute - newCount,
+      remaining: perMinute - newCount,
     };
   } catch (error) {
-    // Fail-open on errors - log but allow request
+    // BROKEN, not absent. A store that throws cannot count, and a limiter that
+    // cannot count has no basis for saying yes. Denying is the safe direction
+    // for an abuse control: the cost is a retryable 429 on a comment, against
+    // an unbounded, unmetered comment flood.
+    if (failMode === "open") {
+      getLogger().error(
+        "[CommentRateLimit] Error checking rate limit - allowing request (COMMENT_RATE_LIMIT_FAIL_MODE=open)",
+        error,
+      );
+      return { allowed: true };
+    }
     getLogger().error(
-      "[CommentRateLimit] Error checking rate limit - allowing request",
+      "[CommentRateLimit] Error checking rate limit - denying request (fail-closed)",
       error,
     );
-    return { allowed: true };
+    return {
+      allowed: false,
+      retryAfter: FAIL_CLOSED_RETRY_AFTER_SECONDS,
+      remaining: 0,
+    };
   }
 }

@@ -22,7 +22,7 @@ vi.mock("../../../src/lib/auth/cognito-jwt", () => ({
     if (!header?.startsWith("Bearer ")) return null;
     return header.slice(7);
   },
-  verifyCognitoJwt: (...args: unknown[]) => mockVerify(...args),
+  verifyJwt: (...args: unknown[]) => mockVerify(...args),
 }));
 
 const { mockFindMany } = vi.hoisted(() => ({ mockFindMany: vi.fn() }));
@@ -66,7 +66,7 @@ describe("authMiddleware", () => {
   it("returns null when userId claim is missing", async () => {
     mockVerify.mockResolvedValue({
       sub: "cognito-sub",
-      "custom:activeTenantId": TENANT_CUID,
+      activeTenantId: TENANT_CUID,
       // no custom:userId
     });
     const request = new Request("https://api.example.com/api/tenants", {
@@ -79,7 +79,7 @@ describe("authMiddleware", () => {
   it("returns null when activeTenantId claim is missing", async () => {
     mockVerify.mockResolvedValue({
       sub: "cognito-sub",
-      "custom:userId": USER_CUID,
+      userId: USER_CUID,
       // no custom:activeTenantId
     });
     const request = new Request("https://api.example.com/api/tenants", {
@@ -92,8 +92,8 @@ describe("authMiddleware", () => {
   it("returns null when userId is not a cuid", async () => {
     mockVerify.mockResolvedValue({
       sub: "cognito-sub",
-      "custom:userId": "not-a-cuid",
-      "custom:activeTenantId": TENANT_CUID,
+      userId: "not-a-cuid",
+      activeTenantId: TENANT_CUID,
     });
     const request = new Request("https://api.example.com/api/tenants", {
       headers: { Authorization: "Bearer valid-token" },
@@ -104,8 +104,8 @@ describe("authMiddleware", () => {
   it("returns null when activeTenantId is not a cuid", async () => {
     mockVerify.mockResolvedValue({
       sub: "cognito-sub",
-      "custom:userId": USER_CUID,
-      "custom:activeTenantId": "not-a-cuid",
+      userId: USER_CUID,
+      activeTenantId: "not-a-cuid",
     });
     const request = new Request("https://api.example.com/api/tenants", {
       headers: { Authorization: "Bearer valid-token" },
@@ -116,12 +116,12 @@ describe("authMiddleware", () => {
   it("builds AuthContext from T3 JWT claims", async () => {
     mockVerify.mockResolvedValue({
       sub: "cognito-sub-123",
-      "custom:userId": USER_CUID,
-      "custom:globalRole": "B2B_PARTNER",
-      "custom:activeTenantId": TENANT_CUID,
-      "custom:tenantSlug": "acme",
-      "custom:tenantRole": "ADMIN",
-      "custom:handle": "alice",
+      userId: USER_CUID,
+      globalRole: "B2B_PARTNER",
+      activeTenantId: TENANT_CUID,
+      tenantSlug: "acme",
+      tenantRole: "ADMIN",
+      handle: "alice",
     });
     const request = new Request("https://api.example.com/api/tenants", {
       headers: { Authorization: "Bearer valid-token" },
@@ -129,7 +129,7 @@ describe("authMiddleware", () => {
     const result = await authMiddleware(request, mockEnv);
 
     expect(result).not.toBeNull();
-    expect(result!.cognitoSub).toBe("cognito-sub-123");
+    expect(result!.sub).toBe("cognito-sub-123");
     expect(result!.userId).toBe(USER_CUID);
     expect(result!.globalRole).toBe("B2B_PARTNER");
     expect(result!.activeTenantId).toBe(TENANT_CUID);
@@ -141,9 +141,9 @@ describe("authMiddleware", () => {
   it("falls back to legacy custom:role when custom:globalRole absent", async () => {
     mockVerify.mockResolvedValue({
       sub: "sub",
-      "custom:userId": USER_CUID,
-      "custom:role": "END_USER",
-      "custom:activeTenantId": TENANT_CUID,
+      userId: USER_CUID,
+      globalRole: "END_USER",
+      activeTenantId: TENANT_CUID,
     });
     const request = new Request("https://api.example.com/", {
       headers: { Authorization: "Bearer t" },
@@ -155,8 +155,8 @@ describe("authMiddleware", () => {
   it("defaults tenantRole to GUEST (least privilege) when claim absent", async () => {
     mockVerify.mockResolvedValue({
       sub: "sub",
-      "custom:userId": USER_CUID,
-      "custom:activeTenantId": TENANT_CUID,
+      userId: USER_CUID,
+      activeTenantId: TENANT_CUID,
     });
     const request = new Request("https://api.example.com/", {
       headers: { Authorization: "Bearer t" },
@@ -168,8 +168,8 @@ describe("authMiddleware", () => {
   it("membershipsLoader fetches from DB (lazy)", async () => {
     mockVerify.mockResolvedValue({
       sub: "sub",
-      "custom:userId": USER_CUID,
-      "custom:activeTenantId": TENANT_CUID,
+      userId: USER_CUID,
+      activeTenantId: TENANT_CUID,
     });
     mockFindMany.mockResolvedValue([{ tenantId: TENANT_CUID, userId: USER_CUID, role: "OWNER", tenant: {} }]);
 
@@ -193,7 +193,7 @@ describe("authMiddleware", () => {
 
 describe("requireActiveTenant", () => {
   const makeAuth = (activeTenantId: string, globalRole = "B2B_PARTNER"): AuthContext => ({
-    cognitoSub: "sub",
+    sub: "sub",
     userId: USER_CUID,
     globalRole: globalRole as any,
     activeTenantId,
@@ -222,7 +222,7 @@ describe("requireActiveTenant", () => {
 
 describe("requireOwnTenant", () => {
   const makeAuth = (activeTenantId: string, globalRole = "B2B_PARTNER"): AuthContext => ({
-    cognitoSub: "sub",
+    sub: "sub",
     userId: USER_CUID,
     globalRole: globalRole as any,
     activeTenantId,
@@ -257,8 +257,8 @@ describe("extractVerifiedTenantId (WS1 tenant-context source)", () => {
   it("returns the verified active tenant id for a valid token", async () => {
     mockVerify.mockResolvedValue({
       sub: "cognito-sub",
-      "custom:userId": USER_CUID,
-      "custom:activeTenantId": TENANT_CUID,
+      userId: USER_CUID,
+      activeTenantId: TENANT_CUID,
     });
     const request = new Request("https://api.example.com/api/posts", {
       headers: { Authorization: "Bearer valid-token" },
@@ -283,8 +283,8 @@ describe("extractVerifiedTenantId (WS1 tenant-context source)", () => {
   it("returns null for a malformed activeTenantId claim", async () => {
     mockVerify.mockResolvedValue({
       sub: "cognito-sub",
-      "custom:userId": USER_CUID,
-      "custom:activeTenantId": "not-a-cuid",
+      userId: USER_CUID,
+      activeTenantId: "not-a-cuid",
     });
     const request = new Request("https://api.example.com/api/posts", {
       headers: { Authorization: "Bearer valid-token" },

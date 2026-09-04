@@ -134,6 +134,21 @@ console.log('  OK: installed @prisma/client satisfies trellis peerDependencies r
 "
 
 echo "==> requiring every published runtime entry point"
+# NOTE ON THE EXPORTS MAP (added 2026-08). @de-otio/trellis declares an
+# `exports` map whose only job is to make the unwired voting crypto
+# unreachable while every other path keeps resolving exactly as before.
+#
+# Declaring `exports` at ALL disables Node's extension probing, which is how a
+# first attempt broke 20 of 21 entry points: with no map, `.../hourly-cron`
+# finds `hourly-cron.js`; with one, the target must be exact. The map therefore
+# carries TWO patterns per prefix — `./dist/*.js` (explicit, passes through)
+# and `./dist/*` (extensionless, appends `.js`) — and Node's most-specific-
+# pattern rule picks the right one. A `null` on the narrower `voting/` base
+# beats both.
+#
+# The three blocks below are the gate on that. They must stay together: the
+# positive list alone cannot distinguish a working map from no map at all,
+# and a map that blocks nothing passes it perfectly.
 # We require:
 #   1. The package main (dist/index.js).
 #   2. Every dist/lambda/*.js file (these are what trellis's CDK packages
@@ -182,5 +197,408 @@ if (failed > 0) {
 console.log('');
 console.log('All ' + targets.length + ' entry point(s) loaded cleanly.');
 "
+
+# ---------------------------------------------------------------------------
+# Downstream deep specifiers.
+#
+# The lambda list above is generated from the tarball, so it can only assert
+# what the package already contains. These are the specifiers a REAL consumer
+# imports, transcribed from the consuming application, and they are the set the
+# reverted 2026-08 exports map would have broken. Both spelling forms are
+# asserted wherever a consumer uses either, because the map treats them via
+# different patterns and only one of them was broken last time.
+#
+# Keep this list WIDER than the current consumer, not equal to it: its purpose
+# is to fail when the map narrows, and a list that tracks the consumer exactly
+# stops being an independent check.
+# ---------------------------------------------------------------------------
+echo "==> requiring downstream deep specifiers (both spellings)"
+node --input-type=commonjs -e "
+const targets = [
+  // package root + manifest
+  '@de-otio/trellis',
+  '@de-otio/trellis/package.json',
+  // the moderation seam — the heaviest downstream dependency
+  '@de-otio/trellis/dist/lib/media/ffmpeg-args.js',
+  '@de-otio/trellis/dist/lib/media/media-lifecycle.js',
+  '@de-otio/trellis/dist/lib/media/media-ports.js',
+  '@de-otio/trellis/dist/lib/media/moderation-provider.js',
+  '@de-otio/trellis/dist/lib/media/request-moderation.js',
+  '@de-otio/trellis/dist/lib/media/request-text-moderation.js',
+  '@de-otio/trellis/dist/lib/media/spend-guard.js',
+  '@de-otio/trellis/dist/lib/media/text-moderation.js',
+  '@de-otio/trellis/dist/lib/media/track-verdict.js',
+  // other lib deep imports
+  '@de-otio/trellis/dist/lib/cost-accumulator.js',
+  '@de-otio/trellis/dist/lib/database-connection-manager.js',
+  '@de-otio/trellis/dist/lib/extension-scoped-db.js',
+  '@de-otio/trellis/dist/lib/graph/index.js',
+  '@de-otio/trellis/dist/lib/lambda-prisma.js',
+  '@de-otio/trellis/dist/lib/openai-budget.js',
+  '@de-otio/trellis/dist/lib/user-export-handler.js',
+  // lambdas, explicit .js (the generated list above covers extensionless)
+  '@de-otio/trellis/dist/lambda/media-completion-worker.js',
+  '@de-otio/trellis/dist/lambda/media-processing-worker.js',
+  // extensionless, and it resolves today — the form the reverted map broke
+  '@de-otio/trellis/dist/env',
+  '@de-otio/trellis/dist/env.js',
+  '@de-otio/trellis/dist/lib/media/media-ports',
+  '@de-otio/trellis/dist/lib/graph/index',
+  // live crypto seam: startup wiring a deployment calls (Scaleway has no KMS
+  // GenerateMac). Deliberately NOT blocked — only voting/ is.
+  '@de-otio/trellis/dist/lib/crypto/software-hmac-mac.js',
+  '@de-otio/trellis/dist/lib/crypto/software-hmac-mac',
+];
+
+let failed = 0;
+for (const t of targets) {
+  try {
+    require(t);
+    console.log('  ✓', t);
+  } catch (err) {
+    failed++;
+    console.error('  ✗', t);
+    console.error('   ', err.code || err.name, '-', err.message);
+  }
+}
+if (failed > 0) {
+  console.error('');
+  console.error(failed + ' downstream specifier(s) failed to resolve.');
+  console.error('An exports map that does not list a path a consumer imports');
+  console.error('breaks that consumer at runtime with ERR_PACKAGE_PATH_NOT_EXPORTED,');
+  console.error('or ERR_MODULE_NOT_FOUND if the pattern resolved to a missing file.');
+  process.exit(1);
+}
+console.log('');
+console.log('All ' + targets.length + ' downstream specifier(s) resolved.');
+"
+
+# ---------------------------------------------------------------------------
+# NEGATIVE assertions — the private interior must be refused.
+#
+# Without these the gate cannot tell a working map from no map at all: every
+# positive assertion above passes just as happily with no `exports` field.
+# Same discipline as the @ts-expect-error cases in the extension-api type
+# tests — the check has to be able to fail for the right reason.
+#
+# The error code is asserted, not just the throw. ERR_PACKAGE_PATH_NOT_EXPORTED
+# means the map refused the path; ERR_MODULE_NOT_FOUND would mean the map let
+# it through to a file that happens not to exist, which is a different (and
+# fragile) reason to pass.
+# ---------------------------------------------------------------------------
+echo "==> asserting the private interior is refused"
+node --input-type=commonjs -e "
+const blocked = [
+  '@de-otio/trellis/dist/lib/crypto/voting/elgamal-encryption.js',
+  '@de-otio/trellis/dist/lib/crypto/voting/hybrid-encryption.js',
+  '@de-otio/trellis/dist/lib/crypto/voting/post-quantum-encryption.js',
+  '@de-otio/trellis/dist/lib/crypto/voting/encryption-scheme.js',
+  '@de-otio/trellis/dist/lib/crypto/voting/hash-utils.js',
+  '@de-otio/trellis/dist/lib/crypto/voting/index.js',
+  // extensionless spelling must be refused too, or the block is bypassable
+  '@de-otio/trellis/dist/lib/crypto/voting/elgamal-encryption',
+  '@de-otio/trellis/dist/lib/crypto/voting/index',
+];
+
+let failed = 0;
+for (const t of blocked) {
+  let code = null;
+  try {
+    require(t);
+  } catch (err) {
+    code = err.code || err.name;
+  }
+  if (code === 'ERR_PACKAGE_PATH_NOT_EXPORTED') {
+    console.log('  ✓ refused', t);
+  } else if (code === null) {
+    failed++;
+    console.error('  ✗ LOADED (should be unreachable):', t);
+  } else {
+    failed++;
+    console.error('  ✗ wrong failure mode for', t);
+    console.error('    expected ERR_PACKAGE_PATH_NOT_EXPORTED, got', code);
+  }
+}
+if (failed > 0) {
+  console.error('');
+  console.error(failed + ' path(s) that must be private are not.');
+  console.error('The exports map is missing its null exclusion, or a broader');
+  console.error('pattern is out-ranking it. Node picks the MOST SPECIFIC');
+  console.error('pattern: a null on a narrower base must win over ./dist/*.');
+  process.exit(1);
+}
+console.log('');
+console.log('All ' + blocked.length + ' private path(s) refused.');
+"
+
+# ---------------------------------------------------------------------------
+# TYPE resolution.
+#
+# An `exports` map governs TypeScript's resolution too, under moduleResolution
+# node16/nodenext — which is what the consuming application uses. A map can
+# therefore resolve perfectly at runtime and still break the consumer's BUILD,
+# and every check above would stay green. That is the failure this block
+# exists for; it is not covered by loading modules.
+#
+# Asserts three things at once: deep specifiers still carry types, the blocked
+# path is refused by tsc as well as by Node, and the root still resolves.
+# ---------------------------------------------------------------------------
+echo "==> asserting TypeScript still resolves the same specifiers"
+mkdir -p "${CONSUMER_DIR}/tscheck"
+cat > "${CONSUMER_DIR}/tscheck/tsconfig.json" <<'TSCONFIG'
+{
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "target": "ES2022",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "types": []
+  },
+  "include": ["probe.ts"]
+}
+TSCONFIG
+cat > "${CONSUMER_DIR}/tscheck/probe.ts" <<'PROBE'
+// Deep specifiers a consumer imports must still carry types under the map.
+import type * as ports from "@de-otio/trellis/dist/lib/media/media-ports.js";
+import type * as verdict from "@de-otio/trellis/dist/lib/media/track-verdict.js";
+import type * as scoped from "@de-otio/trellis/dist/lib/extension-scoped-db.js";
+import type * as mac from "@de-otio/trellis/dist/lib/crypto/software-hmac-mac.js";
+
+export type Keep = [typeof ports, typeof verdict, typeof scoped, typeof mac];
+
+// And the private interior must be refused by tsc, not only by Node.
+// @ts-expect-error — dist/lib/crypto/voting/* is not an exported path
+import type * as blocked from "@de-otio/trellis/dist/lib/crypto/voting/elgamal-encryption.js";
+export type Blocked = typeof blocked;
+PROBE
+( cd "${CONSUMER_DIR}/tscheck" && npx -y -p typescript@7 tsc -p tsconfig.json )
+echo "  OK: deep specifiers type-resolve, and voting/* is refused by tsc"
+
+# The extension-api tarball was packed and installed above purely to satisfy
+# trellis's dependency on it — nothing ever loaded it. That gap is why an
+# `exports` map added to @de-otio/trellis in 2026-08 broke 20 of 21 consumer
+# entry points without any local gate noticing: every other check runs against
+# src/, and only a packed-tarball load exercises resolution. Extension authors
+# consume this package directly, so it gets the same treatment.
+#
+# The contract asserted here is the PACKAGE ROOT, in both module systems.
+# Deep specifiers (".../lib/index.js") are deliberately NOT part of the
+# contract — the exports map exposes the root only.
+echo "==> loading @de-otio/trellis-extension-api from the packed tarball"
+node --input-type=module -e "
+const mod = await import('@de-otio/trellis-extension-api');
+if (typeof mod.EXTENSION_API_VERSION !== 'string') {
+  console.error('::error::EXTENSION_API_VERSION missing or not a string on the ESM import');
+  process.exit(1);
+}
+console.log('  ✓ ESM import — EXTENSION_API_VERSION', mod.EXTENSION_API_VERSION);
+"
+node --input-type=commonjs -e "
+const mod = require('@de-otio/trellis-extension-api');
+if (typeof mod.EXTENSION_API_VERSION !== 'string') {
+  console.error('::error::EXTENSION_API_VERSION missing or not a string on the CJS require');
+  process.exit(1);
+}
+console.log('  ✓ CJS require — EXTENSION_API_VERSION', mod.EXTENSION_API_VERSION);
+"
+
+# The published version must match the constant inside the packed artifact.
+# The in-repo lockstep gate compares source-to-source; this compares what a
+# consumer actually installs, which is the thing that can drift at pack time.
+echo "==> asserting the packed extension-api version matches its exported constant"
+node --input-type=module -e "
+const { createRequire } = await import('node:module');
+const require = createRequire(process.cwd() + '/');
+const pkg = require('@de-otio/trellis-extension-api/package.json');
+const mod = await import('@de-otio/trellis-extension-api');
+if (pkg.version !== mod.EXTENSION_API_VERSION) {
+  console.error('::error::packed extension-api version ' + pkg.version + ' != EXTENSION_API_VERSION ' + mod.EXTENSION_API_VERSION);
+  process.exit(1);
+}
+console.log('  OK: packed version and exported constant agree (' + pkg.version + ')');
+"
+
+# ---------------------------------------------------------------------------
+# @de-otio/trellis-extension-testkit, from a packed tarball.
+#
+# Same argument as extension-api above, one degree sharper: the testkit's whole
+# job is to be installed by someone outside this repo, so a resolution defect in
+# it is a defect in the only tool an author has for finding defects.
+#
+# Two entry points, and the split matters. `.` pulls in the harness, which
+# reaches for `@de-otio/trellis` at runtime; `./example` is the fixture an
+# author copies, and it must load with core ABSENT — an author reading the
+# reference extension has not necessarily installed anything else yet.
+# ---------------------------------------------------------------------------
+echo "==> packing @de-otio/trellis-extension-testkit from ${REPO_ROOT}/packages/extension-testkit"
+( cd "${REPO_ROOT}/packages/extension-testkit" && npm pack --silent --pack-destination "${PACK_DIR}" >/dev/null )
+TESTKIT_TARBALL="$(find "${PACK_DIR}" -name 'de-otio-trellis-extension-testkit-*.tgz' -type f | head -n1)"
+if [ -z "${TESTKIT_TARBALL}" ] || [ ! -f "${TESTKIT_TARBALL}" ]; then
+  echo "::error::Could not locate packed extension-testkit tarball under ${PACK_DIR}"
+  exit 1
+fi
+echo "==> packed extension-testkit: ${TESTKIT_TARBALL}"
+
+# The compose fixture is the one non-JS file the package promises. `files`
+# lists it, but `files` is edited by hand and this is the only place that
+# notices when it stops being true.
+echo "==> asserting the compose fixture ships"
+if ! tar -tzf "${TESTKIT_TARBALL}" | grep -q 'package/fixtures/docker-compose.yml'; then
+  echo "::error::fixtures/docker-compose.yml is missing from the testkit tarball"
+  tar -tzf "${TESTKIT_TARBALL}"
+  exit 1
+fi
+
+echo "==> installing the testkit tarball into the consumer project"
+# Not --omit=dev: the testkit IS a devDependency for a consumer, so its own
+# runtime deps (pg, prisma, the DynamoDB client) must come with it.
+npm install "${TESTKIT_TARBALL}" --no-fund --no-audit --silent
+
+# The testkit's peer range can only name a PUBLISHED core — npm resolves it
+# against the registry, and a floor with no matching version fails the install
+# outright. Its real requirement is `MINIMUM_CORE_VERSION`, which is allowed to
+# be ahead of the range and is enforced by reading the module rather than its
+# version string. So this is the check that means something: does the core that
+# actually got installed carry the surface the testkit calls?
+echo "==> asserting the installed core satisfies the testkit's required surface"
+node --input-type=module -e "
+const { assertCoreShape } = await import('@de-otio/trellis-extension-testkit');
+const core = await import('@de-otio/trellis');
+assertCoreShape(core);
+console.log('  ✓ installed core exports every member the testkit calls');
+"
+
+echo "==> loading @de-otio/trellis-extension-testkit entry points"
+node --input-type=module -e "
+const harness = await import('@de-otio/trellis-extension-testkit');
+for (const name of ['startStandaloneServer', 'assertExtensionConformance', 'checkExtensionConformance', 'standaloneEnv', 'applyCoreMigrations', 'coreSchemaPath', 'seedGlobalFeatureToggles', 'waitForHealth', 'assertCoreShape']) {
+  if (typeof harness[name] !== 'function') {
+    console.error('::error::' + name + ' missing from the testkit root export');
+    process.exit(1);
+  }
+}
+console.log('  ✓ root export — harness + conformance surface present');
+
+// The guard must never be LOOSER than the peer range. If it were, npm would
+// refuse an install that the testkit would then have accepted — the range
+// would be doing enforcement nobody wrote down, and loosening the guard would
+// look like the fix. Ahead is fine and expected; behind is a mistake.
+const { createRequire: createRequireForManifest } = await import('node:module');
+const manifest = createRequireForManifest(process.cwd() + '/')('@de-otio/trellis-extension-testkit/package.json');
+const peerRange = manifest.peerDependencies?.['@de-otio/trellis'];
+if (typeof peerRange !== 'string' || !peerRange.startsWith('>=')) {
+  console.error('::error::testkit peerDependencies[\"@de-otio/trellis\"] is not a >= range:', peerRange);
+  process.exit(1);
+}
+// Both are 'MAJOR.MINOR.PATCH[-prerelease]'; compare numerically, then treat a
+// prerelease as lower than the release it precedes.
+const parse = (v) => {
+  const m = v.match(/^(\d+)\.(\d+)\.(\d+)(?:-(.+))?$/);
+  if (!m) { console.error('::error::unparseable version:', v); process.exit(1); }
+  return { nums: [Number(m[1]), Number(m[2]), Number(m[3])], pre: m[4] ?? null };
+};
+const floor = parse(peerRange.slice(2));
+const guard = parse(harness.MINIMUM_CORE_VERSION);
+let cmp = 0;
+for (let i = 0; i < 3 && cmp === 0; i++) cmp = guard.nums[i] - floor.nums[i];
+if (cmp === 0) {
+  cmp = (guard.pre === floor.pre) ? 0 : (guard.pre === null ? 1 : floor.pre === null ? -1 : (guard.pre < floor.pre ? -1 : 1));
+}
+if (cmp < 0) {
+  console.error('::error::MINIMUM_CORE_VERSION ' + harness.MINIMUM_CORE_VERSION + ' is BELOW the peer range floor ' + peerRange);
+  process.exit(1);
+}
+console.log('  ✓ guard ' + harness.MINIMUM_CORE_VERSION + ' is at or ahead of the peer floor ' + peerRange);
+
+"
+
+# The `docker-compose.yml` subpath is exported as a real file, so it must be
+# resolvable AS a path — an author is going to hand it to `docker compose -f`.
+echo "==> asserting the compose fixture resolves through the exports map"
+node --input-type=module -e "
+const { createRequire } = await import('node:module');
+const require = createRequire(process.cwd() + '/');
+const p = require.resolve('@de-otio/trellis-extension-testkit/docker-compose.yml');
+const { readFileSync } = await import('node:fs');
+if (!readFileSync(p, 'utf8').includes('postgis/postgis')) {
+  console.error('::error::resolved compose fixture does not look like the shipped one:', p);
+  process.exit(1);
+}
+console.log('  ✓ docker-compose.yml resolves to', p);
+"
+
+# The tarball path that `coreSchemaPath()` exists to find. It could only be
+# wrong in a real install — in the monorepo apps/api/prisma does not exist at
+# all, because core's prepack creates it — so this is the one place the
+# happy path is reachable.
+echo "==> asserting coreSchemaPath() finds core's shipped schema"
+node --input-type=module -e "
+const { coreSchemaPath } = await import('@de-otio/trellis-extension-testkit');
+const { readFileSync } = await import('node:fs');
+const p = coreSchemaPath();
+if (!readFileSync(p, 'utf8').includes('generator client')) {
+  console.error('::error::coreSchemaPath() returned something that is not a prisma schema:', p);
+  process.exit(1);
+}
+console.log('  ✓ coreSchemaPath() ->', p);
+"
+
+# ---------------------------------------------------------------------------
+# The testkit ALONE, with no core installed.
+#
+# This needs its own project. The consumer directory above has core installed,
+# so loading `/example` there proves nothing about whether the reference
+# extension can be read before an author installs anything else — and "read the
+# reference extension first" is the order authors actually work in.
+#
+# It is also the only place the missing-core error message is reachable, and a
+# bad message here is expensive: it is the first thing an author sees when they
+# get the install order wrong.
+# ---------------------------------------------------------------------------
+AUTHOR_DIR="$(mktemp -d -t trellis-author-XXXXXX)"
+trap 'rm -rf "${CONSUMER_DIR}" "${PACK_DIR}" "${AUTHOR_DIR}"' EXIT
+cd "${AUTHOR_DIR}"
+npm init -y >/dev/null
+
+echo "==> installing the testkit with NO core present"
+# --legacy-peer-deps unconditionally here: the point of this project is that
+# the peer is absent, which is the state being tested.
+npm install "${TESTKIT_TARBALL}" --no-fund --no-audit --silent --legacy-peer-deps
+
+node --input-type=module -e "
+const example = await import('@de-otio/trellis-extension-testkit/example');
+if (example.exampleExtension?.id !== 'example') {
+  console.error('::error::/example did not export the reference extension');
+  process.exit(1);
+}
+// The reference extension must pass the checks it is the reference FOR. A
+// fixture that its own suite would reject teaches the wrong thing, and this is
+// the cheapest place to notice — no server needed, since the version check is
+// a pure comparison over data the tarball already carries.
+if (typeof example.exampleExtension.extensionApiVersion !== 'string') {
+  console.error('::error::the reference extension declares no extensionApiVersion');
+  process.exit(1);
+}
+console.log('  ✓ /example — reference extension loads with core genuinely absent');
+
+const { loadCore } = await import('@de-otio/trellis-extension-testkit');
+let message = '';
+try {
+  await loadCore();
+  console.error('::error::loadCore() resolved with no core installed');
+  process.exit(1);
+} catch (err) {
+  message = err instanceof Error ? err.message : String(err);
+}
+if (!message.includes('peer dependency')) {
+  console.error('::error::loadCore() failed without explaining the missing peer:', message);
+  process.exit(1);
+}
+console.log('  ✓ loadCore() names the missing peer dependency');
+"
+
+cd "${CONSUMER_DIR}"
 
 echo "==> smoke test passed"

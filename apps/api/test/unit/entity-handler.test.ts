@@ -1583,6 +1583,75 @@ describe("EntityHandler", () => {
       expect(data.error).toBe("Forbidden");
     });
 
+    // Anti-targeting regression (plan 011 WS-B / Milestone S): a non-owner must
+    // never receive an entity's precise coordinates via the wholesale profile
+    // metadata (a stalker/thief locating the dog is the core threat).
+    it("strips precise location from a non-owner's view; keeps other public fields", async () => {
+      const mockEntity = {
+        id: "entity-loc",
+        name: "Buddy",
+        entityType: "test",
+        metadata: {
+          breed: "Golden Retriever",
+          markings: "white chest blaze",
+          lat: 48.2082,
+          lng: 16.3738,
+          latitude: 48.2082,
+          longitude: 16.3738,
+        },
+        createdAt: new Date("2024-01-01"),
+        updatedAt: new Date("2024-01-01"),
+        owners: [{ userId: "a-different-user" }],
+      };
+      mockDb.entity.findUnique.mockResolvedValue(mockEntity);
+      mockIsEnabled.mockResolvedValue(true);
+
+      const response = await handler.getEntityProfile(
+        "entity-loc",
+        mockSession, // userId "user-123" — NOT the owner
+        mockEnv,
+      );
+
+      expect(response.status).toBe(200);
+      const data = await response.json();
+      // Precise location stripped.
+      expect(data.metadata.lat).toBeUndefined();
+      expect(data.metadata.lng).toBeUndefined();
+      expect(data.metadata.latitude).toBeUndefined();
+      expect(data.metadata.longitude).toBeUndefined();
+      // Non-location public fields survive.
+      expect(data.metadata.breed).toBe("Golden Retriever");
+      expect(data.metadata.markings).toBe("white chest blaze");
+      // chip/passport never live in entity metadata (ext_dog__private owns them).
+      expect(data.metadata.microchip).toBeUndefined();
+      expect(data.metadata.passport).toBeUndefined();
+    });
+
+    it("keeps precise location in the OWNER's own view", async () => {
+      const mockEntity = {
+        id: "entity-loc",
+        name: "Buddy",
+        entityType: "test",
+        metadata: { breed: "Golden Retriever", lat: 48.2082, lng: 16.3738 },
+        createdAt: new Date("2024-01-01"),
+        updatedAt: new Date("2024-01-01"),
+        owners: [{ userId: "user-123" }],
+      };
+      mockDb.entity.findUnique.mockResolvedValue(mockEntity);
+      mockIsEnabled.mockResolvedValue(true);
+
+      const response = await handler.getEntityProfile(
+        "entity-loc",
+        mockSession, // userId "user-123" — the owner
+        mockEnv,
+      );
+
+      expect(response.status).toBe(200);
+      const data = await response.json();
+      expect(data.metadata.lat).toBe(48.2082);
+      expect(data.metadata.lng).toBe(16.3738);
+    });
+
     it("should work with request parameter and use session dataRegion", async () => {
       const mockEntity = {
         id: "entity-123",

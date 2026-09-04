@@ -18,6 +18,8 @@
  * Environment variable: ENVIRONMENT or DEPLOY_ENV (defaults to 'dev')
  */
 
+import { PrismaPg } from "@prisma/adapter-pg";
+import { Pool } from "pg";
 import { PrismaClient } from "@prisma/client";
 import * as fs from "fs";
 import * as yaml from "js-yaml";
@@ -84,14 +86,7 @@ interface FeatureToggleSeed {
 function loadFeatureFlagsFromConfig(): Map<string, boolean> {
   const env = process.env.ENVIRONMENT || process.env.DEPLOY_ENV || "dev";
   // Config file is in repo root, not in apps/api
-  const configPath = path.join(
-    process.cwd(),
-    "..",
-    "..",
-    "environments",
-    env,
-    "config.yaml",
-  );
+  const configPath = path.join(process.cwd(), "..", "..", "environments", env, "config.yaml");
 
   const flags = new Map<string, boolean>();
 
@@ -115,9 +110,7 @@ function loadFeatureFlagsFromConfig(): Map<string, boolean> {
         );
       }
     } else {
-      console.log(
-        `⚠️  Config file not found: ${configPath}, using defaults (false)\n`,
-      );
+      console.log(`⚠️  Config file not found: ${configPath}, using defaults (false)\n`);
     }
   } catch (error) {
     console.error(
@@ -140,14 +133,12 @@ async function seedFeatureToggles() {
   // replace with the direct connection port (5432) when present.
   const databaseUrl = rawUrl.replace(":6543/", ":5432/");
 
-  // Create Prisma client with the direct database URL
-  const prisma = new PrismaClient({
-    datasources: {
-      db: {
-        url: databaseUrl,
-      },
-    },
-  });
+  // Prisma 7 takes the connection through a driver adapter — it rejects BOTH
+  // the pre-7 `datasources: { db: { url } }` object and the `datasourceUrl`
+  // string with `PrismaClientConstructorValidationError`. Same `PrismaPg`
+  // shape the runtime uses (see src/lib/lambda-prisma.ts).
+  const pool = new Pool({ connectionString: databaseUrl, max: 2 });
+  const prisma = new PrismaClient({ adapter: new PrismaPg(pool) });
 
   // Store for cleanup
   prismaInstance = prisma;
@@ -164,11 +155,7 @@ async function seedFeatureToggles() {
   // General defaults are false for safety, but can be overridden in config.yaml
   // For dev environment, enable core features by default
   const isDev =
-    (
-      process.env.ENVIRONMENT ||
-      process.env.DEPLOY_ENV ||
-      "dev"
-    ).toLowerCase() === "dev";
+    (process.env.ENVIRONMENT || process.env.DEPLOY_ENV || "dev").toLowerCase() === "dev";
 
   const globalFlags: FeatureToggleSeed[] = [
     {
@@ -330,9 +317,7 @@ async function seedFeatureToggles() {
   // row distinct, and Postgres NULL-distinctness keeps the global row untouched.
   const seedTenantId = process.env.SEED_TENANT_ID?.trim() || null;
   if (seedTenantId) {
-    console.log(
-      `🏷️  Seeding TENANT-SCOPED toggles for tenant_id=${seedTenantId}\n`,
-    );
+    console.log(`🏷️  Seeding TENANT-SCOPED toggles for tenant_id=${seedTenantId}\n`);
   }
 
   let created = 0;
