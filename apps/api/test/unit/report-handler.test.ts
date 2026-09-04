@@ -15,7 +15,7 @@ import {
 } from "../../src/lib/report-handler.js";
 
 const mockDb = {
-  reportCategory: { findUnique: vi.fn() },
+  reportCategory: { findUnique: vi.fn(), findMany: vi.fn() },
   report: { findFirst: vi.fn(), create: vi.fn(), findMany: vi.fn() },
   user: { findUnique: vi.fn() },
 };
@@ -476,5 +476,71 @@ describe("ReportHandler.handleCreate — ILLEGAL_PRIORITY carve-out routing", ()
     // And the reporter learns nothing about the carve-out either way.
     expect(JSON.stringify(body)).not.toContain("carve");
     expect(JSON.stringify(body)).not.toContain("evidence");
+  });
+});
+
+/**
+ * The category vocabulary is deployment-seeded data. A client that hardcoded it
+ * would put jurisdiction/offence vocabulary back into the published surface by
+ * the back door, so it has to be readable — and readable WITHOUT the routing
+ * class, which is the operator's enforcement posture, not the reporter's
+ * business.
+ */
+describe("ReportHandler.handleListCategories", () => {
+  let handler: ReportHandler;
+  beforeEach(() => {
+    vi.clearAllMocks();
+    handler = new ReportHandler();
+  });
+
+  it("returns active categories with their labels, ordered for a picker", async () => {
+    mockDb.reportCategory.findMany.mockResolvedValue([
+      { key: "b-key", labels: { en: "B", de: "B-de" } },
+      { key: "a-key", labels: { en: "A" } },
+    ]);
+
+    const res = await handler.handleListCategories(mockEnv, requestContext);
+    const body = (await res.json()) as any;
+
+    expect(res.status).toBe(200);
+    expect(body.categories).toEqual([
+      { key: "b-key", labels: { en: "B", de: "B-de" } },
+      { key: "a-key", labels: { en: "A" } },
+    ]);
+    const args = mockDb.reportCategory.findMany.mock.calls[0][0];
+    expect(args.where).toEqual({ active: true });
+    expect(args.orderBy).toEqual([{ sortOrder: "asc" }, { key: "asc" }]);
+  });
+
+  it("never exposes routingClass — it is not even selected", async () => {
+    mockDb.reportCategory.findMany.mockResolvedValue([
+      { key: "a-key", labels: { en: "A" } },
+    ]);
+
+    const res = await handler.handleListCategories(mockEnv, requestContext);
+
+    const select = mockDb.reportCategory.findMany.mock.calls[0][0].select;
+    expect(select).toEqual({ key: true, labels: true });
+    expect(JSON.stringify(await res.json())).not.toContain("routingClass");
+  });
+
+  it("inactive categories are excluded — that flag is the pre-legal-review gate", async () => {
+    mockDb.reportCategory.findMany.mockResolvedValue([]);
+
+    const body = (await (
+      await handler.handleListCategories(mockEnv, requestContext)
+    ).json()) as any;
+
+    expect(body.categories).toEqual([]);
+    expect(mockDb.reportCategory.findMany.mock.calls[0][0].where.active).toBe(true);
+  });
+
+  it("a database fault is a 500, not a leak", async () => {
+    mockDb.reportCategory.findMany.mockRejectedValue(new Error("db down"));
+
+    const res = await handler.handleListCategories(mockEnv, requestContext);
+
+    expect(res.status).toBe(500);
+    expect(JSON.stringify(await res.json())).not.toContain("db down");
   });
 });

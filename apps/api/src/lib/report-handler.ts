@@ -214,6 +214,46 @@ export class ReportHandler {
   }
 
   /**
+   * GET /api/report-categories — the ACTIVE report vocabulary a client renders
+   * in its category picker.
+   *
+   * The vocabulary is deployment-seeded data, never a compiled-in list, so a
+   * client MUST read it from here rather than hardcoding categories: core ships
+   * no jurisdiction or offence vocabulary, and a client that hardcoded one would
+   * put it back into the published surface by the back door.
+   *
+   * Returns `key` + the deployment's localized `labels` only. `routingClass` is
+   * deliberately WITHHELD: it is the operator's routing decision, and telling a
+   * reporter which categories trigger the priority path is an oracle over the
+   * deployment's enforcement posture. Inactive categories are omitted entirely —
+   * that is the gate a deployment uses to ship a category before its legal
+   * review lands.
+   */
+  async handleListCategories(
+    env: Env,
+    requestContext: TrellisRequestContext,
+  ): Promise<Response> {
+    const logger = getLogger();
+    const region = requestContext?.region || env.DEFAULT_REGION || "EU";
+    const db = DataRouter.getDatabaseForRegion(region, env);
+
+    try {
+      const rows = await db.reportCategory.findMany({
+        where: { active: true },
+        orderBy: [{ sortOrder: "asc" }, { key: "asc" }],
+        select: { key: true, labels: true },
+      });
+
+      return json(200, {
+        categories: rows.map((c) => ({ key: c.key, labels: c.labels })),
+      });
+    } catch (error) {
+      logger.error("[Reports] error listing report categories", error);
+      return json(500, { error: "Internal server error" });
+    }
+  }
+
+  /**
    * GET /api/reports/:id — the reporter's status poll for ONE of their reports.
    *
    * This is the Art. 16 loop made observable to the person who filed it. It

@@ -18,6 +18,7 @@ vi.mock("../../src/lib/session-cookie.js", () => ({
 
 const mockDb = {
   report: { findMany: vi.fn(async () => []), findFirst: vi.fn(async () => null) },
+  reportCategory: { findMany: vi.fn(async () => []) },
   statementOfReasons: { findFirst: vi.fn(async () => null) },
 };
 vi.mock("../../src/lib/data-router.js", () => ({
@@ -77,6 +78,18 @@ describe("report routes — unauthenticated", () => {
       mockEnv,
       { ...ctx, pathname: "/api/reports/mine" },
     );
+    expect(res.status).toBe(401);
+  });
+
+  it("GET /api/report-categories => 401 when no session", async () => {
+    const route = routeFor("/api/report-categories", "GET");
+    const req = new Request("https://api.example.com/api/report-categories", {
+      method: "GET",
+    });
+    const res = await route.handler(req as any, mockEnv, {
+      ...ctx,
+      pathname: "/api/report-categories",
+    });
     expect(res.status).toBe(401);
   });
 

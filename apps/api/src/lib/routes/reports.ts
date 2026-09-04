@@ -1,6 +1,7 @@
 /**
  * Report Routes (compliance plan 08 §2.2).
  *
+ *   GET  /api/report-categories — the ACTIVE category vocabulary for the picker
  *   POST /api/reports          — file a content report (auth, rate-limited, deduped)
  *   GET  /api/reports/mine     — the reporter's own notices + statuses
  *   GET  /api/reports/:id      — status poll for one of the reporter's reports
@@ -28,6 +29,46 @@ const REPORT_RATE_WINDOW_SECONDS = 3600;
 const STATUS_PATH = /^\/api\/reports\/([^/]+)$/;
 
 export const reportRoutes: Route[] = [
+  {
+    path: "/api/report-categories",
+    method: "GET",
+    handler: async (request, env, { requestContext }) => {
+      const sessionManager = new SessionManager();
+      const securityHeaders = new SecurityHeaders(env);
+
+      // Same gate as filing a report: the vocabulary is only useful to someone
+      // who can act on it, and it describes the deployment's enforcement
+      // posture, so it is not handed to anonymous callers.
+      const session = await sessionManager.getSession(
+        request,
+        env.SESSION_SECRET,
+        env as any,
+      );
+      if (!session) {
+        return securityHeaders.createSecureResponse(
+          JSON.stringify({ error: "Unauthorized" }),
+          { status: 401, headers: { "content-type": "application/json" } },
+        );
+      }
+
+      if (!requestContext) {
+        return securityHeaders.createSecureResponse(
+          JSON.stringify({ error: "Request context not available" }),
+          { status: 500, headers: { "content-type": "application/json" } },
+        );
+      }
+
+      const handler = new ReportHandler();
+      const response = await handler.handleListCategories(env, requestContext);
+      return securityHeaders.addSecurityHeaders(response);
+    },
+    middleware: [corsMiddleware()],
+    description:
+      "List the ACTIVE report categories a client renders in its picker " +
+      "(key + deployment-supplied localized labels). Routing class is not " +
+      "exposed. Clients must read this rather than hardcode categories.",
+  },
+
   {
     path: "/api/reports",
     method: "POST",
