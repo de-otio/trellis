@@ -181,6 +181,11 @@ describe("GET /openapi.json", () => {
         description: "List tenants",
         // G4 MEDIUM-3: only routes flagged publicSpec land in /openapi.json.
         publicSpec: true,
+        // Plan 034 lane B/G: `publicSpec` alone is no longer sufficient — a
+        // route also has to say what a third-party principal must hold. `[]`
+        // is "authenticated, no particular scope", the weakest declaration
+        // that publishes. Without it the generator omits the operation.
+        scopes: [],
       },
     ];
     const routes = buildAgentSurfaceRoutes(() => injectedRoutes);
@@ -194,8 +199,10 @@ describe("GET /openapi.json", () => {
 
   it("each path operation has a responses field", async () => {
     const injectedRoutes: Route[] = [
-      { path: "/health", method: "GET", handler: async () => new Response("ok"), publicSpec: true },
-      { path: "/api/tenants", method: "POST", handler: async () => new Response("ok"), publicSpec: true },
+      // `scopes: []` alongside `publicSpec` — see the note above; without it
+      // the generator emits no operations and this loop asserts nothing.
+      { path: "/health", method: "GET", handler: async () => new Response("ok"), publicSpec: true, scopes: [] },
+      { path: "/api/tenants", method: "POST", handler: async () => new Response("ok"), publicSpec: true, scopes: [] },
     ];
     const routes = buildAgentSurfaceRoutes(() => injectedRoutes);
     const route = findRoute(routes, "/openapi.json");

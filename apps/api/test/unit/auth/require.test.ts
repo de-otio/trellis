@@ -194,7 +194,13 @@ describe("requireScope", () => {
 
     it("uses the standard envelope and names the missing scope literally", async () => {
       const { body } = await bodyOf(["walks:write"]);
-      expect(body).toEqual({
+      // `request_id` is lane C's addition to every `structuredError` envelope;
+      // it is a fresh correlator per response, so it is asserted for presence
+      // and then set aside before the value comparison.
+      expect(typeof body.request_id).toBe("string");
+      expect(body.request_id.length).toBeGreaterThan(0);
+      const { request_id: _correlator, ...rest } = body;
+      expect(rest).toEqual({
         error: "INSUFFICIENT_SCOPE",
         message:
           "This operation requires the `walks:write` scope, which this credential was not granted.",
