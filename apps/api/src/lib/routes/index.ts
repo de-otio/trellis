@@ -56,6 +56,7 @@ import { invitationsRoutes } from "./invitations.js";
 import { linkReportRoutes } from "./link-reports.js";
 import { reportRoutes } from "./reports.js";
 import { reportCategoryAdminRoutes } from "./report-category-admin.js";
+import { contentReportAdminRoutes } from "./content-report-admin.js";
 import { moderationFeedbackRoutes } from "./moderation-feedback.js";
 import { mapRoutes } from "./map.js";
 import { mediaRoutes } from "./media.js";
@@ -317,6 +318,10 @@ const coreRoutes: Route[] = [
 
   // Report-category admin (SUPER_ADMIN-only, data-driven category vocabulary)
   ...reportCategoryAdminRoutes,
+
+  // CONTENT-report review queue (SUPER_ADMIN-only; the LINK queue in admin.ts
+  // is deliberately separate — different state machine, different payload)
+  ...contentReportAdminRoutes,
 
   // Moderation feedback + owner-scoped disposition (spec 07 §4 / plan 08 Phase 2)
   ...moderationFeedbackRoutes,
