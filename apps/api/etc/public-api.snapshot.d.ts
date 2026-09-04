@@ -848,6 +848,18 @@ export type { MediaModerationProvider, MediaPin, ImageRef, S3Ref, ModerationVerd
 export { completionEnvelopeBody, parseCompletionEnvelope, } from "./lib/media/completion-envelope.js";
 export type { ModerationCompletionEnvelope } from "./lib/media/completion-envelope.js";
 export { setTextModerationProvider } from "./lib/media/request-text-moderation.js";
+export { setEvidencePreservationStore, setAuthorityReportChannel, setModerationFeedbackSink, } from "./lib/media/compliance-seams.js";
+export type { EvidencePreservationStore, AuthorityReportChannel, ModerationFeedbackSink, EvidenceBundle, AuthorityReportBundle, AuthorityReportResult, ModerationFeedbackRecord, BlockClass, } from "./lib/media/compliance-seams.js";
+export { setReportTemplates, REPORT_TEMPLATE_KEYS, } from "./lib/report-templates.js";
+export type { ReportTemplate, ReportTemplateMap } from "./lib/report-templates.js";
+export { setOperatorAlertHook, } from "./lib/report-operator-alert.js";
+export type { OperatorAlert, OperatorAlertHook, } from "./lib/report-operator-alert.js";
+export { restrictContent, evidenceHoldExemptWhere, setComplianceAlarmHook, } from "./lib/compliance/restrict-content.js";
+export type { RestrictContentRef, RestrictContentOpts, RestrictContentResult, ComplianceAlarm, ComplianceAlarmHook, } from "./lib/compliance/restrict-content.js";
+export { setStatementDelivery } from "./lib/compliance/statement-of-reasons.js";
+export type { StatementDelivery } from "./lib/compliance/statement-of-reasons.js";
+export { ILLEGAL_SUSPECTED_LABEL, deriveBlockClass, isAppealable, } from "./lib/compliance/block-class.js";
+export { createPendingAuthorityReport, markAuthorityReportSubmitted, markAuthorityReportClosed, } from "./lib/compliance/authority-report.js";
 export type { AgentSurfaceContent } from "./lib/routes/agent-surface.js";
 
 // ===== lib/audit-composer.d.ts =====
@@ -1098,6 +1110,353 @@ export type ScopeSet = ReadonlySet<string> | "*";
  * @param needed what the route declared (`Route.scopes`)
  */
 export declare function hasScope(granted: ScopeSet, needed: readonly string[]): boolean;
+
+// ===== lib/compliance/authority-report.d.ts =====
+import type { Env } from "../../env.js";
+import type { Region } from "../region-detection.js";
+/** Minimal Prisma slice for authority-report persistence. */
+export interface AuthorityReportDb {
+    authorityReport: {
+        create(args: {
+            data: {
+                jurisdiction: string;
+                status: string;
+                evidenceId?: string | null;
+                bundle: Record<string, unknown>;
+            };
+            select: {
+                id: true;
+                status: true;
+            };
+        }): Promise<{
+            id: string;
+            status: string;
+        }>;
+        findUnique(args: {
+            where: {
+                id: string;
+            };
+            select: {
+                id: true;
+                status: true;
+                evidenceId: true;
+            };
+        }): Promise<{
+            id: string;
+            status: string;
+            evidenceId: string | null;
+        } | null>;
+        update(args: {
+            where: {
+                id: string;
+            };
+            data: {
+                status?: string;
+                channelMode?: string | null;
+                submittedAt?: Date;
+                closedAt?: Date;
+            };
+            select: {
+                id: true;
+                status: true;
+            };
+        }): Promise<{
+            id: string;
+            status: string;
+        }>;
+    };
+}
+export interface CreateAuthorityReportInput {
+    jurisdiction: string;
+    evidenceId?: string | null;
+    /** Art.-18 info bundle — REFS, never bytes. */
+    bundle: Record<string, unknown>;
+}
+/**
+ * Create a `pending` authority report. This function DELIBERATELY does not touch
+ * the {@link AuthorityReportChannel} — nothing is filed on creation. The record
+ * sits `pending` until an operator confirms via {@link markAuthorityReportSubmitted}.
+ */
+export declare function createPendingAuthorityReport(db: AuthorityReportDb, input: CreateAuthorityReportInput, env: Env, region: Region): Promise<{
+    id: string;
+    status: string;
+}>;
+/**
+ * Operator-confirmed submission (M3). Files the report THROUGH the injected
+ * channel — never called automatically by the pipeline. Persists the channel
+ * mode + `submitted` status. Idempotent-ish: a non-`pending` report is returned
+ * unchanged.
+ */
+export declare function markAuthorityReportSubmitted(db: AuthorityReportDb, id: string, input: {
+    jurisdiction: string;
+    bundle: Record<string, unknown>;
+    evidenceId?: string | null;
+}, env: Env, region: Region): Promise<{
+    id: string;
+    status: string;
+    channelMode: string;
+}>;
+/**
+ * Close an authority report and RELEASE the evidence hold (plan 08 §2.6). The
+ * hold release calls the injected {@link EvidencePreservationStore} for the
+ * WORM-copy hold and clears the DB `evidenceHold` flag on any media rows carrying
+ * this evidence id, so the hard-delete GC path may resume for them.
+ */
+export declare function markAuthorityReportClosed(db: AuthorityReportDb & {
+    mediaFile?: {
+        updateMany(args: {
+            where: {
+                evidenceId: string;
+            };
+            data: {
+                evidenceHold: boolean;
+            };
+        }): Promise<{
+            count: number;
+        }>;
+    };
+}, id: string, reason: string, env: Env, region: Region): Promise<{
+    id: string;
+    status: string;
+}>;
+
+// ===== lib/compliance/block-class.d.ts =====
+import type { ModerationVerdict } from "../media/moderation-provider.js";
+import type { BlockClass } from "../media/compliance-seams.js";
+/**
+ * The RESERVED, jurisdiction-/provider-neutral label token that signals the
+ * illegal-suspected class. A deployment's moderation adapter emits a
+ * {@link ModerationLabel} with this `category` when its underlying provider
+ * flags a suspected-illegal category (the text path: OpenAI `sexual/minors`;
+ * later: a media hash-match hit). Core matches ONLY this token, so no real
+ * category vocabulary is ever compiled into the public tarball.
+ *
+ * The `x-` prefix marks it as an out-of-band, reserved control token distinct
+ * from ordinary opaque classifier tokens.
+ */
+export declare const ILLEGAL_SUSPECTED_LABEL = "x-illegal-suspected";
+/**
+ * Derive the SERVER-ONLY {@link BlockClass} from a moderation verdict.
+ *
+ * `illegal-suspected` iff ANY label carries the reserved
+ * {@link ILLEGAL_SUSPECTED_LABEL} token; otherwise `lawful-flagged`. Total over
+ * its input; a verdict with no labels is `lawful-flagged`.
+ *
+ * The asymmetry is deliberate and conservative in the direction that matters:
+ * illegal-class must be affirmatively signalled by the adapter, never inferred.
+ */
+export declare function deriveBlockClass(verdict: ModerationVerdict): BlockClass;
+/**
+ * Whether a blocked item may be offered the submit-for-analysis appeal path.
+ *
+ * `false` for `illegal-suspected` (the carve-out: never appealable, never
+ * offered submit). `true` for `lawful-flagged`. An UNKNOWN/absent block class is
+ * treated as `lawful-flagged` → appealable — media illegal-class detection is a
+ * known gap (spec 07 §8), so only an explicitly-marked illegal item is
+ * non-appealable; a blocked-but-unclassified item gets the lawful appeal path.
+ *
+ * `appealable` is the ONLY bit derived from the block class that ever crosses
+ * the domain boundary (spec 07 §4.1).
+ */
+export declare function isAppealable(blockClass: BlockClass | null | undefined): boolean;
+
+// ===== lib/compliance/restrict-content.d.ts =====
+import type { Env } from "../../env.js";
+import type { Region } from "../region-detection.js";
+import { type StatementOfReasonsDb } from "./statement-of-reasons.js";
+/**
+ * The canonical Prisma `where` fragment that EXCLUDES content under a live
+ * evidence hold. Applied by BOTH the nightly hard-delete purge and the
+ * account-deletion media-erasure cascade so a held original is never destroyed
+ * while an authority case is open. Referencing one definition keeps the two call
+ * sites from drifting.
+ */
+export declare function evidenceHoldExemptWhere(): {
+    evidenceHold: false;
+};
+export interface ComplianceAlarm {
+    readonly kind: string;
+    readonly ref: string;
+    readonly detail?: Record<string, unknown>;
+}
+export type ComplianceAlarmHook = (alarm: ComplianceAlarm) => Promise<void>;
+export declare function setComplianceAlarmHook(hook: ComplianceAlarmHook): void;
+export declare function __resetComplianceAlarmHookForTests(): void;
+export declare function getComplianceAlarmHook(): ComplianceAlarmHook;
+/** Bounded in-request preserve retries. Deployment may add an async queue too. */
+export declare const MAX_PRESERVE_ATTEMPTS = 3;
+export type RestrictResourceType = "post" | "comment" | "media" | "entity";
+export interface RestrictContentRef {
+    resourceType: RestrictResourceType;
+    resourceId: string;
+    /** The affected user (content owner) — the Art. 17 statement recipient. */
+    affectedUserId: string;
+    tenantId?: string;
+    /** The chain of report ids / signals that led here (for the evidence bundle). */
+    reportChain?: ReadonlyArray<string>;
+    /** Uploader/account context available at preservation time (refs, not bytes). */
+    uploaderContext?: Record<string, unknown>;
+    /** Where the preserved bytes live (media path). Refs only. */
+    bytesLocation?: {
+        bucket: string;
+        key: string;
+        versionId?: string;
+    };
+}
+export interface RestrictContentOpts {
+    /** Copy to the evidence store before serving stops permanently. */
+    preserve: boolean;
+    /** Deployment-supplied Art. 17 template key. */
+    statementTemplateKey: string;
+    /** Non-tip-off carve-out: writes the statement, skips delivery. */
+    suppressStatement?: {
+        reasonKey: string;
+    };
+    /** "removed" | "hidden" | "account-suspended" … (default "hidden"). */
+    restriction?: string;
+    /** Template PARAMS only — never raw classifier output (sanitized downstream). */
+    statementParams?: Record<string, unknown>;
+}
+export interface RestrictContentResult {
+    restricted: true;
+    evidenceId?: string;
+    statementId: string;
+    /** True if preservation was requested but ultimately failed (item still hidden). */
+    preserveFailed?: boolean;
+}
+/** Prisma slice restrictContent needs (structural — mockable in unit tests). */
+export interface RestrictContentDb extends StatementOfReasonsDb {
+    mediaFile: {
+        update(args: {
+            where: {
+                id: string;
+            };
+            data: {
+                hidden?: boolean;
+                hiddenAt?: Date;
+                hiddenBy?: string;
+                evidenceHold?: boolean;
+                evidenceId?: string;
+                blockClass?: string;
+            };
+            select: {
+                id: true;
+            };
+        }): Promise<{
+            id: string;
+        }>;
+    };
+    post: {
+        update(args: {
+            where: {
+                id: string;
+            };
+            data: {
+                hiddenByAuthor?: boolean;
+            };
+            select: {
+                id: true;
+            };
+        }): Promise<{
+            id: string;
+        }>;
+    };
+    postComment: {
+        update(args: {
+            where: {
+                id: string;
+            };
+            data: {
+                deletedAt?: Date;
+            };
+            select: {
+                id: true;
+            };
+        }): Promise<{
+            id: string;
+        }>;
+    };
+}
+/**
+ * Orchestrate a takedown. See the module header for ordering + failure
+ * semantics. Returns the statement id and (when preserved) the evidence id.
+ */
+export declare function restrictContent(db: RestrictContentDb, ref: RestrictContentRef, opts: RestrictContentOpts, env: Env, region: Region): Promise<RestrictContentResult>;
+
+// ===== lib/compliance/statement-of-reasons.d.ts =====
+import type { Env } from "../../env.js";
+/**
+ * Keys that MUST NEVER appear in a statement's `params` — they are raw
+ * classifier / moderation output whose exposure would (a) leak operational
+ * thresholds (anti-oracle) and (b) reveal detection detail to the affected user.
+ * The sanitizer drops them defensively even if a caller passes them by mistake.
+ */
+export declare const FORBIDDEN_STATEMENT_PARAM_KEYS: ReadonlyArray<string>;
+/**
+ * Strip any forbidden raw-classifier keys from statement params. Pure + total;
+ * returns a new object (immutable input). A non-object input yields `undefined`.
+ */
+export declare function sanitizeStatementParams(params: Record<string, unknown> | null | undefined): Record<string, unknown> | undefined;
+/** Delivery transport for a written statement. Injected for tests. */
+export type StatementDelivery = (record: {
+    id: string;
+    affectedUserId: string;
+    templateKey: string;
+    params?: Record<string, unknown>;
+}) => Promise<void>;
+/** Deployment injects the affected-user delivery transport at startup. */
+export declare function setStatementDelivery(delivery: StatementDelivery): void;
+/** Test-only: clear the injected delivery transport. */
+export declare function __resetStatementDeliveryForTests(): void;
+/** Minimal Prisma slice needed to write a statement. */
+export interface StatementOfReasonsDb {
+    statementOfReasons: {
+        create(args: {
+            data: {
+                affectedUserId: string;
+                resourceType: string;
+                resourceId: string;
+                restriction: string;
+                templateKey: string;
+                params?: Record<string, unknown>;
+                suppressed: boolean;
+                suppressReason?: string | null;
+            };
+            select: {
+                id: true;
+                suppressed: true;
+            };
+        }): Promise<{
+            id: string;
+            suppressed: boolean;
+        }>;
+    };
+}
+export interface WriteStatementInput {
+    affectedUserId: string;
+    resourceType: string;
+    resourceId: string;
+    /** "removed" | "hidden" | "account-suspended" … */
+    restriction: string;
+    templateKey: string;
+    params?: Record<string, unknown>;
+    /** Present => suppress DELIVERY (still writes the record, audited). */
+    suppress?: {
+        reasonKey: string;
+    };
+}
+export interface WriteStatementResult {
+    statementId: string;
+    suppressed: boolean;
+    delivered: boolean;
+}
+/**
+ * Write a statement of reasons and (unless suppressed) deliver it. Params are
+ * sanitized of raw classifier output before persistence. Delivery is
+ * best-effort — a transport fault never fails the takedown, and never throws
+ * into the caller.
+ */
+export declare function writeStatementOfReasons(db: StatementOfReasonsDb, input: WriteStatementInput, _env: Env): Promise<WriteStatementResult>;
 
 // ===== lib/extension-model-registry.d.ts =====
 /**
@@ -1577,6 +1936,140 @@ export declare function parseCompletionEnvelope(body: string): ModerationComplet
  * so core's own tests round-trip against the same producer the docs point at.
  */
 export declare function completionEnvelopeBody(envelope: ModerationCompletionEnvelope): string;
+
+// ===== lib/media/compliance-seams.d.ts =====
+/**
+ * The internal, BACKEND-ONLY moderation block class. This bit NEVER leaves the
+ * domain: it is not in `ModerationResolvedPayload`, not in the owner-scoped
+ * disposition read (which exposes only a coarse `appealable` boolean derived
+ * from it), and never in any client response or notification payload.
+ *
+ * - `lawful-flagged`   — a lawful-content false-positive candidate. May be
+ *                        offered the submit-for-analysis path (plan 07).
+ * - `illegal-suspected`— suspected-illegal (e.g. OpenAI `sexual/minors`, or a
+ *                        future hash-match hit). Drives the carve-out: NEVER
+ *                        offered submit, NEVER written to the analysis sink,
+ *                        routed to preserve-in-place + the mandated report.
+ *
+ * Lane A2 consumes this; Lane A only defines it so the contract is fixed.
+ */
+export type BlockClass = "lawful-flagged" | "illegal-suspected";
+/**
+ * The Art. 18 "all relevant information available" bundle: a reference to the
+ * content, where its bytes live, the uploader/account context, the report
+ * chain, and timestamps. Refs only — NEVER raw bytes in this object.
+ *
+ * Field shapes are intentionally loose (`string`/`Json`-ish) at the Lane A stub
+ * stage; Lane A2 tightens them alongside the `restrictContent` orchestration.
+ */
+/**
+ * The literal that MUST NEVER be used as an evidence copy-source bucket.
+ * `"processing"` is a CAS key PREFIX inside the media bucket (see cas-keys.ts),
+ * not a bucket name — handing it to a store's `CopyObject` as the source bucket
+ * fails `NoSuchBucket`, and the WORM evidence then holds a manifest with no
+ * bytes behind it while looking preserved (V2 Finding G).
+ *
+ * Lives here, next to {@link EvidenceBundle}, so every path that builds a
+ * `bytesLocation` checks the SAME literal rather than each keeping its own copy.
+ */
+export declare const PLACEHOLDER_EVIDENCE_BUCKET = "processing";
+export interface EvidenceBundle {
+    /** Opaque content reference (e.g. `${resourceType}:${resourceId}`). */
+    readonly contentRef: string;
+    /** Where the preserved bytes live (bucket/key handle), NOT the bytes. */
+    readonly bytesLocation?: {
+        readonly bucket: string;
+        readonly key: string;
+        readonly versionId?: string;
+    };
+    /** Uploader / account context available at preservation time. */
+    readonly uploaderContext?: Record<string, unknown>;
+    /** The chain of report ids / signals that led here. */
+    readonly reportChain?: ReadonlyArray<string>;
+    /** ISO timestamps of the relevant events. */
+    readonly timestamps?: Record<string, string>;
+}
+/**
+ * M7 — preserve illegal-content evidence to a WORM store and, on case closure,
+ * release the hold. skybber injects an `S3EvidencePreservationStore` (Object
+ * Lock + Legal Hold). Fail-safe default THROWS: a deployment MUST inject a real
+ * store before enabling any `ILLEGAL_*` category (plan 08 §5 fail-safe test).
+ */
+export interface EvidencePreservationStore {
+    preserve(bundle: EvidenceBundle): Promise<{
+        evidenceId: string;
+    }>;
+    /** Release the legal hold when the authority case closes. Audited. */
+    releaseHold(evidenceId: string, reason: string): Promise<void>;
+}
+/** The bundle handed to the authority channel. Refs, never bytes. */
+export interface AuthorityReportBundle {
+    readonly jurisdiction: string;
+    readonly evidenceId?: string;
+    readonly bundle: Record<string, unknown>;
+}
+/** The two channel outcomes. `manual` = the operator files it by hand. */
+export type AuthorityReportResult = {
+    readonly mode: "manual";
+    readonly instructionsKey: string;
+} | {
+    readonly mode: "api";
+    readonly receiptId: string;
+};
+/**
+ * M3 — submit an authority report through the deployment's channel. NEVER
+ * auto-submits from core routing: the operator confirms and files (a false
+ * positive to a federal police portal is not acceptable). Fail-safe default is
+ * a manual stub that records nothing and returns a placeholder instructions key
+ * — a real deployment injects `ManualBkaChannel` (which notifies the operator).
+ */
+export interface AuthorityReportChannel {
+    submit(report: AuthorityReportBundle): Promise<AuthorityReportResult>;
+}
+/** A consent-gated, lawful-content feedback record destined for the sink. */
+export interface ModerationFeedbackRecord {
+    readonly resourceType: string;
+    readonly resourceId: string;
+    readonly reporterUserId: string;
+    readonly description?: string;
+    readonly includeContent: boolean;
+    /**
+     * Deterministic idempotency key for (user, resource). The sink adapter keys
+     * its (per-user-prefixed) object name on this so N identical submits from one
+     * user collapse to ONE stored record (spec 07 §6.1 + the dedup test). Stable
+     * across retries; never contains raw content.
+     */
+    readonly dedupKey: string;
+    /**
+     * The server-re-derived block class. Defense-in-depth (plan 09 §6.5): the
+     * concrete sink adapter MUST refuse to write an `illegal-suspected` record —
+     * illegal content never lands in the analysis sink even if core mis-routes.
+     */
+    readonly blockClass: BlockClass;
+}
+/**
+ * plan 07 §4.2 — the write-only analysis sink for lawful-content false-positive
+ * submissions. skybber injects an `S3ModerationFeedbackSink`. Fail-safe default
+ * THROWS when un-injected: a submit path that silently no-ops would look like a
+ * successful capture while dropping the data.
+ */
+export interface ModerationFeedbackSink {
+    store(record: ModerationFeedbackRecord): Promise<void>;
+}
+/** Error thrown by an un-injected fail-safe seam. Lets wiring/tests assert. */
+export declare class ComplianceSeamNotConfiguredError extends Error {
+    constructor(seam: string);
+}
+export declare function setEvidencePreservationStore(store: EvidencePreservationStore): void;
+export declare function getEvidencePreservationStore(): EvidencePreservationStore;
+export declare function setAuthorityReportChannel(channel: AuthorityReportChannel): void;
+export declare function getAuthorityReportChannel(): AuthorityReportChannel;
+export declare function setModerationFeedbackSink(sink: ModerationFeedbackSink): void;
+export declare function getModerationFeedbackSink(): ModerationFeedbackSink;
+/** True when no real evidence store has been injected (still the throwing default). */
+export declare function isEvidencePreservationConfigured(): boolean;
+/** Test-only: clear all injected compliance seams so tests don't leak state. */
+export declare function __resetComplianceSeamsForTests(): void;
 
 // ===== lib/media/cross-check-provider.d.ts =====
 import { type ImageRef, type MediaModerationProvider, type ModerationCallOptions, type ModerationVerdict, type S3Ref, type VideoModerationStart } from "./moderation-provider.js";
@@ -5262,6 +5755,69 @@ export declare class RegionDetector {
 export declare function isValidRegion(region: string): region is Region;
 export declare function detectRegion(request: Request, env: Env, sessionManager?: SessionManager, session?: Session | null): Promise<Region>;
 export declare function detectRegionSync(request: Request, env: Env): Region;
+
+// ===== lib/report-operator-alert.d.ts =====
+import type { Env } from "../env.js";
+import type { RoutingClass } from "@prisma/client";
+/** The payload handed to the operator-alert hook. Opaque refs, no legal copy. */
+export interface OperatorAlert {
+    readonly reportId: string;
+    readonly routingClass: RoutingClass;
+    readonly categoryKey: string;
+    readonly resourceType: string;
+    readonly resourceId: string;
+}
+export type OperatorAlertHook = (alert: OperatorAlert, env: Env) => Promise<void>;
+/** RoutingClasses that trigger an immediate operator alert (M1 awareness clock). */
+export declare function routingClassAlertsOperator(routingClass: RoutingClass): boolean;
+/** Deployment injects a concrete operator-alert hook at startup. */
+export declare function setOperatorAlertHook(hook: OperatorAlertHook): void;
+/** Test-only: clear the injected hook. */
+export declare function __resetOperatorAlertHookForTests(): void;
+/** Returns the injected hook, or the fail-safe default. */
+export declare function getOperatorAlertHook(): OperatorAlertHook;
+
+// ===== lib/report-templates.d.ts =====
+/** Stable template keys. Values are the keys the deployment map is keyed by. */
+export declare const REPORT_TEMPLATE_KEYS: {
+    /** Art. 16(4) — receipt confirmation on report creation. */
+    readonly RECEIPT: "report.receipt";
+    /** Art. 16(5) — terminal outcome: the report was actioned. */
+    readonly DECISION_ACTIONED: "report.decision.actioned";
+    /** Art. 16(5) — terminal outcome: the report was rejected/closed no-action. */
+    readonly DECISION_REJECTED: "report.decision.rejected";
+    /**
+     * Art. 16(5) — the redress information that must accompany a decision
+     * ("information on the possibilities for redress"). Kept a SEPARATE key from
+     * the two decision notices because the redress routes are identical whatever
+     * the outcome, and because it is the part counsel is most likely to redline
+     * on its own.
+     */
+    readonly REDRESS: "report.redress";
+};
+export type ReportTemplateKey = (typeof REPORT_TEMPLATE_KEYS)[keyof typeof REPORT_TEMPLATE_KEYS];
+/** A single localized template. `body` may contain `{param}` placeholders. */
+export interface ReportTemplate {
+    readonly title: string;
+    readonly body: string;
+}
+/** Deployment-supplied template map, keyed by template key. */
+export type ReportTemplateMap = Readonly<Record<string, ReportTemplate>>;
+/**
+ * Consuming app injects localized, counsel-approved templates at startup (via
+ * registerComplianceProfile). Keys not present in the injected map fall back to
+ * the neutral core copy — so a partial deployment map never yields an empty
+ * notification.
+ */
+export declare function setReportTemplates(templates: ReportTemplateMap): void;
+/** Test-only: clear injected templates so tests don't leak across cases. */
+export declare function __resetReportTemplatesForTests(): void;
+/**
+ * Resolve a template by key and fill its `{param}` placeholders. Prefers the
+ * injected deployment template; falls back to the neutral core copy. Throws only
+ * if a key has neither an injected nor a fallback template (a programming error).
+ */
+export declare function resolveReportTemplate(key: ReportTemplateKey, params?: Record<string, string>): ReportTemplate;
 
 // ===== lib/request-context.d.ts =====
 /**
