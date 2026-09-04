@@ -475,14 +475,21 @@ export interface ExtensionContext<TModels extends ExtensionModelMap = OpenScoped
      * and should be declared in {@link TrellisExtension.events} together with
      * the payload schema, so a subscriber can be written against it later.
      *
-     * **Optional in this version.** The property is declared here so extension
-     * code can be written against it, but core does not supply it yet — call it
-     * as `ctx.events?.emit(...)` until the release notes say otherwise. It is
-     * optional rather than required because making it required would break
-     * every existing constructor of an `ExtensionContext`, and this addition is
-     * additive by contract.
+     * **Supplied by core, always.** Declared optional when the contract first
+     * landed, on the assumption that requiring it would break every existing
+     * constructor of an `ExtensionContext`; it does not, because core is the
+     * only real constructor — every other one in this repo and in the first
+     * consuming vertical is a test double behind an `as unknown as` cast, which
+     * a required member does not touch. Requiring it is what makes
+     * `ctx.events.emit(...)` (not `ctx.events?.emit(...)`) correct at the call
+     * site, so an extension author never has to reason about whether the seam
+     * is there.
+     *
+     * The emitter is bound to the tenant core resolved for the caller. There is
+     * no tenant parameter here on purpose: an extension has no way to name a
+     * tenant, so it cannot emit into one it does not act for.
      */
-    events?: ExtensionEventEmitter;
+    events: ExtensionEventEmitter;
 }
 /**
  * The emission half of the event seam — see {@link ExtensionContext.events}.
