@@ -31,6 +31,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { MemoryKvStore } from "@de-otio/saas-foundation/kv";
 import { runNightlyCron } from "../../../src/lib/workers/nightly-cron.js";
+import { evidenceHoldExemptWhere } from "../../../src/lib/compliance/restrict-content.js";
 import { makeKvCronLock } from "../../../src/lib/workers/cron-lock.js";
 import { noopMetrics } from "../../../src/lib/workers/metrics-port.js";
 import type { Logger } from "../../../src/lib/logger.js";
@@ -200,5 +201,17 @@ describe("nightly purge — a row outlives a failed object delete", () => {
     const { db } = await run([], async () => {});
     const where = db.mediaFile.findMany.mock.calls[0][0].where;
     expect(where.deletedAt.lte.getTime()).toBe(NOW - 7 * DAY);
+  });
+
+  it("excludes content under a live evidence hold (compliance plan 08 §2.3)", async () => {
+    // The guard has to sit on THIS query. Main split the cron into a thin
+    // Lambda entrypoint plus this worker; the compliance branch had patched the
+    // pre-split file, so a naive merge would have left the real purge
+    // unguarded and hard-deleted originals while an authority case was open.
+    const { db } = await run([], async () => {});
+    const where = db.mediaFile.findMany.mock.calls[0][0].where;
+    expect(where.evidenceHold).toBe(false);
+    // Same predicate the account-deletion cascade and the orphan purge use.
+    expect(where).toMatchObject(evidenceHoldExemptWhere());
   });
 });
