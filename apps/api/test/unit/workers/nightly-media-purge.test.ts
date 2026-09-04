@@ -48,6 +48,7 @@ interface Row {
   originalKey: string | null;
   thumbnailKey: string | null;
   optimizedKey: string | null;
+  c2paSidecarKey: string | null;
 }
 
 /** A soft-deleted row well past the 7-day window, with `n` distinct keys. */
@@ -57,6 +58,7 @@ function row(id: string, ...keys: (string | null)[]): Row {
     originalKey: keys[0] ?? null,
     thumbnailKey: keys[1] ?? null,
     optimizedKey: keys[2] ?? null,
+    c2paSidecarKey: keys[3] ?? null,
   };
 }
 
@@ -200,5 +202,51 @@ describe("nightly purge — a row outlives a failed object delete", () => {
     const { db } = await run([], async () => {});
     const where = db.mediaFile.findMany.mock.calls[0][0].where;
     expect(where.deletedAt.lte.getTime()).toBe(NOW - 7 * DAY);
+  });
+});
+
+describe("nightly purge — the C2PA manifest sidecar", () => {
+  // A kept manifest is MORE identifying than the pixels it describes: camera
+  // model and serial number, capture times, edit history, often an identity
+  // claim. An erasure that reclaimed the image and left the sidecar would
+  // delete the least sensitive half of the upload. GDPR Art. 17 routes through
+  // this purge (user-media-erasure.ts soft-deletes; this is what reclaims the
+  // bytes), so it is the one place the sidecar MUST be covered.
+
+  it("selects the sidecar key, so the purge can even see it", async () => {
+    const { db } = await run([], async () => {});
+    const select = db.mediaFile.findMany.mock.calls[0][0].select;
+    expect(select.c2paSidecarKey).toBe(true);
+  });
+
+  it("deletes the sidecar alongside the media object", async () => {
+    const { spy } = await run(
+      [row("m1", "cas/t/a", null, null, "cas/t/a.c2pa")],
+      async () => {},
+    );
+    const keys = spy.mock.calls.flatMap((c: any[]) => [...c[0]]);
+    expect(keys).toContain("cas/t/a.c2pa");
+    expect(keys).toContain("cas/t/a");
+  });
+
+  it("does NOT hard-delete the row when only the sidecar delete failed", async () => {
+    // The row is the only record of the sidecar's key. Dropping it here would
+    // strand the manifest permanently, with nothing left to derive the key
+    // from — the exact failure this suite exists to prevent, applied to the
+    // most sensitive object of the set.
+    const { db } = await run(
+      [row("m1", "cas/t/a", null, null, "cas/t/a.c2pa")],
+      async (keys) => {
+        if (keys.includes("cas/t/a.c2pa")) throw new Error("boom");
+      },
+    );
+    expect(hardDeleted(db)).toEqual([]);
+  });
+
+  it("purges normally for a row that never carried a manifest", async () => {
+    const { db, spy } = await run([row("m1", "cas/t/a")], async () => {});
+    const keys = spy.mock.calls.flatMap((c: any[]) => [...c[0]]);
+    expect(keys).toEqual(["cas/t/a"]);
+    expect(hardDeleted(db)).toEqual(["m1"]);
   });
 });
