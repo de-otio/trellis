@@ -8,13 +8,25 @@
 -- authorization-server work exists, so nothing writes one), so there is nothing
 -- to lock out and CONCURRENTLY buys nothing.
 
+-- House style (M7b / plan 031 C1): timeout prologue so a lock queue fails fast
+-- instead of stalling the app; robust (re-runnable) statements throughout. The
+-- table is small and holds no rows of this purpose, but the ADD COLUMNs still
+-- take ACCESS EXCLUSIVE on the whole table, which does hold cross-region rows.
+SET lock_timeout = '1s';
+SET statement_timeout = '5s';
+
 -- AlterTable
-ALTER TABLE "consent" ADD COLUMN "grantee_client_id" TEXT;
-ALTER TABLE "consent" ADD COLUMN "grantee_issuer"    TEXT;
-ALTER TABLE "consent" ADD COLUMN "granted_scopes"    TEXT[] NOT NULL DEFAULT '{}';
-ALTER TABLE "consent" ADD COLUMN "grant_profile"     TEXT;
-ALTER TABLE "consent" ADD COLUMN "subject_entity_id" TEXT;
-ALTER TABLE "consent" ADD COLUMN "expires_at"        TIMESTAMP(3);
+-- All nullable or constant-defaulted: a catalog-only change on PostgreSQL 11+,
+-- no table rewrite.
+ALTER TABLE "consent" ADD COLUMN IF NOT EXISTS "grantee_client_id" TEXT;
+ALTER TABLE "consent" ADD COLUMN IF NOT EXISTS "grantee_issuer"    TEXT;
+ALTER TABLE "consent" ADD COLUMN IF NOT EXISTS "granted_scopes"    TEXT[] NOT NULL DEFAULT '{}';
+ALTER TABLE "consent" ADD COLUMN IF NOT EXISTS "grant_profile"     TEXT;
+ALTER TABLE "consent" ADD COLUMN IF NOT EXISTS "subject_entity_id" TEXT;
+-- TIMESTAMP(3), not timestamptz: this is what Prisma's `DateTime` maps to and
+-- what every other datetime column in this schema is. A timestamptz here would
+-- be permanent schema drift for one column's sake.
+ALTER TABLE "consent" ADD COLUMN IF NOT EXISTS "expires_at"        TIMESTAMP(3);
 
 -- The shape invariant lives where the evidence lives, not only at a Zod
 -- boundary nothing calls yet: a sharing row without a verified grantee, its
@@ -22,14 +34,21 @@ ALTER TABLE "consent" ADD COLUMN "expires_at"        TIMESTAMP(3);
 -- expiry in particular is the eternal sharing grant this design rules out.
 -- NOT VALID + VALIDATE keeps squawk quiet and skips an ACCESS EXCLUSIVE full
 -- scan; with zero rows of this purpose the validation is instant either way.
-ALTER TABLE "consent" ADD CONSTRAINT "consent_third_party_sharing_shape_check"
-  CHECK (
-    "purpose" <> 'THIRD_PARTY_DATA_SHARING'
-    OR ("grantee_client_id" IS NOT NULL
-        AND "grantee_issuer" IS NOT NULL
-        AND cardinality("granted_scopes") > 0
-        AND "expires_at" IS NOT NULL)
-  ) NOT VALID;
+-- ALTER TABLE ... ADD CONSTRAINT has no IF NOT EXISTS; the duplicate_object
+-- guard makes the file re-runnable, mirroring the CREATE TYPE guard in
+-- 20260823150000.
+DO $$ BEGIN
+  ALTER TABLE "consent" ADD CONSTRAINT "consent_third_party_sharing_shape_check"
+    CHECK (
+      "purpose" <> 'THIRD_PARTY_DATA_SHARING'
+      OR ("grantee_client_id" IS NOT NULL
+          AND "grantee_issuer" IS NOT NULL
+          AND cardinality("granted_scopes") > 0
+          AND "expires_at" IS NOT NULL)
+    ) NOT VALID;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
 ALTER TABLE "consent" VALIDATE CONSTRAINT "consent_third_party_sharing_shape_check";
 
 -- One ACTIVE sharing decision per (user, external client, resource). Scopes are
