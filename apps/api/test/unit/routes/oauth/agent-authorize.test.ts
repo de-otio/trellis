@@ -67,9 +67,17 @@ vi.mock("../../../../src/lib/oauth/device-authorization", async () => {
   };
 });
 
-vi.mock("../../../../src/lib/oauth/refresh-detection", () => ({
-  recordAgentSession: (...a: unknown[]) => mockRecordAgentSession(...a),
-}));
+vi.mock("../../../../src/lib/oauth/refresh-detection", async () => {
+  // Only the persistence call is stubbed — the jti derivation and the token
+  // hash are the behaviour under test and must stay real.
+  const actual = await vi.importActual<
+    typeof import("../../../../src/lib/oauth/refresh-detection.js")
+  >("../../../../src/lib/oauth/refresh-detection");
+  return {
+    ...actual,
+    recordAgentSession: (...a: unknown[]) => mockRecordAgentSession(...a),
+  };
+});
 
 vi.mock("../../../../src/db", () => ({
   createPrisma: () => ({
@@ -91,6 +99,9 @@ const ENV = {
   COGNITO_USER_POOL_ID: "us-east-1_pool",
   COGNITO_AGENT_CLIENT_ID: "agent-client",
   AGENT_VERIFICATION_URI_BASE: "https://example.com/agents/authorize",
+  // D.2 — the refresh-jti HMAC sub-key is derived from this. Required at boot
+  // in every real deployment.
+  SESSION_SECRET: "test-secret-key-32-characters-long!!",
   RATE_LIMIT_KV: undefined,
 } as unknown as Env;
 
@@ -441,9 +452,53 @@ describe("POST /agents/authorize/approve", () => {
     const issuerCall = mockIssueForAgent.mock.calls[0]![0] as { username: string };
     expect(issuerCall.username).toBe("cognito-sub-admin");
     const recordCall = mockRecordAgentSession.mock.calls[0]![0] as {
-      session: { sub: string };
+      session: { sub: string; currentJti: string; accessTokenHash?: string };
+      refreshToken: string;
+      masterSecret: string;
     };
     expect(recordCall.session.sub).toBe("cognito-sub-admin");
+
+    // D.2 — the jti written is a function of the refresh token that was
+    // actually issued, not `randomBytes(16)`.
+    const { deriveRefreshJti, hashSessionToken } = await import(
+      "../../../../src/lib/oauth/refresh-detection.js"
+    );
+    expect(recordCall.refreshToken).toBe("RT");
+    expect(recordCall.session.currentJti).toBe(
+      deriveRefreshJti("RT", "test-secret-key-32-characters-long!!"),
+    );
+    // ...and the persistence call gets the token itself, so it can assert the
+    // two agree rather than trusting the caller.
+    expect(recordCall.masterSecret).toBe("test-secret-key-32-characters-long!!");
+
+    // D.1 — the access token this session will present is pinned by hash, so
+    // revoking the session can blocklist exactly it.
+    expect(recordCall.session.accessTokenHash).toBe(hashSessionToken("AT"));
+  });
+
+  it("D.2: refuses to approve when no master secret is configured", async () => {
+    mockGetSession.mockResolvedValue(ADMIN_SESSION);
+    mockLookupDeviceCodeByUserCode.mockResolvedValue("dc-good");
+    const original = await import("../../../../src/lib/oauth/device-authorization.js");
+    const matchingHash = original.hashUserCode(original.normaliseUserCode("BCDF-GHJK"));
+    mockLoadByDeviceCode.mockResolvedValue({
+      deviceCode: "dc-good",
+      userCodeHash: matchingHash,
+      status: "pending",
+      expiresAt: Math.floor(Date.now() / 1000) + 600,
+      createdAt: Math.floor(Date.now() / 1000),
+      interval: 5,
+      failedLookups: 0,
+    });
+
+    const { route, request } = makeApprove();
+    const response = await route.handler(
+      request,
+      { ...ENV, SESSION_SECRET: undefined } as unknown as Env,
+      { url: new URL(request.url), pathname: "/agents/authorize/approve", params: {} },
+    );
+    expect(response.status).toBe(503);
+    expect(mockRecordAgentSession).not.toHaveBeenCalled();
   });
 
   it("returns 404 when user_code does not resolve", async () => {
