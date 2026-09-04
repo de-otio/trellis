@@ -61,6 +61,7 @@
     "prisma:migrate:deploy": "prisma migrate deploy",
     "seed:feature-toggles": "tsx scripts/seed-feature-toggles.ts",
     "seed:platform-categories": "tsx scripts/seed-platform-categories.ts",
+    "seed:report-categories": "tsx scripts/seed-report-categories.ts",
     "openapi:snapshot": "tsx scripts/check-openapi-additivity.mjs update",
     "openapi:check": "tsx scripts/check-openapi-additivity.mjs check",
     "api-snapshot:update": "node scripts/update-api-snapshot.mjs",

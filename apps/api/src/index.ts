@@ -177,6 +177,74 @@ export type { ModerationCompletionEnvelope } from "./lib/media/completion-envelo
 // deploys hold text for review and never auto-approve). Gates post/comment
 // create + edit text.
 export { setTextModerationProvider } from "./lib/media/request-text-moderation.js";
+// Compliance seams (plan 08 §2.5 / plan 07 §4.2) — a consuming app injects
+// concrete adapters (S3 WORM evidence store, manual BKA channel, S3 analysis
+// sink) before enabling any ILLEGAL_* report category. Fail-safe defaults throw
+// (evidence + sink) or return a manual no-op (authority channel). Lane A ships
+// the interface stubs; Lane A2 wires the enforcement flow to them.
+export {
+  setEvidencePreservationStore,
+  setAuthorityReportChannel,
+  setModerationFeedbackSink,
+} from "./lib/media/compliance-seams.js";
+export type {
+  EvidencePreservationStore,
+  AuthorityReportChannel,
+  ModerationFeedbackSink,
+  EvidenceBundle,
+  AuthorityReportBundle,
+  AuthorityReportResult,
+  ModerationFeedbackRecord,
+  BlockClass,
+} from "./lib/media/compliance-seams.js";
+// Reporter-notification templates (plan 08 §2.2 §3.3) — deployment injects
+// localized, counsel-approved Art. 16(4)/(5) copy; core ships a neutral fallback.
+export {
+  setReportTemplates,
+  REPORT_TEMPLATE_KEYS,
+} from "./lib/report-templates.js";
+export type { ReportTemplate, ReportTemplateMap } from "./lib/report-templates.js";
+// Operator-alert hook (plan 08 §2.2) — ILLEGAL_* reports alert the operator;
+// the deployment can inject a richer hook (default emails MODERATOR_EMAILS).
+export {
+  setOperatorAlertHook,
+} from "./lib/report-operator-alert.js";
+export type {
+  OperatorAlert,
+  OperatorAlertHook,
+} from "./lib/report-operator-alert.js";
+// Compliance enforcement (plan 08 Phase 2 / spec 07 §4 — Lane A2).
+// - `restrictContent` orchestrates takedown (hide → preserve → statement → audit).
+// - The deployment injects the affected-user statement delivery transport and an
+//   alarm hook for repeated evidence-preservation failure.
+// - `ILLEGAL_SUSPECTED_LABEL` is the reserved, provider-neutral token a
+//   deployment's moderation adapter emits to signal the illegal-suspected class.
+// - Authority-report lifecycle: created `pending` (NEVER auto-submitted);
+//   operator confirms `submitted`; `closed` releases the evidence hold.
+export {
+  restrictContent,
+  evidenceHoldExemptWhere,
+  setComplianceAlarmHook,
+} from "./lib/compliance/restrict-content.js";
+export type {
+  RestrictContentRef,
+  RestrictContentOpts,
+  RestrictContentResult,
+  ComplianceAlarm,
+  ComplianceAlarmHook,
+} from "./lib/compliance/restrict-content.js";
+export { setStatementDelivery } from "./lib/compliance/statement-of-reasons.js";
+export type { StatementDelivery } from "./lib/compliance/statement-of-reasons.js";
+export {
+  ILLEGAL_SUSPECTED_LABEL,
+  deriveBlockClass,
+  isAppealable,
+} from "./lib/compliance/block-class.js";
+export {
+  createPendingAuthorityReport,
+  markAuthorityReportSubmitted,
+  markAuthorityReportClosed,
+} from "./lib/compliance/authority-report.js";
 // Agent-surface content seam (plan 034): a consuming app supplies its own
 // GET /llms.txt and GET /security.txt bodies via `Env.agentSurface` (the
 // AGENT_SURFACE_LLMS_TXT / AGENT_SURFACE_SECURITY_TXT env vars, the same

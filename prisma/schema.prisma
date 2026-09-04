@@ -152,9 +152,27 @@ enum SignupMethod {
 // Surveillance-hardening Phase 0 (E3): discriminator for the generalized Report
 // model. LINK reports exist today (folded in from LinkReport, P4); ACCOUNT
 // reports are Phase 1 (just a new reportType, not a new subsystem).
+//
+// CONTENT (compliance plan 08 Phase 1) is a STRUCTURAL, not semantic, value:
+// it marks a report that targets user content (post/comment/media/entity) and
+// carries a `categoryKey` into the data-driven `ReportCategory` vocabulary. The
+// core routes on the category's `routingClass`, never on this discriminator —
+// so CONTENT stays jurisdiction-neutral (no German law, no domain categories).
 enum ReportType {
   LINK
   ACCOUNT
+  CONTENT
+}
+
+// Compliance plan 08 §2.1 — the ONLY thing core routing keys off. A deployment
+// (e.g. skybber → Germany) seeds concrete `ReportCategory` rows and maps each to
+// one of these classes; core never learns what a given category *means*, only
+// how to route it. Jurisdiction-neutral by construction.
+enum RoutingClass {
+  ILLEGAL_PRIORITY // suspected crime, authority-report candidate
+  ILLEGAL // unlawful content, takedown + possible authority report
+  POLICY_VIOLATION // ToS breach, takedown path
+  FEEDBACK // routes to the analysis sink (plan 07), no takedown
 }
 
 // Role metadata for UI display and documentation
@@ -838,6 +856,21 @@ model MediaFile {
   deletedAt DateTime? @map("deleted_at") // Permanent deletion timestamp
   hiddenAt  DateTime? @map("hidden_at") // When media was hidden
   hiddenBy  String?   @map("hidden_by") // User ID who hid the media
+
+  // Compliance (plan 08 Phase 2 / spec 07 §4.3) — SERVER-ONLY moderation
+  // enrichment. `blockClass` is the internal block class
+  // ("lawful-flagged" | "illegal-suspected"); it NEVER leaves the domain (not in
+  // ModerationResolvedPayload, not in any client response — the owner-scoped
+  // disposition read exposes only a coarse `appealable` bit derived from it).
+  // Nullable: set by the moderation pipeline / carve-out path, absent otherwise.
+  blockClass String? @map("block_class")
+  // `evidenceHold` marks content under a live legal/evidence hold (plan 08 §2.3
+  // item 5). The hard-delete GC purge and the account-deletion cascade MUST skip
+  // rows with a live hold so the original is never destroyed while a case is
+  // open. `evidenceId` references the WORM store copy (opaque handle; the bytes
+  // live outside the DB).
+  evidenceHold Boolean @default(false) @map("evidence_hold")
+  evidenceId   String? @map("evidence_id")
 
   // (T14/AR4: the former uploadStatus String column is consolidated into
   // `lifecycle` above. AR10 prune history: the never-read reconciliation
@@ -1884,11 +1917,23 @@ model InteractionEvent {
 model Report {
   id             String     @id @default(cuid())
   reportType     ReportType @map("report_type")
-  resourceType   String     @map("resource_type") // "url" (LINK) | "user" (ACCOUNT)
+  // Validated set (compliance plan 08 §2.1): "url" (LINK), "user" (ACCOUNT), and
+  // — added for CONTENT reports — "post" | "comment" | "media" | "entity". Kept a
+  // plain String (no enum migration); the allowed set is enforced at the Zod
+  // boundary in the report route.
+  resourceType   String     @map("resource_type")
   resourceId     String     @map("resource_id") // opaque; no FK by design
   reporterUserId String     @map("reporter_user_id")
+  // Compliance plan 08 §2.1 — the data-driven category for CONTENT reports.
+  // Nullable + back-compat: LINK/ACCOUNT reports leave it null. FK to the
+  // deployment-seeded `ReportCategory`; core routes on `category.routingClass`.
+  categoryKey    String?    @map("category_key")
   reason         String? // free-text; P4 enforces a 1000-char Zod bound at the boundary
-  status         String     @default("pending") // pending | reviewed | resolved
+  // Free-string lifecycle. Legacy LINK values: pending | reviewed | resolved.
+  // Compliance plan 08 §2.2 CONTENT lifecycle: pending -> acknowledged ->
+  // decided (with `resolution` = "actioned" | "rejected"). Documented, not
+  // enum-migrated, so existing rows/flows are untouched.
+  status         String     @default("pending")
   // LINK-report registrable domain (P4 fold-in of LinkReport). Indexed +
   // queried hot by DomainReputationService (auto-block threshold counts by
   // domain). Nullable: ACCOUNT reports have no domain.
@@ -1898,13 +1943,84 @@ model Report {
   resolution     String? // Phase 1 moderator queue
   createdAt      DateTime   @default(now()) @map("created_at")
 
-  reporter User @relation("ReportReporter", fields: [reporterUserId], references: [id], onDelete: Cascade)
+  reporter User            @relation("ReportReporter", fields: [reporterUserId], references: [id], onDelete: Cascade)
+  category ReportCategory? @relation(fields: [categoryKey], references: [key])
 
   @@index([reportType, status])
   @@index([resourceType, resourceId])
   @@index([reporterUserId])
   @@index([domain])
+  @@index([categoryKey])
+  // Dedup hot path (plan 08 §2.2): one open report per reporter+resource+category.
+  @@index([reporterUserId, resourceType, resourceId, categoryKey, status])
   @@map("reports")
+}
+
+// Compliance plan 08 §2.1 — data-driven report categories. Replaces "extend the
+// ReportType enum": baking CSAM/cruelty/etc. into the public core would hardcode
+// one country's law and one domain's concerns into a jurisdiction-neutral,
+// AGPL-published package. Instead the deployment SEEDS its categories
+// (`seed:report-categories`) and manages them via `report-category-admin`.
+//
+// `labels` is deployment-supplied localized display text (e.g.
+// { "en": "...", "de": "..." }); core never reads it for routing. `routingClass`
+// is the sole semantic core acts on.
+model ReportCategory {
+  key          String       @id // "csam", "animal-cruelty", "harassment", … (deployment vocabulary)
+  routingClass RoutingClass @map("routing_class")
+  labels       Json // localized display names, deployment-supplied
+  active       Boolean      @default(true)
+  sortOrder    Int          @default(0) @map("sort_order")
+  createdAt    DateTime     @default(now()) @map("created_at")
+  updatedAt    DateTime     @updatedAt @map("updated_at")
+
+  reports Report[]
+
+  @@index([active, sortOrder])
+  @@map("report_categories")
+}
+
+// Statement of reasons (compliance plan 08 §2.4 — DSA Art. 17, jurisdiction-
+// neutral). Written by `restrictContent` for every restriction. The `params`
+// carry ONLY template parameters — NEVER raw classifier output, labels, or
+// confidence (spec 07 anti-oracle + plan 08 §5). Core stores + (unless
+// suppressed) delivers; the human-readable text comes from deployment-supplied,
+// counsel-approved templates keyed by `templateKey`.
+model StatementOfReasons {
+  id             String   @id @default(cuid())
+  affectedUserId String   @map("affected_user_id")
+  resourceType   String   @map("resource_type")
+  resourceId     String   @map("resource_id")
+  restriction    String // "removed" | "hidden" | "account-suspended" …
+  templateKey    String   @map("template_key") // deployment-supplied localized template
+  params         Json? // template params ONLY — never raw classifier output
+  suppressed     Boolean  @default(false) // non-tip-off carve-out: written, not delivered
+  suppressReason String?  @map("suppress_reason") // audited non-tip-off grounds
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@index([affectedUserId])
+  @@map("statements_of_reasons")
+}
+
+// Authority-report tracking (compliance plan 08 §2.6 — M3, channel-agnostic).
+// Created when the pipeline sets blockClass=illegal-suspected or an operator
+// confirms an ILLEGAL_PRIORITY report. NEVER auto-submitted: an operator
+// confirms and files (a false positive to a federal-police portal is not
+// acceptable). `jurisdiction` is a deployment-profile value; `bundle` holds the
+// Art.-18 info bundle as REFS, never bytes. Closing releases the evidence hold.
+model AuthorityReport {
+  id           String    @id @default(cuid())
+  jurisdiction String // deployment profile value, e.g. "DE"
+  status       String    @default("pending") // pending | submitted | closed
+  channelMode  String?   @map("channel_mode") // "manual" | "api"
+  evidenceId   String?   @map("evidence_id")
+  bundle       Json // the Art.-18 info bundle (refs, not bytes)
+  submittedAt  DateTime? @map("submitted_at")
+  closedAt     DateTime? @map("closed_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  @@index([status])
+  @@map("authority_reports")
 }
 
 // ============================================================================

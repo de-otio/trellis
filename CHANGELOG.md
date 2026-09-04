@@ -100,6 +100,60 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ### Added
 
+- **Content reports — the Art. 16 notice-and-action path (`reportType:
+  "CONTENT"`).** A reporter picks from a data-driven category vocabulary
+  (`GET /api/report-categories` returns the ACTIVE `ReportCategory` rows a
+  deployment seeds; core routes only on each category's `RoutingClass` —
+  `ILLEGAL_PRIORITY` / `ILLEGAL` / `POLICY_VIOLATION` / `FEEDBACK` — and never
+  learns what a category means) and files against a post, comment, media item,
+  entity, user or URL with `POST /api/reports` (authenticated, rate-limited, one
+  open report per reporter × resource × category). Filing sends the Art. 16(4)
+  receipt and, for the `ILLEGAL_*` classes, alerts the operator.
+  `GET /api/reports/mine` lists the reporter's own notices; `GET /api/reports/:id`
+  is the status poll — the receipt, the Art. 16(5) decision, the statement of
+  reasons (suppressed ones excluded) and the redress information — and 404s for
+  anyone else's report.
+
+  Review runs on a surface separate from the LINK queue, because the two run
+  different state machines: `GET /api/admin/content-reports` (SUPER_ADMIN;
+  oldest first; filter by status, category and routing class; cursor-paged) and
+  `POST /api/admin/content-reports/:id/decision`, which drives
+  `pending → acknowledged → decided` with a resolution of `actioned` or
+  `rejected`. The terminal transition is what sends the reporter their decision
+  notice. Existing LINK and ACCOUNT reports are untouched.
+
+  A category routing to `ILLEGAL_PRIORITY` does not wait for a human before its
+  first protective steps. Intake hides the resource, preserves the original
+  under an evidence hold through the injected `EvidencePreservationStore`,
+  writes a *suppressed* statement of reasons (the audit record exists; delivery
+  to the affected user is skipped), marks media `illegal-suspected` so it is
+  never offered the appeal path, and creates a `pending` authority report. It
+  deliberately submits nothing to any authority — filing stays human-gated
+  (`markAuthorityReportSubmitted`); an unreviewed accusation that auto-filed
+  would be a worse failure than a delayed one, and a denial-of-service vector.
+
+  The hold is honoured where it matters: the nightly hard-delete of
+  soft-deleted media spreads `evidenceHoldExemptWhere()` into its query, so an
+  original under a live evidence hold is never purged while the case is open.
+
+  Seams a consuming app injects before enabling any `ILLEGAL_*` category:
+  `setEvidencePreservationStore`, `setAuthorityReportChannel`,
+  `setModerationFeedbackSink`, `setStatementDelivery`, `setComplianceAlarmHook`,
+  `setOperatorAlertHook`, and `setReportTemplates` for the localized,
+  counsel-approved reporter copy. Core ships neutral fallbacks and fail-safe
+  defaults (the evidence store and the feedback sink throw until configured;
+  the authority channel is a manual no-op).
+
+  Schema, all additive: `20260904090000_compliance_report_categories` (the
+  `RoutingClass` enum, the `CONTENT` value, `reports.category_key`,
+  `report_categories`) and `20260904090100_compliance_enforcement_sor_authority`
+  (`media_files.block_class` / `evidence_hold` / `evidence_id`,
+  `statements_of_reasons`, `authority_reports`). The two indexes on the
+  pre-existing `reports` table are built `CONCURRENTLY` in their own files
+  (`…090010`, `…090020`), and every file follows the squawk house style —
+  timeout prologue, re-runnable statements, the foreign key added `NOT VALID`
+  and validated separately.
+
 - **`@de-otio/trellis-extension-api` 0.10.0 — the scoped-surface contract, and
   the code that reads it.** An extension written against `0.9.2` compiles and
   behaves identically: every field this bump adds is optional and defaults to

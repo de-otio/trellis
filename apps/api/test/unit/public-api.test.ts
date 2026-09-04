@@ -21,6 +21,26 @@ const EXPECTED_EXPORTS = [
   "setRealtimeProvider",
   "setTextModerationProvider",
   "startServer",
+  // Compliance seams + reporter-notification wiring (plan 08 §2.5 / §2.2).
+  // Type-only exports don't appear as runtime keys; only these value exports do.
+  "setEvidencePreservationStore",
+  "setAuthorityReportChannel",
+  "setModerationFeedbackSink",
+  "setReportTemplates",
+  "REPORT_TEMPLATE_KEYS",
+  "setOperatorAlertHook",
+  // Compliance enforcement (plan 08 Phase 2 / spec 07 §4 — Lane A2). Value
+  // exports only; the accompanying type exports are erased at runtime.
+  "restrictContent",
+  "evidenceHoldExemptWhere",
+  "setComplianceAlarmHook",
+  "setStatementDelivery",
+  "ILLEGAL_SUSPECTED_LABEL",
+  "deriveBlockClass",
+  "isAppealable",
+  "createPendingAuthorityReport",
+  "markAuthorityReportSubmitted",
+  "markAuthorityReportClosed",
   // Lifecycle: releasing core's process-wide pools is a supported operation,
   // so it has a supported name. Without it a consumer booting the server
   // in-process had to import dist/lib/… to tear down.
@@ -111,6 +131,15 @@ describe("public API surface (@de-otio/trellis)", () => {
 
   it("exposes the push-transport injection hook as a callable (T8)", () => {
     expect(typeof publicApi.setPushTransportProvider).toBe("function");
+  });
+
+  it("exposes the compliance-seam injection hooks as callables (plan 08 §2.5)", () => {
+    expect(typeof publicApi.setEvidencePreservationStore).toBe("function");
+    expect(typeof publicApi.setAuthorityReportChannel).toBe("function");
+    expect(typeof publicApi.setModerationFeedbackSink).toBe("function");
+    expect(typeof publicApi.setReportTemplates).toBe("function");
+    expect(typeof publicApi.setOperatorAlertHook).toBe("function");
+    expect(typeof publicApi.REPORT_TEMPLATE_KEYS).toBe("object");
   });
 
   it("exposes shutdown as a callable, and it resolves rather than throwing", async () => {

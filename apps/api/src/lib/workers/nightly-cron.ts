@@ -77,13 +77,20 @@ export async function runNightlyCron(
         const deletionCutoff = new Date(ctx.clock());
         deletionCutoff.setDate(deletionCutoff.getDate() - 7);
 
+        // Evidence-hold guard (compliance plan 08 §2.3 item 5): never
+        // hard-delete an original that is under a live evidence/legal hold —
+        // the case is open. The exempt predicate is the single source of truth
+        // in compliance/restrict-content.ts.
+        const { evidenceHoldExemptWhere } = await import(
+          "../compliance/restrict-content.js"
+        );
         // c2paSidecarKey belongs in this select for the same reason the other
         // three do: it names bytes derived from the user's original upload, and
         // a manifest is MORE personal than the pixels (camera serial numbers,
         // capture times, an identity claim). An erasure that left it behind
         // would leave the most identifying part of the file in the store.
         const mediaToDelete = await db.mediaFile.findMany({
-          where: { deletedAt: { lte: deletionCutoff } },
+          where: { deletedAt: { lte: deletionCutoff }, ...evidenceHoldExemptWhere() },
           select: {
             id: true,
             originalKey: true,

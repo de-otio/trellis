@@ -74,6 +74,10 @@ import { healthRoutes } from "./health.js";
 import { internaldocsRoutes } from "./internal-docs.js";
 import { invitationsRoutes } from "./invitations.js";
 import { linkReportRoutes } from "./link-reports.js";
+import { reportRoutes } from "./reports.js";
+import { reportCategoryAdminRoutes } from "./report-category-admin.js";
+import { contentReportAdminRoutes } from "./content-report-admin.js";
+import { moderationFeedbackRoutes } from "./moderation-feedback.js";
 import { mapRoutes } from "./map.js";
 import { mediaRoutes } from "./media.js";
 import { mediaReviewRoutes } from "./media-review.js";
@@ -342,6 +346,19 @@ const coreRoutes: Route[] = [
 
   // Link Reports
   ...linkReportRoutes,
+
+  // Content reports (compliance plan 08 §2.2 — Art. 16 notice path)
+  ...reportRoutes,
+
+  // Report-category admin (SUPER_ADMIN-only, data-driven category vocabulary)
+  ...reportCategoryAdminRoutes,
+
+  // CONTENT-report review queue (SUPER_ADMIN-only; the LINK queue in admin.ts
+  // is deliberately separate — different state machine, different payload)
+  ...contentReportAdminRoutes,
+
+  // Moderation feedback + owner-scoped disposition (spec 07 §4 / plan 08 Phase 2)
+  ...moderationFeedbackRoutes,
 
   // Out Redirector (public endpoint, must be before 404 handler)
   ...outRoutes,

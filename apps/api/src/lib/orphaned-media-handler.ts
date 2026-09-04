@@ -381,6 +381,14 @@ export class OrphanedMediaHandler {
     const { withQueryTimeoutAndRetry, QueryTimeoutPresets } = await import(
       "./db-query-helper.js"
     );
+    // Evidence-hold guard (compliance plan 08 §2.3 item 5): this is the SAME
+    // 7-day `deletedAt` hard-delete purge as lambda/nightly-cron.ts step 1, so
+    // it must apply the SAME exemption — never destroy an original that is under
+    // a live evidence/legal hold while an authority case is open. The exempt
+    // predicate is the single source of truth in restrict-content.ts.
+    const { evidenceHoldExemptWhere } = await import(
+      "./compliance/restrict-content.js"
+    );
 
     try {
       // Calculate R2 deletion cutoff (7 days after soft delete)
@@ -413,6 +421,7 @@ export class OrphanedMediaHandler {
                 deletedAt: {
                   lte: deletionCutoff,
                 },
+                ...evidenceHoldExemptWhere(),
               },
               select: {
                 id: true,
@@ -491,6 +500,11 @@ export class OrphanedMediaHandler {
               db.mediaFile.deleteMany({
                 where: {
                   id: { in: mediaIds },
+                  // Re-assert the hold exemption atomically at delete time: a row
+                  // placed under an evidence hold between the SELECT above and this
+                  // DELETE must not be swept (mirrors the select-then-re-assert
+                  // pattern used by stale-media-reap).
+                  ...evidenceHoldExemptWhere(),
                 },
               }),
             {

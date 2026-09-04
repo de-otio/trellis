@@ -209,6 +209,18 @@ export const UNSCOPED_MODELS: ReadonlyMap<string, string> = new Map([
   // PlatformCategory: no tenantId column — a platform-global curated
   // taxonomy table, written only by platform admins and read everywhere.
   ["PlatformCategory", "global"],
+  // ReportCategory (compliance plan 08 §2.1): no tenantId column — a
+  // platform-global, deployment-seeded vocabulary written only by SUPER_ADMIN
+  // (report-category-admin) and read everywhere the report path routes. Global,
+  // exactly like PlatformCategory.
+  ["ReportCategory", "global"],
+  // StatementOfReasons (compliance plan 08 §2.4) + AuthorityReport (§2.6):
+  // compliance-enforcement records keyed by affectedUserId / evidenceId, not a
+  // tenant. No tenantId column; written by the takedown/authority core and read
+  // by the operator surface. Global-platform posture (like Report), never
+  // auto-scoped by tenant.
+  ["StatementOfReasons", "user"],
+  ["AuthorityReport", "global"],
   // TenantClassification / TenantDirectoryProfile: each carries
   // tenantId @unique (1:1 with Tenant). Classified as tenant-admin for
   // the same reasons as TenantDomain / TenantIdentityProvider: the

@@ -109,6 +109,29 @@ export const PLATFORM_CATEGORY_CREATED: AuditAction = "platform_category.created
 export const PLATFORM_CATEGORY_DEACTIVATED: AuditAction = "platform_category.deactivated";
 export const PLATFORM_CATEGORY_REPARENTED: AuditAction = "platform_category.reparented";
 
+// ── Report-category admin actions (compliance plan 08 §2.1) ────────────
+// SUPER_ADMIN mutations of the data-driven ReportCategory vocabulary that the
+// deployment seeds and core routes on (by routingClass only).
+export const REPORT_CATEGORY_CREATED: AuditAction = "report_category.created";
+export const REPORT_CATEGORY_UPDATED: AuditAction = "report_category.updated";
+export const REPORT_CATEGORY_DEACTIVATED: AuditAction = "report_category.deactivated";
+
+// ── Compliance enforcement actions (plan 08 Phase 2 / spec 07 §4) ─────
+// Lane A2 (enforcement). Every step of a takedown, evidence preservation,
+// statement-of-reasons issuance, and authority-report lifecycle writes one of
+// these. Jurisdiction-neutral: the audit row references opaque resource refs +
+// routing class, NEVER category labels, classifier output, or legal copy.
+export const CONTENT_RESTRICTED: AuditAction = "content.restricted";
+export const EVIDENCE_PRESERVED: AuditAction = "evidence.preserved";
+export const EVIDENCE_PRESERVE_FAILED: AuditAction = "evidence.preserve_failed";
+export const EVIDENCE_HOLD_RELEASED: AuditAction = "evidence.hold_released";
+export const STATEMENT_OF_REASONS_ISSUED: AuditAction = "statement_of_reasons.issued";
+export const AUTHORITY_REPORT_CREATED: AuditAction = "authority_report.created";
+export const AUTHORITY_REPORT_SUBMITTED: AuditAction = "authority_report.submitted";
+export const AUTHORITY_REPORT_CLOSED: AuditAction = "authority_report.closed";
+export const MODERATION_FEEDBACK_CAPTURED: AuditAction = "moderation_feedback.captured";
+export const MODERATION_FEEDBACK_ILLEGAL_ROUTED: AuditAction = "moderation_feedback.illegal_routed";
+
 // ── Media-moderation review-queue actions (T9) ────────────────────────
 // Every human moderator decision on a REVIEW/QUARANTINED media item writes
 // one of these. The audited moderator VIEW bypass writes MEDIA_MODERATION_VIEWED
