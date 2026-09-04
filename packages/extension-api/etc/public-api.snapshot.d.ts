@@ -488,6 +488,15 @@ export interface ExtensionContext<TModels extends ExtensionModelMap = OpenScoped
      * The emitter is bound to the tenant core resolved for the caller. There is
      * no tenant parameter here on purpose: an extension has no way to name a
      * tenant, so it cannot emit into one it does not act for.
+     *
+     * That binding is a property of the *call site* core builds the context
+     * from, not of this type, so it is stated as what it guarantees: a route
+     * handler (the seam extensions are written against) gets the tenant core
+     * verified for the request. Where core has no tenant to bind — a context
+     * built outside a request, before a tenant is known — `emit` **throws**
+     * rather than writing a row scoped to nothing. Fail-closed, loudly, is the
+     * posture; an event with no tenant is an event a dispatcher could not
+     * deliver.
      */
     events: ExtensionEventEmitter;
 }

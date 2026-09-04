@@ -33,7 +33,7 @@ import { SecurityHeaders } from "./security-headers.js";
 import { SessionManager, type Session } from "./session-cookie.js";
 import { getLogger, Logger } from "./logger.js";
 import { createExtensionContext } from "./extension-context.js";
-import { mintTenantId } from "./mint-tenant-id.js";
+import { mintTenantId, type TenantId as CoreTenantId } from "./mint-tenant-id.js";
 import { CUID_RE } from "./auth/cuid.js";
 import { requireScope, InsufficientScopeError } from "./auth/require.js";
 import { structuredError } from "./routes/errors.js";
@@ -55,14 +55,19 @@ import type { PrismaClient } from "@prisma/client";
  *
  * The raw id is CUID-validated then minted through the core-private
  * `mintTenantId(·, "session")`, so provenance is audited and the brand chain
- * stays core-only. Returns `undefined` when no tenant can be verified (e.g. a
- * legacy cookie whose user row is gone) — a typed, explicit absence, never a
- * throw.
+ * stays core-only. Returns the **core** `TenantId`: it feeds two consumers with
+ * different brands — `createExtensionContext`'s sixth parameter (core-branded,
+ * because the outbox writer demands it) and `ExtensionSession.tenantId`
+ * (extension-branded). Keeping the core brand here and casting once, at the
+ * `ExtensionSession` whitelist, keeps the crossing where the boundary is.
+ *
+ * Returns `undefined` when no tenant can be verified (e.g. a legacy cookie
+ * whose user row is gone) — a typed, explicit absence, never a throw.
  */
 async function resolveTenantId(
   session: Session,
   prisma: PrismaClient,
-): Promise<ExtensionTenantId | undefined> {
+): Promise<CoreTenantId | undefined> {
   let raw = session.activeTenantId; // (b) verified JWT claim
   if (!raw) {
     // (c) cookie-only fallback — server-authoritative personal tenant.
@@ -74,9 +79,10 @@ async function resolveTenantId(
   }
   if (raw && CUID_RE.test(raw)) {
     // Mint through core's private minter (foundation brand + audited
-    // provenance), then cast to the extension-api brand at this boundary — both
-    // erase to `string` (extension.ts TenantId doc). This is the sole crossing.
-    return mintTenantId(raw, "session") as unknown as ExtensionTenantId;
+    // provenance). The cast to the extension-api brand happens once, at the
+    // `ExtensionSession` whitelist below — both erase to `string`
+    // (extension.ts TenantId doc), and that is the sole crossing.
+    return mintTenantId(raw, "session");
   }
   return undefined;
 }
@@ -235,23 +241,39 @@ export function wrapExtensionRoute(
       // discover()'s region floor: the caller's verified data region when
       // authenticated, else the deployment primary (fail-closed to one region).
       const callerRegion = session?.dataRegion ?? env.DEFAULT_REGION ?? region;
-      const ctx = createExtensionContext(ext, env, prisma, graph, callerRegion);
 
       try {
-        // Resolve the caller's verified tenant and build the extension-facing
-        // session by explicit whitelist. Never spread the internal `Session` —
-        // it carries `csrfToken`/`mfaVerified`/`dataRegion`/`ageTier`/
-        // `activeTenantId` that must not cross the extension boundary.
-        // `tenantId` is the only path by which a handler obtains a branded
-        // `TenantId`. Inside the try so a fallback DB error yields a clean 500.
+        // Resolve the caller's verified tenant FIRST — before the context is
+        // built, because the context closes over it.
+        //
+        // `ctx.events.emit(type, payload)` takes no tenant (an extension must
+        // not be able to name one), so the emitter uses whatever core handed
+        // `createExtensionContext`. Resolving afterwards left that argument
+        // absent, the emitter fell back to the ambient tenant, and the ambient
+        // tenant is established only when `TENANT_SCOPE_MODE !== "off"` —
+        // which is not the default. An extension's first `emit` then threw and
+        // came back as a 500. Passing it here is what makes
+        // `ExtensionContext.events`' contract ("bound to the tenant core
+        // resolved for the caller") true at the call site and not just in the
+        // parameter list.
+        //
+        // Inside the try so a fallback DB read failure yields a clean 500.
+        const tenantId = session ? await resolveTenantId(session, prisma) : undefined;
+        const ctx = createExtensionContext(ext, env, prisma, graph, callerRegion, tenantId);
+
+        // Build the extension-facing session by explicit whitelist. Never
+        // spread the internal `Session` — it carries `csrfToken`/`mfaVerified`/
+        // `dataRegion`/`ageTier`/`activeTenantId` that must not cross the
+        // extension boundary. `tenantId` is the only path by which a handler
+        // obtains a branded `TenantId`, cast to the extension-api brand here
+        // (the single crossing — see `resolveTenantId`).
         let extSession: ExtensionSession | null = null;
         if (session) {
-          const tenantId = await resolveTenantId(session, prisma);
           extSession = {
             userId: session.userId,
             email: session.email,
             role: session.role ?? "END_USER",
-            ...(tenantId ? { tenantId } : {}),
+            ...(tenantId ? { tenantId: tenantId as unknown as ExtensionTenantId } : {}),
             // Principal (plan 034 lane A). Whitelisted, like every other field
             // here — never spread — because this object is the trust boundary
             // between core and extension code. An extension may attribute a

@@ -460,37 +460,71 @@ describe("ctx.events.emit, as an extension route actually receives it", () => {
     SESSION_SECRET: "super-secret-do-not-expose-to-extensions!!",
   } as never;
 
-  it("is built by the wrapper WITHOUT the request's tenant — five arguments, not six", () => {
-    // The join, read off the source: `resolveTenantId()` runs *after*
-    // `createExtensionContext(...)` in `wrapExtensionRoute`, so the tenant the
-    // wrapper resolves for `ExtensionSession.tenantId` is not the tenant the
-    // emitter closes over. Lane E left the sixth parameter open for exactly
-    // this and lane A did not fill it — neither lane could see the gap from
-    // inside its own file set.
+  it("is built by the wrapper WITH the request's tenant — six arguments, resolved first", () => {
+    // F-6, fixed. The join, read off the source: `resolveTenantId()` now runs
+    // *before* `createExtensionContext(...)` in `wrapExtensionRoute`, and its
+    // result is the sixth argument, so the tenant the wrapper resolves for
+    // `ExtensionSession.tenantId` is the same tenant the emitter closes over.
+    // Lane E left that parameter open for exactly this; lane A did not fill it
+    // and neither lane could see the gap from inside its own file set.
     const wrapper = read("lib/extension-route-wrapper.ts");
     expect(wrapper).toContain(
-      "createExtensionContext(ext, env, prisma, graph, callerRegion)",
+      "createExtensionContext(ext, env, prisma, graph, callerRegion, tenantId)",
     );
-    expect(wrapper.indexOf("createExtensionContext(")).toBeLessThan(
-      wrapper.indexOf("await resolveTenantId(session, prisma)"),
+    expect(wrapper.indexOf("await resolveTenantId(session, prisma)")).toBeLessThan(
+      wrapper.indexOf("createExtensionContext(ext, env"),
     );
   });
 
-  it("therefore FAILS CLOSED on a default deployment — TENANT_SCOPE_MODE is off", async () => {
-    // With no tenant passed, the emitter falls back to the ambient tenant
-    // context. That context is established by `lib/app.ts` only when
-    // `TENANT_SCOPE_MODE !== "off"`, and "off" is the documented default
-    // (`lib/tenant-scope.ts`). So on a stock deployment an extension calling
-    // `ctx.events.emit` gets a throw, which the wrapper's catch turns into a
-    // 500 with `{"error":"Internal server error"}`.
+  it("a context built with the request's tenant emits on a STOCK env — no ambient tenant needed", async () => {
+    // The behavioural half. Before the fix the wrapper passed five arguments,
+    // the emitter fell back to the ambient tenant context, and that context is
+    // established by `lib/app.ts` only when `TENANT_SCOPE_MODE !== "off"` —
+    // "off" being the documented default (`lib/tenant-scope.ts`). An extension
+    // calling `ctx.events.emit` on a stock deployment therefore threw, and the
+    // wrapper's catch returned 500 `{"error":"Internal server error"}`.
     //
-    // Acceptable for 0.10.0 — nothing reads the outbox, no shipped extension
-    // emits, and the failure is loud rather than a row scoped to nothing — but
-    // it is NOT what `ExtensionContext.events`' published doc comment says
-    // ("The emitter is bound to the tenant core resolved for the caller").
-    // Recorded as an H.1 finding; the fix is one argument in lane A's file.
+    // Asserted here with `TENANT_SCOPE_MODE` unset and NO ambient context, so
+    // the row can only come from the tenant core passed at construction.
     expect(process.env.TENANT_SCOPE_MODE ?? "off").toBe("off");
 
+    const db = recordingPrisma();
+    const ctx = createExtensionContext(ext, extEnv, db.prisma, undefined, "EU", OWN);
+
+    await expect(
+      ctx.events.emit("walk.created", { walkId: "w_1" }),
+    ).resolves.toBeUndefined();
+    expect(db.rows).toHaveLength(1);
+    expect(db.rows[0]).toMatchObject({
+      type: "walk.created",
+      tenantId: "tenant_own",
+      subjectKind: "extension",
+      subjectId: "dog",
+    });
+  });
+
+  it("still cannot emit into another tenant — the payload names one and is inert", async () => {
+    // The confinement property must survive the fix: the only channel an
+    // extension controls is `payload`, and the row's tenant comes from the
+    // closure core built, never from anything the extension wrote.
+    const db = recordingPrisma();
+    const ctx = createExtensionContext(ext, extEnv, db.prisma, undefined, "EU", OWN);
+
+    await ctx.events.emit("walk.created", {
+      tenantId: "tenant_other",
+      tenant_id: "tenant_other",
+      walkId: "w_1",
+    });
+
+    expect(db.rows[0].tenantId).toBe("tenant_own");
+    expect(db.rows[0].tenantId).not.toBe("tenant_other");
+  });
+
+  it("still fails closed when core has NO tenant to bind", async () => {
+    // The other side of the contract, unchanged by the fix: a context built
+    // with no tenant and no ambient one writes nothing rather than a row
+    // scoped to nothing. This is the state `ExtensionContext.events`' doc
+    // comment now names explicitly.
     const db = recordingPrisma();
     const ctx = createExtensionContext(ext, extEnv, db.prisma, undefined, "EU");
 
@@ -500,11 +534,11 @@ describe("ctx.events.emit, as an extension route actually receives it", () => {
     expect(db.rows).toEqual([]);
   });
 
-  it("succeeds the moment an ambient tenant exists — the seam itself is wired", () => {
-    // The other half of the finding: the composition is correct, only the
-    // tenant source is missing. Under the ambient context the wrapper's
-    // five-argument call produces a working emitter, so enabling tenant
-    // scoping (or passing the sixth argument) is the whole fix.
+  it("succeeds the moment an ambient tenant exists — the fallback path still works", () => {
+    // The ambient fallback is not dead code after the fix: it is what a
+    // context built without an explicit tenant (`recap-service.ts`) uses when
+    // tenant scoping IS enabled. Kept asserted so removing the fallback is a
+    // deliberate act rather than an unnoticed regression.
     const db = recordingPrisma();
     const ctx = createExtensionContext(ext, extEnv, db.prisma, undefined, "EU");
 
