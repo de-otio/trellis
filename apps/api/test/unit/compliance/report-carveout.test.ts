@@ -342,6 +342,105 @@ describe("ILLEGAL_PRIORITY carve-out — failure modes must be LOUD, not silent"
       "illegal-priority-carveout-failed",
     );
   });
+
+  /**
+   * A3 (quality sweep 2026-09-05). The block-class write is LAST, so that a
+   * preserve failure cannot mark an item that was never hidden. The cost of
+   * that ordering is a window: hide + preserve + hold all succeed, the class
+   * write alone fails, and `isAppealable(null)` is deliberately `true` — so the
+   * owner's disposition endpoint would offer submit-for-analysis on suspected
+   * illegal content, the exact affordance the carve-out removes.
+   *
+   * The existing "db down" test throws at `statementOfReasons.create`, BEFORE
+   * the class write, so it could never see this. These pin the window itself.
+   */
+  describe("the block-class write failing alone (A3)", () => {
+    /** Succeeds for the hide, throws only for the block-class write. */
+    const failOnBlockClass = () => {
+      const update = vi.fn(async (args: any) => {
+        if (args?.data?.blockClass) throw new Error("class write lost");
+        return { id: "media-1" };
+      });
+      return makeDb({
+        mediaFile: {
+          findUnique: vi.fn(async () => ({
+            uploadedBy: "owner-1",
+            tenantId: VALID_TENANT,
+            contentHash: VALID_HASH,
+          })),
+          update,
+        },
+      });
+    };
+
+    it("still files the authority report — Art. 18 is not abandoned at the last step", async () => {
+      const db = failOnBlockClass();
+
+      const result = await applyIllegalPriorityCarveOut(
+        db,
+        { reportId: "rep-1", resourceType: "media", resourceId: "media-1" },
+        mockEnv,
+        "EU" as any,
+      );
+
+      // Letting this reach the outer catch would return applied:false and
+      // create NO authority report for content that is already hidden and
+      // preserved. That is the worse outcome, so the carve-out continues.
+      expect(result.applied).toBe(true);
+      expect(result.authorityReportId).toBe("auth-1");
+      expect(db.authorityReport.create).toHaveBeenCalled();
+    });
+
+    it("alarms under its own kind and reports the partial state back", async () => {
+      const alarms: Array<{ kind: string }> = [];
+      setComplianceAlarmHook(async (a) => {
+        alarms.push(a);
+      });
+      const db = failOnBlockClass();
+
+      const result = await applyIllegalPriorityCarveOut(
+        db,
+        { reportId: "rep-1", resourceType: "media", resourceId: "media-1" },
+        mockEnv,
+        "EU" as any,
+      );
+
+      // A distinct kind: the generic carve-out-failed alarm does not tell an
+      // operator that a specific row needs its class repaired.
+      expect(alarms.map((a) => a.kind)).toContain(
+        "illegal-priority-block-class-unwritten",
+      );
+      expect(result.blockClassUnwritten).toBe(true);
+    });
+
+    it("leaves the item hidden — protection does not depend on the class write", async () => {
+      const db = failOnBlockClass();
+
+      await applyIllegalPriorityCarveOut(
+        db,
+        { reportId: "rep-1", resourceType: "media", resourceId: "media-1" },
+        mockEnv,
+        "EU" as any,
+      );
+
+      const hideCall = db.mediaFile.update.mock.calls[0][0];
+      expect(hideCall.data.hidden).toBe(true);
+    });
+
+    it("does not set the flag on the ordinary success path", async () => {
+      const db = makeDb();
+
+      const result = await applyIllegalPriorityCarveOut(
+        db,
+        { reportId: "rep-1", resourceType: "media", resourceId: "media-1" },
+        mockEnv,
+        "EU" as any,
+      );
+
+      expect(result.applied).toBe(true);
+      expect(result.blockClassUnwritten).toBeUndefined();
+    });
+  });
 });
 
 describe("ILLEGAL_PRIORITY carve-out — text resources", () => {

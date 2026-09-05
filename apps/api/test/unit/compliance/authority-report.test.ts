@@ -63,7 +63,10 @@ describe("markAuthorityReportSubmitted", () => {
 
     const db = {
       authorityReport: {
-        findUnique: vi.fn(async () => ({ id: "ar1", status: "pending", evidenceId: "ev1" })),
+        findUnique: vi.fn(async () => ({
+          id: "ar1", status: "pending", evidenceId: "ev1", channelMode: null,
+        })),
+        updateMany: vi.fn(async () => ({ count: 1 })),
         update: vi.fn(async () => ({ id: "ar1", status: "submitted" })),
       },
     } as any;
@@ -81,6 +84,129 @@ describe("markAuthorityReportSubmitted", () => {
     expect(result.channelMode).toBe("manual");
     expect(db.authorityReport.update.mock.calls[0][0].data.status).toBe("submitted");
   });
+
+  /**
+   * A1 (quality sweep 2026-09-05). The docstring promised "a non-`pending`
+   * report is returned unchanged" from the first commit; the code read
+   * `status` and then submitted regardless. The channel is a real federal
+   * portal in production, so the cost of the gap is a duplicate filing against
+   * a real person — the one thing this module's "core NEVER auto-submits"
+   * design is most careful about everywhere else.
+   */
+  describe("idempotency (A1)", () => {
+    const submittedDb = (status: string) => ({
+      authorityReport: {
+        findUnique: vi.fn(async () => ({
+          id: "ar1", status, evidenceId: "ev1", channelMode: "manual",
+        })),
+        updateMany: vi.fn(async () => ({ count: 1 })),
+        update: vi.fn(async () => ({ id: "ar1", status: "submitted" })),
+      },
+    }) as any;
+
+    it.each(["submitted", "closed"])(
+      "does NOT file a %s report a second time",
+      async (status) => {
+        const channelSubmit = vi.fn(async () => ({ mode: "manual" as const, instructionsKey: "k" }));
+        setAuthorityReportChannel({ submit: channelSubmit });
+        const db = submittedDb(status);
+
+        const result = await markAuthorityReportSubmitted(
+          db, "ar1", { jurisdiction: "DE", bundle: {} }, env, "EU" as any,
+        );
+
+        // THE invariant: the authority was not contacted again.
+        expect(channelSubmit).not.toHaveBeenCalled();
+        expect(db.authorityReport.update).not.toHaveBeenCalled();
+        // Returned unchanged, as documented.
+        expect(result).toEqual({ id: "ar1", status, channelMode: "manual" });
+      },
+    );
+
+    it("does not file when it loses the claim race to a concurrent caller", async () => {
+      // Both callers read `pending`; the database lets exactly one claim it.
+      // A read-then-check guard would let BOTH through, which is why the claim
+      // is a conditional write.
+      const channelSubmit = vi.fn(async () => ({ mode: "manual" as const, instructionsKey: "k" }));
+      setAuthorityReportChannel({ submit: channelSubmit });
+
+      const findUnique = vi
+        .fn()
+        .mockResolvedValueOnce({ id: "ar1", status: "pending", evidenceId: "ev1", channelMode: null })
+        .mockResolvedValueOnce({ id: "ar1", status: "submitted", evidenceId: "ev1", channelMode: "api" });
+      const db = {
+        authorityReport: {
+          findUnique,
+          updateMany: vi.fn(async () => ({ count: 0 })), // someone else claimed it
+          update: vi.fn(),
+        },
+      } as any;
+
+      const result = await markAuthorityReportSubmitted(
+        db, "ar1", { jurisdiction: "DE", bundle: {} }, env, "EU" as any,
+      );
+
+      expect(channelSubmit).not.toHaveBeenCalled();
+      expect(db.authorityReport.update).not.toHaveBeenCalled();
+      expect(result.status).toBe("submitted");
+      expect(result.channelMode).toBe("api");
+    });
+
+    it("releases the claim when the channel throws, so the report stays retryable", async () => {
+      const channelSubmit = vi.fn(async () => {
+        throw new Error("portal unreachable");
+      });
+      setAuthorityReportChannel({ submit: channelSubmit });
+
+      const updateMany = vi.fn(async () => ({ count: 1 }));
+      const db = {
+        authorityReport: {
+          findUnique: vi.fn(async () => ({
+            id: "ar1", status: "pending", evidenceId: "ev1", channelMode: null,
+          })),
+          updateMany,
+          update: vi.fn(),
+        },
+      } as any;
+
+      await expect(
+        markAuthorityReportSubmitted(db, "ar1", { jurisdiction: "DE", bundle: {} }, env, "EU" as any),
+      ).rejects.toThrow("portal unreachable");
+
+      // Claimed, then released back to pending — not left stuck mid-flight,
+      // and never marked submitted for a filing that did not happen.
+      expect(updateMany.mock.calls[0][0]).toEqual({
+        where: { id: "ar1", status: "pending" },
+        data: { status: "submitting" },
+      });
+      expect(updateMany.mock.calls[1][0]).toEqual({
+        where: { id: "ar1", status: "submitting" },
+        data: { status: "pending" },
+      });
+      expect(db.authorityReport.update).not.toHaveBeenCalled();
+    });
+
+    it("still files a genuinely pending report exactly once", async () => {
+      const channelSubmit = vi.fn(async () => ({ mode: "api" as const, instructionsKey: "k" }));
+      setAuthorityReportChannel({ submit: channelSubmit });
+      const db = {
+        authorityReport: {
+          findUnique: vi.fn(async () => ({
+            id: "ar1", status: "pending", evidenceId: "ev1", channelMode: null,
+          })),
+          updateMany: vi.fn(async () => ({ count: 1 })),
+          update: vi.fn(async () => ({ id: "ar1", status: "submitted" })),
+        },
+      } as any;
+
+      const result = await markAuthorityReportSubmitted(
+        db, "ar1", { jurisdiction: "DE", bundle: {} }, env, "EU" as any,
+      );
+
+      expect(channelSubmit).toHaveBeenCalledTimes(1);
+      expect(result).toEqual({ id: "ar1", status: "submitted", channelMode: "api" });
+    });
+  });
 });
 
 describe("markAuthorityReportClosed", () => {
@@ -94,7 +220,9 @@ describe("markAuthorityReportClosed", () => {
     const mediaUpdateMany = vi.fn(async () => ({ count: 1 }));
     const db = {
       authorityReport: {
-        findUnique: vi.fn(async () => ({ id: "ar1", status: "submitted", evidenceId: "ev1" })),
+        findUnique: vi.fn(async () => ({
+          id: "ar1", status: "submitted", evidenceId: "ev1", channelMode: "manual",
+        })),
         update: vi.fn(async () => ({ id: "ar1", status: "closed" })),
       },
       mediaFile: { updateMany: mediaUpdateMany },

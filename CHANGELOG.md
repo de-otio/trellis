@@ -16,6 +16,43 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An authority report can no longer be filed twice.**
+  `markAuthorityReportSubmitted` was documented from its first commit as
+  "idempotent-ish: a non-`pending` report is returned unchanged" — and never
+  implemented it. The function read `status` and then called the channel
+  regardless, so a double-click, a client retry, or two operators working the
+  same moderation queue filed the SAME report to the authority twice, through
+  what is a real federal portal in a production deployment. The guard is a
+  conditional `updateMany` (`where: { id, status: "pending" }`) rather than a
+  read-then-check, because a read-then-check does not close the concurrent
+  case, which is the one that matters on a shared queue: the database decides
+  who claims the report. Ordering is claim → submit → confirm, and a channel
+  failure releases the claim so the report returns to `pending` and stays
+  retryable — the alternative (mark submitted, then file) would leave a report
+  that was never filed looking filed, which is the worse failure for an
+  Art.-18 obligation. `channelMode` in the return type is now `string | null`,
+  since an unchanged report may not carry one.
+
+- **Suspected-illegal content can no longer be offered an appeal because of a
+  half-applied carve-out.** `applyIllegalPriorityCarveOut` hides, preserves and
+  evidence-holds an item and then writes `blockClass = illegal-suspected` —
+  last, deliberately, so that a preserve failure cannot mark an item that was
+  never hidden. The cost of that ordering was a window: if only the class write
+  failed, the item was left hidden, preserved and held with a NULL block class,
+  and `isAppealable(null)` is `true` by design, so the owner's disposition
+  endpoint would offer submit-for-analysis on exactly the content the carve-out
+  exists to withhold it from. Two changes, neither of which disturbs the
+  deliberate null-is-appealable default: `computeDisposition` now also consults
+  `evidenceHold` — ordinary moderation never places a hold, so it costs a
+  normal blocked item nothing and makes the window fail-closed — and the class
+  write is caught under its own alarm kind
+  (`illegal-priority-block-class-unwritten`) and reported back as
+  `blockClassUnwritten`, so an operator can repair the row while the carve-out
+  still files the authority report rather than abandoning Art. 18 at the last
+  step.
+
 ### Security
 
 - **The scoped extension surface can no longer be used unbound, and a relation
