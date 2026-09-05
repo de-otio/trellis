@@ -35,6 +35,8 @@ import {
   isUnderMinimumAge,
   MINIMUM_SIGNUP_AGE_YEARS,
   MINOR_TIERS_SUPPORTED,
+  InvalidDateOfBirthError,
+  parseDateOfBirth,
   UnderMinimumAgeError,
 } from "../age-gate.js";
 import { deriveEmailDomain } from "../tenant/derive-domain.js";
@@ -233,24 +235,41 @@ export async function provisionConfirmedUser(
   // and the sign-up does not complete; on the JIT path `jit-claims.ts` logs
   // and yields no claims, which surfaces as a 401. An account that should not
   // exist is never created either way.
+  //
+  // A SUPPLIED date of birth that cannot be read fails closed too (quality
+  // sweep 2026-09-05, B1). The inline parse here used to accept anything
+  // `new Date()` accepted and require only `parsed < now`; a malformed or
+  // future value failed the `if` and fell straight through, leaving the
+  // account at the `ADULT` default with no date of birth stored, no log line
+  // and no re-check. That is an age tier assigned by accident from an input
+  // the caller got wrong — the exact opposite of the paragraph above, on the
+  // two paths (Cognito trigger, Keycloak JIT) that the strict parser at
+  // `/auth/register` never sees. A value we cannot read is not evidence of
+  // adulthood.
+  //
+  // `parseDateOfBirth` is now the single implementation (age-gate.ts), so
+  // these paths also inherit its round-trip guard (`2025-02-31`) and its
+  // implausible-year guard (`0202`).
   const now = new Date();
   let dateOfBirth: Date | undefined;
   let ageTier: AgeTier = "ADULT";
   if (input.dateOfBirthRaw) {
-    const parsed = new Date(input.dateOfBirthRaw);
-    if (!isNaN(parsed.getTime()) && parsed < now) {
-      if (isUnderMinimumAge(parsed, now)) {
-        // No date of birth in the log line — the reason is enough, and the
-        // value is the most sensitive field on the input.
-        logger.warn("postconfirm.under_minimum_age", {
-          sub,
-          minimumAgeYears: MINIMUM_SIGNUP_AGE_YEARS,
-        });
-        throw new UnderMinimumAgeError();
-      }
-      dateOfBirth = parsed;
-      ageTier = computeTier(parsed, now);
+    const parsed = parseDateOfBirth(input.dateOfBirthRaw, now);
+    if (!parsed) {
+      // No date of birth in the log line — the reason is enough, and the value
+      // is the most sensitive field on the input.
+      logger.warn("postconfirm.invalid_date_of_birth", { sub });
+      throw new InvalidDateOfBirthError();
     }
+    if (isUnderMinimumAge(parsed, now)) {
+      logger.warn("postconfirm.under_minimum_age", {
+        sub,
+        minimumAgeYears: MINIMUM_SIGNUP_AGE_YEARS,
+      });
+      throw new UnderMinimumAgeError();
+    }
+    dateOfBirth = parsed;
+    ageTier = computeTier(parsed, now);
   }
 
   // Signup-metadata (P3): how the account was created. An explicit

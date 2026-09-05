@@ -374,6 +374,55 @@ describe("PostConfirmation Lambda — native sign-up", () => {
     expect(mockParentalLinkUpsert).not.toHaveBeenCalled();
   });
 
+  /**
+   * B1 (quality sweep 2026-09-05). The minimum-age floor above is fail-closed;
+   * the parse in front of it was not. It accepted whatever `new Date()`
+   * accepted and required only `parsed < now`, so a malformed or future value
+   * failed the `if` and fell straight through — account provisioned at the
+   * `ADULT` default, no date of birth stored, no log line, no re-check. An age
+   * tier assigned by accident from an input the caller got wrong.
+   *
+   * `/auth/register`'s strict parser never sees these paths: this trigger and
+   * Keycloak JIT both reach provisioning directly.
+   */
+  it.each([
+    ["a future date", "2099-01-01"],
+    ["a non-date", "not-a-date"],
+    ["an impossible day the Date constructor rolls over", "2025-02-31"],
+    ["a year typo that a bare Date parse accepts", "0202-01-01"],
+    ["a non-ISO shape", "01/01/1990"],
+    ["an empty-ish string", "   "],
+  ])("refuses to provision on %s rather than defaulting to ADULT", async (_label, dateOfBirth) => {
+    const handler = await loadHandler();
+
+    const thrown = await handler(
+      makeEvent({ dateOfBirth }),
+      {} as any,
+      () => {},
+    ).then(
+      () => null,
+      (err: unknown) => err,
+    );
+
+    // Matched by name for the same reason as the under-age case above.
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).name).toBe("InvalidDateOfBirthError");
+
+    // Fail closed: nothing written at all.
+    expect(mockTransaction).not.toHaveBeenCalled();
+    expect(mockUserCreate).not.toHaveBeenCalled();
+  });
+
+  it("still provisions when no date of birth is supplied at all", async () => {
+    // An ABSENT date of birth is a different case: nothing was claimed, so
+    // there is nothing to fail on. Only a supplied-but-unreadable value throws.
+    const handler = await loadHandler();
+
+    await handler(makeEvent({}), {} as any, () => {});
+
+    expect(mockTransaction).toHaveBeenCalled();
+  });
+
   it("provisions an adult, and links no guardian even when one is supplied", async () => {
     mockUserFindUnique.mockResolvedValueOnce({ id: "guardian_id" });
     const handler = await loadHandler();

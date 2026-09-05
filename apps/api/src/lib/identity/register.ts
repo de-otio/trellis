@@ -49,7 +49,16 @@
  */
 
 import type { Env } from "../../env.js";
-import { isUnderMinimumAge, UNDER_MINIMUM_AGE_ERROR } from "../age-gate.js";
+import {
+  isUnderMinimumAge,
+  parseDateOfBirth,
+  UNDER_MINIMUM_AGE_ERROR,
+} from "../age-gate.js";
+
+// Re-exported: the parser moved to age-gate.js so the provisioning path can
+// apply the SAME rules (quality sweep 2026-09-05, B1). This endpoint remains
+// its most visible consumer, and existing importers are unaffected.
+export { parseDateOfBirth };
 import {
   IdentityProviderError,
   type IdentityProviderPort,
@@ -85,9 +94,7 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const MAX_EMAIL_LENGTH = 254;
 const MAX_CODE_LENGTH = 128;
 /** ISO calendar date, `YYYY-MM-DD` — the shape the age tier is computed from. */
-const DOB_RE = /^\d{4}-\d{2}-\d{2}$/;
 /** Nobody registering is older than this; a typo'd year must not pass. */
-const MAX_AGE_YEARS = 120;
 
 interface RegisterBody {
   email?: unknown;
@@ -112,27 +119,6 @@ function str(value: unknown, max: number): string | undefined {
   return typeof value === "string" && value.length > 0 && value.length <= max
     ? value.trim()
     : undefined;
-}
-
-/**
- * Parse and sanity-check a `YYYY-MM-DD` date of birth.
- *
- * Rejects the future and the implausibly distant past. Both matter because the
- * value feeds the age tier: a future date would compute as an infant (the most
- * restricted tier, locking a real user out) and a year typo like `0202` would
- * sail through a bare `Date` parse.
- */
-export function parseDateOfBirth(raw: string, now: Date): Date | undefined {
-  if (!DOB_RE.test(raw)) return undefined;
-  const parsed = new Date(`${raw}T00:00:00.000Z`);
-  if (Number.isNaN(parsed.getTime())) return undefined;
-  // Round-trip guard: `new Date("2025-02-31")` silently becomes March 3.
-  if (!parsed.toISOString().startsWith(raw)) return undefined;
-  if (parsed.getTime() >= now.getTime()) return undefined;
-  const oldest = new Date(now.getTime());
-  oldest.setUTCFullYear(oldest.getUTCFullYear() - MAX_AGE_YEARS);
-  if (parsed.getTime() < oldest.getTime()) return undefined;
-  return parsed;
 }
 
 /**

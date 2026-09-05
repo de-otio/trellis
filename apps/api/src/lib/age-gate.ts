@@ -100,6 +100,69 @@ export class UnderMinimumAgeError extends Error {
   }
 }
 
+const DOB_RE = /^\d{4}-\d{2}-\d{2}$/;
+const MAX_AGE_YEARS = 120;
+
+/**
+ * Parse and sanity-check a `YYYY-MM-DD` date of birth.
+ *
+ * Rejects the future and the implausibly distant past. Both matter because the
+ * value feeds the age tier: a future date would compute as an infant (the most
+ * restricted tier, locking a real user out) and a year typo like `0202` would
+ * sail through a bare `Date` parse.
+ *
+ * Lives here rather than beside the HTTP handler so that EVERY path deciding an
+ * age tier applies the same rules. `/auth/register` is one entry point;
+ * provisioning is reached from a Cognito PostConfirmation trigger and from
+ * Keycloak JIT sign-in, neither of which passes through it, and each was
+ * previously parsing a date of birth to its own weaker standard.
+ * (Quality sweep 2026-09-05, B1.)
+ */
+export function parseDateOfBirth(raw: string, now: Date): Date | undefined {
+  if (!DOB_RE.test(raw)) return undefined;
+  const parsed = new Date(`${raw}T00:00:00.000Z`);
+  if (Number.isNaN(parsed.getTime())) return undefined;
+  // Round-trip guard: `new Date("2025-02-31")` silently becomes March 3.
+  if (!parsed.toISOString().startsWith(raw)) return undefined;
+  if (parsed.getTime() >= now.getTime()) return undefined;
+  const oldest = new Date(now.getTime());
+  oldest.setUTCFullYear(oldest.getUTCFullYear() - MAX_AGE_YEARS);
+  if (parsed.getTime() < oldest.getTime()) return undefined;
+  return parsed;
+}
+
+/** Envelope for a supplied-but-unusable date of birth. */
+export const INVALID_DATE_OF_BIRTH_ERROR = {
+  error: "INVALID_DATE_OF_BIRTH",
+  message: "The date of birth supplied could not be read.",
+  remediation:
+    "Supply the date of birth as YYYY-MM-DD, in the past, and within a plausible human lifespan.",
+} as const;
+
+/**
+ * Thrown by provisioning when a date of birth was SUPPLIED but cannot be
+ * parsed — malformed, in the future, or implausibly distant.
+ *
+ * Fail-closed for the same reason {@link UnderMinimumAgeError} is, and it is
+ * the reason this error exists at all: the alternative that shipped was to
+ * skip the whole block and leave the account at the `ADULT` default with no
+ * date of birth stored, no log line and no re-check — an age tier assigned by
+ * accident from an input the caller got wrong. A value we cannot read is not
+ * evidence of adulthood. (Quality sweep 2026-09-05, B1.)
+ *
+ * An ABSENT date of birth is a different case and is deliberately not covered
+ * here: nothing was claimed, so there is nothing to fail on, and the signup
+ * floor applies elsewhere.
+ */
+export class InvalidDateOfBirthError extends Error {
+  readonly envelope = INVALID_DATE_OF_BIRTH_ERROR;
+
+  constructor() {
+    super(INVALID_DATE_OF_BIRTH_ERROR.message);
+    this.name = "InvalidDateOfBirthError";
+  }
+}
+
 export interface FeatureAccess {
   maxFeedPages: number | null; // null = unlimited
   sessionTimeLimits: {
