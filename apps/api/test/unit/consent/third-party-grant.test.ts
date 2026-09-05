@@ -370,7 +370,23 @@ const dateArb = fc
   .integer({ min: 0, max: 4_102_444_800_000 })
   .map((ms) => new Date(ms));
 
-/** Arbitrary well-formed rows of either purpose, across every field's states. */
+/**
+ * Arbitrary well-formed rows of either purpose, across every field's states.
+ *
+ * `freq: 2` on the liveness-relevant options is load-bearing, not decoration.
+ * `fc.option` defaults to `freq: 5` — a null one time in five — and a row is
+ * only live when FOUR of these line up at once (`withdrawnAt` and
+ * `supersededAt` null, plus `consented`/`active` true, plus an unexpired
+ * `expiresAt`). At the default frequency that combination came out at roughly
+ * 4 rows in 2000, measured over 400 seeds: the monotonicity property below was
+ * being exercised on about 0.2% of what it generated, and one seed in a
+ * hundred produced NO live row at all and failed the non-vacuity assertion —
+ * a ~1% flake on every PR that ran the suite (seen on CI 2026-09-05).
+ *
+ * Balancing the nulls raises the live rate to roughly 57 rows in 2000, which
+ * removes the flake as a side effect of the real fix: making the property
+ * actually test something.
+ */
 const rowArb: fc.Arbitrary<ConsentGrantRow> = fc.record({
   purpose: fc.constantFrom(
     THIRD_PARTY_DATA_SHARING,
@@ -380,22 +396,30 @@ const rowArb: fc.Arbitrary<ConsentGrantRow> = fc.record({
   consented: fc.boolean(),
   active: fc.boolean(),
   consentedAt: fc.option(dateArb, { nil: null }),
-  withdrawnAt: fc.option(dateArb, { nil: null }),
-  supersededAt: fc.option(dateArb, { nil: null }),
-  granteeClientId: fc.option(fc.constant("partner-agent-01"), { nil: null }),
+  withdrawnAt: fc.option(dateArb, { nil: null, freq: 2 }),
+  supersededAt: fc.option(dateArb, { nil: null, freq: 2 }),
+  granteeClientId: fc.option(fc.constant("partner-agent-01"), {
+    nil: null,
+    freq: 2,
+  }),
   granteeIssuer: fc.option(fc.constant("https://issuer.example.com"), {
     nil: null,
+    freq: 2,
   }),
   grantedScopes: fc.subarray(["dogs:share", "walks:read"]),
   grantProfile: fc.option(fc.constant("boarding"), { nil: null }),
   subjectEntityId: fc.option(fc.constant("dog_abc123"), { nil: null }),
-  expiresAt: fc.option(dateArb, { nil: null }),
+  expiresAt: fc.option(dateArb, { nil: null, freq: 2 }),
 });
 
 describe("isGrantActive — properties", () => {
   it("is monotone in `now`: once inactive by time, never active again", () => {
     // The property is vacuous unless the generator actually produces live
     // rows, so count the non-vacuous cases and assert the count afterwards.
+    // The floor is a real number rather than `> 0`: at `> 0` this assertion
+    // passed on a median of FOUR live rows out of 2000 and failed outright on
+    // 1% of seeds, so it could not tell a healthy generator from a nearly
+    // vacuous one. See `rowArb` for the measurement.
     let live = 0;
     fc.assert(
       fc.property(rowArb, dateArb, dateArb, (row, t1, t2) => {
@@ -410,7 +434,7 @@ describe("isGrantActive — properties", () => {
       }),
       { numRuns: 2000 },
     );
-    expect(live).toBeGreaterThan(0);
+    expect(live).toBeGreaterThan(10);
   });
 
   it("is never true when active === false", () => {
