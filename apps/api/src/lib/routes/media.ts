@@ -495,10 +495,11 @@ export const mediaRoutes: Route[] = [
 
       // Check authentication
       const authHeader = request.headers.get("Authorization");
+      // Scheme only — the first 50 characters of a bearer header are the token.
       logger.debug("[Media Upload] Attempting to get session", {
         hasCookie: !!request.headers.get("Cookie"),
         hasAuthHeader: !!authHeader,
-        authHeaderPreview: authHeader?.substring(0, 50) || "none",
+        authScheme: authHeader ? authHeader.split(" ")[0] : "none",
       });
 
       const session = await sessionManager.getSession(

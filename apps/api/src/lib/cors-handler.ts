@@ -272,13 +272,18 @@ export class CorsHandler {
         allHeaders = new Headers(response.headers);
       }
 
-      // Log Set-Cookie header before adding CORS headers
+      // Log that a Set-Cookie header is being preserved — by cookie NAME only.
+      // This used to log the first 100 characters of the header at INFO on
+      // every response that set a cookie, which on login is most of the sealed
+      // session token.
       const setCookieBefore = allHeaders.get("Set-Cookie");
       if (setCookieBefore) {
-        getLogger().info(
-          "[CORS] Preserving Set-Cookie header (first 100 chars):",
-          setCookieBefore.substring(0, 100),
-        );
+        getLogger().info("[CORS] Preserving Set-Cookie header", {
+          cookieNames: setCookieBefore
+            .split(/,(?=\s*[^;,=\s]+=)/)
+            .map((c) => c.trim().split("=")[0] ?? "")
+            .filter((n) => n.length > 0),
+        });
       }
 
       // Add CORS headers

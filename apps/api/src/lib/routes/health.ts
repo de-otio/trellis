@@ -106,14 +106,18 @@ export const healthRoutes: Route[] = [
       const sessionSecret = env.SESSION_SECRET;
       const logger = getLogger();
 
+      // Presence and shape only. The previous fields logged the first 100
+      // characters of the Cookie header and the first 50 of Authorization —
+      // i.e. most of a sealed session token or a bearer token — at debug and,
+      // for the cookie, at WARN on every unauthenticated hit.
       const authHeader = request.headers.get("Authorization");
+      const cookieHeader = request.headers.get("Cookie");
       logger.debug("[CSRF Token] Attempting to get session", {
         secretLength: sessionSecret.length,
-        hasCookie: !!request.headers.get("Cookie"),
+        hasCookie: !!cookieHeader,
+        cookieCount: cookieHeader ? cookieHeader.split(";").length : 0,
         hasAuthHeader: !!authHeader,
-        cookieHeader:
-          request.headers.get("Cookie")?.substring(0, 100) || "none",
-        authHeaderPreview: authHeader?.substring(0, 50) || "none",
+        authScheme: authHeader ? authHeader.split(" ")[0] : "none",
       });
 
       const session = await sessionManager.getSession(request, sessionSecret, env);
@@ -121,8 +125,8 @@ export const healthRoutes: Route[] = [
       if (!session) {
         logger.warn("[CSRF Token] Unauthorized request - no valid session", {
           secretLength: sessionSecret.length,
-          cookieHeader:
-            request.headers.get("Cookie")?.substring(0, 100) || "none",
+          hasCookie: !!cookieHeader,
+          hasAuthHeader: !!authHeader,
         });
         return securityHeaders.createSecureResponse(
           JSON.stringify({ error: "Unauthorized" }),
