@@ -319,6 +319,135 @@ describe("ModerationFeedbackHandler — the lawful path", () => {
     expect(res.status).toBe(400);
   });
 
+  /**
+   * A2 (quality sweep 2026-09-05). `description` is user free text that reaches
+   * the write-only analysis sink, and the sink adapter's illegal-record refusal
+   * keys on the RESOURCE's blockClass — not on this field. So a LAWFUL record
+   * could smuggle attacker-supplied illegal text into the analysis corpus
+   * through the description channel. The code moderates it with the same
+   * provider and drops it fail-closed.
+   *
+   * That branch had ZERO coverage. The one lawful test that passes a
+   * description (`"please review"`) never inspects what the sink received, so
+   * inverting the condition — or deleting the try/catch — passed every
+   * assertion in this file.
+   */
+  describe("the description channel is moderated too (A2)", () => {
+    /** Illegal iff the text carries the marker; records what it was asked. */
+    const contentAwareProvider = () => {
+      const calls: string[] = [];
+      setTextModerationProvider({
+        async moderateText(text: string) {
+          calls.push(text);
+          const flagged = text.includes("ILLEGAL");
+          return {
+            decision: flagged ? ("quarantine" as const) : ("approved" as const),
+            labels: flagged
+              ? [{ category: ILLEGAL_SUSPECTED_LABEL, confidence: 0.99 }]
+              : [],
+            provider: "mock",
+          };
+        },
+      } as any);
+      return calls;
+    };
+
+    const lawfulMedia = () =>
+      mockDb.mediaFile.findUnique.mockResolvedValue({
+        uploadedBy: OWNER,
+        blockClass: "lawful-flagged",
+        tenantId: VALID_TENANT,
+        contentHash: VALID_HASH,
+      });
+
+    it("DROPS an illegal description from the record the sink receives", async () => {
+      const { store } = wireSeams();
+      lawfulMedia();
+      const calls = contentAwareProvider();
+
+      const res = await handler.handleSubmit(
+        req({
+          resourceType: "media", resourceId: "m1", includeContent: true, consent: true,
+          description: "ILLEGAL text smuggled through the description field",
+        }),
+        session,
+        env,
+        requestContext,
+      );
+
+      // The record is still written — the RESOURCE is lawful — but without the
+      // description. Illegal bytes never enter the analysis corpus.
+      expect(store).toHaveBeenCalledTimes(1);
+      expect(store.mock.calls[0][0]).not.toHaveProperty("description");
+      // And it was actually classified, not merely dropped by accident.
+      expect(calls).toContain("ILLEGAL text smuggled through the description field");
+      // Response is unchanged: the reporter learns nothing about the drop.
+      expect(res.status).toBe(202);
+    });
+
+    it("KEEPS a lawful description", async () => {
+      const { store } = wireSeams();
+      lawfulMedia();
+      contentAwareProvider();
+
+      await handler.handleSubmit(
+        req({
+          resourceType: "media", resourceId: "m1", includeContent: true, consent: true,
+          description: "the classifier got this one wrong",
+        }),
+        session,
+        env,
+        requestContext,
+      );
+
+      expect(store.mock.calls[0][0].description).toBe(
+        "the classifier got this one wrong",
+      );
+    });
+
+    it("DROPS the description fail-closed when the provider throws", async () => {
+      const { store } = wireSeams();
+      lawfulMedia();
+      setTextModerationProvider({
+        async moderateText() {
+          throw new Error("provider unavailable");
+        },
+      } as any);
+
+      const res = await handler.handleSubmit(
+        req({
+          resourceType: "media", resourceId: "m1", includeContent: true, consent: true,
+          description: "unverifiable because the provider is down",
+        }),
+        session,
+        env,
+        requestContext,
+      );
+
+      // Fail-closed: an unverifiable description is dropped, not admitted.
+      // The record itself still lands — the resource verdict is independent.
+      expect(store).toHaveBeenCalledTimes(1);
+      expect(store.mock.calls[0][0]).not.toHaveProperty("description");
+      expect(res.status).toBe(202);
+    });
+
+    it("does not call the provider at all when there is no description", async () => {
+      const { store } = wireSeams();
+      lawfulMedia();
+      const calls = contentAwareProvider();
+
+      await handler.handleSubmit(
+        req({ resourceType: "media", resourceId: "m1", includeContent: true, consent: true }),
+        session,
+        env,
+        requestContext,
+      );
+
+      expect(calls).toHaveLength(0);
+      expect(store).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it("lawful media + consent:true → exactly ONE sink call; content stays blocked", async () => {
     const { store, preserve } = wireSeams();
     mockDb.mediaFile.findUnique.mockResolvedValue({
