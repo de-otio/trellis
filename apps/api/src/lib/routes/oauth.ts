@@ -68,6 +68,77 @@ function jsonResponse(body: unknown, status: number, env: unknown): Response {
   });
 }
 
+/**
+ * D.3 — boot-time fail-closed check on the agent client registration.
+ *
+ * `/oauth2/device_authorization` and `/oauth2/token` are mounted
+ * unconditionally, and both used to guard with `if (expectedClientId && …)`:
+ * with `COGNITO_AGENT_CLIENT_ID` unset, ANY `client_id` was accepted. Every
+ * other auth decision in this codebase fails closed and says so
+ * (`auth-config.ts` `resolveAuthConfig`, `cognito-jwt.ts` `normalizeClaims`,
+ * `session-cookie.ts` `isTokenRevoked`); this one did not.
+ *
+ * The request handlers below now also reject when the value is unset, so the
+ * fail-open is gone regardless of whether this assertion is wired. This
+ * function exists so a deployment that mounts the OAuth routes without a
+ * client id does not report itself healthy — the same reasoning as
+ * `assertModerationProviderAllowed`, called from `server.ts`'s boot sequence.
+ *
+ * A client registry replaces the check entirely in Phase 1.
+ *
+ * @throws when the agent client id is unset and the escape hatch is not set.
+ */
+export function assertAgentOAuthConfigured(env: {
+  COGNITO_AGENT_CLIENT_ID?: string | undefined;
+  AGENT_OAUTH_CLIENT_ID_OPTIONAL?: string | undefined;
+}): void {
+  if (env.COGNITO_AGENT_CLIENT_ID) return;
+  if (env.AGENT_OAUTH_CLIENT_ID_OPTIONAL === "true") {
+    // Explicit operator opt-out: boot proceeds, but the agent surface stays
+    // closed — the handlers below still reject every client_id. This is the
+    // "merge behind a toggle and flip after" rollout, not a fail-open.
+    return;
+  }
+  throw new Error(
+    "agent OAuth client id could not be resolved — set COGNITO_AGENT_CLIENT_ID. " +
+      "The /oauth2 device-grant routes are mounted unconditionally; without it " +
+      "there is nothing to validate a presented client_id against. Set " +
+      "AGENT_OAUTH_CLIENT_ID_OPTIONAL=true to boot with the agent surface " +
+      "disabled instead.",
+  );
+}
+
+/**
+ * Fail-closed client check for a single request. Returns a response when the
+ * client_id is unacceptable, `null` when it is the registered agent client.
+ */
+function rejectUnknownClient(
+  env: { COGNITO_AGENT_CLIENT_ID?: string | undefined },
+  clientId: string,
+): Response | null {
+  const expectedClientId = env.COGNITO_AGENT_CLIENT_ID;
+  if (!expectedClientId) {
+    // Unset ⇒ no client is registered ⇒ no client is valid. Previously this
+    // branch accepted every client_id.
+    return jsonResponse(
+      {
+        error: "invalid_client",
+        error_description: "No agent client is registered on this deployment",
+      },
+      400,
+      env,
+    );
+  }
+  if (clientId !== expectedClientId) {
+    return jsonResponse(
+      { error: "invalid_client", error_description: "Unknown client_id" },
+      400,
+      env,
+    );
+  }
+  return null;
+}
+
 async function readForm(request: Request): Promise<Record<string, string>> {
   const ct = request.headers.get("content-type") || "";
   if (ct.includes("application/x-www-form-urlencoded")) {
@@ -100,14 +171,8 @@ export const oauthRoutes: Route[] = [
         );
       }
 
-      const expectedClientId = env.COGNITO_AGENT_CLIENT_ID;
-      if (expectedClientId && parsed.data.client_id !== expectedClientId) {
-        return jsonResponse(
-          { error: "invalid_client", error_description: "Unknown client_id" },
-          400,
-          env,
-        );
-      }
+      const rejected = rejectUnknownClient(env, parsed.data.client_id);
+      if (rejected) return rejected;
 
       const verificationUriBase =
         env.AGENT_VERIFICATION_URI_BASE ||
@@ -142,14 +207,8 @@ export const oauthRoutes: Route[] = [
         );
       }
 
-      const expectedClientId = env.COGNITO_AGENT_CLIENT_ID;
-      if (expectedClientId && parsed.data.client_id !== expectedClientId) {
-        return jsonResponse(
-          { error: "invalid_client", error_description: "Unknown client_id" },
-          400,
-          env,
-        );
-      }
+      const rejected = rejectUnknownClient(env, parsed.data.client_id);
+      if (rejected) return rejected;
 
       const result = await pollDeviceAuth(parsed.data.device_code);
       switch (result.outcome) {

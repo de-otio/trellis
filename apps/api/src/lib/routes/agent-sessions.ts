@@ -3,16 +3,26 @@
  *
  *   GET  /api/users/me/agent-sessions
  *   POST /api/users/me/agent-sessions/{id}/revoke
+ *   POST /api/users/me/agent-sessions/global-sign-out
  *
  * Backed by the AGENT_REFRESH_TABLE rows written by the device-auth flow.
+ *
+ * D.1 — the two POSTs are deliberately different instruments and are named
+ * for it. `…/{id}/revoke` disconnects ONE agent and nothing else.
+ * `…/global-sign-out` is the account-compromise button: it signs the caller
+ * out of every session they hold, everywhere. The first used to do the second,
+ * which made a partner's "disconnect this app" a denial of service on the
+ * user's own account.
  */
 
 import {
+  adminGlobalSignOutUser,
   getAgentSession,
   listAgentSessions,
   revokeAgentSession,
   type AgentSessionRecord,
   type CognitoRevoker,
+  type SessionTokenBlocklist,
 } from "../oauth/refresh-detection.js";
 import { authMiddleware } from "../auth/auth-middleware.js";
 import { TenantAuditEmitter } from "../audit-composer.js";
@@ -62,6 +72,17 @@ function getAudit(): TenantAuditEmitter {
   return deps.auditEmitter ?? new TenantAuditEmitter();
 }
 
+/**
+ * The `SESSION_BLOCKLIST_KV` binding, if this deployment has one. Local dev
+ * and the unit-test envs bind no KV; `revokeAgentSession` reports that back
+ * rather than pretending the token was blocklisted.
+ */
+function getBlocklist(env: unknown): SessionTokenBlocklist | undefined {
+  const kv = (env as { SESSION_BLOCKLIST_KV?: SessionTokenBlocklist } | undefined)
+    ?.SESSION_BLOCKLIST_KV;
+  return kv && typeof kv.put === "function" ? kv : undefined;
+}
+
 function publicShape(rec: AgentSessionRecord): Record<string, unknown> {
   return {
     id: rec.sessionId,
@@ -74,6 +95,7 @@ function publicShape(rec: AgentSessionRecord): Record<string, unknown> {
 }
 
 const REVOKE_RE = /^\/api\/users\/me\/agent-sessions\/([^/]+)\/revoke$/;
+const GLOBAL_SIGN_OUT_PATH = "/api/users/me/agent-sessions/global-sign-out";
 
 export const agentSessionsRoutes: Route[] = [
   {
@@ -92,6 +114,58 @@ export const agentSessionsRoutes: Route[] = [
     },
     middleware: [corsMiddleware()],
     description: "List active agent sessions for the current user",
+  },
+
+  {
+    // NOTE: this literal path must be registered BEFORE `REVOKE_RE` only if
+    // the two could collide. They cannot — `global-sign-out` carries no
+    // `/revoke` suffix — but keeping it first documents the intent.
+    path: GLOBAL_SIGN_OUT_PATH,
+    method: "POST",
+    handler: async (request, env) => {
+      const sec = new SecurityHeaders(env);
+      const auth = await authMiddleware(request, env);
+      if (!auth) return unauthorizedError(sec);
+
+      const userPoolId = env.COGNITO_USER_POOL_ID;
+      if (!userPoolId) {
+        return sec.createSecureResponse(
+          JSON.stringify({ error: "not_configured" }),
+          { status: 503, headers: { "content-type": "application/json" } },
+        );
+      }
+
+      const cognito = getCognito();
+      const audit = getAudit();
+      const prisma = createPrisma(env);
+
+      // Self-service only: the subject signed out is always the caller's own
+      // Cognito sub, never a value taken from the request.
+      const result = await adminGlobalSignOutUser({
+        userId: auth.userId,
+        cognitoUsername: auth.sub,
+        userPoolId,
+        cognito,
+        audit: {
+          emit: async (input) => audit.emit(input as never, prisma as never),
+        },
+        tenantId: auth.activeTenantId,
+        actorUserId: auth.userId,
+        reason: "user-initiated global sign-out",
+        sourceIp: trustedClientIp(request, env),
+      });
+
+      return sec.createSecureResponse(
+        JSON.stringify({
+          status: "signed_out_everywhere",
+          agentSessionsRevoked: result.agentSessionsRevoked,
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    },
+    middleware: [corsMiddleware(), csrfMiddleware()],
+    description:
+      "Sign the current user out of every session everywhere (account-compromise action)",
   },
 
   {
@@ -121,38 +195,33 @@ export const agentSessionsRoutes: Route[] = [
         }, sec);
       }
 
-      const userPoolId = env.COGNITO_USER_POOL_ID;
-      if (!userPoolId) {
-        return sec.createSecureResponse(
-          JSON.stringify({ error: "not_configured" }),
-          { status: 503, headers: { "content-type": "application/json" } },
-        );
-      }
-
-      const cognito = getCognito();
       const audit = getAudit();
       // Audit emitter wants a Prisma client — supply the standard shape.
       const prisma = createPrisma(env);
 
-      await revokeAgentSession({
+      // D.1 — session-scoped. No Cognito call: this must not touch the user's
+      // other sessions. `tokenBlocklisted: false` means the session predates
+      // `accessTokenHash` or no blocklist KV is bound, so its already-issued
+      // access token lives out its (short) TTL; the session row and its
+      // refresh jti are gone either way. Reported rather than glossed over.
+      const blocklist = getBlocklist(env);
+      const { tokenBlocklisted } = await revokeAgentSession({
         sessionId,
-        userPoolId,
-        cognitoUsername: session.sub,
-        cognito,
         audit: {
           emit: async (input) => audit.emit(input as never, prisma as never),
         },
         tenantId: session.tenantId,
         actorUserId: auth.userId,
         sourceIp: trustedClientIp(request, env),
+        ...(blocklist ? { blocklist } : {}),
       });
 
       return sec.createSecureResponse(
-        JSON.stringify({ status: "revoked" }),
+        JSON.stringify({ status: "revoked", tokenBlocklisted }),
         { status: 200, headers: { "content-type": "application/json" } },
       );
     },
     middleware: [corsMiddleware(), csrfMiddleware()],
-    description: "Revoke an agent session",
+    description: "Revoke a single agent session (does not affect other sessions)",
   },
 ];
