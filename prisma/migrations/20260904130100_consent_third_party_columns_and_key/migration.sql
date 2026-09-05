@@ -26,6 +26,7 @@ ALTER TABLE "consent" ADD COLUMN IF NOT EXISTS "subject_entity_id" TEXT;
 -- TIMESTAMP(3), not timestamptz: this is what Prisma's `DateTime` maps to and
 -- what every other datetime column in this schema is. A timestamptz here would
 -- be permanent schema drift for one column's sake.
+-- squawk-ignore prefer-timestamp-tz
 ALTER TABLE "consent" ADD COLUMN IF NOT EXISTS "expires_at"        TIMESTAMP(3);
 
 -- The shape invariant lives where the evidence lives, not only at a Zod
@@ -49,6 +50,11 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
+-- The rule below wants an explicit transaction so a part-way failure can be
+-- re-run. Prisma already runs each migration file inside one; wrapping this
+-- statement in a second BEGIN/COMMIT would be a nested transaction, not a
+-- safer one.
+-- squawk-ignore prefer-robust-stmts
 ALTER TABLE "consent" VALIDATE CONSTRAINT "consent_third_party_sharing_shape_check";
 
 -- One ACTIVE sharing decision per (user, external client, resource). Scopes are
@@ -58,6 +64,11 @@ ALTER TABLE "consent" VALIDATE CONSTRAINT "consent_third_party_sharing_shape_che
 -- NULLS NOT DISTINCT (PG15+; Postgres is 16 everywhere) so a NULL grantee or
 -- subject cannot escape the key — a NULL subject means "all this user's
 -- resources", the row least safe to duplicate.
+-- CONCURRENTLY cannot run inside a transaction block, and Prisma wraps every
+-- migration file in one — so the rule's fix is not available here. A plain
+-- CREATE INDEX also matches the precedent this key sits beside
+-- (`consent_cross_region_key`, init migration).
+-- squawk-ignore require-concurrent-index-creation
 CREATE UNIQUE INDEX IF NOT EXISTS "consent_third_party_sharing_key"
   ON "consent" ("user_id", "grantee_client_id", "subject_entity_id") NULLS NOT DISTINCT
   WHERE "purpose" = 'THIRD_PARTY_DATA_SHARING' AND "active";
