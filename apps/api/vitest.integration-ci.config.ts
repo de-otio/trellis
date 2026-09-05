@@ -65,6 +65,13 @@ const PHASE0_INTEGRATION = [
   // resolves canned rows regardless of the SQL — only real Postgres decides
   // whether a row comes back.
   "test/integration/circle-read-authz.integration.test.ts",
+  // C1 (quality sweep 2026-09-05) — the scoped extension surface must not be
+  // usable unbound. The fix rests on a claim ABOUT PRISMA: an `undefined` in a
+  // `where` is no filter, not `IS NULL`, so `{ tenantId: undefined }` made a
+  // scoped read platform-wide. Every unit assertion of that claim runs against
+  // a fake delegate, and the neighbouring fake compares with `===` — under
+  // which the bug is invisible. Only real Postgres settles the premise.
+  "test/integration/extension-tenant-binding.integration.test.ts",
 ];
 
 export default defineConfig({
