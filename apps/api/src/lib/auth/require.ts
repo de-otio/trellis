@@ -259,3 +259,65 @@ export function requireScope(
   const held = granted as ReadonlySet<string>;
   throw new InsufficientScopeError(needed.filter((scope) => !held.has(scope)));
 }
+
+/**
+ * Thrown by {@link requireFirstParty}. 403 for the same reason
+ * {@link InsufficientScopeError} is: the caller authenticated and is simply
+ * not permitted.
+ *
+ * Deliberately NOT an `InsufficientScopeError` with an empty `missing` list.
+ * That error's contract is "ask for these scopes and come back", and its
+ * remediation says so. Here there is no scope to ask for: the route is not
+ * exposed to third-party clients at all, and telling a client to request a
+ * grant that cannot exist sends it round a loop it can never finish.
+ */
+export class ThirdPartyNotPermittedError extends Error {
+  readonly status = 403 as const;
+  readonly body: StructuredError;
+
+  constructor() {
+    super("First-party only: this route is not available to third-party clients");
+    this.name = "ThirdPartyNotPermittedError";
+    this.body = {
+      error: "FIRST_PARTY_ONLY",
+      message:
+        "This operation is available only to the user's own session, not to a third-party client acting on their behalf.",
+      remediation:
+        "There is no scope that grants this. If your integration needs this capability, it has to be exposed as a scoped route first.",
+    };
+  }
+
+  /** Render the 403. Pass `securityHeaders` at a route boundary. */
+  toResponse(securityHeaders?: SecurityHeaders): Response {
+    return structuredError(this.status, this.body, securityHeaders);
+  }
+}
+
+/**
+ * The other half of the scope gate: a route that declares NO scopes is
+ * first-party only, and this is where that is enforced.
+ *
+ * The published contract (`ExtensionRouteDefinition.scopes`) is three-valued —
+ * absent means "first-party only; no third-party client reaches it", `[]` means
+ * "any authenticated principal", non-empty means "every listed scope". Only the
+ * last two ran through {@link requireScope}; absent fell through every gate,
+ * because a missing declaration reads as "nothing to check" unless something
+ * says otherwise. This says otherwise.
+ *
+ * The rule is written against `clientId`, not against `scopes`. An absent
+ * `scopes` is the *first-party* default (see {@link requireScope}), so testing
+ * it here would refuse exactly the caller the route is for. `clientId` is
+ * populated only when a third-party client is acting on the user's behalf,
+ * which is precisely the caller the contract excludes.
+ *
+ * Unreachable today: every `getSession` path stamps `scopes: "*"` and nothing
+ * populates `clientId`, so no third-party principal exists yet. It is written
+ * now because the gate has to be in place BEFORE the first narrowed principal
+ * is minted — on the day that lands, every scope-less extension route would
+ * otherwise open to any client at once, silently.
+ * (Quality sweep 2026-09-05, C3.)
+ */
+export function requireFirstParty(ctx: ScopedPrincipal): void {
+  if (ctx.clientId === undefined) return;
+  throw new ThirdPartyNotPermittedError();
+}

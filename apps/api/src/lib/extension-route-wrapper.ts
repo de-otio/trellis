@@ -3,7 +3,8 @@
  *
  * Converts ExtensionRouteDefinition → Route with core-applied:
  * - Authentication (enforced by core, not extension)
- * - Scope enforcement (`requireScope`, from the route's declared `scopes`)
+ * - Scope enforcement (`requireScope`, from the route's declared `scopes`;
+ *   `requireFirstParty` when the route declares none)
  * - Request-body validation (the route's declared `requestSchema`)
  * - CORS and CSRF middleware
  * - Security headers
@@ -35,7 +36,12 @@ import { getLogger, Logger } from "./logger.js";
 import { createExtensionContext } from "./extension-context.js";
 import { mintTenantId, type TenantId as CoreTenantId } from "./mint-tenant-id.js";
 import { CUID_RE } from "./auth/cuid.js";
-import { requireScope, InsufficientScopeError } from "./auth/require.js";
+import {
+  requireScope,
+  requireFirstParty,
+  InsufficientScopeError,
+  ThirdPartyNotPermittedError,
+} from "./auth/require.js";
 import { structuredError } from "./routes/errors.js";
 import type { Env } from "../env.js";
 import type { PrismaClient } from "@prisma/client";
@@ -212,13 +218,28 @@ export function wrapExtensionRoute(
       // above; an `auth: "optional"` route has no principal to narrow). A
       // non-empty `scopes` on an `auth: "none"` route is refused at wiring
       // time, so this cannot silently pass one.
-      if (session && routeDef.scopes) {
+      //
+      // `scopes` is three-valued and all three branches are decided here.
+      // ABSENT is first-party only — the published contract says so, and it
+      // used to fall through this gate entirely because a missing declaration
+      // reads as "nothing to check". `[]` (any authenticated principal) is
+      // truthy, so it went and still goes through `requireScope`, which admits
+      // it. (Quality sweep 2026-09-05, C3.)
+      if (session) {
         try {
-          requireScope(session, routeDef.scopes);
+          if (routeDef.scopes === undefined) {
+            requireFirstParty(session);
+          } else {
+            requireScope(session, routeDef.scopes);
+          }
         } catch (error) {
-          if (error instanceof InsufficientScopeError) {
+          if (
+            error instanceof InsufficientScopeError ||
+            error instanceof ThirdPartyNotPermittedError
+          ) {
             // 403, not 401 — the caller is authenticated and simply not
-            // permitted. `remediation` names the missing scope literally.
+            // permitted. `remediation` names the missing scope literally, or
+            // says plainly that no scope grants this one.
             return error.toResponse(securityHeaders);
           }
           throw error;

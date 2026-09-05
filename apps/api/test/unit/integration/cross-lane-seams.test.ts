@@ -364,7 +364,15 @@ describe("lane A's wrapper and lane G's dispatcher run the same pipeline", () =>
     // each side. It is a defect *of the pair* if an extension author reads the
     // core rule and assumes it holds for their route, which is why it is
     // pinned here.
-    expect(wrapper).toMatch(/if \(session && routeDef\.scopes\)/);
+    //
+    // The guard used to read `if (session && routeDef.scopes)`. Sweep C3
+    // changed what happens INSIDE it — an absent `scopes` now means
+    // first-party-only rather than "nothing to check" — but not the condition
+    // for entering it, which is still the presence of a session. So the
+    // asymmetry this test exists for is unchanged and STILL OPEN: an anonymous
+    // caller on an `auth: "optional"` extension route reaches `handle()` with
+    // the declared scopes unchecked.
+    expect(wrapper).toMatch(/if \(session\) \{[\s\S]{0,600}?requireScope\(session,/);
     expect(dispatcher).toMatch(/if \(!session\) return unauthorizedError\(/);
 
     // …and the same declaration is refused outright once it is public: an
