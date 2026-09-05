@@ -18,6 +18,29 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ### Security
 
+- **The scoped extension surface can no longer be used unbound, and a relation
+  can no longer be projected out of `discover()`.** Two holes in the tenant
+  half of the `@de-otio/trellis-extension-api` 0.10.0 contract, found by an
+  adversarial sweep of the alpha.15 wave. First: `ctx.db.tenant(id)` bound to
+  whatever string it was handed — no mint, no validation, no comparison against
+  the tenant core had already resolved for the request — and the `TenantId`
+  brand is type-only, so it erases in the compiled JS that extensions actually
+  consume. Prisma ignores an `undefined` field in a `where`, so the
+  `{ tenantId: undefined }` clause that produced was *no filter*: a scoped
+  `findMany` became a platform-wide read and a scoped `deleteMany` a
+  platform-wide delete, with no backstop (`TENANT_SCOPE_MODE` is off by default
+  and RLS is installed inert). `planScopedOp` now rejects any non-string or
+  empty tenant id, and on the route path the context binds to the tenant core
+  resolved, rejecting a request for any other. Second: both projection guards
+  tested the *value* of a `select` entry, so `select: { author: true }` — the
+  same read spelled with a boolean instead of a nested object — passed, and
+  `author` is not a scalar so the excluded-column guard did not see it either.
+  Every SHOUT post came back with its author's `User` row and, via `tenant`,
+  the tenant row: the author→tenant map that excluding `tenantId` from every
+  model exists to prevent. Both guards now decide on the *key*, against the
+  DMMF relation set, and `orderBy` on a relation is rejected for the same
+  reason. No public API changed.
+
 - **Secrets no longer appear as "previews" in logs.** The connection manager
   logged `DATABASE_URL.substring(0, 50)` at pool creation (INFO, so on every
   boot) and in a debug line, and put the same slice into the error thrown for
