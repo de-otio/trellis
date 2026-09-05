@@ -153,3 +153,25 @@ the append-only `Consent` record with `purpose = CROSS_REGION`.
 
 **Errors:** `400` invalid region or data-region mismatch, `401`, `404` user not
 found, `500`.
+
+## Former parental-controls endpoints
+
+Accounts are 18+ (enforced server-side; see
+[Compliance — Minimum age](../security-and-privacy/compliance.md#minimum-age)),
+so there are no linked child accounts for a guardian to manage. The seven
+guardian endpoints stay registered and return **`410 Gone`** with
+`{"error":"MINOR_ACCOUNTS_NOT_SUPPORTED", "message", "remediation"}` — a `404`
+would say "no such path", which a client retries; `410` says the capability is
+withdrawn, which is the truth and terminal:
+
+- `GET /api/parental/children`
+- `GET /api/parental/children/:childId/settings`
+- `PUT /api/parental/children/:childId/settings`
+- `PUT /api/parental/children/:childId/quiet-hours`
+- `PUT /api/parental/children/:childId/dm-access`
+- `PUT /api/parental/children/:childId/profile-visibility`
+- `DELETE /api/parental/children/:childId/link`
+
+The gated form keeps CORS and its rate limit but drops CSRF (the response
+changes no state, and a `403` would misdescribe why the call failed). None of
+these appear in `/openapi.json`.

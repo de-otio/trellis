@@ -84,9 +84,15 @@ write path.
 ## Extension architecture
 
 Trellis's core is domain-agnostic. Domain-specific behaviour is provided by
-**extensions** — pluggable modules that register entity types, metadata
-schemas, routes, feed strategies, recommendation strategies, lifecycle hooks,
-entity relationship types, discovery facets, and relationship signal providers.
+**extensions** — pluggable modules that register an entity type with its
+metadata schema and terminology, routes (core-wrapped or raw), scheduled jobs,
+a scoped configuration schema, display enrichment (ActivityPub actor,
+life-stage computation, year-in-review recap), and — since extension-api
+`0.10.0` — per-route scopes with a scope and event vocabulary. The
+[Extension API reference](../reference/extension-api.md#the-trellisextension-contract)
+lists the whole contract; anything not in that table (lifecycle hooks,
+recommendation strategies, discovery facets, relationship signal providers) was
+removed in `0.9.0` because core never called it.
 
 | Concept | Description |
 |---------|-------------|
@@ -94,8 +100,8 @@ entity relationship types, discovery facets, and relationship signal providers.
 | `ExtensionContext` | Scoped context passed to extensions — limited database access, no secrets |
 | `ExtensionDb` | Compile-time boundary exposing only safe data models, never auth or security tables |
 | `ExtensionGraphService` | Read-only proxy over the graph layer — extensions can traverse edges but not write them |
-| Extension Registry | Startup-validated list of loaded extensions |
-| Hook Dispatcher | Fires lifecycle hooks (for example `onEntityCreated`) with a timeout and circuit breaker |
+| Extension Registry | Startup-validated list of loaded extensions — an unauthenticated raw route, an undeclarable `crossTenantRead`, or scopes on an `auth: "none"` route fail startup |
+| `ctx.events` | The extension's event emitter; writes a tenant-bound row to the domain-event outbox (nothing reads the outbox yet) |
 
 Extensions are separate workspace packages. See the
 [glossary](../reference/glossary.md) for term definitions.

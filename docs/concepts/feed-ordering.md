@@ -50,6 +50,11 @@ elsewhere:
 - taxonomy/tag match quality
 - any personalization signal
 
+**Blocks narrow, too.** A [user block](../reference/blocks-api.md) removes
+the other party's posts from the feed in both directions, as a `WHERE authorId
+NOT IN (…)` conjunct inside the same paginating query, so the keyset cursor
+stays exact. It changes which posts are eligible; it never touches the order.
+
 **Personalization narrows, it does not reorder.** When a feed request opts
 into personalization (matching a user's entities' taxonomy tags — e.g. life
 stage or behavior tags), the server builds a database `WHERE` filter that

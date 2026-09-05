@@ -47,17 +47,20 @@ exposes the root only, so deep specifiers into `lib/` do not resolve.
 > **Current version: `0.10.0`.** This line is checked against the
 > `EXTENSION_API_VERSION` constant in CI, so it cannot drift.
 >
-> `0.9.2 → 0.10.0` is **additive, and every added field is inert**. It declares
-> the shapes a developer surface needs — per-route `scopes`, `publicSpec`,
+> `0.9.2 → 0.10.0` is **additive, and core reads it**. It adds the shapes a
+> scoped developer surface needs — per-route `scopes`, `publicSpec`,
 > `requestSchema`/`responseSchema`, `idempotent`, `operationId`, `stability`;
 > a `scopes` vocabulary and an `events` catalog on `TrellisExtension`;
-> `clientId`/`scopes` on `ExtensionSession`; and `ctx.events` — **without core
-> reading any of them yet**. Nothing enforces a scope, validates a schema,
-> emits an event or publishes a route as a result of this bump. An extension
-> written against `0.9.2` compiles and behaves identically; the minor moved
-> only because a `0.x` minor is the breaking unit and these had to land
-> together. Fields marked _declared_ in the tables below are the ones core does
-> not call yet — see [Declared but not yet read](#declared-but-not-yet-read).
+> `clientId`/`scopes` on `ExtensionSession`; and a **required** `ctx.events`.
+> An extension written against `0.9.2` compiles and behaves identically,
+> because every added field is optional and defaults to the previous
+> behaviour; the minor moved only because a `0.x` minor is the breaking unit
+> and these had to land together. Unlike the fields removed in `0.9.0`, these
+> are live: per-route `scopes` is enforced, `requestSchema` is validated,
+> `publicSpec` + `scopes` publishes a route into `/openapi.json` and under
+> `/api/v1`, and `ctx.events.emit` writes an outbox row. Two things are still
+> declaration only — the `scopes`/`events` _catalogs_ on `TrellisExtension`
+> and `ExtensionSession.clientId` — see [Live since 0.10.0](#live-since-0100).
 >
 > `0.9.1 → 0.9.2` tightens `ExtensionModelMap` from `Record<string, object>` to
 > `Record<string, ScopedDelegate>`, with **no runtime change**. If you declare a
@@ -130,13 +133,13 @@ omitted when the vertical has no interest in that surface.
 | `computeLifeStage`    | no       | Compute a life-stage (or equivalent) value from entity metadata; the result is persisted as `Entity.lifeStage`.                                                    |
 | `extendRecap`         | no       | Attach own-table aggregates to a year-in-review recap; merged under `payload.extension`.                                                                           |
 | `shutdown`            | no       | Called on server shutdown (SIGTERM/SIGINT).                                                                                                                        |
-| `scopes`              | no       | _Declared, not yet read._ This extension's scope vocabulary — `{ id, description }` per scope, the description being the consent-screen copy.                      |
-| `events`              | no       | _Declared, not yet read._ This extension's event catalog — `{ type, payloadSchema }` per event.                                                                    |
+| `scopes`              | no       | _Catalog, declaration only._ This extension's scope vocabulary — `{ id, description }` per scope, the description being the consent-screen copy. Ids are `<resource>:<verb>` and must not collide with core's. Nothing reads the catalog yet; the per-route `scopes` on `extensionRoutes` is what core enforces. |
+| `events`              | no       | _Catalog, declaration only._ This extension's event catalog — `{ type, payloadSchema }` per event. Nothing validates an emitted payload against its schema yet, and nothing delivers an event.                                                                    |
 
 **This table is the whole contract.** Every field listed is invoked by core,
-except the two marked _declared, not yet read_ — see
-[Declared but not yet read](#declared-but-not-yet-read) for why those exist and
-what it is safe to conclude from them.
+except the two catalogs marked _declaration only_ — see
+[Live since 0.10.0](#live-since-0100) for exactly what is enforced, what is
+not, and the one runtime precondition.
 If you are looking for a lifecycle hook, an entity-relationship-type
 registration, a discovery facet, a scoring signal, a taxonomy seed, a
 recommendation strategy or an `init` callback, they were removed in `0.9.0`:
@@ -248,16 +251,21 @@ interface ExtensionRouteDefinition {
   description?: string;
   handle: ExtensionHandler;
 
-  // Declared, not yet read by core (0.10.0).
-  scopes?: string[]; // absent = first-party only; [] = any authenticated caller
-  publicSpec?: boolean; // eligible for the public OpenAPI document
-  requestSchema?: ZodType; // → JSON Schema; the intended pre-handler validation point
-  responseSchema?: ZodType; // → JSON Schema
-  idempotent?: boolean; // repeated Idempotency-Key must not re-execute
-  operationId?: string; // stable machine name in the spec
-  stability?: "stable" | "beta";
+  // Read by core since 0.10.0 — see "Live since 0.10.0" below.
+  scopes?: string[]; // ENFORCED before handle(): absent = first-party only; [] = any authenticated caller
+  publicSpec?: boolean; // with `scopes`: published in /openapi.json and mounted under /api/v1
+  requestSchema?: ZodType; // VALIDATED before handle() (400 on failure); → JSON Schema in the spec
+  responseSchema?: ZodType; // → JSON Schema in the spec (documentation; responses are not checked)
+  idempotent?: boolean; // carried into the public route table for the /api/v1 dispatcher
+  operationId?: string; // stable machine name in the spec (unique, or the build fails)
+  stability?: "stable" | "beta"; // carried through as `x-stability`
 }
 ```
+
+A route with `auth: "none"` and a non-empty `scopes` **fails startup**: an
+unauthenticated route has no principal to check scopes against, so serving it
+would look gated and be open. Set `auth` to `"required"` (or `"optional"`) or
+drop the scopes.
 
 The handler receives the parsed request, route params, the session (or `null`
 when unauthenticated), and the scoped `ExtensionContext`, and returns an
@@ -295,10 +303,15 @@ const pingHandler: ExtensionHandler = async () => ({
 `ExtensionSession` is built by whitelist — core never spreads its internal
 session into it — so only the fields named in the type cross the boundary.
 Besides `userId`, `email`, `role` and the verified `tenantId`, `0.10.0` adds
-two _declared, not yet populated_ fields: `clientId?` (the third-party client
-acting on the user's behalf; absent means first-party) and `scopes?`
-(`ReadonlySet<string> | "*"`, where absent is equivalent to `"*"`). Both stay
-undefined until there is an authorization server to populate them.
+`clientId?` (the third-party client acting on the user's behalf; absent means
+first-party) and `scopes?` (`ReadonlySet<string> | "*"`, where absent is
+equivalent to `"*"`). Core copies `scopes` onto the session when the
+authenticated session carries them; a first-party session carries none, so the
+field is absent and reads as `"*"`. Enforcement of the route's declared
+`scopes` has already happened in core by the time your handler runs, so read
+`session.scopes` to _branch_, never to _gate_. `clientId` is the one `0.10.0`
+field nothing populates: it stays `undefined` until an authorization server
+exists.
 
 ### Raw routes
 
@@ -325,43 +338,77 @@ interface ExtensionContext {
   stage: string; // "dev", "prod"
   config: Record<string, string>; // this extension's validated config
 
-  // Declared, not yet supplied by core (0.10.0) — call as ctx.events?.emit(…).
-  events?: { emit(type: string, payload: unknown): Promise<void> };
+  // Supplied by core, always (0.10.0). Records a domain event in core's outbox.
+  events: { emit(type: string, payload: unknown): Promise<void> };
 }
 ```
 
-### Declared but not yet read
+### Live since 0.10.0
 
-`0.10.0` adds fields that core accepts and does nothing with. That is normally
-the exact anti-pattern this document warns about — the seven dead extension
-points removed in `0.9.0` — so the difference is worth stating plainly rather
-than leaving you to discover it.
+The `0.10.0` contract landed first as a declaration nothing read; by the time
+it published, core read most of it. The distinction matters because a
+declared-but-unread field is the exact anti-pattern this document warns about —
+the seven dead extension points removed in `0.9.0` — so here is what is
+enforced, what is not, and the one runtime precondition.
 
-Those seven were declared as _working features_ and were not. These are
-declared as a _contract to build against_, and the tables say so on every row.
-The reason to land them empty is that they are the vocabulary a scoped
-third-party surface needs — which route requires which grant, what a user is
-consenting to, what a payload looks like — and every one of them is cheap to
-add before there are callers and invasive afterwards, when adding a required
-field means touching every route at once.
+**Enforced or acted on by core:**
 
-What this means for you today:
+- **Per-route `scopes`** on an `extensionRoutes` entry is enforced by the
+  route wrapper before `handle()` runs, and again by the `/api/v1` dispatcher
+  for routes published there. Absent means first-party only; `[]` means any
+  authenticated caller; a non-empty list means the session must hold **every**
+  listed scope. Matching is exact set inclusion (`hasScope`): `"*"` passes
+  everything, an empty requirement is satisfied by anything, and there is no
+  prefix rule, per-scope wildcard, or separator normalisation. A session that
+  lacks a scope is refused before your handler.
+- **`requestSchema`** is validated before `handle()` on both paths, against a
+  clone of the request (your own `request.json()` still works). A failing body
+  is the standard `400 {error, message, remediation, field?}` envelope
+  (`INVALID_REQUEST_BODY` for non-JSON), and the handler never sees it.
+  `GET`/`HEAD` carry no body, so a schema on them only documents the
+  operation. `responseSchema` is emitted into the spec but responses are not
+  checked.
+- **`publicSpec: true` together with `scopes`** publishes the route into
+  `/openapi.json` and mounts it under `/api/v1` behind the public dispatcher
+  (authenticate → `requireScope` → validate → idempotency → handle).
+  `publicSpec` without `scopes` is curated but unpublished — not an error;
+  `operationId` (declared or derived) must be unique across the document or the
+  build fails, and a path parameter must be a _named_ capture group.
+- **`ctx.events.emit(type, payload)`** is supplied by core on every
+  `ExtensionContext` and writes a row to the `domain_events` outbox, bound to
+  the tenant core resolved for the request. Call it as `ctx.events.emit(…)`,
+  never `ctx.events?.emit(…)` — the seam is always there. Each extension emit
+  is its own single-statement transaction, not part of whatever your handler
+  wrote before it. Nothing _reads_ the outbox yet — there is no dispatcher,
+  sweeper or subscriber — so `emit` records that something happened and
+  delivers nothing; emission points are what is expensive to retrofit later,
+  delivery is not.
+- **Two wiring rules fail startup** rather than serve a route that looks
+  gated: an `extensionRoutes` entry with `auth: "none"` and a non-empty
+  `scopes`, and a raw `routes` entry that declares no auth middleware (see the
+  package README's trust-model section).
 
-- **Declaring them is safe and changes nothing.** No request is refused, no
-  body is validated, no event is delivered, nothing new appears in
-  `/openapi.json`.
-- **Do not rely on them for enforcement.** A route carrying
-  `scopes: ["walks:write"]` is not yet protected by that scope. If a route must
-  be restricted now, restrict it in the handler as you would have before.
-- **`ctx.events` is absent at runtime.** Call it as `ctx.events?.emit(…)`; an
-  unguarded call throws.
-- **Declare only what is true.** A scope you list is copy a person will
-  eventually be asked to consent to, and an `operationId` is a name a generated
-  client will eventually carry. Both are easier to get right now than to
-  rename later.
+**Runtime precondition — `TENANT_SCOPE_MODE`:**
 
-Each field becomes live in a later release, and the release note for that
-version will say which.
+On the extension-route path the emitter's tenant comes from the **ambient
+tenant context**, which `lib/app.ts` establishes only when the deployment's
+`TENANT_SCOPE_MODE` is not `"off"` — and `off` is the default. On a deployment
+that leaves it there, `ctx.events.emit` **throws** rather than write a row
+scoped to nothing. The same precondition applies to the circle reads on
+`ctx.graphService`. Core's own emission points are unaffected; they pass the
+tenant explicitly.
+
+**Still declaration only:**
+
+- The **`scopes` and `events` catalogs on `TrellisExtension`**: nothing reads
+  the consent copy yet (there is no consent screen), and nothing validates an
+  emitted payload against its declared `payloadSchema`. Declare only what is
+  true — a scope's description is copy a person will eventually be asked to
+  consent to, and an `operationId` is a name a generated client will carry.
+- **`ExtensionSession.clientId`** stays `undefined` until an authorization
+  server exists to populate it.
+
+When either becomes live, the release note for that version will say so.
 
 ### `db` — scoped database access
 
