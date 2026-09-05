@@ -16,6 +16,26 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A date of birth that cannot be read no longer provisions an adult.**
+  The minimum-age floor in `provisionConfirmedUser` is fail-closed and says so;
+  the parse in front of it was not. It accepted whatever `new Date()` accepted
+  and required only `parsed < now`, so a malformed or future value failed the
+  `if` and fell straight through — the account was provisioned at the `ADULT`
+  default, with no date of birth stored, no log line and no re-check. An age
+  tier assigned by accident from an input the caller got wrong. This mattered
+  because the strict parser at `/auth/register` never sees these paths:
+  provisioning is reached from a Cognito PostConfirmation trigger and from
+  Keycloak JIT sign-in, neither of which the client mediates. A supplied
+  date of birth that cannot be parsed now throws `InvalidDateOfBirthError`, so
+  nothing is written — the same fail-closed shape as the under-age case. An
+  ABSENT date of birth is unchanged: nothing was claimed, so there is nothing
+  to fail on. `parseDateOfBirth` moved to `age-gate.ts` and is now the single
+  implementation, so these paths also inherit its round-trip guard
+  (`2025-02-31`, which `new Date()` silently rolls to March 3) and its
+  implausible-year guard (`0202`).
+
 ### Security
 
 - **Secrets no longer appear as "previews" in logs.** The connection manager
