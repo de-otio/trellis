@@ -51,6 +51,25 @@ EMAIL_SUB_HMAC_SECRET=local-dev-email-sub-hmac-secret-at-least-32-chars
 EMAIL_SUB_ENC_KEY=      # 32-byte base64; generate with: openssl rand -base64 32
 ```
 
+### Optional switches
+
+None of these is needed for local development; each defaults to the safe
+setting. They are listed because their absence changes behaviour in ways that
+surprise people reading the code. All are read in `apps/api/src/env.ts` unless
+noted.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `ENABLE_TEST_ROUTES` | unset (off) | Opts the `/api/admin/test/*` test-user seam on. The seam is also on when `STAGE=dev` is genuinely set (not defaulted) or the process runs in CI; `STAGE=prod`/`production` can never enable it. Even when on, the routes require an authenticated `SUPER_ADMIN` session plus CSRF — there is deliberately no bootstrap header or bypass. |
+| `SESSION_BLOCKLIST_REQUIRED` | unset | Set to `true` to make the session-revocation check fail closed when no `SESSION_BLOCKLIST_KV` is bound: every session is denied instead of the check being skipped. Local dev and the unit tests bind no KV, so leave it unset here (`apps/api/src/lib/session-cookie.ts`). |
+| `TENANT_SCOPE_MODE` | `off` | `off` \| `shadow` \| `enforce`; anything else reads as `off`. `shadow` logs scoped queries that lack a tenant filter; `enforce` injects a tenant predicate (a partial defence — read `apps/api/src/lib/tenant-scope.ts` before enabling it anywhere). Only a non-`off` mode establishes the per-request ambient tenant context, which extension `ctx.events.emit(…)` and the extension graph circle reads require — under `off` both throw. See the [Extension API](../reference/extension-api.md#live-since-0100). |
+| `AGENT_SURFACE_LLMS_TXT` | unset | Full body served verbatim at `GET /llms.txt`. Unset = Trellis's generic default. |
+| `AGENT_SURFACE_SECURITY_TXT` | unset | Full RFC 9116 body served verbatim at `GET /security.txt`. Unset = `404` and one `[agent-surface]` warning at boot; there is deliberately no placeholder contact. |
+
+`HATCHET_ENABLED` and `HATCHET_CLIENT_TOKEN` are read by the **worker**
+container only (`apps/worker`), not by the API — see
+[`apps/worker/README.md`](https://github.com/de-otio/trellis/blob/main/apps/worker/README.md).
+
 ## Running tests
 
 ```bash

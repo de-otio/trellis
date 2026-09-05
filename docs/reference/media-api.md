@@ -86,6 +86,25 @@ itself strip fields based on them.
   metadataVisible: boolean;
   locationVisible: boolean;
 
+  // Synthetic-content provenance (AI Act Art. 50). Deliberately NOT behind
+  // metadataVisible — it is a disclosure meant to be seen, not private metadata.
+  // Field semantics: ../reference/provenance-api.md
+  provenance: {
+    sourceType: string;          // e.g. "UNKNOWN", "AI_GENERATED", …
+    basis: string | null;        // null only when sourceType is UNKNOWN
+    disclosureRequired: boolean;
+    labelKey: string;
+    labelDetailKey: string;
+    c2pa: {                      // null when the file carried no C2PA manifest
+      present: true;
+      container: "jpeg-app11" | "png-cabx" | "unidentified";
+      sidecarKey: string | null; // null = presence only, no bytes kept
+      byteLength: number | null;
+      sha256: string | null;     // digest of OUR copy — not a signature check
+      verified: false;           // always false; Trellis verifies nothing
+    } | null;
+  };
+
   createdAt: string;
   updatedAt: string;
   hidden: boolean;
@@ -193,11 +212,33 @@ For completeness, the media routes also include:
   "exifData": null,
   "iptcData": null,
   "videoMetadata": null,
+  "provenance": {
+    "sourceType": "UNKNOWN",
+    "basis": null,
+    "disclosureRequired": false,
+    "labelKey": "provenance.unknown",
+    "labelDetailKey": "provenance.unknown.detail",
+    "c2pa": {
+      "present": true,
+      "container": "jpeg-app11",
+      "sidecarKey": "cas/<tenant>/<hash>.c2pa",
+      "byteLength": 41203,
+      "sha256": "…",
+      "verified": false
+    }
+  },
   "posts": [],
   "canDelete": true,
   "canHide": true
 }
 ```
+
+`provenance.c2pa` is `null` for a file that carried no manifest, and
+`verified` is **always `false`** — Trellis keeps the manifest bytes so someone
+else can check them one day; it does not check them itself. Do not render
+"Content Credentials verified" from this object. Full field semantics, the
+container table, and the erasure guarantees are in
+[Provenance API — C2PA manifests on media](provenance-api.md#c2pa-manifests-on-media).
 
 ## Behaviour notes
 

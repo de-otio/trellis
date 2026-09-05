@@ -26,6 +26,42 @@ platform:
 | **Portability** (Art. 20) | The same export produces structured, schema-versioned JSON. |
 | **Objection** (Art. 21) | For tenant participation that depends on federation, the user's control is to leave the tenant. |
 
+## Notice and action (DSA Art. 16 and 17)
+
+Trellis ships the mechanism for the Digital Services Act's notice-and-action
+obligations; the deployment supplies the jurisdiction — the offence categories
+and the legal copy — because core cannot truthfully invent either. The full
+route contract is in the [Content reports API](../reference/content-reports-api.md).
+
+| Obligation | How Trellis supports it |
+|---|---|
+| **Notice** (Art. 16(1)–(2)) | An authenticated user files a report with `POST /api/reports` against a post, comment, media item, entity, user or URL, choosing from the deployment-seeded category vocabulary served by `GET /api/report-categories`. Core routes only on each category's `RoutingClass` (`ILLEGAL_PRIORITY`, `ILLEGAL`, `POLICY_VIOLATION`, `FEEDBACK`) and never learns what a category means. |
+| **Confirmation of receipt** (Art. 16(4)) | Sent on filing, and readable back at any time from `GET /api/reports/:id` — the report row's existence is the receipt, so a lost email never costs the reporter their confirmation. |
+| **Decision and redress information** (Art. 16(5)) | A `SUPER_ADMIN` drives `pending → acknowledged → decided` on `POST /api/admin/content-reports/:id/decision`; the terminal transition is what sends the reporter the decision notice, so a report cannot be decided without its reporter being notified. The redress copy travels with the decision. |
+| **Timely, diligent, non-arbitrary handling** (Art. 16(6)) | The review queue (`GET /api/admin/content-reports`) is ordered oldest-first because the handling is deadline-bearing; the lifecycle allows only `pending → acknowledged → decided`, and an illegal transition is refused (`409`) rather than overwriting a decision. |
+| **Statement of reasons** (Art. 17) | Written when content is restricted. The reporter's status poll surfaces only the fact and the kind of restriction — never the affected user or the template parameters. A statement may be written *suppressed*: the audit record exists but delivery to the affected user is skipped, which is how the illegal-priority carve-out avoids tipping off the account. |
+| **Illegal-content carve-out** | A category routing to `ILLEGAL_PRIORITY` does not wait for a human before its first protective steps: the resource is hidden, the original is preserved under an **evidence hold** through the injected `EvidencePreservationStore`, a suppressed statement is written, media is marked so it is never offered the appeal path, and a `pending` authority report is created. The hold is honoured by the nightly hard-delete purge, the account-deletion media erasure and the orphaned-media purge, so evidence is never destroyed while a case is open. |
+| **Reporting to authorities** | **Human-gated, always.** Core creates the authority report and submits nothing — filing goes through `markAuthorityReportSubmitted` after review. An unreviewed accusation that auto-filed would be a worse failure than a delayed one, and a denial-of-service vector against any user. |
+
+The seams a deployment injects before activating any `ILLEGAL_*` category —
+evidence store, authority channel, moderation-feedback sink, statement
+delivery, alarm and operator-alert hooks, and the localized reporter templates
+— all ship with fail-safe defaults (the stores throw until configured; the
+authority channel is a manual no-op).
+
+## Minimum age
+
+Accounts are held by people aged **18 and over**. The minimum is enforced
+server-side at every point a date of birth enters the system — the brokered
+registration endpoint and just-in-time provisioning on first sign-in — so a
+minor account cannot be created, and the platform therefore does not process
+children's data as a matter of construction rather than policy. The
+guardian-facing endpoints that once managed linked child accounts return
+`410 Gone` (see the [User profile API](../reference/user-profile-api.md#former-parental-controls-endpoints)).
+The age-tier *policy* tables remain in the codebase as a quarantined,
+re-enableable capability; nothing resolves a session to a minor tier while the
+product decision stands.
+
 ## Data minimization
 
 Federation collects only the claims it needs to identify a user and assign a

@@ -28,6 +28,19 @@ cadences in-process with single-fire via WS-1's
 | `WORKER_DISABLED_CRONS` | no | comma-separated cron names to OMIT (e.g. `nightly` to park the scheduled GDPR-deletion job until its identity + email ports are wired). Queue consumers are unaffected. Empty/unset = all crons scheduled. |
 | `WORKER_HEALTH_HOST` / `WORKER_HEALTH_PORT` | no | default `127.0.0.1:8081` — **never attach to a public LB/ingress (finding 10)** |
 | `WORKER_DRAIN_TIMEOUT_MS` | no | default 25000; keep **below** the orchestrator grace period |
+| `HATCHET_ENABLED` | no | **Evaluation scaffolding (plan 030), not load-bearing.** Starts the Hatchet SDK evaluation host (`src/hatchet.ts`, one `trellis-echo` task, one slot) only when exactly `"true"`; unset/empty/misspelled leaves the worker untouched. Started *after* the real pollers and scheduler and never awaited into the startup gate — a failure logs and the queues keep running. `@hatchet-dev/typescript-sdk` is imported here and nowhere else; it must not cross into `@de-otio/trellis`. |
+| `HATCHET_CLIENT_TOKEN` | with `HATCHET_ENABLED` | Read by the Hatchet SDK itself; the worker checks presence only and never logs it. `HATCHET_ENABLED=true` with no token logs a warning and does not start the host. |
+
+### Domain-event outbox — not relayed by this worker
+
+The API writes `domain_events` rows (`emitDomainEvent(tx, …)` in
+`apps/api/src/lib/events/emit.ts`, and `ctx.events.emit` for extensions) inside
+the emitting mutation's own transaction. **Nothing reads that table yet** —
+there is no dispatcher, sweeper or subscriber anywhere in the tree, and
+`delivered_at` is written by nobody. This container does not relay it; when a
+delivery mechanism lands, this is where its poller would live. The
+`federation-outbox` queue below is the ActivityPub delivery queue, a different
+thing with the same word in its name.
 
 ### Media env-var note (resolves the inventory §4.3 drift)
 

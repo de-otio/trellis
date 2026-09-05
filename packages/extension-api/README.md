@@ -31,6 +31,32 @@ so Trellis core checks compatibility for you at startup, instead of comparing
 `EXTENSION_API_VERSION` by hand — see the
 [`extensionApiVersion` reference](../../docs/reference/extension-api.md#extensionapiversion).
 
+## 0.10.0 — the scoped surface
+
+`0.10.0` is additive — an extension written against `0.9.2` compiles and
+behaves identically — and, unlike the fields removed in `0.9.0`, **core reads
+it**:
+
+- **Per-route `scopes`** on an `extensionRoutes` entry is enforced by the route
+  wrapper before your handler runs (absent = first-party only, `[]` = any
+  authenticated caller, non-empty = every listed scope must be held).
+- **`requestSchema`** is validated before the handler; a failing body is a
+  structured `400` your handler never sees.
+- **`publicSpec: true` + `scopes`** publishes the route into `/openapi.json` and
+  mounts it under `/api/v1` behind the public dispatcher.
+- **`ctx.events.emit(type, payload)` is required, not optional** — core always
+  supplies it. It writes a tenant-bound row to core's domain-event outbox;
+  nothing delivers events yet. On the extension-route path it needs the
+  deployment's `TENANT_SCOPE_MODE` to be something other than `off`, or it
+  throws rather than write a row scoped to nothing.
+- A route with `auth: "none"` and a non-empty `scopes` **fails startup** —
+  there is no principal to check the scopes against.
+
+Still declaration only: the `scopes` and `events` *catalogs* on
+`TrellisExtension` (consent copy and payload schemas nothing reads yet) and
+`ExtensionSession.clientId`. The line-by-line account is in
+[Extension API reference — Live since 0.10.0](../../docs/reference/extension-api.md#live-since-0100).
+
 ## Trust model — extensions are NOT sandboxed
 
 Registering a `TrellisExtension` is a decision to trust that code at the same

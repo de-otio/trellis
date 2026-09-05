@@ -8,5 +8,6 @@ order: 3
 # Concepts
 
 Background and design: the system architecture, the multi-tenancy and identity
-model, profiles, the graph, and organization classification. Read these to
-understand *why* Trellis works the way it does.
+model, profiles, the graph, organization classification, and
+[how the feed is ordered](feed-ordering.md). Read these to understand *why*
+Trellis works the way it does.

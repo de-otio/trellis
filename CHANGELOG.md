@@ -177,6 +177,86 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   timeout prologue, re-runnable statements, the foreign key added `NOT VALID`
   and validated separately.
 
+- **C2PA manifests survive the ingest strip — as an unverified sidecar.** The
+  image pipeline re-encodes every upload and drops all metadata, C2PA
+  manifests included. That strip is a privacy control (a manifest carries
+  camera model and serial, capture times, edit history, often an identity
+  claim) and it stays — but it is irreversible: once the original bytes are
+  gone nobody can ever check a Content Credentials claim about that image
+  again. So the manifest store is now copied out of the original *before* the
+  strip and kept as a sidecar object beside the media. JPEG APP11 JUMBF is
+  reassembled across segments with the packet-sequence and `LBox` checks that
+  tell a clean reassembly from a mangled one; PNG `caBX` is read whole; every
+  other container (WebP, GIF, video, audio) reports **presence only** rather
+  than guessing a byte range. Dispatch is on magic bytes, not the declared
+  MIME type. Dedup collapses two different originals onto one row, so the
+  row's sidecar slot is claimed atomically before any object is written —
+  first manifest wins.
+
+  The summary rides inside the media-detail `provenance` object as `c2pa`
+  (`present`, `container`, `sidecarKey`, `byteLength`, `sha256`, `verified`),
+  `null` when the file carried none. **`verified` is a hard-coded `false`**
+  with no column behind it: Trellis extracts the manifest and checks nothing —
+  no signature, no certificate chain, no assertion — so a client must not
+  render "Content Credentials verified" from this object. See
+  [Provenance API](docs/reference/provenance-api.md).
+
+  Erasure treats the sidecar as the most identifying object of the set: it is
+  deleted alongside `originalKey`/`thumbnailKey`/`optimizedKey` in all four
+  object-deletion paths (the nightly soft-deleted-media purge that Art. 17
+  erasure routes through, the cleanup handler, the orphan sweep and the stale
+  reap), and the purge refuses to hard-delete a row whose sidecar delete
+  failed, so no sidecar can exist that no row names. The five columns join the
+  extension-scoped-db protected-field set — an extension able to write
+  `c2paSidecarKey` could point a row at an object of its choosing, or blank the
+  summary and put the bytes beyond every deletion path.
+
+  Schema, additive: `20260904120000_add_c2pa_manifest_sidecar` adds five
+  nullable columns to `media_files` (`c2pa_manifest_present`, `c2pa_container`,
+  `c2pa_sidecar_key`, `c2pa_sidecar_bytes`, `c2pa_sidecar_sha256`).
+
+- **User blocks — `POST /api/blocks`, `DELETE /api/blocks/:userId`,
+  `GET /api/blocks`.** The `blocked_users` table had no write path: only the
+  realtime delivery floor read it, and nothing could put a row in it. The feed
+  handler and the comment handler had zero references to it, so a "blocked"
+  account's posts and comments stayed fully visible in both directions and it
+  could still comment on and react to the blocker's posts. The product has no
+  standing human moderator, so the block is the user-side remedy, and a remedy
+  that only silences notifications is not one.
+
+  Blocking requires a session *and* a JWT with an active tenant — the tenant
+  comes from the JWT, never from the body — is idempotent (a repeat is `200
+  alreadyBlocked`, not `409`), and deletes both directed `Relationship` edges
+  in the same transaction as the block row, since an edge that outlived the
+  block would keep the blocked account inside the blocker's audience. On the
+  read paths the exclusion is **bidirectional** and threaded through
+  `buildPostAudienceFilter` — the one predicate the home feed, the single-post
+  read and `canReadPost` share, so everything hanging off a post (thread,
+  sentiment counts, who-reacted) is covered by one change; the comment thread
+  gets its own conjunct for a blocked account commenting under a third party's
+  post, and the recommendation surfaces get the same set. Applied as `WHERE`
+  exclusions inside the paginating queries, never as a post-filter, so the
+  `(createdAt, id)` feed keyset and the comment cursor stay exact. Commenting,
+  replying and reacting across a block are refused `403 {"error":"BLOCKED"}`
+  in both directions. Block and unblock bump the feed cache version so the
+  change is visible on the next request rather than at TTL. The `BlockStore`
+  port grew `listMutualBlockIds`, one batched bidirectional lookup every read
+  path consults. No schema change. See
+  [Blocks API](docs/reference/blocks-api.md).
+
+- **The agent surface takes its words from the deployment (`AGENT_SURFACE_*`).**
+  `GET /llms.txt` and `GET /security.txt` are plain-text routes with no place
+  for a consuming application's product name, contacts or setup narrative, and
+  the shipped `security.txt` carried a placeholder `security@example.com`
+  contact — a contact that is not real is worse than none. Both bodies now come
+  from `Env.agentSurface`, sourced from `AGENT_SURFACE_LLMS_TXT` /
+  `AGENT_SURFACE_SECURITY_TXT` through the same app-configuration path as
+  `APP_DOMAIN`/`ALLOWED_ORIGINS`, served verbatim. `llms.txt` unset falls back
+  to a generic default that describes only what core truthfully does;
+  `security.txt` unset returns `404` with the structured envelope and logs one
+  warning at boot. `GET /openapi.json` is unchanged. Operator notes in
+  [Operations](docs/getting-started/for-operations.md#agent-surface-llmstxt-openapijson-securitytxt).
+
 - **`@de-otio/trellis-extension-api` 0.10.0 — the scoped-surface contract, and
   the code that reads it.** An extension written against `0.9.2` compiles and
   behaves identically: every field this bump adds is optional and defaults to
@@ -659,6 +739,29 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   scoring time because the frames it describes are deleted moments later.
 
 ### Fixed
+
+- **`commentCount` excluded hidden comments but not soft-deleted ones.**
+  `FeedPost.commentCount` filtered `hiddenByPostOwner` but not `deletedAt`, so
+  a soft-deleted comment stayed counted until it was hard-purged. The `groupBy`
+  in `enrichPosts` (shared by the home feed and the single-post read) now also
+  requires `deletedAt: null`; the regression test asserts the `where` clause
+  sent to Prisma, not just the returned count. `sentimentCounts` needed no
+  equivalent fix — withdrawing a reaction hard-deletes its row, so nothing
+  lingers. Neither count is author-scoped: the post author's own comments and
+  reactions count like anyone else's.
+
+  Two adjacent honesty fixes ride along. `PersonalizationOptions` declared
+  `boostByMatchCount` and `taxonomyWeight`, which read as relevance-scoring
+  controls and were wired to nothing — personalization only ever builds a
+  taxonomy `WHERE` filter, never a score. Both are removed, and a pinned key
+  list plus a unit test fail the build if a scoring-shaped option name
+  (`/score|weight|boost|rank|relevance/i`) reappears. And
+  `FEED_RANKER_ID = "chronological@1"` names the ranking mechanism that
+  `FEED_RANKING_VERSION` carries as a bare integer, kept in lockstep by a
+  pinning test; it is not on the feed response yet, because `FeedResponse` has
+  no ranking-metadata field and inventing one was out of scope. The invariant
+  and its enforcement are written up in
+  [Feed ordering](docs/concepts/feed-ordering.md).
 
 - **The `@opentelemetry` override moves the whole family instead of splicing
   one package.** `GHSA-8988-4f7v-96qf` (unbounded memory allocation in W3C

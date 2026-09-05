@@ -91,9 +91,12 @@ logged rather than claim values.
 
 ### Conservative privacy defaults
 
-Profile visibility and direct-message access default conservatively, and those
-defaults tighten further for protected age tiers, where they can be locked
-against loosening. Abuse-control identification prefers stable account
+Profile visibility and direct-message access default conservatively. Accounts
+are 18+ — the minimum age is enforced server-side wherever a date of birth
+enters the system — so there are no minor tiers to serve; the age-tier policy
+tables that would tighten defaults for them remain in the codebase as a
+quarantined capability, not a live one (see
+[Compliance — Minimum age](compliance.md#minimum-age)). Abuse-control identification prefers stable account
 identifiers over network-level signals, so rate limiting and similar controls
 do not make a user's IP address the primary key. The intent throughout is that
 the safe choice is the default, and the user does not have to discover a setting

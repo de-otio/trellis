@@ -161,6 +161,58 @@ full contract.
 | `CLIENT_STORE_URL_ANDROID` | Android store URL surfaced in `storeUrls.android`. Unset = dormant (`null`). | Must be `https:` and resolve to the `play.google.com` host — any other scheme or host fails boot validation. |
 | `CLIENT_STORE_URL_IOS` | iOS store URL surfaced in `storeUrls.ios`. Unset = dormant (`null`). | Must be `https:` and resolve to the `apps.apple.com` host — any other scheme or host fails boot validation. |
 
+## Agent surface (`/llms.txt`, `/openapi.json`, `/security.txt`)
+
+Three unauthenticated, CORS-enabled discovery routes are always registered
+(`apps/api/src/lib/routes/agent-surface.ts`). Two of them take their body from
+the environment, through the same app-configuration path as `APP_DOMAIN` /
+`ALLOWED_ORIGINS`:
+
+| Route | Source | When unset | `Cache-Control` |
+|---|---|---|---|
+| `GET /llms.txt` | `AGENT_SURFACE_LLMS_TXT` | Trellis's generic default — describes only what core does, names no product | `public, max-age=3600` |
+| `GET /openapi.json` | Generated from the route registry: every route that is `publicSpec` **and** declares `scopes`, published at its `/api/v1` path | Always served | `public, max-age=300` |
+| `GET /security.txt` | `AGENT_SURFACE_SECURITY_TXT` | `404` with a structured error and one `[agent-surface]` warning at boot. There is deliberately no placeholder contact: RFC 9116 has no "not configured yet" convention, and a fake contact is worse than a 404 | `public, max-age=86400` |
+
+Both values are served **verbatim** — no template substitution — so each must
+be the complete llmstxt.org / RFC 9116 body. Trellis applies no route-level
+rate limit to these three; the route file expects the gateway or WAF to do so.
+
+## Upgrading to 0.25
+
+Four behaviour changes in `0.25.0` need an operator's attention before the
+roll. The CHANGELOG's Unreleased "Security" section carries the full reasoning;
+this is the checklist.
+
+- **Expect one forced re-login.** Session revocation is now enforced on every
+  request, and the inactivity timeout with it. Sessions sealed by an earlier
+  version carry no activity or issue timestamp, so the first request after the
+  roll rejects them and every signed-in user logs in again once. Nothing to
+  configure — schedule the roll accordingly. Where a `SESSION_BLOCKLIST_KV`
+  binding is guaranteed, `SESSION_BLOCKLIST_REQUIRED=true` makes a *missing*
+  binding deny rather than pass.
+- **CORS fails closed unless configured.** With neither `APP_DOMAIN` nor
+  `ALLOWED_ORIGINS` set, the previous version reflected any request `Origin`
+  with credentials allowed. Now only loopback origins (`localhost`,
+  `127.0.0.0/8`, `[::1]`, hostname-exact) are reflected; every remote origin is
+  denied. Set `APP_DOMAIN` (a bare host; the `www.`/non-`www.` variant is
+  derived) and/or a comma-separated `ALLOWED_ORIGINS` covering every browser
+  origin that calls the API. `example.com` was also removed from the shipped
+  allow-list.
+- **`/api/admin/test/*` is off unless opted in.** The test-user seam is
+  enabled only by a genuinely set `STAGE=dev`, a CI flag, or
+  `ENABLE_TEST_ROUTES=true`, and never under `STAGE=prod`/`production`. When
+  on, it requires a real `SUPER_ADMIN` session plus CSRF. A harness that
+  called it anonymously now sees `403 {"error":"Forbidden: Test endpoints are
+  not enabled"}` (gate) or `401 {"error":"Unauthorized"}` (no session). Update
+  harnesses to seed one `SUPER_ADMIN` row, seal a session cookie with the
+  server's secret, and fetch a CSRF token from `/api/csrf-token`.
+- **CSRF is no longer waived by the shape of an `Authorization` header.** If a
+  request carries a session cookie, CSRF applies regardless of any Bearer
+  token. Pure Bearer clients (mobile, server-to-server) send no cookie and are
+  unaffected; a browser client that sent both must now also send the CSRF
+  token.
+
 ## Monitoring conventions
 
 Because the consuming application owns the runtime, it also owns dashboards and
