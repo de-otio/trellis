@@ -16,6 +16,7 @@ import { getCurrentTenantId } from "@de-otio/saas-foundation/tenant";
 import { Pool } from "pg";
 import { DatabaseCircuitBreaker } from "./database-circuit-breaker.js";
 import { getLogger, Logger, type LoggerEnv } from "./logger.js";
+import { redactConnectionString } from "./redact-connection-string.js";
 import { resolveTenantScopeMode, tenantScopeExtension } from "./tenant-scope.js";
 import {
   getPerformanceMetricsCollector,
@@ -227,15 +228,18 @@ export class DatabaseConnectionManager {
       throw new Error(
         `CRITICAL: DATABASE_URL is not a valid PostgreSQL connection string. ` +
           `Expected format starting with postgresql:// or postgres://, ` +
-          `Got: ${base.substring(0, 50)}...`,
+          `Got: ${redactConnectionString(base)}`,
       );
     }
 
+    // Redacted, never a prefix: a libpq URI carries the password right after
+    // the user name, so `substring(0, 50)` of a real DATABASE_URL was the user
+    // and the first characters of the password (seen live, 2026-09-05).
     this.logger.debug(
       "[DatabaseConnectionManager] Using DATABASE_URL connection string",
       {
         region,
-        connectionStringPreview: `${base.substring(0, 50)}...`,
+        connectionString: redactConnectionString(base),
       },
     );
 
@@ -333,9 +337,7 @@ export class DatabaseConnectionManager {
       minConnections: poolMin,
       idleTimeoutMs: idleTimeout,
       connectionTimeoutMs: resolved.connectionTimeout,
-      connectionStringPreview: resolved.connectionString
-        ? `${resolved.connectionString.substring(0, 50)}...`
-        : "undefined",
+      connectionString: redactConnectionString(resolved.connectionString),
     });
 
     // RDS requires SSL (rejectUnauthorized: false because the Amazon RDS root CA

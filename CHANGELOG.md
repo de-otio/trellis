@@ -18,6 +18,29 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ### Security
 
+- **Secrets no longer appear as "previews" in logs.** The connection manager
+  logged `DATABASE_URL.substring(0, 50)` at pool creation (INFO, so on every
+  boot) and in a debug line, and put the same slice into the error thrown for
+  a malformed URL. A libpq URI carries the password right after the user
+  name, so on a real deployment that preview was the user and the first
+  characters of the password, URL-encoded — seen live in a deployed api pod's
+  boot log. Two route handlers did the same with request headers: the CSRF
+  token route logged the first 100 characters of `Cookie` (most of a sealed
+  session token) at debug and again at **WARN on every unauthenticated
+  request**, plus the first 50 of `Authorization`; the media upload route
+  logged the first 50 of `Authorization` (a bearer token); and the CORS
+  handler logged the first 100 characters of every outgoing `Set-Cookie` at
+  INFO — on login, most of the sealed session token. New
+  `redactConnectionString()` keeps scheme, user, host, port and database and
+  replaces the password with `***`, drops the query string (libpq accepts
+  `?password=` there too) and returns a fixed placeholder for anything that is
+  not a URL — never a slice of the input. The header fields become presence
+  and shape only (`hasCookie`, `cookieCount`, `hasAuthHeader`, `authScheme`,
+  and the CORS line's `cookieNames`).
+  Deployments whose logs are retained should treat the affected prefixes as
+  exposed and rotate the database password if the log store is not itself
+  secret-grade.
+
 - **`/api/admin/test/*` is fail-closed — BREAKING for test harnesses.** The
   test-user create/delete endpoints allowed unauthenticated SUPER_ADMIN
   creation, and handed back a valid session cookie for the new account, in any
