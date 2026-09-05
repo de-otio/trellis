@@ -2088,7 +2088,7 @@ model StatementOfReasons {
 model AuthorityReport {
   id           String    @id @default(cuid())
   jurisdiction String // deployment profile value, e.g. "DE"
-  status       String    @default("pending") // pending | submitted | closed
+  status       String    @default("pending") // pending | submitting | submitted | closed
   channelMode  String?   @map("channel_mode") // "manual" | "api"
   evidenceId   String?   @map("evidence_id")
   bundle       Json // the Art.-18 info bundle (refs, not bytes)

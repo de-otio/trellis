@@ -420,6 +420,22 @@ export function planScopedOp(input: PlanScopedOpInput): ScopedOpPlan {
   const args = input.args ?? {};
   const tf = meta.tenantField;
 
+  // (0) The binding itself. `TenantId` is a TypeScript brand: it erases at
+  // `tsc`, and `@de-otio/trellis-extension-api` is consumed as compiled JS, so
+  // a caller can reach here with anything at all. `undefined` is the dangerous
+  // one — Prisma IGNORES an undefined field in a `where`, so the
+  // `{ tenantId: undefined }` clause `andTenant` would build is "no filter",
+  // not "match null": a scoped `findMany` becomes a platform-wide read and a
+  // scoped `deleteMany` a platform-wide delete. Fail closed before any clause
+  // is built. (Quality sweep 2026-09-05, C1.)
+  if (typeof tenantId !== "string" || tenantId.length === 0) {
+    return {
+      kind: "reject",
+      message:
+        "the scoped extension surface requires a non-empty tenant id (it cannot be used unbound)",
+    };
+  }
+
   // (e) Projection guard — applies to every op that can request relations.
   const proj = guardProjection(args);
   if (proj) return { kind: "reject", message: proj };

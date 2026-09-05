@@ -74,6 +74,10 @@ export default defineConfig({
       // localstack, so this is a LOCAL-ONLY suite. Run it with
       // `docker compose up` and the default suite's test:integration script.
       "test/integration/gdpr-erasure-worker.integration.test.ts",
+      // C1 extension tenant binding — pins Prisma's "undefined in a where is no
+      // filter" semantics against a real database, which this config's
+      // test/setup.ts cannot provide. Runs in the Phase0 integration lane.
+      "test/integration/extension-tenant-binding.integration.test.ts",
     ],
     setupFiles: ["test/setup.ts"],
     globalTeardown: "test/teardown.ts",

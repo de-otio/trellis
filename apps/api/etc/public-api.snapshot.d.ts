@@ -1140,12 +1140,30 @@ export interface AuthorityReportDb {
                 id: true;
                 status: true;
                 evidenceId: true;
+                channelMode: true;
             };
         }): Promise<{
             id: string;
             status: string;
             evidenceId: string | null;
+            channelMode: string | null;
         } | null>;
+        /**
+         * Conditional transition. The `where` carries the EXPECTED status, so the
+         * database decides the race: `count === 1` means this caller made the
+         * transition and nobody else did.
+         */
+        updateMany(args: {
+            where: {
+                id: string;
+                status: string;
+            };
+            data: {
+                status: string;
+            };
+        }): Promise<{
+            count: number;
+        }>;
         update(args: {
             where: {
                 id: string;
@@ -1184,8 +1202,24 @@ export declare function createPendingAuthorityReport(db: AuthorityReportDb, inpu
 /**
  * Operator-confirmed submission (M3). Files the report THROUGH the injected
  * channel — never called automatically by the pipeline. Persists the channel
- * mode + `submitted` status. Idempotent-ish: a non-`pending` report is returned
- * unchanged.
+ * mode + `submitted` status.
+ *
+ * **Idempotent, and now actually so.** A non-`pending` report is returned
+ * unchanged without touching the channel. This was documented from the start
+ * and never implemented: the function read `status` and then submitted
+ * regardless, so a double-click, a client retry, or two operators working the
+ * same queue filed the SAME report to the authority twice — through a channel
+ * that is a real federal portal in production. (Quality sweep 2026-09-05, A1.)
+ *
+ * The guard is a conditional `updateMany` rather than a read-then-check,
+ * because a read-then-check does not close the concurrent case — the one that
+ * matters here, since "two operators clicked at once" is exactly how a shared
+ * moderation queue is worked. The database decides who claims it.
+ *
+ * Ordering is claim → submit → confirm. The alternative (mark submitted, then
+ * file) would leave a report that was never filed looking filed, which is the
+ * worse failure for an Art.-18 obligation. If the channel throws, the claim is
+ * released so the report returns to `pending` and can be retried.
  */
 export declare function markAuthorityReportSubmitted(db: AuthorityReportDb, id: string, input: {
     jurisdiction: string;
@@ -1194,7 +1228,7 @@ export declare function markAuthorityReportSubmitted(db: AuthorityReportDb, id: 
 }, env: Env, region: Region): Promise<{
     id: string;
     status: string;
-    channelMode: string;
+    channelMode: string | null;
 }>;
 /**
  * Close an authority report and RELEASE the evidence hold (plan 08 §2.6). The
