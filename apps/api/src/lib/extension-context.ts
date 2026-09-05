@@ -16,6 +16,7 @@ import type {
 import {
   buildScopedModelMetas,
   createScopedDb,
+  ScopedDbError,
   type RawPrismaLike,
 } from "./extension-scoped-db.js";
 import { createDiscoverDb } from "./extension-discover-db.js";
@@ -146,10 +147,31 @@ export function createExtensionContext(
   // Region floor for discover reads (§4.4(3)): the caller's data region when
   // authenticated, else the deployment primary — fail-closed to one region.
   const region = callerRegion ?? env.DEFAULT_REGION ?? "EU";
+  // The `tenant(id)` binding. The route wrapper resolves the caller's verified
+  // tenant BEFORE building this context and passes it as `tenantId`, so on that
+  // path core already knows the only tenant this request may touch — bind to it
+  // and reject any other, rather than trusting the id the extension hands back.
+  // The brand is type-only, so this is the sole runtime check on that path.
+  // Job callers (recap-service) pass no resolved tenant; there the requested id
+  // stands, and `planScopedOp` rejects an unusable one.
+  // (Quality sweep 2026-09-05, C1.)
+  const bindTenant = (requested: TenantId): string => {
+    const asked = requested as unknown;
+    if (tenantId !== undefined) {
+      if (typeof asked === "string" && asked.length > 0 && asked !== tenantId) {
+        throw new ScopedDbError(
+          "db.tenant() was asked for a tenant other than the one core resolved for this request",
+        );
+      }
+      return tenantId as unknown as string;
+    }
+    return asked as string;
+  };
+
   return {
     db: {
-      tenant: (tenantId: TenantId): ScopedDb =>
-        createScopedDb(rawPrisma, tenantId, metas),
+      tenant: (requested: TenantId): ScopedDb =>
+        createScopedDb(rawPrisma, bindTenant(requested) as unknown as TenantId, metas),
       discover: (reason: string): DiscoverDb =>
         createDiscoverDb(rawPrisma, ext.id, reason, declaredCrossTenant, region),
     },

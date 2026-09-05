@@ -32,13 +32,31 @@ export interface DispositionResult {
  * soft-deleted (mirrors the serve gate). `pending` for the pre-verdict states.
  * Everything else — REVIEW/QUARANTINED/REJECTED/UPLOAD_FAILED, or an
  * APPROVED-but-hidden/deleted object — is `blocked`. `appealable` is true only
- * for a blocked, non-illegal-class item.
+ * for a blocked, non-illegal-class item that is not under an evidence hold.
+ *
+ * **Why `evidenceHold` is consulted as well as `blockClass`** (quality sweep
+ * 2026-09-05, A3). `isAppealable` reads an absent block class as appealable,
+ * deliberately: media illegal-class detection is a known gap, so a
+ * blocked-but-unclassified item gets the lawful appeal path. That default is
+ * right for an item nobody classified — and wrong for an item the
+ * illegal-priority carve-out was in the middle of processing. The carve-out
+ * hides, preserves and holds the item and THEN writes
+ * `blockClass = illegal-suspected`; if only that last write fails, the item is
+ * hidden, preserved and evidence-held with a null block class, and this
+ * function would offer submit-for-analysis on suspected-illegal content — the
+ * exact affordance the carve-out exists to remove.
+ *
+ * A hold is never placed by ordinary moderation, so reading it here costs an
+ * ordinary blocked item nothing and makes the partial-failure window
+ * fail-closed. The block class stays the primary signal; the hold is the
+ * backstop for the window in which it has not been written yet.
  */
 export function computeDisposition(record: {
   lifecycle: MediaLifecycle;
   hidden: boolean;
   deletedAt: Date | null;
   blockClass: BlockClass | null;
+  evidenceHold?: boolean;
 }): DispositionResult {
   const approved =
     record.lifecycle === "APPROVED" && !record.hidden && record.deletedAt === null;
@@ -48,8 +66,12 @@ export function computeDisposition(record: {
     record.lifecycle === "AWAITING_UPLOAD" || record.lifecycle === "UPLOADED";
   if (pending) return { status: "pending", appealable: false };
 
-  // Blocked: appealable only if NOT illegal-class (the carve-out).
-  return { status: "blocked", appealable: isAppealable(record.blockClass) };
+  // Blocked: appealable only if NOT illegal-class (the carve-out) and not
+  // under an evidence hold (the carve-out's partial-failure window).
+  return {
+    status: "blocked",
+    appealable: record.evidenceHold !== true && isAppealable(record.blockClass),
+  };
 }
 
 /** The uniform not-found response — byte-identical for not-found AND non-owner. */
@@ -80,6 +102,7 @@ export class ModerationDispositionHandler {
           hidden: true,
           deletedAt: true,
           blockClass: true,
+          evidenceHold: true,
         },
       });
 
@@ -95,6 +118,7 @@ export class ModerationDispositionHandler {
         hidden: media.hidden,
         deletedAt: media.deletedAt,
         blockClass: (media.blockClass as BlockClass | null) ?? null,
+        evidenceHold: media.evidenceHold,
       });
 
       return new Response(JSON.stringify(disposition), {

@@ -83,6 +83,15 @@ export interface CarveOutResult {
   evidenceId?: string;
   statementId?: string;
   authorityReportId?: string;
+  /**
+   * True when the item was hidden, preserved and held but the
+   * `blockClass = illegal-suspected` write did not land. The carve-out is
+   * PARTIAL: protection and the authority report are in place, the durable
+   * non-appealable marker is not. `computeDisposition` fails closed on the
+   * evidence hold meanwhile, so nothing is offered an appeal — but the row
+   * needs repairing. (Quality sweep 2026-09-05, A3.)
+   */
+  blockClassUnwritten?: boolean;
   /** Set when the carve-out could not run; the report row still exists. */
   failure?:
     | "owner-unresolved"
@@ -218,12 +227,42 @@ export async function applyIllegalPriorityCarveOut(
 
     // Non-appealable from here on. Written after restrictContent so a preserve
     // failure cannot leave a block class on an item that was never hidden.
+    //
+    // Both orderings have a bad window, so this one is chosen and then guarded
+    // rather than swapped (quality sweep 2026-09-05, A3). Writing the class
+    // first marks an item that may never be hidden; writing it last — this
+    // order — leaves an item hidden, preserved and evidence-held with a NULL
+    // block class if only this write fails, and `isAppealable(null)` is
+    // deliberately `true`. Letting the failure reach the outer catch would be
+    // worse still: the carve-out would return `applied: false` and no authority
+    // report would be created for content that IS already hidden and preserved,
+    // which is the Art.-18 obligation abandoned at the last step.
+    //
+    // So: this failure is caught here, alarmed under its own kind so an
+    // operator can find and repair the row, recorded in the result, and the
+    // carve-out continues to file the authority report. The appeal path is
+    // covered meanwhile by `computeDisposition`, which fails closed on the
+    // evidence hold that IS in place.
+    let blockClassUnwritten = false;
     if (owner.isMedia) {
-      await db.mediaFile.update({
-        where: { id: input.resourceId },
-        data: { blockClass: "illegal-suspected" },
-        select: { id: true },
-      });
+      try {
+        await db.mediaFile.update({
+          where: { id: input.resourceId },
+          data: { blockClass: "illegal-suspected" },
+          select: { id: true },
+        });
+      } catch (error) {
+        blockClassUnwritten = true;
+        logger.error("[Reports] carve-out could not write the block class", {
+          reportId: input.reportId,
+          resourceId: input.resourceId,
+        });
+        await alarm(
+          "illegal-priority-block-class-unwritten",
+          `report:${input.reportId}`,
+          { resourceId: input.resourceId, error: String(error) },
+        );
+      }
     }
 
     const jurisdiction =
@@ -265,6 +304,7 @@ export async function applyIllegalPriorityCarveOut(
       ...(restricted.evidenceId ? { evidenceId: restricted.evidenceId } : {}),
       statementId: restricted.statementId,
       authorityReportId: authorityReport.id,
+      ...(blockClassUnwritten ? { blockClassUnwritten: true } : {}),
     };
   } catch (error) {
     const seamMissing = error instanceof ComplianceSeamNotConfiguredError;

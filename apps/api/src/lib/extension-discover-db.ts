@@ -171,22 +171,63 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+/** Relation field names on `model`, per the DMMF. Empty for an unknown model. */
+function relationsOf(model: string): ReadonlyMap<string, string> {
+  return MODEL_META.get(model)?.relations ?? new Map<string, string>();
+}
+
 /**
  * Reject `include` (any) and relation `select` (§4.4(4)) — a cross-model join is
  * not visibility-floored and would leak past the model allow-list.
+ *
+ * A relation is rejected however it is written. `{ author: { select: … } }` is
+ * the nested-object form; `{ author: true }` is the same read spelled with a
+ * boolean, and testing the VALUE alone let it through — `author` is not a
+ * scalar, so the excluded-column guard did not see it either, and every SHOUT
+ * post came back with its author's `User` row (and via `tenant`, the tenant
+ * row): the author→tenant map that excluding `tenantId` from every model exists
+ * to prevent. Decide on the KEY, using the DMMF relation set.
+ * (Quality sweep 2026-09-05, C2.)
  */
-function guardProjection(args: Record<string, unknown>): void {
+function guardProjection(model: string, args: Record<string, unknown>): void {
   if (args.include !== undefined) {
     throw new DiscoverGuardError(
       "include is not permitted on discover() (a cross-model join bypasses the model allow-list and visibility floor)",
     );
   }
+  const relations = relationsOf(model);
   const select = args.select;
   if (isPlainObject(select)) {
     for (const [key, value] of Object.entries(select)) {
+      if (relations.has(key) && value !== false && value !== undefined) {
+        throw new DiscoverGuardError(
+          `select of relation "${key}" is not permitted on discover()`,
+        );
+      }
       if (isPlainObject(value)) {
         throw new DiscoverGuardError(
           `select of relation "${key}" is not permitted on discover()`,
+        );
+      }
+    }
+  }
+}
+
+/**
+ * Reject `orderBy` that traverses a relation. It returns no relation columns,
+ * but sorting a cross-tenant result set by a column the caller may not read is
+ * an oracle over exactly that column. Same DMMF reasoning as
+ * {@link guardProjection}. (Quality sweep 2026-09-05, C2.)
+ */
+function guardOrderBy(model: string, orderBy: unknown): void {
+  const relations = relationsOf(model);
+  const clauses = Array.isArray(orderBy) ? orderBy : [orderBy];
+  for (const clause of clauses) {
+    if (!isPlainObject(clause)) continue;
+    for (const key of Object.keys(clause)) {
+      if (relations.has(key)) {
+        throw new DiscoverGuardError(
+          `orderBy on relation "${key}" is not permitted on discover()`,
         );
       }
     }
@@ -294,8 +335,9 @@ export function planDiscoverOp(
 ): DiscoverPlan {
   const args: Record<string, unknown> = isPlainObject(rawArgs) ? { ...rawArgs } : {};
 
-  guardProjection(args);
+  guardProjection(model, args);
   guardColumns(model, args);
+  guardOrderBy(model, args.orderBy);
   guardRelationWhere(model, args.where, allowed);
 
   // Baseline floor, AND-merged and non-overridable.
