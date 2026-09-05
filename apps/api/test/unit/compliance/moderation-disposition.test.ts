@@ -49,6 +49,57 @@ describe("computeDisposition (pure)", () => {
       computeDisposition({ lifecycle: "REJECTED", hidden: false, deletedAt: null, blockClass: "illegal-suspected" }),
     ).toEqual({ status: "blocked", appealable: false });
   });
+
+  /**
+   * A3 (quality sweep 2026-09-05). `isAppealable(null)` is deliberately `true`
+   * — media illegal-class detection is a known gap, so a blocked-but-
+   * unclassified item gets the lawful appeal path. That default is right for an
+   * item nobody classified, and wrong for the window in which the carve-out has
+   * hidden, preserved and HELD an item but not yet written its class. The hold
+   * is what tells the two apart: ordinary moderation never places one.
+   */
+  describe("evidence hold is the backstop for a null block class", () => {
+    it("blocked + evidence hold + NULL class → appealable FALSE", () => {
+      expect(
+        computeDisposition({
+          lifecycle: "REJECTED", hidden: true, deletedAt: null,
+          blockClass: null, evidenceHold: true,
+        }),
+      ).toEqual({ status: "blocked", appealable: false });
+    });
+
+    it("blocked + no hold + NULL class → appealable TRUE (the default is preserved)", () => {
+      expect(
+        computeDisposition({
+          lifecycle: "REJECTED", hidden: true, deletedAt: null,
+          blockClass: null, evidenceHold: false,
+        }),
+      ).toEqual({ status: "blocked", appealable: true });
+    });
+
+    it("an absent evidenceHold reads as no hold — ordinary items are unaffected", () => {
+      expect(
+        computeDisposition({
+          lifecycle: "QUARANTINED", hidden: false, deletedAt: null, blockClass: "lawful-flagged",
+        }),
+      ).toEqual({ status: "blocked", appealable: true });
+    });
+
+    it("a hold does not turn an approved or pending item into a blocked one", () => {
+      expect(
+        computeDisposition({
+          lifecycle: "APPROVED", hidden: false, deletedAt: null,
+          blockClass: null, evidenceHold: true,
+        }),
+      ).toEqual({ status: "approved", appealable: false });
+      expect(
+        computeDisposition({
+          lifecycle: "UPLOADED", hidden: false, deletedAt: null,
+          blockClass: null, evidenceHold: true,
+        }),
+      ).toEqual({ status: "pending", appealable: false });
+    });
+  });
 });
 
 describe("ModerationDispositionHandler.handleGet", () => {
