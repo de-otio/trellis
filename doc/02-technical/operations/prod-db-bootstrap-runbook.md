@@ -94,9 +94,13 @@ SELECT migration_name, finished_at FROM _prisma_migrations ORDER BY finished_at;
 SELECT extname FROM pg_extension WHERE extname IN ('postgis','pg_trgm');
 -- hand-written objects present
 SELECT indexname FROM pg_indexes WHERE indexname IN
-  ('consent_cross_region_key','feature_toggles_key_global',
+  ('consent_cross_region_key','consent_third_party_sharing_key',
+   'feature_toggles_key_global',
    'entity_location_location_idx','tenant_display_name_trgm_idx',
    'tenant_directory_profile_desc_trgm_idx','tenant_directory_profile_location_idx');
+-- hand-written CHECK constraints present
+SELECT conname, convalidated FROM pg_constraint
+ WHERE conname IN ('consent_third_party_sharing_shape_check');
 -- seeds
 SELECT count(*) FROM role_metadata;      -- expect 7
 SELECT count(*) FROM feature_toggles;    -- expect > 0

@@ -120,6 +120,14 @@ columns and `cid` (see AR10 above), and the schema comments now point at
   `consent_cross_region_key` and `feature_toggles_key_global` partial
   uniques, the entity_location GiST index, the two trgm GIN indexes, the
   directory-profile expression GiST index.
+- Two further hand-written objects were added after the lock, in
+  `20260904130100_consent_third_party_columns_and_key` (also allowlisted in
+  the drift guard): `consent_third_party_sharing_key` — a partial unique
+  index on `(user_id, grantee_client_id, subject_entity_id)`
+  `NULLS NOT DISTINCT` where `purpose = 'THIRD_PARTY_DATA_SHARING' AND
+  active` — and `consent_third_party_sharing_shape_check`, a CHECK
+  constraint making the grantee id, its issuer, at least one granted scope
+  and an expiry mandatory on sharing rows.
 
 ## The lock
 

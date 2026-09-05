@@ -19,6 +19,8 @@
 #   tenant_display_name_trgm_idx              pg_trgm GIN
 #   tenant_directory_profile_desc_trgm_idx    pg_trgm GIN
 #   consent_cross_region_key                  partial unique
+#   consent_third_party_sharing_key           partial unique, NULLS NOT DISTINCT
+#   consent_third_party_sharing_shape_check   CHECK constraint (row shape)
 #   feature_toggles_key_global                partial unique
 #
 # Anything else in the diff is real drift and fails the check. If you add a
@@ -46,7 +48,7 @@ npx prisma migrate diff \
   --script >"$DIFF_SQL"
 
 # Known hand-written migration objects (see header). One name per alternation.
-ALLOWLIST='entity_location_location_idx|tenant_directory_profile_location_idx|tenant_display_name_trgm_idx|tenant_directory_profile_desc_trgm_idx|consent_cross_region_key|feature_toggles_key_global'
+ALLOWLIST='entity_location_location_idx|tenant_directory_profile_location_idx|tenant_display_name_trgm_idx|tenant_directory_profile_desc_trgm_idx|consent_cross_region_key|consent_third_party_sharing_key|consent_third_party_sharing_shape_check|feature_toggles_key_global'
 
 # Drop allowlisted statements, SQL comments, the config-loader banner, and
 # blank lines. Whatever remains is genuine drift.

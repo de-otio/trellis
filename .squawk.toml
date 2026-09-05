@@ -9,9 +9,24 @@
 # (.github/workflows/ci.yml) and the deployed database.
 pg_version = "16.0"
 
-# No rules are excluded today. If a future migration needs a documented
-# exception, add the rule name here with an inline reason comment directly
-# above it — never a bare/unexplained exclusion. This mirrors the
-# ALLOW-DROP-INDEX convention in scripts/check-migration-sql.mjs: exceptions
-# are explicit, not silent.
+# No rules are excluded today, and the bar for adding one here is high: an
+# entry in this list disarms the rule for EVERY future migration, including
+# ones nobody has written yet.
+#
+# Prefer a line-local `-- squawk-ignore <rule-name>` comment in the migration
+# SQL itself, placed on the line directly above the statement (an explanatory
+# comment goes ABOVE the ignore line — squawk only honours the directive when
+# it immediately precedes the statement). That keeps the exception next to the
+# evidence for it and leaves the rule armed everywhere else. First use:
+# 20260904130100_consent_third_party_columns_and_key, which needs three —
+# prefer-timestamp-tz (Prisma maps DateTime to TIMESTAMP(3); a timestamptz for
+# one column is permanent schema drift), prefer-robust-stmts (Prisma already
+# opens a transaction per migration file) and require-concurrent-index-creation
+# (CONCURRENTLY cannot run inside that transaction, so the rule's fix is not
+# available).
+#
+# If a rule genuinely must be excluded repo-wide, add the rule name here with
+# an inline reason comment directly above it — never a bare/unexplained
+# exclusion. This mirrors the ALLOW-DROP-INDEX convention in
+# scripts/check-migration-sql.mjs: exceptions are explicit, not silent.
 excluded_rules = []
