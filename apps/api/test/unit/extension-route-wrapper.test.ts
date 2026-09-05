@@ -449,6 +449,98 @@ describe("wrapExtensionRoute — scopes and request schemas", () => {
       expect(handler).toHaveBeenCalledOnce();
     });
 
+    /**
+     * The third branch of `scopes`: ABSENT. The published contract calls it
+     * "first-party only; no third-party client reaches it", and it used to
+     * fall through the gate entirely — a missing declaration reads as
+     * "nothing to check" unless something says otherwise.
+     *
+     * Unreachable in production today (nothing populates `clientId`), so
+     * these tests construct the principal the gate exists for. That is the
+     * point: the gate has to hold BEFORE the first narrowed principal is
+     * minted, or every scope-less extension route opens at once on the day
+     * it is. (Quality sweep 2026-09-05, C3.)
+     */
+    describe("first-party-only routes (scopes absent)", () => {
+      const unscopedRoute = (handle: any) =>
+        wrapExtensionRoute(makeExt(), {
+          path: "walks",
+          method: "POST",
+          auth: "required",
+          handle,
+        });
+
+      it("403s a third-party client, and does not send it after a scope that cannot exist", async () => {
+        mockGetSession.mockResolvedValue({
+          userId: "u1", email: "a@b.com", role: "END_USER",
+          clientId: "client-abc", scopes: new Set(["posts:write"]),
+        });
+        const handler = vi.fn(async () => ({ status: 200, body: { ok: true } }));
+
+        const response = await call(unscopedRoute(handler), post('{"name":"Rex"}'));
+
+        expect(response.status).toBe(403);
+        expect(handler).not.toHaveBeenCalled();
+        const body = await response.json();
+        expect(body).toMatchObject({
+          error: "FIRST_PARTY_ONLY",
+          message:
+            "This operation is available only to the user's own session, not to a third-party client acting on their behalf.",
+        });
+        // The remediation must NOT name a scope to request: there is none, and
+        // an integration told to ask for one loops forever.
+        expect(body.remediation).not.toMatch(/re-authorize/);
+      });
+
+      it("403s a third-party client even when its grant is the unscoped '*'", async () => {
+        // A client holding "*" is still a client. The gate is written against
+        // `clientId`, not against the grant, precisely so this cannot pass.
+        mockGetSession.mockResolvedValue({
+          userId: "u1", email: "a@b.com", role: "END_USER",
+          clientId: "client-abc", scopes: "*",
+        });
+        const handler = vi.fn(async () => ({ status: 200, body: { ok: true } }));
+
+        expect((await call(unscopedRoute(handler), post('{"name":"Rex"}'))).status).toBe(403);
+        expect(handler).not.toHaveBeenCalled();
+      });
+
+      it("200s the user's own session (no clientId)", async () => {
+        mockGetSession.mockResolvedValue({
+          userId: "u1", email: "a@b.com", role: "END_USER", scopes: "*",
+        });
+        const handler = vi.fn(async () => ({ status: 200, body: { ok: true } }));
+
+        expect((await call(unscopedRoute(handler), post('{"name":"Rex"}'))).status).toBe(200);
+        expect(handler).toHaveBeenCalledOnce();
+      });
+
+      it("200s a session predating scopes entirely (both fields absent)", async () => {
+        mockGetSession.mockResolvedValue({ userId: "u1", email: "a@b.com", role: "END_USER" });
+        const handler = vi.fn(async () => ({ status: 200, body: { ok: true } }));
+
+        expect((await call(unscopedRoute(handler), post('{"name":"Rex"}'))).status).toBe(200);
+        expect(handler).toHaveBeenCalledOnce();
+      });
+
+      it("refuses the third-party client BEFORE reading the body", async () => {
+        // Order matters: a 400 here would mean the body was parsed for a
+        // caller that is not permitted to reach the route at all.
+        mockGetSession.mockResolvedValue({
+          userId: "u1", email: "a@b.com", role: "END_USER", clientId: "client-abc",
+        });
+        const handler = vi.fn(async () => ({ status: 200, body: { ok: true } }));
+        const route = wrapExtensionRoute(makeExt(), {
+          path: "walks", method: "POST", auth: "required",
+          requestSchema: bodySchema, handle: handler,
+        });
+
+        // Body is invalid too — the scope stage must win.
+        expect((await call(route, post('{"name":""}'))).status).toBe(403);
+        expect(handler).not.toHaveBeenCalled();
+      });
+    });
+
     it('refuses to wire auth: "none" together with a non-empty scopes list', () => {
       // A route with no principal can never have its scopes checked; served,
       // it would look gated and be open. Boot fails instead of serving it.
@@ -588,8 +680,14 @@ describe("wrapExtensionRoute — scopes and request schemas", () => {
 
       const handler = vi.fn(async () => ({ status: 200, body: {} }));
       await call(
+        // `scopes: []` — "any authenticated principal". The route must admit a
+        // third-party client for this test to have a principal to inspect at
+        // all: an ABSENT `scopes` is first-party only and now 403s one before
+        // the handler runs (requireFirstParty, sweep C3). The subject here is
+        // the whitelist, not the gate, so the route declares the value that
+        // lets the caller through rather than relying on the gap that used to.
         wrapExtensionRoute(makeExt(), {
-          path: "me", method: "GET", auth: "required", handle: handler,
+          path: "me", method: "GET", auth: "required", scopes: [], handle: handler,
         }),
         new Request("https://test.com/api/ext/dog/me"),
       );

@@ -624,6 +624,13 @@ export interface ExtensionRouteDefinition<TModels extends ExtensionModelMap = Op
    * - **`[]`** — any authenticated principal, no particular scope.
    * - **non-empty** — every listed scope required.
    *
+   * All three are enforced in core's route wrapper, before the request body is
+   * read: `requireFirstParty` for the absent case, `requireScope` for the other
+   * two. A third-party client on an absent-`scopes` route gets a 403
+   * `FIRST_PARTY_ONLY`, whose remediation deliberately names no scope to
+   * request — there is none, and a route that is not exposed to clients cannot
+   * be reached by asking the user for a grant.
+   *
    * Strings are `<resource>:<verb>` (colon), distinct from core's capability
    * convention `<resource>.<verb>` (dot). An extension declares its own scope
    * ids and their consent copy in {@link TrellisExtension.scopes}; it may also

@@ -55,6 +55,24 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ### Security
 
+- **A route that declares no scopes is now first-party only, as published.**
+  `ExtensionRouteDefinition.scopes` is three-valued — absent means "first-party
+  only; no third-party client reaches it", `[]` means "any authenticated
+  principal", non-empty means "every listed scope". Only the last two were
+  enforced: the gate read `if (session && routeDef.scopes)`, and an absent
+  declaration is falsy, so it fell through every check. A missing declaration
+  read as "nothing to check" rather than as the restriction the contract says
+  it is. `requireFirstParty` now decides that branch, returning a 403
+  `FIRST_PARTY_ONLY` whose remediation deliberately names no scope to request —
+  there is none, and telling a client to seek a grant that cannot exist sends
+  it round a loop it can never finish. The rule is written against `clientId`
+  (present only when a third-party client is acting) rather than against
+  `scopes`, because an absent `scopes` is itself the first-party default and
+  testing it would refuse exactly the caller the route is for. Unreachable
+  today — every session is stamped `scopes: "*"` and nothing populates
+  `clientId` — and fixed now precisely because of that: the gate has to hold
+  before the first narrowed principal is minted, or every scope-less extension
+  route opens to any client at once, silently, on the day it is.
 - **The scoped extension surface can no longer be used unbound, and a relation
   can no longer be projected out of `discover()`.** Two holes in the tenant
   half of the `@de-otio/trellis-extension-api` 0.10.0 contract, found by an
