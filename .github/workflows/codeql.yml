@@ -1,0 +1,101 @@
+name: CodeQL
+
+# =============================================================================
+# CodeQL — ADVANCED setup.
+#
+# WHY THIS FILE EXISTS AT ALL. Until now CodeQL ran through GitHub's
+# code-scanning DEFAULT setup: no workflow in the repo, and a single check
+# named `CodeQL` posted by the `github-advanced-security` App (integration id
+# 57789). That check has one disqualifying property — it does not report on
+# `merge_group` refs (github/codeql-action#1537, open since 2023). A merge
+# queue therefore waits forever on a required `CodeQL` context that will never
+# arrive, and the pull request looks queued rather than broken until it is
+# evicted. Advanced setup runs CodeQL as an ordinary Actions workflow, so its
+# checks are posted by `github-actions` (integration id 15368) and DO run on
+# merge groups. Same analysis, same alerts, a check the queue can see.
+#
+# THE JOB NAME IS A LOAD-BEARING STRING. Each matrix job publishes a check run
+# named after the job — `Analyze (actions)`, `Analyze (javascript-typescript)`
+# — and those exact names are what the `byo-full-public` ruleset requires on
+# `main` (recorded in de-otio/dot-work `inventory/repo-register.json` under
+# trellis's `extra_required_checks`, which is what asserts they have not
+# drifted). Renaming the job, or adding/removing a language, CHANGES THE CHECK
+# NAMES: a removed name is a required context nothing will ever report and
+# every pull request hangs with no error anywhere. Change this matrix and the
+# ruleset + register in the same change, never one without the other.
+#
+# NO `paths:` FILTER, DELIBERATELY. Same rule as ci.yml: a skipped JOB
+# satisfies a required check, a skipped WORKFLOW reports nothing at all. For as
+# long as these are required contexts this workflow must fire on every pull
+# request to `main`.
+#
+# LANGUAGES AND SUITE reproduce what default setup was configured with, read
+# live from `GET /repos/de-otio/trellis/code-scanning/default-setup` before the
+# switch: languages `actions`, `javascript`, `javascript-typescript`,
+# `typescript` (the last three are aliases of the one `javascript-typescript`
+# extractor), query suite `default`, threat model `remote`. `queries:` is
+# therefore deliberately unset — setting it would change the suite — and the
+# weekly `schedule:` below reproduces default setup's weekly full scan.
+# =============================================================================
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # See ci.yml: the merge queue validates a speculative merge on a
+  # `refs/heads/gh-readonly-queue/main/...` ref. Without this trigger the
+  # workflow never fires there and the required contexts never arrive.
+  merge_group:
+  schedule:
+    # Weekly full scan, matching what default setup ran. Catches newly
+    # published queries against code that has not changed.
+    - cron: "27 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  # A cancelled merge-queue run reports no result, which the queue reads the
+  # same way as a failure — so merge_group is never cancel-eligible, alongside
+  # main. Identical reasoning to ci.yml.
+  cancel-in-progress: ${{ github.event_name != 'merge_group' && github.ref != 'refs/heads/main' }}
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    permissions:
+      # Least privilege, per language job: read the tree, read workflow run
+      # metadata (the action queries it), write the SARIF back as code-scanning
+      # alerts. Nothing else.
+      contents: read
+      actions: read
+      security-events: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: actions
+            build-mode: none
+          - language: javascript-typescript
+            build-mode: none
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          category: "/language:${{ matrix.language }}"
