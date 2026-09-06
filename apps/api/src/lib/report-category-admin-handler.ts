@@ -15,7 +15,7 @@ import type { Env } from "../env.js";
 import type { AuthContext } from "./auth/auth-context.js";
 import { requireSuperAdmin as requireSuperAdminGuard } from "./auth/require-super-admin.js";
 import { emitAdminAudit } from "./admin-audit.js";
-import { ROUTING_CLASSES } from "./report-templates.js";
+import { ROUTING_CLASSES } from "./report-category-routing.js";
 import {
   REPORT_CATEGORY_CREATED,
   REPORT_CATEGORY_DEACTIVATED,

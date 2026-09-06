@@ -24,7 +24,7 @@
 
 import { readFile } from "node:fs/promises";
 import { PrismaClient } from "@prisma/client";
-import { ROUTING_CLASSES, type RoutingClass } from "../src/lib/report-templates.js";
+import { ROUTING_CLASSES, type RoutingClass } from "../src/lib/report-category-routing.js";
 
 interface ReportCategorySeed {
   key: string;

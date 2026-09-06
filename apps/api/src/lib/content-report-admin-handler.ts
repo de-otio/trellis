@@ -22,7 +22,7 @@ import type { AuthContext } from "./auth/auth-context.js";
 import { requireSuperAdmin as requireSuperAdminGuard } from "./auth/require-super-admin.js";
 import { DataRouter } from "./data-router.js";
 import { getLogger } from "./logger.js";
-import { ROUTING_CLASSES } from "./report-templates.js";
+import { ROUTING_CLASSES } from "./report-category-routing.js";
 import {
   transitionReportStatus,
   InvalidReportTransitionError,
