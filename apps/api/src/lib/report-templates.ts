@@ -31,6 +31,23 @@ export const REPORT_TEMPLATE_KEYS = {
 export type ReportTemplateKey =
   (typeof REPORT_TEMPLATE_KEYS)[keyof typeof REPORT_TEMPLATE_KEYS];
 
+/**
+ * The `ReportCategory.routingClass` values (mirrors the Prisma `RoutingClass`
+ * enum in `prisma/schema.prisma`). Shared here so the admin handlers that
+ * validate against it — `content-report-admin-handler.ts`,
+ * `report-category-admin-handler.ts` — and the seed script import one
+ * definition instead of retyping the same four-value array (quality sweep
+ * 2026-09-05, D1).
+ */
+export const ROUTING_CLASSES = [
+  "ILLEGAL_PRIORITY",
+  "ILLEGAL",
+  "POLICY_VIOLATION",
+  "FEEDBACK",
+] as const;
+
+export type RoutingClass = (typeof ROUTING_CLASSES)[number];
+
 /** A single localized template. `body` may contain `{param}` placeholders. */
 export interface ReportTemplate {
   readonly title: string;

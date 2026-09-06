@@ -145,4 +145,42 @@ describe("transitionReportStatus", () => {
       transitionReportStatus({ reportId: "nope", toStatus: "acknowledged" }, mockEnv),
     ).rejects.toBeInstanceOf(ReportNotFoundError);
   });
+
+  it("expectedReportType mismatch throws ReportNotFoundError, not a silent transition", async () => {
+    mockDb.report.findUnique.mockResolvedValue({
+      id: "r1",
+      status: "pending",
+      reporterUserId: "u1",
+      reportType: "LINK",
+    });
+
+    await expect(
+      transitionReportStatus(
+        { reportId: "r1", toStatus: "acknowledged", expectedReportType: "CONTENT" },
+        mockEnv,
+      ),
+    ).rejects.toBeInstanceOf(ReportNotFoundError);
+    expect(mockDb.report.update).not.toHaveBeenCalled();
+  });
+
+  it("expectedReportType match transitions normally", async () => {
+    mockDb.report.findUnique.mockResolvedValue({
+      id: "r1",
+      status: "pending",
+      reporterUserId: "u1",
+      reportType: "CONTENT",
+    });
+    mockDb.report.update.mockResolvedValue({
+      id: "r1",
+      status: "acknowledged",
+      resolution: null,
+    });
+
+    const result = await transitionReportStatus(
+      { reportId: "r1", toStatus: "acknowledged", expectedReportType: "CONTENT" },
+      mockEnv,
+    );
+
+    expect(result.status).toBe("acknowledged");
+  });
 });

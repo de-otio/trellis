@@ -16,7 +16,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "../../src/env.js";
 
 const mockDb = {
-  report: { findMany: vi.fn(), findFirst: vi.fn() },
+  report: { findMany: vi.fn() },
 };
 
 vi.mock("../../src/lib/data-router.js", () => ({
@@ -37,7 +37,7 @@ vi.mock("../../src/lib/report-lifecycle.js", async (importOriginal) => {
 const { ContentReportAdminHandler } = await import(
   "../../src/lib/content-report-admin-handler.js"
 );
-const { InvalidReportTransitionError } = await import(
+const { InvalidReportTransitionError, ReportNotFoundError } = await import(
   "../../src/lib/report-lifecycle.js"
 );
 
@@ -173,7 +173,6 @@ describe("ContentReportAdminHandler.handleDecision", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     handler = new ContentReportAdminHandler();
-    mockDb.report.findFirst.mockResolvedValue({ id: "rep1" });
     mockTransition.mockResolvedValue({
       id: "rep1",
       status: "decided",
@@ -197,6 +196,18 @@ describe("ContentReportAdminHandler.handleDecision", () => {
       toStatus: "decided",
       resolution: "actioned",
     });
+  });
+
+  it("scopes the transition to CONTENT reports — the wrong reportType is not decidable here", async () => {
+    await handler.handleDecision(
+      "rep1",
+      decisionReq({ status: "decided", resolution: "actioned" }),
+      superAdmin,
+      mockEnv,
+      "EU",
+    );
+
+    expect(mockTransition.mock.calls[0][0].expectedReportType).toBe("CONTENT");
   });
 
   it("acknowledges without a resolution", async () => {
@@ -232,7 +243,10 @@ describe("ContentReportAdminHandler.handleDecision", () => {
   });
 
   it("404s a LINK/ACCOUNT report id — the wrong state machine is not entered", async () => {
-    mockDb.report.findFirst.mockResolvedValue(null);
+    // The transition itself rejects on a reportType mismatch (`expectedReportType`);
+    // it is what a LINK/ACCOUNT id resolves to here now that there is no separate
+    // pre-fetch (quality sweep 2026-09-05, D6).
+    mockTransition.mockRejectedValue(new ReportNotFoundError("link-report-1"));
 
     const res = await handler.handleDecision(
       "link-report-1",
@@ -243,10 +257,8 @@ describe("ContentReportAdminHandler.handleDecision", () => {
     );
 
     expect(res.status).toBe(404);
-    expect(mockDb.report.findFirst.mock.calls[0][0].where.reportType).toBe(
-      "CONTENT",
-    );
-    expect(mockTransition).not.toHaveBeenCalled();
+    expect(mockTransition).toHaveBeenCalledOnce();
+    expect(mockTransition.mock.calls[0][0].expectedReportType).toBe("CONTENT");
   });
 
   it("409s an illegal transition rather than overwriting a decided report", async () => {
@@ -290,7 +302,6 @@ describe("ContentReportAdminHandler.handleDecision", () => {
     );
 
     expect(res.status).toBe(403);
-    expect(mockDb.report.findFirst).not.toHaveBeenCalled();
     expect(mockTransition).not.toHaveBeenCalled();
   });
 });

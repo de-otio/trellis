@@ -56,6 +56,13 @@ export interface TransitionInput {
   /** Required when `toStatus === "decided"`. */
   resolution?: ReportDecisionOutcome;
   region?: string;
+  /**
+   * When set, the report's `reportType` must match or the transition throws
+   * `ReportNotFoundError` — the caller's scope check folded into this
+   * function's own `Report` lookup instead of a separate pre-fetch of the
+   * same row (quality sweep 2026-09-05, D6).
+   */
+  expectedReportType?: string;
 }
 
 export interface TransitionResult {
@@ -80,9 +87,15 @@ export async function transitionReportStatus(
 
   const report = await db.report.findUnique({
     where: { id: input.reportId },
-    select: { id: true, status: true, reporterUserId: true },
+    select: { id: true, status: true, reporterUserId: true, reportType: true },
   });
   if (!report) throw new ReportNotFoundError(input.reportId);
+  if (input.expectedReportType !== undefined && report.reportType !== input.expectedReportType) {
+    // A report of the wrong type is not this caller's to transition — treat
+    // it as not found rather than driving it into a lifecycle it does not
+    // belong to.
+    throw new ReportNotFoundError(input.reportId);
+  }
 
   const allowed = ALLOWED_TRANSITIONS[report.status] ?? [];
   if (!allowed.includes(input.toStatus)) {

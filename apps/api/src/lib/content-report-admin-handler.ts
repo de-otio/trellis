@@ -19,8 +19,10 @@
 
 import type { Env } from "../env.js";
 import type { AuthContext } from "./auth/auth-context.js";
+import { requireSuperAdmin as requireSuperAdminGuard } from "./auth/require-super-admin.js";
 import { DataRouter } from "./data-router.js";
 import { getLogger } from "./logger.js";
+import { ROUTING_CLASSES } from "./report-templates.js";
 import {
   transitionReportStatus,
   InvalidReportTransitionError,
@@ -37,19 +39,8 @@ const REVIEWABLE_TARGET_STATUSES: ReadonlyArray<ReportLifecycleStatus> = [
   "decided",
 ];
 
-const ROUTING_CLASSES = [
-  "ILLEGAL_PRIORITY",
-  "ILLEGAL",
-  "POLICY_VIOLATION",
-  "FEEDBACK",
-] as const;
-
 function requireSuperAdmin(auth: AuthContext): Response | null {
-  if (auth.globalRole === "SUPER_ADMIN") return null;
-  return json(403, {
-    error: "FORBIDDEN",
-    message: "SUPER_ADMIN role required for content-report review.",
-  });
+  return requireSuperAdminGuard(auth, "SUPER_ADMIN role required for content-report review.");
 }
 
 export class ContentReportAdminHandler {
@@ -198,28 +189,20 @@ export class ContentReportAdminHandler {
       });
     }
 
-    // Scope check BEFORE the transition: this surface reviews CONTENT reports
-    // only, so a LINK/ACCOUNT id must 404 here rather than be driven into the
-    // Art. 16 state machine it does not belong to.
-    const db = DataRouter.getDatabaseForRegion(region, env);
-    const scoped = await db.report.findFirst({
-      where: { id: reportId, reportType: "CONTENT" },
-      select: { id: true },
-    });
-    if (!scoped) {
-      return json(404, {
-        error: "NOT_FOUND",
-        message: "Content report not found.",
-      });
-    }
-
     try {
+      // Scope check happens INSIDE the transition (`expectedReportType`):
+      // this surface reviews CONTENT reports only, so a LINK/ACCOUNT id must
+      // 404 here rather than be driven into the Art. 16 state machine it does
+      // not belong to. Threading the filter into the transition's own lookup
+      // avoids a second `Report` SELECT for the same row (quality sweep
+      // 2026-09-05, D6).
       const updated = await transitionReportStatus(
         {
           reportId,
           toStatus: parsed.data.status as ReportLifecycleStatus,
           ...(parsed.data.resolution ? { resolution: parsed.data.resolution } : {}),
           region,
+          expectedReportType: "CONTENT",
         },
         env,
       );

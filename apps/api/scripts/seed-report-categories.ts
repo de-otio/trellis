@@ -24,14 +24,7 @@
 
 import { readFile } from "node:fs/promises";
 import { PrismaClient } from "@prisma/client";
-
-const ROUTING_CLASSES = [
-  "ILLEGAL_PRIORITY",
-  "ILLEGAL",
-  "POLICY_VIOLATION",
-  "FEEDBACK",
-] as const;
-type RoutingClass = (typeof ROUTING_CLASSES)[number];
+import { ROUTING_CLASSES, type RoutingClass } from "../src/lib/report-templates.js";
 
 interface ReportCategorySeed {
   key: string;
