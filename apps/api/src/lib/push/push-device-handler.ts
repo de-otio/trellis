@@ -6,7 +6,7 @@ import type { Env } from "../../env.js";
 import { createPrisma } from "../../db.js";
 import { MAX_PUSH_DEVICES_PER_USER, platformToWire } from "./push-dispatcher.js";
 import type { PushPlatformWire } from "./push-transport.js";
-import { encryptSecret, hashDeviceToken } from "./token-crypto.js";
+import { hashDeviceToken, resolveKeyring, sealSecret } from "./token-crypto.js";
 
 /** Wire platform → Prisma enum. */
 export function wireToPlatform(wire: PushPlatformWire): PushPlatform {
@@ -45,7 +45,10 @@ export class PushDeviceHandler {
     const db = createPrisma(env);
     try {
       const tokenHash = await hashDeviceToken(token);
-      const tokenCiphertext = await encryptSecret(token, env.SESSION_SECRET);
+      const tokenCiphertext = await sealSecret(
+        token,
+        resolveKeyring(env, "push"),
+      );
 
       const device = await db.pushDevice.upsert({
         where: { tokenHash },

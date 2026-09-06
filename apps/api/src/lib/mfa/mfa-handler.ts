@@ -8,14 +8,19 @@
 
 import type { PrismaClient } from "@prisma/client";
 import type { Env } from "../../env.js";
+import {
+  hashBackupCodeKeyed,
+  matchBackupCode,
+  needsReseal,
+  openSecret,
+  sealSecret,
+  type Keyring,
+} from "../at-rest-secret.js";
 import { getLogger, Logger } from "../logger.js";
 import {
   buildOTPAuthURI,
-  decryptSecret,
-  encryptSecret,
   generateBackupCodes,
   generateSecret,
-  hashBackupCode,
   verifyTOTPStep,
 } from "./totp-service.js";
 
@@ -78,7 +83,7 @@ export class MfaHandler {
     secret: string,
     backupCodes: string[],
     verificationCode: string,
-    encryptionKey: string,
+    keyring: Keyring,
   ): Promise<{ success: boolean; error?: string }> {
     // Verify the user can generate a valid code. The matched step is
     // persisted so the enrollment code itself cannot be replayed as the
@@ -88,12 +93,12 @@ export class MfaHandler {
       return { success: false, error: "Invalid verification code" };
     }
 
-    // Encrypt the secret for storage
-    const encrypted = await encryptSecret(secret, encryptionKey);
+    // Seal the secret for storage under the MFA keyring (DP-3)
+    const encrypted = await sealSecret(secret, keyring);
 
-    // Hash all backup codes
-    const hashedCodes = await Promise.all(
-      backupCodes.map((code) => hashBackupCode(code)),
+    // Keyed-hash all backup codes (DP-8)
+    const hashedCodes = backupCodes.map((code) =>
+      hashBackupCodeKeyed(code, keyring),
     );
 
     // Upsert enrollment (in case of re-enrollment)
@@ -131,17 +136,14 @@ export class MfaHandler {
     prisma: PrismaClient,
     userId: string,
     code: string,
-    encryptionKey: string,
+    keyring: Keyring,
   ): Promise<boolean> {
     const enrollment = await prisma.mfaEnrollment.findUnique({
       where: { userId },
     });
     if (!enrollment) return false;
 
-    const secret = await decryptSecret(
-      enrollment.encryptedSecret,
-      encryptionKey,
-    );
+    const secret = await openSecret(enrollment.encryptedSecret, keyring);
     const step = await verifyTOTPStep(secret, code);
     if (step === null) return false;
 
@@ -155,9 +157,16 @@ export class MfaHandler {
       return false;
     }
 
+    // A successful open is the one moment the plaintext is in hand: if the
+    // row is in an older format (legacy raw-key wrap, or sealed under the
+    // previous session secret), re-seal it so the migration completes on use.
+    const reseal = needsReseal(enrollment.encryptedSecret, keyring)
+      ? { encryptedSecret: await sealSecret(secret, keyring) }
+      : {};
+
     await prisma.mfaEnrollment.update({
       where: { userId },
-      data: { lastUsedAt: new Date(), lastUsedStep: step },
+      data: { lastUsedAt: new Date(), lastUsedStep: step, ...reseal },
     });
 
     return true;
@@ -170,14 +179,16 @@ export class MfaHandler {
     prisma: PrismaClient,
     userId: string,
     code: string,
+    keyring: Keyring,
   ): Promise<boolean> {
     const enrollment = await prisma.mfaEnrollment.findUnique({
       where: { userId },
     });
     if (!enrollment) return false;
 
-    const codeHash = await hashBackupCode(code);
-    const index = enrollment.backupCodes.indexOf(codeHash);
+    // Keyed hash first, then the legacy unsalted hash for rows written
+    // before DP-8. The matched code is consumed either way.
+    const index = await matchBackupCode(code, enrollment.backupCodes, keyring);
 
     if (index === -1) return false;
 

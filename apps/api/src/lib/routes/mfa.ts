@@ -6,6 +6,7 @@
 
 import { z } from "zod";
 import { createPrisma } from "../../db.js";
+import { resolveKeyring } from "../at-rest-secret.js";
 import { CorsHandler } from "../cors-handler.js";
 import { getLogger, Logger } from "../logger.js";
 import { MfaHandler } from "../mfa/mfa-handler.js";
@@ -265,7 +266,9 @@ export const mfaRoutes: Route[] = [
 
         const prisma = createPrisma(env);
         const mfaHandler = new MfaHandler(env);
-        const encryptionKey = sessionSecret; // Reuse session secret for MFA encryption
+        // MFA_ENC_KEY when provisioned, else a session-derived key — never
+        // the raw session secret (DP-3).
+        const keyring = resolveKeyring(env, "mfa");
 
         const result = await mfaHandler.finalizeEnrollment(
           prisma,
@@ -273,7 +276,7 @@ export const mfaRoutes: Route[] = [
           parsed.data.secret,
           parsed.data.backupCodes,
           parsed.data.verificationCode,
-          encryptionKey,
+          keyring,
         );
 
         if (!result.success) {
@@ -356,6 +359,7 @@ export const mfaRoutes: Route[] = [
 
         const prisma = createPrisma(env);
         const mfaHandler = new MfaHandler(env);
+        const keyring = resolveKeyring(env, "mfa");
         let verified = false;
 
         if (parsed.data.type === "backup") {
@@ -363,13 +367,14 @@ export const mfaRoutes: Route[] = [
             prisma,
             session.userId,
             parsed.data.code,
+            keyring,
           );
         } else {
           verified = await mfaHandler.verifyCode(
             prisma,
             session.userId,
             parsed.data.code,
-            sessionSecret,
+            keyring,
           );
         }
 

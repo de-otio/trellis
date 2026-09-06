@@ -69,6 +69,10 @@ export interface Env {
     MFA_VERIFY_MAX_ATTEMPTS_PER_IP?: string;
     /** Window the attempt budgets refill over, in seconds. Default 300. */
     MFA_VERIFY_WINDOW_SECONDS?: string;
+    /** KEK for TOTP seeds and backup-code hashes. */
+    MFA_ENC_KEY?: string;
+    /** KEK for push device tokens. */
+    PUSH_TOKEN_ENC_KEY?: string;
     COGNITO_USER_POOL_ID?: string;
     COGNITO_APP_CLIENT_ID?: string;
     COGNITO_REGION?: string;
@@ -867,6 +871,97 @@ export type { StatementDelivery } from "./lib/compliance/statement-of-reasons.js
 export { ILLEGAL_SUSPECTED_LABEL, deriveBlockClass, isAppealable, } from "./lib/compliance/block-class.js";
 export { createPendingAuthorityReport, markAuthorityReportSubmitted, markAuthorityReportClosed, } from "./lib/compliance/authority-report.js";
 export type { AgentSurfaceContent } from "./lib/routes/agent-surface.js";
+
+// ===== lib/at-rest-secret.d.ts =====
+/**
+ * At-rest wrapping for small per-user secrets (TOTP seeds, push device tokens).
+ *
+ * ## What this replaces (DP-3)
+ *
+ * `mfa/totp-service.ts` built its AES-GCM key from the first 32 *characters*
+ * of `SESSION_SECRET` (`padEnd(32, "0").slice(0, 32)` as UTF-8 bytes) and
+ * `push/token-crypto.ts` re-exported it. Three problems:
+ *
+ *   1. **Secret reuse.** The key that seals session cookies also wrapped every
+ *      MFA seed and every push token — one secret, three trust domains.
+ *   2. **No KDF.** Characters are not bytes: a hex or base64 session secret
+ *      yields 4–6 bits per character, so a "256-bit" AES key carried
+ *      128–192 bits of entropy.
+ *   3. **No rotation path.** Nothing tagged the ciphertext and nothing read
+ *      `SESSION_SECRET_FALLBACK`, so rotating the session secret locked every
+ *      MFA user out (decrypt throws) and orphaned every push registration.
+ *
+ * ## What this does
+ *
+ * A {@link Keyring} is resolved once per request from env, per purpose:
+ *
+ *   - If a dedicated key is provisioned (`MFA_ENC_KEY`, `PUSH_TOKEN_ENC_KEY`;
+ *     base64 of exactly 32 bytes), values are sealed with
+ *     `field-encryption.ts` — HKDF per-record DEK, `v1:` prefix — under it.
+ *   - Otherwise the key is HKDF-SHA256-derived from `SESSION_SECRET` with a
+ *     purpose-specific `info` label (domain separation, real bytes), and the
+ *     ciphertext carries an `h1:` prefix. `SESSION_SECRET_FALLBACK` is tried
+ *     on decrypt, so the session-secret rotation ceremony now covers these
+ *     stores too.
+ *   - The LEGACY unprefixed format (bare base64 of iv‖ct under the raw-bytes
+ *     key) is still read, under the current secret and then the fallback, so
+ *     no existing enrollment or device breaks. Readers that own a write path
+ *     re-seal such values on the next successful open (see `needsReseal`).
+ *
+ * Backup codes get the same treatment: a keyed HMAC (`k1:` prefix) under the
+ * purpose key instead of an unsalted SHA-256 of a 40-bit code (DP-8), with the
+ * legacy hash still matched for rows written before this change.
+ */
+import type { Env } from "../env.js";
+/** Which store a keyring protects. Each purpose derives a distinct key. */
+export type AtRestPurpose = "mfa" | "push";
+/** Resolved key material for one purpose. Build it with {@link resolveKeyring}. */
+export interface Keyring {
+    readonly purpose: AtRestPurpose;
+    /** Dedicated 32-byte KEK when provisioned; null → session-derived mode. */
+    readonly kek: Buffer | null;
+    /** HKDF(SESSION_SECRET, info=purpose) — always present. */
+    readonly derived: Buffer;
+    /** HKDF(SESSION_SECRET_FALLBACK, info=purpose) when a fallback is set. */
+    readonly derivedFallback: Buffer | null;
+    /** Raw session secret(s), only for reading the legacy unprefixed format. */
+    readonly legacyMaster: string;
+    readonly legacyFallback: string | null;
+}
+/**
+ * Decode a dedicated key var. Returns null when unset; throws when set but
+ * not base64 of exactly 32 bytes (a passphrase is not a key — same rule as
+ * `EMAIL_SUB_ENC_KEY` and `ACTIVITYPUB_KEY_ENCRYPTION_KEY`).
+ */
+export declare function decodeDedicatedKey(name: "MFA_ENC_KEY" | "PUSH_TOKEN_ENC_KEY", raw: string | undefined): Buffer | null;
+/** Resolve the keyring for a purpose from env. Cheap; call per request. */
+export declare function resolveKeyring(env: Env, purpose: AtRestPurpose): Keyring;
+/** Seal a plaintext secret in the keyring's CURRENT format. */
+export declare function sealSecret(plaintext: string, keyring: Keyring): Promise<string>;
+/**
+ * Open a stored value in any format this module has ever written, trying the
+ * current key first and the fallback second. Throws when nothing opens it —
+ * never returns partial plaintext.
+ */
+export declare function openSecret(stored: string, keyring: Keyring): Promise<string>;
+/**
+ * True when `stored` is not in the format {@link sealSecret} would produce
+ * today (legacy, `h1:` after a dedicated key was provisioned, or sealed under
+ * the fallback rather than the current secret). Callers with a write path
+ * re-seal after a successful open; the rest of the rows migrate on their next
+ * use, which is how a rotation completes without a stop-the-world job.
+ */
+export declare function needsReseal(stored: string, keyring: Keyring): boolean;
+/** Hash a backup code for storage under the keyring's current key. */
+export declare function hashBackupCodeKeyed(code: string, keyring: Keyring): string;
+/**
+ * Find `code` among stored hashes: keyed under the current key, keyed under
+ * the fallback-derived key, then the legacy unsalted SHA-256. Returns the
+ * index or -1. A matched code is consumed by the caller, so there is nothing
+ * to re-hash — remaining legacy hashes cannot be upgraded without their
+ * plaintext and stay until the user re-enrols.
+ */
+export declare function matchBackupCode(code: string, stored: readonly string[], keyring: Keyring): Promise<number>;
 
 // ===== lib/audit-composer.d.ts =====
 /**
@@ -4635,14 +4730,27 @@ export declare function buildOTPAuthURI(secret: string, email: string, issuer?: 
 export declare function generateBackupCodes(count?: number): string[];
 /**
  * Hash a backup code for storage using SHA-256.
+ *
+ * @deprecated LEGACY — unsalted SHA-256 of a 40-bit code is recoverable
+ * offline by anyone who can read the table (DP-8). Kept only so rows written
+ * before `lib/at-rest-secret.ts` still match; new hashes come from
+ * `hashBackupCodeKeyed`.
  */
 export declare function hashBackupCode(code: string): Promise<string>;
 /**
  * Encrypt a TOTP secret for database storage using AES-GCM.
+ *
+ * @deprecated LEGACY — keys off the first 32 CHARACTERS of the supplied
+ * secret (no KDF, no domain separation, no rotation tag; DP-3). Nothing in
+ * the API writes this format any more; `lib/at-rest-secret.ts` `sealSecret`
+ * replaces it. Kept exported so tests can produce legacy rows.
  */
 export declare function encryptSecret(secret: string, encryptionKey: string): Promise<string>;
 /**
  * Decrypt a TOTP secret from database storage.
+ *
+ * @deprecated LEGACY read path for rows written by `encryptSecret`; called
+ * only from `lib/at-rest-secret.ts` `openSecret`, which re-seals on use.
  */
 export declare function decryptSecret(encryptedSecret: string, encryptionKey: string): Promise<string>;
 
@@ -4985,6 +5093,7 @@ export declare class PushDeviceHandler {
 import type { PushPlatform } from "@prisma/client";
 import type { Logger } from "../logger.js";
 import type { WakeupKind } from "../realtime/push-notifier.js";
+import { type Keyring } from "./token-crypto.js";
 import type { PushPlatformWire, PushTransport } from "./push-transport.js";
 /** Per-user registered-device cap (also enforced at registration). */
 export declare const MAX_PUSH_DEVICES_PER_USER = 20;
@@ -5021,6 +5130,19 @@ export interface PushDeviceStore {
         }): Promise<{
             count: number;
         }>;
+        /**
+         * Optional: lets the dispatcher re-seal a token that opened in an older
+         * at-rest format (legacy raw-key wrap, or the previous session secret).
+         * Best effort and non-fatal; a store without it just leaves the row as is.
+         */
+        update?(args: {
+            where: {
+                id: string;
+            };
+            data: {
+                tokenCiphertext: string;
+            };
+        }): Promise<unknown>;
     };
 }
 export interface PushDispatchInput {
@@ -5042,7 +5164,7 @@ export declare class PushDispatcher {
      * Fan one content-free wakeup out to every registered device of the user.
      * NEVER throws; resolves with counters for observability.
      */
-    dispatch(input: PushDispatchInput, db: PushDeviceStore, decryptionKey: string): Promise<PushDispatchResult>;
+    dispatch(input: PushDispatchInput, db: PushDeviceStore, keyring: Keyring): Promise<PushDispatchResult>;
 }
 
 // ===== lib/push/push-transport.d.ts =====
@@ -5080,6 +5202,11 @@ export declare function resolvePushTransport(): PushTransport | undefined;
 export declare function __resetPushTransportProviderForTests(): void;
 
 // ===== lib/push/token-crypto.d.ts =====
+export { needsReseal, openSecret, resolveKeyring, sealSecret, type Keyring, } from "../at-rest-secret.js";
+/**
+ * @deprecated LEGACY raw-key wrap, re-exported so tests can produce rows in
+ * the pre-DP-3 format. Nothing in the API writes it any more.
+ */
 export { encryptSecret, decryptSecret } from "../mfa/totp-service.js";
 /** Deterministic SHA-256 hex of a raw device token — the dedupe/upsert key. */
 export declare function hashDeviceToken(token: string): Promise<string>;

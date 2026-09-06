@@ -16,6 +16,7 @@ import { getLogger, Logger } from "./logger.js";
 import { CalmDeliveryResolver } from "./realtime/index.js";
 import { PushNotifier } from "./realtime/push-notifier.js";
 import { PushDispatcher } from "./push/push-dispatcher.js";
+import { resolveKeyring } from "./at-rest-secret.js";
 import { resolvePushTransport } from "./push/push-transport.js";
 import {
   PrismaBlockStore,
@@ -312,7 +313,11 @@ export class NotificationHandler {
         const pushTransport = resolvePushTransport();
         if (pushTransport) {
           const dispatcher = new PushDispatcher(pushTransport, logger);
-          await dispatcher.dispatch({ userId, kind }, db, env.SESSION_SECRET);
+          await dispatcher.dispatch(
+            { userId, kind },
+            db,
+            resolveKeyring(env, "push"),
+          );
         }
       }
 

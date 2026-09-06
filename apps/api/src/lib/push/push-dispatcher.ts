@@ -19,7 +19,7 @@ import type { PushPlatform } from "@prisma/client";
 import type { Logger } from "../logger.js";
 import { buildNotificationWakeup } from "../realtime/push-notifier.js";
 import type { WakeupKind } from "../realtime/push-notifier.js";
-import { decryptSecret } from "./token-crypto.js";
+import { needsReseal, openSecret, sealSecret, type Keyring } from "./token-crypto.js";
 import type { PushPlatformWire, PushTransport } from "./push-transport.js";
 
 /** Per-user registered-device cap (also enforced at registration). */
@@ -52,6 +52,15 @@ export interface PushDeviceStore {
       Array<{ id: string; platform: PushPlatform; tokenCiphertext: string }>
     >;
     deleteMany(args: { where: { id: string } }): Promise<{ count: number }>;
+    /**
+     * Optional: lets the dispatcher re-seal a token that opened in an older
+     * at-rest format (legacy raw-key wrap, or the previous session secret).
+     * Best effort and non-fatal; a store without it just leaves the row as is.
+     */
+    update?(args: {
+      where: { id: string };
+      data: { tokenCiphertext: string };
+    }): Promise<unknown>;
   };
 }
 
@@ -81,7 +90,7 @@ export class PushDispatcher {
   async dispatch(
     input: PushDispatchInput,
     db: PushDeviceStore,
-    decryptionKey: string,
+    keyring: Keyring,
   ): Promise<PushDispatchResult> {
     const result: PushDispatchResult = {
       attempted: 0,
@@ -112,10 +121,19 @@ export class PushDispatcher {
     for (const device of devices) {
       result.attempted += 1;
       try {
-        const token = await decryptSecret(
-          device.tokenCiphertext,
-          decryptionKey,
-        );
+        const token = await openSecret(device.tokenCiphertext, keyring);
+        if (db.pushDevice.update && needsReseal(device.tokenCiphertext, keyring)) {
+          // Migrate-on-use: the plaintext is in hand, so bring the row up to
+          // the current format. Never blocks delivery.
+          try {
+            await db.pushDevice.update({
+              where: { id: device.id },
+              data: { tokenCiphertext: await sealSecret(token, keyring) },
+            });
+          } catch (err) {
+            this.logger.warn("push dispatch: token re-seal failed (non-fatal)", err);
+          }
+        }
         const outcome = await this.transport.send(
           {
             deviceId: device.id,

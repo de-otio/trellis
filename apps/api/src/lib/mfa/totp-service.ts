@@ -109,6 +109,11 @@ export function generateBackupCodes(count: number = 10): string[] {
 
 /**
  * Hash a backup code for storage using SHA-256.
+ *
+ * @deprecated LEGACY — unsalted SHA-256 of a 40-bit code is recoverable
+ * offline by anyone who can read the table (DP-8). Kept only so rows written
+ * before `lib/at-rest-secret.ts` still match; new hashes come from
+ * `hashBackupCodeKeyed`.
  */
 export async function hashBackupCode(code: string): Promise<string> {
   const normalized = code.replace(/-/g, "").toUpperCase();
@@ -119,6 +124,11 @@ export async function hashBackupCode(code: string): Promise<string> {
 
 /**
  * Encrypt a TOTP secret for database storage using AES-GCM.
+ *
+ * @deprecated LEGACY — keys off the first 32 CHARACTERS of the supplied
+ * secret (no KDF, no domain separation, no rotation tag; DP-3). Nothing in
+ * the API writes this format any more; `lib/at-rest-secret.ts` `sealSecret`
+ * replaces it. Kept exported so tests can produce legacy rows.
  */
 export async function encryptSecret(
   secret: string,
@@ -150,6 +160,9 @@ export async function encryptSecret(
 
 /**
  * Decrypt a TOTP secret from database storage.
+ *
+ * @deprecated LEGACY read path for rows written by `encryptSecret`; called
+ * only from `lib/at-rest-secret.ts` `openSecret`, which re-seals on use.
  */
 export async function decryptSecret(
   encryptedSecret: string,

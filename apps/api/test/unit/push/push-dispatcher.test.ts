@@ -22,9 +22,17 @@ import type {
   PushSendOutcome,
   PushTransport,
 } from "../../../src/lib/push/push-transport.js";
-import { encryptSecret } from "../../../src/lib/push/token-crypto.js";
+import {
+  encryptSecret,
+  resolveKeyring,
+  sealSecret,
+} from "../../../src/lib/push/token-crypto.js";
 
 const KEY = "test-secret-32-characters-long!!";
+// The dispatcher takes a resolved keyring; the fixtures below deliberately
+// write rows in the LEGACY raw-key format (encryptSecret) so the read path's
+// backward compatibility is exercised on every case.
+const KEYRING = resolveKeyring({ SESSION_SECRET: KEY } as any, "push");
 const USER = "user-1";
 
 const logger = {
@@ -72,7 +80,7 @@ describe("PushDispatcher", () => {
     const { transport, send } = makeTransport(() => ({ ok: true }));
 
     const dispatcher = new PushDispatcher(transport, logger);
-    const result = await dispatcher.dispatch({ userId: USER, kind: "wakeup" }, store, KEY);
+    const result = await dispatcher.dispatch({ userId: USER, kind: "wakeup" }, store, KEYRING);
 
     expect(result).toEqual({ attempted: 2, delivered: 2, invalidated: 0 });
     // Token lookup is user-scoped and bounded.
@@ -104,7 +112,7 @@ describe("PushDispatcher", () => {
     const { transport, send } = makeTransport(() => ({ ok: true }));
 
     const dispatcher = new PushDispatcher(transport, logger);
-    await dispatcher.dispatch({ userId: USER, kind: "safety" }, store, KEY);
+    await dispatcher.dispatch({ userId: USER, kind: "safety" }, store, KEYRING);
 
     const payload = send.mock.calls[0][1] as Uint8Array;
     expect(payload).toBeInstanceOf(Uint8Array);
@@ -128,7 +136,7 @@ describe("PushDispatcher", () => {
     ]);
 
     const dispatcher = new PushDispatcher(transport, logger);
-    const result = await dispatcher.dispatch({ userId: USER, kind: "wakeup" }, store, KEY);
+    const result = await dispatcher.dispatch({ userId: USER, kind: "wakeup" }, store, KEYRING);
 
     expect(result).toEqual({ attempted: 2, delivered: 1, invalidated: 1 });
     expect(deleteMany).toHaveBeenCalledTimes(1);
@@ -147,7 +155,7 @@ describe("PushDispatcher", () => {
     ]);
 
     const dispatcher = new PushDispatcher(transport, logger);
-    const result = await dispatcher.dispatch({ userId: USER, kind: "wakeup" }, store, KEY);
+    const result = await dispatcher.dispatch({ userId: USER, kind: "wakeup" }, store, KEYRING);
 
     expect(result).toEqual({ attempted: 2, delivered: 0, invalidated: 0 });
     expect(deleteMany).not.toHaveBeenCalled();
@@ -166,7 +174,7 @@ describe("PushDispatcher", () => {
     const transport: PushTransport = { kind: "boom", send };
 
     const dispatcher = new PushDispatcher(transport, logger);
-    const result = await dispatcher.dispatch({ userId: USER, kind: "wakeup" }, store, KEY);
+    const result = await dispatcher.dispatch({ userId: USER, kind: "wakeup" }, store, KEYRING);
 
     expect(result).toEqual({ attempted: 2, delivered: 1, invalidated: 0 });
     expect(deleteMany).not.toHaveBeenCalled();
@@ -182,7 +190,7 @@ describe("PushDispatcher", () => {
     const { transport, send } = makeTransport(() => ({ ok: true }));
 
     const dispatcher = new PushDispatcher(transport, logger);
-    const result = await dispatcher.dispatch({ userId: USER, kind: "wakeup" }, store, KEY);
+    const result = await dispatcher.dispatch({ userId: USER, kind: "wakeup" }, store, KEYRING);
 
     expect(result.attempted).toBe(2);
     expect(result.delivered).toBe(1);
@@ -198,7 +206,7 @@ describe("PushDispatcher", () => {
     const { transport, send } = makeTransport(() => ({ ok: true }));
 
     const dispatcher = new PushDispatcher(transport, logger);
-    const result = await dispatcher.dispatch({ userId: USER, kind: "wakeup" }, store, KEY);
+    const result = await dispatcher.dispatch({ userId: USER, kind: "wakeup" }, store, KEYRING);
 
     expect(result).toEqual({ attempted: 0, delivered: 0, invalidated: 0 });
     expect(send).not.toHaveBeenCalled();
@@ -214,7 +222,7 @@ describe("PushDispatcher", () => {
     const { transport } = makeTransport([{ ok: false, reason: "unregistered" }]);
 
     const dispatcher = new PushDispatcher(transport, logger);
-    const result = await dispatcher.dispatch({ userId: USER, kind: "wakeup" }, store, KEY);
+    const result = await dispatcher.dispatch({ userId: USER, kind: "wakeup" }, store, KEYRING);
 
     expect(result).toEqual({ attempted: 1, delivered: 0, invalidated: 0 });
     expect(logger.warn).toHaveBeenCalled();

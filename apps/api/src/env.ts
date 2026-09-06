@@ -86,6 +86,17 @@ export interface Env {
   MFA_VERIFY_MAX_ATTEMPTS_PER_IP?: string;
   /** Window the attempt budgets refill over, in seconds. Default 300. */
   MFA_VERIFY_WINDOW_SECONDS?: string;
+
+  // Purpose-specific at-rest keys (lib/at-rest-secret.ts). Optional: when
+  // unset the key is HKDF-derived from SESSION_SECRET with a per-purpose
+  // label and SESSION_SECRET_FALLBACK is honoured on read. When set: base64
+  // of exactly 32 bytes, asserted at boot; values are sealed via
+  // field-encryption under it and the session secret no longer reaches
+  // these stores.
+  /** KEK for TOTP seeds and backup-code hashes. */
+  MFA_ENC_KEY?: string;
+  /** KEK for push device tokens. */
+  PUSH_TOKEN_ENC_KEY?: string;
   COGNITO_USER_POOL_ID?: string;
   COGNITO_APP_CLIENT_ID?: string;
   COGNITO_REGION?: string;
@@ -1391,6 +1402,21 @@ export function validateEnv(env: Env): string[] {
   // KEK is not a degraded mode — actor private keys would be unwrappable (or,
   // before this change, wrapped under the reused session secret). Only checked
   // when ACTIVITYPUB_ENABLED, so non-federating deployments are unaffected.
+  // At-rest keys for MFA seeds / push tokens (DP-3): optional, but when set
+  // they must be real 32-byte keys. A mis-encoded key would otherwise fail
+  // the first MFA verification or push registration instead of the rollout.
+  for (const name of ["MFA_ENC_KEY", "PUSH_TOKEN_ENC_KEY"] as const) {
+    const raw = env[name];
+    if (raw !== undefined && raw !== "") {
+      const decoded = Buffer.from(raw.trim(), "base64");
+      if (decoded.length !== 32) {
+        errors.push(
+          `${name} must be base64 of exactly 32 bytes (got ${decoded.length}) — a passphrase is not a key. Unset it to fall back to the session-derived key.`,
+        );
+      }
+    }
+  }
+
   if (env.ACTIVITYPUB_ENABLED) {
     const kek = env.ACTIVITYPUB_KEY_ENCRYPTION_KEY;
     if (!kek) {
@@ -1639,6 +1665,8 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     MFA_VERIFY_MAX_ATTEMPTS: process.env.MFA_VERIFY_MAX_ATTEMPTS,
     MFA_VERIFY_MAX_ATTEMPTS_PER_IP: process.env.MFA_VERIFY_MAX_ATTEMPTS_PER_IP,
     MFA_VERIFY_WINDOW_SECONDS: process.env.MFA_VERIFY_WINDOW_SECONDS,
+    MFA_ENC_KEY: process.env.MFA_ENC_KEY,
+    PUSH_TOKEN_ENC_KEY: process.env.PUSH_TOKEN_ENC_KEY,
     COGNITO_USER_POOL_ID: process.env.COGNITO_USER_POOL_ID,
     COGNITO_APP_CLIENT_ID: process.env.COGNITO_APP_CLIENT_ID,
     COGNITO_REGION: process.env.COGNITO_REGION || process.env.AWS_REGION || "us-east-1",
