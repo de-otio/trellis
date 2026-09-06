@@ -302,4 +302,22 @@ describe("getFeatureAccess", () => {
     expect(access.showUnreadCount).toBe(true);
     expect(access.dmAccess).toBe("connections");
   });
+
+  it("fails closed to CHILD-level access for an ageTier outside the known enum", () => {
+    // The runtime input can be an unchecked JWT/session claim cast to
+    // AgeTier (B3/T1: `session-cookie.ts`'s `custom:ageTier` claim), so the
+    // switch cannot assume its argument is one of the three literal values
+    // TypeScript believes are exhaustive. An unrecognised value must be at
+    // least as restrictive as CHILD — not `undefined`, which reads as
+    // "unlimited" for the nullable numeric fields (`maxFeedPages`, …) while
+    // reading as "most restricted" for the booleans, a split behaviour with
+    // no error and no log.
+    const childAccess = getFeatureAccess("CHILD");
+    const unknownTierAccess = getFeatureAccess(
+      "SUPERADULT" as unknown as Parameters<typeof getFeatureAccess>[0],
+    );
+    expect(unknownTierAccess).toEqual(childAccess);
+    expect(unknownTierAccess.maxFeedPages).toBe(5);
+    expect(unknownTierAccess.canEditNotificationPreferences).toBe(false);
+  });
 });

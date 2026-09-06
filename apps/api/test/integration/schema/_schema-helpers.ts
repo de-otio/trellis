@@ -11,16 +11,20 @@ export const TEST_DB_URL =
   process.env.DATABASE_URL ??
   "postgresql://trellis:trellis_dev_password@localhost:5432/trellis_dev";
 
-/** Ask Postgres for a column's nullability and type. */
+/** Ask Postgres for a column's nullability, type, and default expression. */
 export async function describeColumn(
   prisma: PrismaClient,
   table: string,
   column: string,
-): Promise<{ data_type: string; is_nullable: "YES" | "NO" } | null> {
+): Promise<{
+  data_type: string;
+  is_nullable: "YES" | "NO";
+  column_default: string | null;
+} | null> {
   const rows = await prisma.$queryRawUnsafe<
-    { data_type: string; is_nullable: "YES" | "NO" }[]
+    { data_type: string; is_nullable: "YES" | "NO"; column_default: string | null }[]
   >(
-    `SELECT data_type, is_nullable
+    `SELECT data_type, is_nullable, column_default
        FROM information_schema.columns
       WHERE table_schema = 'public'
         AND table_name = $1

@@ -76,6 +76,19 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   that was never filed looking filed, which is the worse failure for an
   Art.-18 obligation. `channelMode` in the return type is now `string | null`,
   since an unchanged report may not carry one.
+- **An unrecognised age tier no longer gets adult-unlimited feature access.**
+  `getFeatureAccess` (`age-gate.ts`) switched on `CHILD`/`TEEN`/`ADULT` with no
+  `default` branch, which type-checks because those are the only literals in
+  the `AgeTier` union — but the runtime argument can be an unchecked JWT/
+  session claim cast to that type, not a value TypeScript ever validated. A
+  fourth string fell through to an implicit `return undefined`, which reads
+  as the MOST restrictive setting for the boolean fields
+  (`canEditNotificationPreferences`, `showUnreadCount`: falsy) and the LEAST
+  restrictive for the nullable numeric ones (`maxFeedPages`: callers compare
+  with `!= null`, so `undefined` means unlimited) — split, silent behaviour
+  in the wrong direction for a function whose whole purpose is to restrict by
+  tier. An unrecognised tier now fails closed to the CHILD-level access table
+  and logs the anomaly, rather than defaulting to `undefined`.
 
 - **Suspected-illegal content can no longer be offered an appeal because of a
   half-applied carve-out.** `applyIllegalPriorityCarveOut` hides, preserves and
