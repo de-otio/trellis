@@ -116,7 +116,10 @@ export async function getOutboxActivities(
       },
     );
 
-    // Convert activities to ActivityStreams format
+    // Convert activities to ActivityStreams format. `bto`/`bcc` are blind by
+    // definition (AS2 §5.1: removed before delivery or serving) — rows that
+    // carry ONLY blind recipients are already withheld by the audience gate,
+    // and the remaining ones must not publish their blind lists either.
     const orderedItems = activities.map((a) => ({
       type: a.type,
       actor: a.actorUri,
@@ -124,8 +127,6 @@ export async function getOutboxActivities(
       target: a.targetId,
       to: a.to,
       cc: a.cc,
-      bto: a.bto,
-      bcc: a.bcc,
       published: a.published.toISOString(),
     }));
 

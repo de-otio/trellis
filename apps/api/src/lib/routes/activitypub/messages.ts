@@ -20,7 +20,74 @@ import { corsMiddleware, csrfMiddleware } from "../../middleware.js";
 import { detectRegionSync } from "../../region-detection.js";
 import { SecurityHeaders } from "../../security-headers.js";
 import { SessionManager } from "../../session-cookie.js";
+import { verifyInboxRequest } from "../../activitypub/listeners/http-signatures.js";
 import type { Route } from "../types.js";
+
+/**
+ * The single deny body for the DM object route.
+ *
+ * `GET /messages/:messageId` is reachable without a session. It used to serve
+ * the Note — with the message text — to anyone holding the id, and DM ids
+ * leaked through the outbox collection. Now the caller must prove they are a
+ * party to the conversation, and every refusal (no such message, wrong party,
+ * no credentials) shares one status and one body so an anonymous caller cannot
+ * tell "not found" from "not yours".
+ */
+const DM_DENY_BODY = JSON.stringify({ error: "Message not found" });
+const DM_DENY_INIT = {
+  status: 404,
+  headers: { "content-type": "application/json" },
+} as const;
+
+/**
+ * Decide whether the caller may read this DM.
+ *
+ * Two credentials are accepted, in this order:
+ *   1. A local session whose user is the sender or the recipient.
+ *   2. A signed GET (HTTP Signature) whose verified key owner is the sender's
+ *      or the recipient's actor URI — the federation path, where the Note's
+ *      `bto` names the recipient. The signature verifier binds the identity;
+ *      nothing in the request body or query is trusted.
+ * Anything else is a refusal. Returns the reason only for logging.
+ */
+async function mayReadDm(
+  request: Request,
+  env: any,
+  dm: {
+    senderId: string;
+    recipientId: string;
+    sender: { actorUri: string | null } | null;
+    recipient: { actorUri: string | null } | null;
+  },
+): Promise<{ ok: true; via: "session" | "signature" } | { ok: false; reason: string }> {
+  const sessionManager = new SessionManager();
+  const session = await sessionManager.getSession(
+    request,
+    env.SESSION_SECRET,
+    env,
+  );
+  if (session) {
+    if (session.userId === dm.senderId || session.userId === dm.recipientId) {
+      return { ok: true, via: "session" };
+    }
+    return { ok: false, reason: "session user is not a party" };
+  }
+
+  if (!request.headers.get("signature")) {
+    return { ok: false, reason: "no session and no signature" };
+  }
+  const verification = await verifyInboxRequest(request, env);
+  if (!verification.valid) {
+    return { ok: false, reason: `signature ${verification.reason}` };
+  }
+  const parties = [dm.sender?.actorUri, dm.recipient?.actorUri].filter(
+    (uri): uri is string => typeof uri === "string" && uri.length > 0,
+  );
+  if (parties.includes(verification.owner)) {
+    return { ok: true, via: "signature" };
+  }
+  return { ok: false, reason: "signing key owner is not a party" };
+}
 
 /**
  * ActivityPub direct message routes
@@ -435,13 +502,18 @@ export const messageRoutes: Route[] = [
           !dm.sender?.actorUri ||
           !dm.recipient?.actorUri
         ) {
-          return securityHeaders.createSecureResponse(
-            JSON.stringify({ error: "Message not found" }),
-            {
-              status: 404,
-              headers: { "content-type": "application/json" },
-            },
-          );
+          return securityHeaders.createSecureResponse(DM_DENY_BODY, DM_DENY_INIT);
+        }
+
+        // ONE gate, one deny body: only a party to the conversation reads it.
+        const access = await mayReadDm(request, env, dm);
+        if (!access.ok) {
+          // Logged, not disclosed: the response cannot say which branch refused.
+          logger.warn("[ActivityPub] DM object fetch refused", {
+            messageId,
+            reason: access.reason,
+          });
+          return securityHeaders.createSecureResponse(DM_DENY_BODY, DM_DENY_INIT);
         }
 
         // Use Fedify to serialize Note object
