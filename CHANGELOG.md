@@ -18,6 +18,20 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ### Fixed
 
+- **The feed cache key now carries every input that shapes the page.** The
+  home-feed cache key (`feed-handler.ts`) said "EVERY input to the response
+  body must appear in this key" and omitted three: `taxonomyTags`,
+  `personalized` and `personalizationEntityIds`, each of which changes the
+  post query's `WHERE` (`taxonomyFilter`). A personalized and an unpersonalized
+  page for the same viewer, cursor and limit therefore shared one cache entry
+  for the TTL — the filtered page could answer the unfiltered request and vice
+  versa. No shipped client sends those parameters, which is why nobody saw it;
+  the key must not depend on that. The three are now key components (id lists
+  sorted, so the order a client lists them in does not fork the cache), with a
+  test that five distinct option sets produce five distinct keys and that
+  order-only variants collapse to one. This is also the rule a per-user ranker
+  choice will have to follow (`plans/pluggable-ranking/` R-3): a choice that is
+  not in the key is a silent default swap by cache.
 - **A date of birth that cannot be read no longer provisions an adult.**
   The minimum-age floor in `provisionConfirmedUser` is fail-closed and says so;
   the parse in front of it was not. It accepted whatever `new Date()` accepted

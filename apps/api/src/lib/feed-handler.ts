@@ -333,14 +333,32 @@ export class FeedHandler {
       const cacheVersion = await FeedHandler.getCacheVersion(env);
       // Include entityRefs in cache key for proper cache invalidation
       const entityRefsKey = options.entityRefs?.sort().join(",") || "";
+      // The taxonomy filter and the personalization inputs change the WHERE
+      // below (`taxonomyFilter`) and were missing from the key, so a
+      // personalized and an unpersonalized page for the same viewer, cursor
+      // and limit shared one entry for the TTL. No shipped client sends
+      // them, which is why nobody saw it — the key must not depend on that.
+      // Sorted, so the order the client lists ids in does not fork the cache.
+      const taxonomyTagsKey = options.taxonomyTags
+        ? [...options.taxonomyTags].sort().join(",")
+        : "";
+      const personalizationKey = options.personalized
+        ? `p:${
+            options.personalizationEntityIds
+              ? [...options.personalizationEntityIds].sort().join(",")
+              : "*"
+          }`
+        : "";
       // EVERY input to the response body must appear in this key. The body is
       // resolved per viewer AND per tenant: `activeTenantId` comes from a JWT
       // claim that changes when a user switches tenant, and it is an AND in the
       // post query below. Omitting it means a user who belongs to two tenants
       // gets tenant A's posts served from cache while reading as tenant B —
       // defeating the tenant predicate entirely for the cache TTL, with no
-      // error anywhere.
-      const cacheKey = `feed:home:${region}:${activeTenantId}:v${cacheVersion}:${session.userId}:${entityRefsKey}:${options.cursor || "initial"}:${limit}`;
+      // error anywhere. The same rule will apply to a per-user ranker choice
+      // when one exists (plans/pluggable-ranking/ R-3): a choice that is not
+      // in the key is a silent default swap by cache.
+      const cacheKey = `feed:home:${region}:${activeTenantId}:v${cacheVersion}:${session.userId}:${entityRefsKey}:${taxonomyTagsKey}:${personalizationKey}:${options.cursor || "initial"}:${limit}`;
 
       // PREPARATORY: Check aggressive caching feature flag
       // If enabled, use longer cache TTL and more aggressive cache strategies

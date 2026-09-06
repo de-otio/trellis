@@ -702,6 +702,71 @@ describe("FeedHandler", () => {
         expect(response.headers.get("Vary")).toContain("Cookie");
       });
 
+      it("keys the cache on the taxonomy and personalization inputs — a filtered page never serves an unfiltered request", async () => {
+        // These three options change the WHERE (taxonomyFilter) and were
+        // absent from the key: the same viewer/cursor/limit with and without
+        // `personalized` shared one entry for the TTL. Every request below is
+        // answered from cache, so only the key is exercised.
+        const keys: string[] = [];
+        mockEnv.FEED_CACHE_KV.get = vi
+          .fn()
+          .mockImplementation((key: string, type?: string) => {
+            if (key === "feed:cache:version") return Promise.resolve("1");
+            if (type === "json" && key.includes("feed:home:")) {
+              keys.push(key);
+              return Promise.resolve({ posts: [], hasMore: false });
+            }
+            return Promise.resolve(null);
+          });
+
+        const variants: Array<Parameters<FeedHandler["getHomeFeed"]>[3]> = [
+          { limit: 20 },
+          { limit: 20, personalized: true },
+          { limit: 20, personalized: true, personalizationEntityIds: ["e-2", "e-1"] },
+          { limit: 20, taxonomyTags: ["a:b:c"] },
+          { limit: 20, taxonomyTags: ["a:b:c", "a:b:d"] },
+        ];
+        for (const options of variants) {
+          const response = await handler.getHomeFeed(
+            mockSession,
+            new Request("http://test.com/feeds/home"),
+            mockEnv,
+            options,
+            mockRequestContext,
+            TEST_TENANT_ID,
+          );
+          expect(response.status).toBe(200);
+        }
+        expect(keys).toHaveLength(variants.length);
+        expect(new Set(keys).size).toBe(variants.length);
+
+        // Id order must not fork the cache: the same set, listed differently,
+        // is the same page.
+        keys.length = 0;
+        await handler.getHomeFeed(
+          mockSession,
+          new Request("http://test.com/feeds/home"),
+          mockEnv,
+          { limit: 20, personalized: true, personalizationEntityIds: ["e-1", "e-2"] },
+          mockRequestContext,
+          TEST_TENANT_ID,
+        );
+        await handler.getHomeFeed(
+          mockSession,
+          new Request("http://test.com/feeds/home"),
+          mockEnv,
+          { limit: 20, taxonomyTags: ["a:b:d", "a:b:c"] },
+          mockRequestContext,
+          TEST_TENANT_ID,
+        );
+        expect(keys[0]).toBe(
+          `feed:home:US:${TEST_TENANT_ID}:v1:${mockSession.userId}:::p:e-1,e-2:initial:20`,
+        );
+        expect(keys[1]).toBe(
+          `feed:home:US:${TEST_TENANT_ID}:v1:${mockSession.userId}::a:b:c,a:b:d::initial:20`,
+        );
+      });
+
       it("refuses a cache-hit request that carries no active tenant", async () => {
         // The guard must run BEFORE the cache is consulted. With a warm cache and
         // no tenant, a guard placed after the query would never be reached and the

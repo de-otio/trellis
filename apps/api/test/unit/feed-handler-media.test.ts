@@ -1627,7 +1627,7 @@ describe("FeedHandler - Media Support", () => {
       expect(mockEnv.FEED_CACHE_KV.put).toHaveBeenCalled();
       const cacheKey = mockEnv.FEED_CACHE_KV.put.mock.calls[0][0];
 
-      // Cache key format: feed:home:{region}:{tenantId}:v{version}:{userId}:{entityRefs}:{cursor}:{limit}
+      // Cache key format: feed:home:{region}:{tenantId}:v{version}:{userId}:{entityRefs}:{taxonomyTags}:{personalization}:{cursor}:{limit}
       //
       // The tenant segment is load-bearing, not cosmetic. A cache hit returns
       // before the post query's tenant AND is ever applied, so a key without the
