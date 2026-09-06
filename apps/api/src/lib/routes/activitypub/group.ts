@@ -379,6 +379,9 @@ export const groupRoutes: Route[] = [
               activity,
               {} as any,
               env as any,
+              // Bind Follows to THIS group's inbox (a Follow of group A posted
+              // to group B's inbox must not be processed against A).
+              { inboxGroupId: groupId },
             );
           },
           {

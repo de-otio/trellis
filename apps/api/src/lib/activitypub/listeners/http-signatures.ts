@@ -85,6 +85,17 @@ export async function verifyHttpSignature(
   return result.valid;
 }
 
+/** Thrown when an outbound request cannot be signed. Never deliver unsigned. */
+export class SigningUnavailableError extends Error {
+  constructor(
+    readonly actorUri: string,
+    readonly reason: string,
+  ) {
+    super(`cannot sign as ${actorUri}: ${reason}`);
+    this.name = "SigningUnavailableError";
+  }
+}
+
 /**
  * Sign an outgoing request with a local actor's key.
  *
@@ -92,10 +103,17 @@ export async function verifyHttpSignature(
  * set inbound requests are required to cover (`digest` included when there is
  * a body) — we hold ourselves to the bar we hold peers to.
  *
+ * FAILS CLOSED. This used to return the ORIGINAL, unsigned request when the
+ * actor had no key pair or signing threw, so a delivery went out unsigned and
+ * was reported as attempted. An unsigned federation POST is never correct:
+ * the peer rejects it, and the caller learned nothing. Now it throws
+ * {@link SigningUnavailableError}; callers skip the delivery and log.
+ *
  * @param request - Outgoing request
  * @param env - Environment
  * @param actorUri - Local actor URI to sign as
  * @returns Request with signature headers
+ * @throws SigningUnavailableError when no key is available or signing fails
  */
 export async function signRequest(
   request: Request,
@@ -104,27 +122,39 @@ export async function signRequest(
 ): Promise<Request> {
   const logger = getLogger();
 
+  let keyPair: { privateKey: string } | null;
   try {
     const { UserActorDispatcher } = await import("../dispatchers/user-actor.js");
     const dispatcher = new UserActorDispatcher(env);
 
     // Signing is the one legitimate use of the LOCAL key lookup: we are
     // proving our own identity, not checking someone else's.
-    const keyPair = await dispatcher.getKeyPair(actorUri);
-    if (!keyPair) {
-      logger.warn("[HTTP Signatures] Key pair not found for signing", {
-        actorUri,
-      });
-      return request; // Return original request if no key
-    }
+    keyPair = (await dispatcher.getKeyPair(actorUri)) as {
+      privateKey: string;
+    } | null;
+  } catch (error) {
+    logger.error("[HTTP Signatures] Key lookup failed for signing", {
+      error: (error as Error).message,
+      actorUri,
+    });
+    throw new SigningUnavailableError(actorUri, "key lookup failed");
+  }
 
+  if (!keyPair) {
+    logger.error("[HTTP Signatures] Key pair not found for signing — refusing to send unsigned", {
+      actorUri,
+    });
+    throw new SigningUnavailableError(actorUri, "no key pair");
+  }
+
+  try {
     const body = request.body
       ? Buffer.from(await request.clone().arrayBuffer())
       : undefined;
 
     const headers = HttpSignatureService.addSignatureHeaders(
       request,
-      (keyPair as any).privateKey,
+      keyPair.privateKey,
       `${actorUri}#main-key`,
       body && body.length > 0 ? body : undefined,
     );
@@ -139,6 +169,6 @@ export async function signRequest(
       error: (error as Error).message,
       actorUri,
     });
-    return request; // Return original request on error
+    throw new SigningUnavailableError(actorUri, (error as Error).message);
   }
 }

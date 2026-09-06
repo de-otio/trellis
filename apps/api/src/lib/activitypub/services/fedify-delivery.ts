@@ -1,12 +1,16 @@
 /**
- * Fedify Activity Delivery Service
+ * ActivityPub activity delivery.
  *
- * Integrates Fedify's delivery system for ActivityPub activities.
- * Fedify handles:
- * - Activity delivery to remote inboxes
- * - Retry logic with exponential backoff
- * - Rate limiting per domain
- * - Delivery queue management
+ * Despite the module name, Fedify is NOT involved in delivery: there is no
+ * retry, no per-domain rate limit and no queue here. Each call is one signed
+ * POST. The federation-outbox worker (`lib/workers/federation-outbox.ts`) is
+ * where a queue would live, and it is not implemented yet.
+ *
+ * Remote delivery goes through the SSRF-safe fetcher (`lib/net/safe-fetch.ts`):
+ * https-only, DNS resolved and range-checked, socket pinned to the validated
+ * address, no redirects, bounded time and response size. The inbox URL comes
+ * from a REMOTE actor document, so it is attacker-chosen — a bare `fetch()`
+ * here was a blind POST to any address a peer cared to name.
  */
 
 import type { Env } from "../../../env.js";
@@ -21,17 +25,43 @@ import {
   QueryTimeoutPresets,
 } from "../../db-query-helper.js";
 import { isStandaloneModeEnabled, isRemoteUri } from "../standalone-mode.js";
+import {
+  safeFetch,
+  SsrfBlockedError,
+  type DnsResolver,
+  type Transport,
+} from "../../net/safe-fetch.js";
+
+/** Whole-exchange budget for one inbox POST. */
+const DELIVERY_TIMEOUT_MS = 10_000;
+
+/** An inbox response is a status line; anything past this is not one. */
+const DELIVERY_MAX_RESPONSE_BYTES = 64 * 1024;
+
+/** Injection seam for tests — never set in production. */
+export interface DeliveryFetchOptions {
+  resolver?: DnsResolver;
+  transport?: Transport;
+}
 
 /**
- * Deliver activity using Fedify
+ * Fallback fetch options used when none are injected. TEST SEAM ONLY —
+ * production leaves this empty, so the real resolver and the pinned-socket
+ * transport are used. Same shape as `RemoteFetchService.defaultFetchOptions`.
+ */
+export const deliveryFetchOptions: DeliveryFetchOptions = {};
+
+/**
+ * Deliver one activity to one inbox.
  *
- * Fedify provides automatic delivery with retry logic and rate limiting.
- * This function integrates with Fedify's delivery system.
+ * Local inboxes are written straight to the database. Remote inboxes get a
+ * signed POST through the SSRF-safe fetcher. There is no retry: the caller
+ * owns that decision.
  *
  * @param activity - Activity to deliver
  * @param inboxUrl - Recipient's inbox URL
  * @param actorUri - Sender's actor URI
- * @param env - Cloudflare Workers environment
+ * @param env - Environment
  * @returns True if delivery successful, false otherwise
  */
 export async function deliverActivityWithFedify(
@@ -124,27 +154,57 @@ export async function deliverActivityWithFedify(
       return true;
     }
 
-    // Remote delivery: use Fedify with HTTP signatures
+    // Remote delivery: one signed POST through the SSRF-safe fetcher.
 
-    // Sign the request
+    const body = JSON.stringify(activity);
     const request = new Request(inboxUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/activity+json",
       },
-      body: JSON.stringify(activity),
+      body,
     });
 
+    // Throws SigningUnavailableError when the actor has no key — caught below,
+    // so an unsigned POST is never sent.
     const signedRequest = await signRequest(request, env, actorUri);
+    const headers: Record<string, string> = {};
+    signedRequest.headers.forEach((value, name) => {
+      headers[name] = value;
+    });
 
-    // Send request
-    const response = await fetch(signedRequest);
+    let status: number;
+    try {
+      const result = await safeFetch(inboxUrl, {
+        method: "POST",
+        headers,
+        body,
+        allowedProtocols: ["https:"],
+        // A redirected POST would re-send the signed body to a hop the
+        // signature never covered; peers do not redirect inboxes.
+        maxRedirects: 0,
+        timeoutMs: DELIVERY_TIMEOUT_MS,
+        maxBytes: DELIVERY_MAX_RESPONSE_BYTES,
+        resolver: deliveryFetchOptions.resolver,
+        transport: deliveryFetchOptions.transport,
+      });
+      status = result.status;
+    } catch (error) {
+      if (error instanceof SsrfBlockedError) {
+        logger.warn("[FedifyDelivery] Refused delivery to inbox URL", {
+          inboxUrl,
+          reason: error.reason,
+          detail: error.detail,
+        });
+        return false;
+      }
+      throw error;
+    }
 
-    if (!response.ok) {
+    if (status < 200 || status >= 300) {
       logger.warn("[FedifyDelivery] Remote delivery failed", {
         inboxUrl,
-        status: response.status,
-        statusText: response.statusText,
+        status,
       });
       return false;
     }
@@ -166,9 +226,10 @@ export async function deliverActivityWithFedify(
 }
 
 /**
- * Deliver activity to multiple recipients using Fedify
+ * Deliver activity to multiple recipients.
  *
- * Fedify handles rate limiting and retry logic automatically.
+ * Fan-out is parallel and unbounded per domain; there is no retry. Both are
+ * the outbox worker's job once it exists.
  *
  * @param activity - Activity to deliver
  * @param recipients - Array of recipient inbox URLs
@@ -186,8 +247,7 @@ export async function deliverToRecipients(
   let successful = 0;
   let failed = 0;
 
-  // Deliver to all recipients in parallel
-  // Fedify will handle rate limiting per domain
+  // Deliver to all recipients in parallel.
   const deliveryPromises = recipients.map(async (inboxUrl) => {
     const result = await deliverActivityWithFedify(
       activity,

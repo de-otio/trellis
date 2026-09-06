@@ -605,6 +605,39 @@ describe("ActivityProcessor", () => {
         expect(mockPrisma.directMessage.create).toHaveBeenCalled();
       });
 
+      it("strips markup from remote DM content before storing it (DP-14)", async () => {
+        const activity = {
+          type: "Create",
+          id: "https://example.com/activities/dm-x",
+          actor: "https://example.com/users/bob",
+          bto: ["https://example.com/users/alice"],
+          object: {
+            id: "https://example.com/notes/dm-x",
+            type: "Note",
+            content:
+              '<p>hi <b>there</b></p><script>alert(1)</script><img src=x onerror="alert(2)">&lt;script&gt;',
+          },
+        };
+
+        mockPrisma.user.findFirst.mockResolvedValue({
+          id: "user-bob",
+          actorUri: "https://example.com/users/bob",
+        });
+        mockPrisma.directMessage.findFirst.mockResolvedValue(null);
+        mockPrisma.directMessage.create.mockResolvedValue({ id: "dm-x" });
+
+        await runActivity(activity);
+
+        expect(mockPrisma.directMessage.create).toHaveBeenCalledTimes(1);
+        const stored = mockPrisma.directMessage.create.mock.calls[0][0].data.text;
+        // Real markup and the script BODY are gone.
+        expect(stored).not.toMatch(/onerror|<img|<b>|alert\(/);
+        expect(stored).toContain("hi there");
+        // The ENCODED tag survives only as literal text (decoded after the
+        // strip pass), never as a tag with a body behind it.
+        expect(stored).toContain("<script>");
+      });
+
       it("should not store DM when user missing actorUri", async () => {
         const activity = {
           type: "Create",
@@ -897,10 +930,10 @@ describe("ActivityProcessor", () => {
         expect(mockPrisma.groupMember.create).not.toHaveBeenCalled();
       });
 
-      it("should handle private group Follow", async () => {
+      it("REFUSES a Follow of a PRIVATE group — no membership row (DP-5)", async () => {
         const activity = {
           type: "Follow",
-          actor: "https://example.com/users/bob",
+          actor: "https://remote.example/users/bob",
           object: "https://example.com/groups/private-group",
         };
 
@@ -917,9 +950,67 @@ describe("ActivityProcessor", () => {
 
         await runActivity(activity);
 
-        // Outcome: private-group Follow still creates a membership row
-        // in the current Phase-1 implementation.
-        expect(mockPrisma.groupMember.create).toHaveBeenCalled();
+        // A private group's membership is an admin decision, never a side
+        // effect of a signed Follow. The old behaviour auto-joined as MEMBER.
+        expect(mockPrisma.groupMember.create).not.toHaveBeenCalled();
+      });
+
+      it("REFUSES a Follow of group A delivered to group B's inbox (DP-5)", async () => {
+        const activity = {
+          type: "Follow",
+          actor: "https://remote.example/users/bob",
+          object: "https://example.com/groups/group-a",
+        };
+
+        const targetGroup = {
+          id: "group-a",
+          actorUri: "https://example.com/groups/group-a",
+          privacy: "PUBLIC",
+          tenantId: "test-tenant-id",
+        };
+
+        mockPrisma.group.findUnique.mockResolvedValue(targetGroup);
+        mockPrisma.groupMember.findUnique.mockResolvedValue(null);
+        mockPrisma.groupMember.create.mockResolvedValue({});
+
+        await ActivityProcessor.processActivity(
+          mockPrisma as unknown as PrismaClient,
+          activity as unknown as ActivityStreamsActivity,
+          {} as unknown as User,
+          mockEnv,
+          { inboxGroupId: "group-b" },
+        );
+
+        expect(mockPrisma.groupMember.create).not.toHaveBeenCalled();
+      });
+
+      it("accepts a PUBLIC group Follow when the inbox group matches", async () => {
+        const activity = {
+          type: "Follow",
+          actor: "https://remote.example/users/bob",
+          object: "https://example.com/groups/group-a",
+        };
+
+        const targetGroup = {
+          id: "group-a",
+          actorUri: "https://example.com/groups/group-a",
+          privacy: "PUBLIC",
+          tenantId: "test-tenant-id",
+        };
+
+        mockPrisma.group.findUnique.mockResolvedValue(targetGroup);
+        mockPrisma.groupMember.findUnique.mockResolvedValue(null);
+        mockPrisma.groupMember.create.mockResolvedValue({});
+
+        await ActivityProcessor.processActivity(
+          mockPrisma as unknown as PrismaClient,
+          activity as unknown as ActivityStreamsActivity,
+          {} as unknown as User,
+          mockEnv,
+          { inboxGroupId: "group-a" },
+        );
+
+        expect(mockPrisma.groupMember.create).toHaveBeenCalledTimes(1);
       });
 
       it("should propagate group member creation errors", async () => {

@@ -4,12 +4,18 @@
  * Tests activity delivery with Fedify integration.
  */
 
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { afterEach, describe, it, expect, beforeEach, vi } from "vitest";
 import {
   deliverActivityWithFedify,
   deliverToRecipients,
+  deliveryFetchOptions,
 } from "../../../../src/lib/activitypub/services/fedify-delivery.js";
 import type { Env } from "../../../../src/env.js";
+import type {
+  DnsResolver,
+  Transport,
+  TransportRequest,
+} from "../../../../src/lib/net/safe-fetch.js";
 
 // Mock dependencies
 vi.mock("../../../../src/lib/database-connection-manager", () => ({
@@ -64,10 +70,36 @@ describe("Fedify Activity Delivery", () => {
     },
   };
 
+  /**
+   * Remote delivery goes through the SSRF-safe fetcher, so tests inject a
+   * resolver and a transport instead of mocking global `fetch`. The request
+   * still travels through the whole guard (scheme, host classification, DNS,
+   * redirect policy) — which is what these tests are meant to exercise.
+   */
+  const publicResolver: DnsResolver = async () => ["93.184.216.34"];
+  let transportCalls: TransportRequest[];
+  let transportStatus: number;
+  const recordingTransport: Transport = async (req) => {
+    transportCalls.push(req);
+    async function* empty(): AsyncIterable<Uint8Array> {}
+    return { status: transportStatus, headers: {}, body: empty() };
+  };
+
   beforeEach(() => {
     vi.clearAllMocks();
-    // Reset global fetch
-    global.fetch = vi.fn();
+    transportCalls = [];
+    transportStatus = 202;
+    deliveryFetchOptions.resolver = publicResolver;
+    deliveryFetchOptions.transport = recordingTransport;
+    // A bare fetch must never be reached by delivery any more.
+    global.fetch = vi.fn(() => {
+      throw new Error("global fetch reached — delivery bypassed safeFetch");
+    }) as any;
+  });
+
+  afterEach(() => {
+    delete deliveryFetchOptions.resolver;
+    delete deliveryFetchOptions.transport;
   });
 
   describe("deliverActivityWithFedify", () => {
@@ -209,11 +241,7 @@ describe("Fedify Activity Delivery", () => {
       );
       vi.mocked(signRequest).mockResolvedValue(signedRequest);
 
-      global.fetch = vi.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        statusText: "OK",
-      });
+      transportStatus = 200;
 
       const result = await deliverActivityWithFedify(
         mockActivity as any,
@@ -224,7 +252,77 @@ describe("Fedify Activity Delivery", () => {
 
       expect(result).toBe(true);
       expect(signRequest).toHaveBeenCalled();
-      expect(global.fetch).toHaveBeenCalled();
+      expect(transportCalls).toHaveLength(1);
+      expect(transportCalls[0].method).toBe("POST");
+      expect(transportCalls[0].target.url.href).toBe(inboxUrl);
+      // The signed headers travel with the POST.
+      expect(transportCalls[0].headers.signature).toBe("test-signature");
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    it("REFUSES an inbox URL that resolves to a private address, without opening a socket (DP-6)", async () => {
+      const inboxUrl = "https://remote.example.com/users/bob/inbox";
+      const actorUri = "https://example.com/users/alice";
+
+      const { signRequest } = await import(
+        "../../../../src/lib/activitypub/listeners/http-signatures.js"
+      );
+      vi.mocked(signRequest).mockResolvedValue(
+        new Request(inboxUrl, { method: "POST", body: "{}" }),
+      );
+      deliveryFetchOptions.resolver = async () => ["169.254.169.254"];
+
+      const result = await deliverActivityWithFedify(
+        mockActivity as any,
+        inboxUrl,
+        actorUri,
+        mockEnv as Env,
+      );
+
+      expect(result).toBe(false);
+      expect(transportCalls).toHaveLength(0);
+    });
+
+    it("REFUSES a plaintext http: inbox URL (DP-6)", async () => {
+      const inboxUrl = "http://remote.example.com/users/bob/inbox";
+      const actorUri = "https://example.com/users/alice";
+
+      const { signRequest } = await import(
+        "../../../../src/lib/activitypub/listeners/http-signatures.js"
+      );
+      vi.mocked(signRequest).mockResolvedValue(
+        new Request(inboxUrl, { method: "POST", body: "{}" }),
+      );
+
+      const result = await deliverActivityWithFedify(
+        mockActivity as any,
+        inboxUrl,
+        actorUri,
+        mockEnv as Env,
+      );
+
+      expect(result).toBe(false);
+      expect(transportCalls).toHaveLength(0);
+    });
+
+    it("sends NOTHING when the actor cannot sign (DP-6)", async () => {
+      const inboxUrl = "https://remote.example.com/users/bob/inbox";
+      const actorUri = "https://example.com/users/alice";
+
+      const { signRequest } = await import(
+        "../../../../src/lib/activitypub/listeners/http-signatures.js"
+      );
+      vi.mocked(signRequest).mockRejectedValue(new Error("no key pair"));
+
+      const result = await deliverActivityWithFedify(
+        mockActivity as any,
+        inboxUrl,
+        actorUri,
+        mockEnv as Env,
+      );
+
+      expect(result).toBe(false);
+      expect(transportCalls).toHaveLength(0);
     });
 
     it("should return false when remote delivery fails", async () => {
@@ -245,11 +343,7 @@ describe("Fedify Activity Delivery", () => {
       );
       vi.mocked(signRequest).mockResolvedValue(signedRequest);
 
-      global.fetch = vi.fn().mockResolvedValue({
-        ok: false,
-        status: 500,
-        statusText: "Internal Server Error",
-      });
+      transportStatus = 500;
 
       const result = await deliverActivityWithFedify(
         mockActivity as any,
@@ -360,11 +454,7 @@ describe("Fedify Activity Delivery", () => {
       );
       vi.mocked(signRequest).mockResolvedValue(signedRequest);
 
-      global.fetch = vi.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        statusText: "OK",
-      });
+      transportStatus = 200;
 
       const result = await deliverActivityWithFedify(
         mockActivity as any,
@@ -375,7 +465,7 @@ describe("Fedify Activity Delivery", () => {
 
       expect(result).toBe(true);
       expect(signRequest).toHaveBeenCalled();
-      expect(global.fetch).toHaveBeenCalled();
+      expect(transportCalls.length).toBeGreaterThan(0);
     });
 
     it("should allow local delivery even when standalone mode is enabled", async () => {
@@ -637,10 +727,7 @@ describe("Fedify Activity Delivery", () => {
       );
       vi.mocked(signRequest).mockResolvedValue(signedRequest);
 
-      global.fetch = vi.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-      });
+      transportStatus = 200;
 
       const result = await deliverToRecipients(
         mockActivity as any,
@@ -734,7 +821,9 @@ describe("Fedify Activity Delivery", () => {
       });
       vi.mocked(signRequest).mockResolvedValue(signedRequest);
 
-      global.fetch = vi.fn().mockRejectedValue(new Error("Network error"));
+      deliveryFetchOptions.transport = async () => {
+        throw new Error("Network error");
+      };
 
       const result = await deliverActivityWithFedify(
         mockActivity as any,
