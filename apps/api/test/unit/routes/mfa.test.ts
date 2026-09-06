@@ -245,7 +245,7 @@ describe("MFA Routes", () => {
         "ABCDEFGHIJKLMNOP",
         ["code1"],
         "123456",
-        "test-secret-32-characters-long!!",
+        expect.objectContaining({ purpose: "mfa" }),
       );
       expect(response.status).toBe(200);
       const body = await response.json();
@@ -376,7 +376,7 @@ describe("MFA Routes", () => {
         mockPrisma,
         "user-123",
         "123456",
-        "test-secret-32-characters-long!!",
+        expect.objectContaining({ purpose: "mfa" }),
       );
       expect(response.status).toBe(200);
       const body = await response.json();
@@ -403,6 +403,7 @@ describe("MFA Routes", () => {
         mockPrisma,
         "user-123",
         "backup-cd",
+        expect.objectContaining({ purpose: "mfa" }),
       );
       expect(mockVerifyCode).not.toHaveBeenCalled();
       expect(response.status).toBe(200);

@@ -31,8 +31,9 @@ import {
   wireToPlatform,
 } from "../../../src/lib/push/push-device-handler.js";
 import {
-  decryptSecret,
   hashDeviceToken,
+  openSecret,
+  resolveKeyring,
 } from "../../../src/lib/push/token-crypto.js";
 
 const KEY = "test-secret-32-characters-long!!";
@@ -78,10 +79,13 @@ describe("PushDeviceHandler", () => {
       expect(args.create.userId).toBe(USER);
       expect(args.create.platform).toBe("APNS");
 
-      // At rest: NOT the raw token; decrypts back to it with the session key.
+      // At rest: NOT the raw token; opens back to it under the push keyring
+      // (session-derived here — no PUSH_TOKEN_ENC_KEY in this env), and is in
+      // the current sealed format, not the legacy raw-key wrap.
       expect(args.create.tokenCiphertext).not.toContain("raw-token");
+      expect(args.create.tokenCiphertext.startsWith("h1:")).toBe(true);
       await expect(
-        decryptSecret(args.create.tokenCiphertext, KEY),
+        openSecret(args.create.tokenCiphertext, resolveKeyring(env, "push")),
       ).resolves.toBe("raw-token");
 
       // Reassignment path: the update clause moves ownership + refreshes.

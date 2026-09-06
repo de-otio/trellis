@@ -462,6 +462,32 @@ describe("S1.4 — validateEnv", () => {
     expect(errors).toEqual([]);
   });
 
+  // DP-3: purpose-specific at-rest keys are optional, but when set they must
+  // be real 32-byte keys — a mis-encoded key must fail the rollout, not the
+  // first MFA verification or push registration.
+  it("accepts MFA_ENC_KEY / PUSH_TOKEN_ENC_KEY that decode to 32 bytes, rejects anything else", async () => {
+    const { validateEnv } = await import("../../src/env.js");
+    const base = {
+      SESSION_SECRET: "a".repeat(32),
+      OIDC_ISSUER_URL: "https://id.example.com/realms/skybber",
+      OIDC_APP_CLIENT_ID: "skybber-api",
+      OIDC_JWKS_URL: "https://id.example.com/realms/skybber/protocol/openid-connect/certs",
+      INVITATIONS_KV: {},
+    };
+    const good = Buffer.alloc(32, 7).toString("base64");
+    expect(
+      validateEnv({ ...base, MFA_ENC_KEY: good, PUSH_TOKEN_ENC_KEY: good } as any),
+    ).toEqual([]);
+
+    const bad = validateEnv({
+      ...base,
+      MFA_ENC_KEY: "a-48-character-password-is-not-a-32-byte-key-!!!",
+      PUSH_TOKEN_ENC_KEY: Buffer.alloc(16).toString("base64"),
+    } as any);
+    expect(bad.some((e) => e.startsWith("MFA_ENC_KEY must be base64 of exactly 32 bytes"))).toBe(true);
+    expect(bad.some((e) => e.startsWith("PUSH_TOKEN_ENC_KEY must be base64 of exactly 32 bytes"))).toBe(true);
+  });
+
   it("[SEC-6b] rejects a Keycloak deployment that omits OIDC_JWKS_URL", async () => {
     const { validateEnv } = await import("../../src/env.js");
     const errors = validateEnv({

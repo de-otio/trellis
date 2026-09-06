@@ -28,11 +28,25 @@ vi.mock("../../../src/lib/mfa/totp-service", async (importOriginal) => {
     ...actual,
     verifyTOTP: mockVerifyTOTP,
     verifyTOTPStep: mockVerifyTOTPStep,
-    encryptSecret: mockEncryptSecret,
-    decryptSecret: mockDecryptSecret,
-    hashBackupCode: mockHashBackupCode,
   };
 });
+
+// The at-rest layer (DP-3/DP-8) is unit-tested on its own in
+// test/unit/at-rest-secret.test.ts; here it is mocked so the handler's
+// control flow is what is under test.
+const { mockNeedsReseal, mockMatchBackupCode } = vi.hoisted(() => ({
+  mockNeedsReseal: vi.fn(() => false),
+  mockMatchBackupCode: vi.fn(),
+}));
+vi.mock("../../../src/lib/at-rest-secret", () => ({
+  sealSecret: mockEncryptSecret,
+  openSecret: mockDecryptSecret,
+  hashBackupCodeKeyed: mockHashBackupCode,
+  needsReseal: mockNeedsReseal,
+  matchBackupCode: mockMatchBackupCode,
+}));
+
+const KEYRING = { purpose: "mfa" } as any;
 
 import { MfaHandler } from "../../../src/lib/mfa/mfa-handler.js";
 
@@ -119,7 +133,7 @@ describe("MfaHandler", () => {
     it("should succeed when verification code is valid", async () => {
       mockVerifyTOTPStep.mockResolvedValue(1_700_000);
       mockEncryptSecret.mockResolvedValue("encrypted-secret");
-      mockHashBackupCode.mockResolvedValue("hashed-code");
+      mockHashBackupCode.mockReturnValue("hashed-code");
       mockPrisma.mfaEnrollment.upsert.mockResolvedValue({});
 
       const result = await handler.finalizeEnrollment(
@@ -128,12 +142,12 @@ describe("MfaHandler", () => {
         "SECRET",
         ["CODE1", "CODE2"],
         "123456",
-        "enc-key",
+        KEYRING,
       );
 
       expect(result).toEqual({ success: true });
       expect(mockVerifyTOTPStep).toHaveBeenCalledWith("SECRET", "123456");
-      expect(mockEncryptSecret).toHaveBeenCalledWith("SECRET", "enc-key");
+      expect(mockEncryptSecret).toHaveBeenCalledWith("SECRET", KEYRING);
       expect(mockPrisma.mfaEnrollment.upsert).toHaveBeenCalled();
       // The enrollment code's own step is recorded, so it cannot be replayed
       // as the first verification.
@@ -151,7 +165,7 @@ describe("MfaHandler", () => {
         "SECRET",
         ["CODE1"],
         "000000",
-        "enc-key",
+        KEYRING,
       );
 
       expect(result).toEqual({
@@ -165,9 +179,9 @@ describe("MfaHandler", () => {
       mockVerifyTOTPStep.mockResolvedValue(1_700_000);
       mockEncryptSecret.mockResolvedValue("encrypted");
       mockHashBackupCode
-        .mockResolvedValueOnce("hash-a")
-        .mockResolvedValueOnce("hash-b")
-        .mockResolvedValueOnce("hash-c");
+        .mockReturnValueOnce("hash-a")
+        .mockReturnValueOnce("hash-b")
+        .mockReturnValueOnce("hash-c");
       mockPrisma.mfaEnrollment.upsert.mockResolvedValue({});
 
       await handler.finalizeEnrollment(
@@ -176,7 +190,7 @@ describe("MfaHandler", () => {
         "SECRET",
         ["A", "B", "C"],
         "123456",
-        "key",
+        KEYRING,
       );
 
       expect(mockHashBackupCode).toHaveBeenCalledTimes(3);
@@ -203,11 +217,11 @@ describe("MfaHandler", () => {
         mockPrisma,
         "user-1",
         "123456",
-        "enc-key",
+        KEYRING,
       );
 
       expect(result).toBe(true);
-      expect(mockDecryptSecret).toHaveBeenCalledWith("enc-secret", "enc-key");
+      expect(mockDecryptSecret).toHaveBeenCalledWith("enc-secret", KEYRING);
       expect(mockVerifyTOTPStep).toHaveBeenCalledWith("PLAIN_SECRET", "123456");
       expect(mockPrisma.mfaEnrollment.update).toHaveBeenCalledWith({
         where: { userId: "user-1" },
@@ -229,7 +243,7 @@ describe("MfaHandler", () => {
         mockPrisma,
         "user-1",
         "123456",
-        "enc-key",
+        KEYRING,
       );
 
       expect(result).toBe(false);
@@ -250,7 +264,7 @@ describe("MfaHandler", () => {
         mockPrisma,
         "user-1",
         "123456",
-        "enc-key",
+        KEYRING,
       );
 
       expect(result).toBe(false);
@@ -270,7 +284,7 @@ describe("MfaHandler", () => {
         mockPrisma,
         "user-1",
         "654321",
-        "enc-key",
+        KEYRING,
       );
 
       expect(result).toBe(true);
@@ -291,7 +305,7 @@ describe("MfaHandler", () => {
         mockPrisma,
         "user-1",
         "000000",
-        "enc-key",
+        KEYRING,
       );
 
       expect(result).toBe(false);
@@ -305,7 +319,7 @@ describe("MfaHandler", () => {
         mockPrisma,
         "user-x",
         "123456",
-        "enc-key",
+        KEYRING,
       );
 
       expect(result).toBe(false);
@@ -315,7 +329,7 @@ describe("MfaHandler", () => {
 
   describe("verifyBackupCode", () => {
     it("should return true and remove used backup code", async () => {
-      mockHashBackupCode.mockResolvedValue("hash-a");
+      mockMatchBackupCode.mockResolvedValue(0);
       mockPrisma.mfaEnrollment.findUnique.mockResolvedValue({
         backupCodes: ["hash-a", "hash-b", "hash-c"],
       });
@@ -325,6 +339,13 @@ describe("MfaHandler", () => {
         mockPrisma,
         "user-1",
         "ABCD-EFGH",
+        KEYRING,
+      );
+
+      expect(mockMatchBackupCode).toHaveBeenCalledWith(
+        "ABCD-EFGH",
+        ["hash-a", "hash-b", "hash-c"],
+        KEYRING,
       );
 
       expect(result).toBe(true);
@@ -334,7 +355,7 @@ describe("MfaHandler", () => {
     });
 
     it("should return false for invalid backup code", async () => {
-      mockHashBackupCode.mockResolvedValue("hash-wrong");
+      mockMatchBackupCode.mockResolvedValue(-1);
       mockPrisma.mfaEnrollment.findUnique.mockResolvedValue({
         backupCodes: ["hash-a", "hash-b"],
       });
@@ -343,6 +364,7 @@ describe("MfaHandler", () => {
         mockPrisma,
         "user-1",
         "XXXX-YYYY",
+        KEYRING,
       );
 
       expect(result).toBe(false);
@@ -356,6 +378,7 @@ describe("MfaHandler", () => {
         mockPrisma,
         "user-x",
         "ABCD-EFGH",
+        KEYRING,
       );
 
       expect(result).toBe(false);

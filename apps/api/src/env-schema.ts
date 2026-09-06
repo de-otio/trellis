@@ -222,6 +222,10 @@ export function buildBootEnvSchema(stage: BootStage) {
       MFA_VERIFY_MAX_ATTEMPTS: z.string().regex(/^[1-9]\d*$/).optional(),
       MFA_VERIFY_MAX_ATTEMPTS_PER_IP: z.string().regex(/^[1-9]\d*$/).optional(),
       MFA_VERIFY_WINDOW_SECONDS: z.string().regex(/^[1-9]\d*$/).optional(),
+      // Optional purpose-specific at-rest KEKs (base64 of 32 bytes; the
+      // exact-length check lives in validateEnv / lib/at-rest-secret.ts).
+      MFA_ENC_KEY: z.string().min(1).optional(),
+      PUSH_TOKEN_ENC_KEY: z.string().min(1).optional(),
 
       COGNITO_USER_POOL_ID: z.string().min(1).optional(),
       COGNITO_APP_CLIENT_ID: z.string().min(1).optional(),
