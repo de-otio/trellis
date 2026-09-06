@@ -10,6 +10,7 @@ import {
   generateSecret,
   generateTOTP,
   verifyTOTP,
+  verifyTOTPStep,
   buildOTPAuthURI,
   generateBackupCodes,
   hashBackupCode,
@@ -121,6 +122,39 @@ describe("verifyTOTP", () => {
     const code = await generateTOTP(secret, farPastTime);
     const valid = await verifyTOTP(secret, code, 1);
     expect(valid).toBe(false);
+  });
+});
+
+describe("verifyTOTPStep", () => {
+  it("should return the step a freshly generated code belongs to", async () => {
+    const secret = generateSecret();
+    const now = Math.floor(Date.now() / 1000);
+    const code = await generateTOTP(secret, now);
+    const step = await verifyTOTPStep(secret, code);
+    expect(step).toBe(Math.floor(now / 30));
+  });
+
+  it("should return the PREVIOUS step for a code from one period ago", async () => {
+    const secret = generateSecret();
+    const now = Math.floor(Date.now() / 1000);
+    const pastCounter = Math.floor(now / 30) - 1;
+    const code = await generateTOTP(secret, pastCounter * 30);
+    expect(await verifyTOTPStep(secret, code, 1)).toBe(pastCounter);
+  });
+
+  it("should return null for a wrong or malformed code", async () => {
+    const secret = generateSecret();
+    expect(await verifyTOTPStep(secret, "000000")).toBeNull();
+    expect(await verifyTOTPStep(secret, "")).toBeNull();
+    expect(await verifyTOTPStep(secret, "12345")).toBeNull();
+  });
+
+  it("should agree with the boolean verifyTOTP", async () => {
+    const secret = generateSecret();
+    const code = await generateTOTP(secret);
+    expect(await verifyTOTP(secret, code)).toBe(
+      (await verifyTOTPStep(secret, code)) !== null,
+    );
   });
 });
 

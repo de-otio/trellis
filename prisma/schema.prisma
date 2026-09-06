@@ -413,6 +413,10 @@ model MfaEnrollment {
   backupCodes     String[]  @map("backup_codes") // hashed, one-time use
   enrolledAt      DateTime  @default(now()) @map("enrolled_at")
   lastUsedAt      DateTime? @map("last_used_at")
+  // Highest RFC 6238 time-step accepted so far. A code whose step is at or
+  // below this is a replay and is refused even though it still verifies
+  // (30-second steps stay well inside int4 until the year 4000).
+  lastUsedStep    Int?      @map("last_used_step")
 
   @@map("mfa_enrollments")
 }

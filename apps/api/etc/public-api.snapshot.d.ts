@@ -63,6 +63,12 @@ export interface Env {
     SESSION_SECRET: string;
     SESSION_SECRET_FALLBACK?: string;
     SESSION_SALT?: string;
+    /** Max verification attempts per user per window. Default 5. */
+    MFA_VERIFY_MAX_ATTEMPTS?: string;
+    /** Max verification attempts per client IP per window. Default 20. */
+    MFA_VERIFY_MAX_ATTEMPTS_PER_IP?: string;
+    /** Window the attempt budgets refill over, in seconds. Default 300. */
+    MFA_VERIFY_WINDOW_SECONDS?: string;
     COGNITO_USER_POOL_ID?: string;
     COGNITO_APP_CLIENT_ID?: string;
     COGNITO_REGION?: string;
@@ -4601,8 +4607,22 @@ export declare function generateSecret(): string;
  */
 export declare function generateTOTP(secret: string, time?: number): Promise<string>;
 /**
+ * Verify a TOTP code against a secret and return the time-step it matched.
+ *
+ * Allows a window of ±1 period to account for clock skew. Returns the RFC 6238
+ * counter (`floor(unixSeconds / 30)`) the code was generated for, or `null`
+ * when nothing in the window matches. Callers that persist the returned step
+ * and refuse anything at or below it get replay protection for free: a code
+ * observed once cannot be presented a second time inside its own window.
+ */
+export declare function verifyTOTPStep(secret: string, code: string, window?: number): Promise<number | null>;
+/**
  * Verify a TOTP code against a secret.
  * Allows a window of ±1 period to account for clock skew.
+ *
+ * Boolean form of {@link verifyTOTPStep}; it cannot detect a replay on its
+ * own, so anything that gates access on the result should use the step form
+ * and persist the accepted step.
  */
 export declare function verifyTOTP(secret: string, code: string, window?: number): Promise<boolean>;
 /**

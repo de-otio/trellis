@@ -68,6 +68,15 @@ export interface ActivityStreamsActivity {
  * activity types that do not exist yet: any future `Announce` or `Delete` of a
  * local post is gated the day it is written, with no change to this fragment.
  *
+ * BLIND-RECIPIENT ROWS are withheld too. A direct message is a `Create` whose
+ * Note is addressed with `bto` only — no `to`, no `cc`, and no `posts` row,
+ * so the object-identity clause above passes it straight through. That leaked
+ * the DM's object URI (and its audience) to any anonymous outbox reader. An
+ * activity that names blind recipients and nothing else has, by definition, no
+ * public audience; the second clause below withholds every such row from the
+ * anonymous collection. An activity with a `to`/`cc` audience AND a `bto`
+ * (rare, but legal) is still served, with `bto`/`bcc` stripped by the caller.
+ *
  * KNOWN FAIL-OPEN, deliberately not widened here: `lib/services/user-data-
  * deletion.ts` HARD-deletes a user's `posts` rows (step 6) without deleting
  * their `activities`, so an erased account's outbox rows match no post and are
@@ -91,6 +100,11 @@ function outboxAudienceFilter(actorUri: string): Prisma.Sql {
           AND p.deleted_at IS NULL
           AND p.hidden_by_author = false
         )
+    )
+    AND NOT (
+      (a.bto IS NOT NULL OR a.bcc IS NOT NULL)
+      AND a.to IS NULL
+      AND a.cc IS NULL
     )
   `;
 }

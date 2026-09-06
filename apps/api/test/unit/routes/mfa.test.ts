@@ -6,7 +6,8 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "../../../src/env.js";
-import { mfaRoutes } from "../../../src/lib/routes/mfa.js";
+import { __resetRateLimiterForTests } from "../../../src/lib/rate-limit.js";
+import { mfaAttemptLimits, mfaRoutes } from "../../../src/lib/routes/mfa.js";
 
 // Mock SessionManager
 const mockGetSession = vi.fn();
@@ -67,11 +68,16 @@ describe("MFA Routes", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // The attempt throttle uses the real limiter on its in-memory backend
+    // (no KV configured here); its bucket state is module-scoped, so reset it
+    // or one test's attempts bleed into the next.
+    __resetRateLimiterForTests();
 
     mockEnv = {
       DATABASE_URL: "postgresql://test",
       SESSION_SECRET: "test-secret-32-characters-long!!",
     } as any;
+    mockAddSecurityHeaders.mockImplementation((r: Response) => r);
 
     mockSession = {
       userId: "user-123",
@@ -468,6 +474,108 @@ describe("MFA Routes", () => {
 
       expect(response.status).toBe(500);
           });
+  });
+
+  describe("verification-attempt throttle (DP-2)", () => {
+    const verifyRoute = mfaRoutes.find(
+      (r) => r.path === "/api/mfa/verify" && r.method === "POST",
+    );
+    const finalizeRoute = mfaRoutes.find(
+      (r) => r.path === "/api/mfa/enroll/finalize" && r.method === "POST",
+    );
+
+    const verifyAttempt = (code = "000000") =>
+      verifyRoute!.handler(
+        new Request("https://example.com/api/mfa/verify", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ code, type: "totp" }),
+        }),
+        mockEnv,
+        { pathname: "/api/mfa/verify" },
+      );
+
+    it("resolves defaults when nothing is configured, and env overrides them", () => {
+      expect(mfaAttemptLimits({} as Env)).toEqual({
+        perUser: 5,
+        perIp: 20,
+        windowSeconds: 300,
+      });
+      expect(
+        mfaAttemptLimits({
+          MFA_VERIFY_MAX_ATTEMPTS: "3",
+          MFA_VERIFY_MAX_ATTEMPTS_PER_IP: "7",
+          MFA_VERIFY_WINDOW_SECONDS: "60",
+        } as Env),
+      ).toEqual({ perUser: 3, perIp: 7, windowSeconds: 60 });
+      // Garbage falls back rather than disabling the throttle.
+      expect(mfaAttemptLimits({ MFA_VERIFY_MAX_ATTEMPTS: "0" } as Env).perUser).toBe(5);
+      expect(mfaAttemptLimits({ MFA_VERIFY_MAX_ATTEMPTS: "lots" } as Env).perUser).toBe(5);
+    });
+
+    it("refuses the attempt after the per-user budget with 429 and stops calling the verifier", async () => {
+      mockVerifyCode.mockResolvedValue(false);
+      const { perUser } = mfaAttemptLimits(mockEnv);
+
+      for (let i = 0; i < perUser; i++) {
+        const res = await verifyAttempt();
+        expect(res.status).toBe(401); // wrong code, but still evaluated
+      }
+      expect(mockVerifyCode).toHaveBeenCalledTimes(perUser);
+
+      const refused = await verifyAttempt();
+      expect(refused.status).toBe(429);
+      expect(refused.headers.get("Retry-After")).toBeTruthy();
+      // The budget is spent BEFORE the code is checked: no sixth evaluation.
+      expect(mockVerifyCode).toHaveBeenCalledTimes(perUser);
+    });
+
+    it("spends the budget on successful attempts too, so it is not a free oracle", async () => {
+      mockVerifyCode.mockResolvedValue(true);
+      mockEncryptSession.mockResolvedValue("encrypted-session-data");
+      mockEnv.MFA_VERIFY_MAX_ATTEMPTS = "2";
+
+      expect((await verifyAttempt("123456")).status).toBe(200);
+      expect((await verifyAttempt("123456")).status).toBe(200);
+      expect((await verifyAttempt("123456")).status).toBe(429);
+    });
+
+    it("throttles finalize on the same budget", async () => {
+      mockFinalizeEnrollment.mockResolvedValue({ success: false, error: "Invalid verification code" });
+      mockEnv.MFA_VERIFY_MAX_ATTEMPTS = "1";
+
+      const attempt = () =>
+        finalizeRoute!.handler(
+          new Request("https://example.com/api/mfa/enroll/finalize", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              secret: "ABCDEFGHIJKLMNOP",
+              backupCodes: ["code1"],
+              verificationCode: "000000",
+            }),
+          }),
+          mockEnv,
+          { pathname: "/api/mfa/enroll/finalize" },
+        );
+
+      expect((await attempt()).status).toBe(400);
+      expect((await attempt()).status).toBe(429);
+      expect(mockFinalizeEnrollment).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps separate per-user budgets", async () => {
+      mockVerifyCode.mockResolvedValue(false);
+      mockEnv.MFA_VERIFY_MAX_ATTEMPTS = "1";
+
+      expect((await verifyAttempt()).status).toBe(401);
+      expect((await verifyAttempt()).status).toBe(429);
+
+      mockGetSession.mockResolvedValue({ ...mockSession, userId: "user-456" });
+      // A different user is not punished for user-123's attempts (the shared
+      // IP budget is 20 by default, well above what this test spends).
+      expect((await verifyAttempt()).status).toBe(401);
+    });
   });
 
   describe("Route configuration", () => {

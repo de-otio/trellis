@@ -14,6 +14,14 @@ vi.mock("../../../../src/lib/activitypub/listeners/inbox", () => ({
   processInboxActivity: (...args: any[]) => mockProcessInboxActivity(...args),
 }));
 
+// Mock SessionManager (the inbox collection is owner-only)
+const mockGetSession = vi.fn();
+vi.mock("../../../../src/lib/session-cookie", () => ({
+  SessionManager: class {
+    getSession = mockGetSession;
+  },
+}));
+
 // Mock SecurityHeaders
 const mockCreateSecureResponse = vi.fn();
 vi.mock("../../../../src/lib/security-headers", () => ({
@@ -88,6 +96,8 @@ describe("ActivityPub Inbox Routes", () => {
     });
     mockAddCorsHeaders.mockImplementation(async (response) => response);
     mockDetectRegionSync.mockReturnValue("US");
+    // Default: the owner is logged in. Individual tests override this.
+    mockGetSession.mockResolvedValue({ userId: "user-123" });
     mockWithQueryTimeoutAndRetry.mockImplementation(
       async (db, region, env, fn) => {
         return await fn(mockDb);
@@ -202,6 +212,61 @@ describe("ActivityPub Inbox Routes", () => {
       });
 
       expect(response.status).toBe(404);
+    });
+
+    const OWNER = {
+      id: "user-123",
+      username: "testuser",
+      actorUri: "https://example.com/users/testuser",
+    };
+    const DENY = JSON.stringify({ error: "Not found" });
+
+    it("refuses an ANONYMOUS reader (DP-12) with the not-found body", async () => {
+      mockDb.user.findUnique.mockResolvedValue(OWNER);
+      mockGetSession.mockResolvedValue(null);
+
+      const response = await route!.handler(
+        new Request("https://example.com/users/testuser/inbox", { method: "GET" }),
+        mockEnv,
+        { params: { username: "testuser" } },
+      );
+
+      expect(response.status).toBe(404);
+      expect(await response.text()).toBe(DENY);
+      expect(mockGetInboxActivities).not.toHaveBeenCalled();
+    });
+
+    it("refuses ANOTHER user's session with the same body", async () => {
+      mockDb.user.findUnique.mockResolvedValue(OWNER);
+      mockGetSession.mockResolvedValue({ userId: "user-999" });
+
+      const response = await route!.handler(
+        new Request("https://example.com/users/testuser/inbox", { method: "GET" }),
+        mockEnv,
+        { params: { username: "testuser" } },
+      );
+
+      expect(response.status).toBe(404);
+      expect(await response.text()).toBe(DENY);
+      expect(mockGetInboxActivities).not.toHaveBeenCalled();
+    });
+
+    it("unknown user and wrong user are indistinguishable to the caller", async () => {
+      mockDb.user.findUnique.mockResolvedValue(null);
+      const unknown = await route!.handler(
+        new Request("https://example.com/users/nobody/inbox", { method: "GET" }),
+        mockEnv,
+        { params: { username: "nobody" } },
+      );
+      mockDb.user.findUnique.mockResolvedValue(OWNER);
+      mockGetSession.mockResolvedValue({ userId: "user-999" });
+      const wrong = await route!.handler(
+        new Request("https://example.com/users/testuser/inbox", { method: "GET" }),
+        mockEnv,
+        { params: { username: "testuser" } },
+      );
+      expect(unknown.status).toBe(wrong.status);
+      expect(await unknown.text()).toBe(await wrong.text());
     });
 
     it("should handle pagination parameters", async () => {

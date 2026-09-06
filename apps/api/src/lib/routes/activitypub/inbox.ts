@@ -16,7 +16,19 @@ import { getLogger, Logger } from "../../logger.js";
 import { corsMiddleware } from "../../middleware.js";
 import { detectRegionSync } from "../../region-detection.js";
 import { SecurityHeaders } from "../../security-headers.js";
+import { SessionManager } from "../../session-cookie.js";
 import type { Route } from "../types.js";
+
+/**
+ * One deny body for the inbox collection (AP §5.2: readable only by its
+ * owner). "No such user" and "not your inbox" share status and body so an
+ * anonymous caller learns nothing from the difference.
+ */
+const INBOX_DENY_BODY = JSON.stringify({ error: "Not found" });
+const INBOX_DENY_INIT = {
+  status: 404,
+  headers: { "content-type": "application/json" },
+} as const;
 
 export interface ActivityPubEnv {
   DATABASE_URL?: string;
@@ -96,8 +108,31 @@ export const inboxRoutes: Route[] = [
 
         if (!user || !user.actorUri) {
           const errorResponse = securityHeaders.createSecureResponse(
-            JSON.stringify({ error: "User not found" }),
-            { status: 404, headers: { "content-type": "application/json" } },
+            INBOX_DENY_BODY,
+            INBOX_DENY_INIT,
+          );
+          return addCorsHeaders(errorResponse, request, env);
+        }
+
+        // The inbox is a PRIVATE collection: only its owner reads it. It used
+        // to list every received activity (who follows, likes and messages
+        // this user, plus DM object URIs) to any anonymous caller. Owner means
+        // a local session for exactly this user; a signed GET is not accepted
+        // here because a local actor's own key is never a valid inbound
+        // signer, and no remote party is ever the owner of a local inbox.
+        const session = await new SessionManager().getSession(
+          request,
+          env.SESSION_SECRET,
+          env,
+        );
+        if (!session || session.userId !== user.id) {
+          logger.warn("[Inbox] inbox read refused", {
+            username,
+            hasSession: Boolean(session),
+          });
+          const errorResponse = securityHeaders.createSecureResponse(
+            INBOX_DENY_BODY,
+            INBOX_DENY_INIT,
           );
           return addCorsHeaders(errorResponse, request, env);
         }
