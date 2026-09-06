@@ -20,6 +20,7 @@ import { verifyKeycloakProfileLockdownAtBoot } from "./lib/identity/identity-pro
 import { buildHonoApp } from "./lib/app.js";
 import { getLogger, Logger } from "./lib/logger.js";
 import { TrellisRequestContextManager } from "./lib/request-context.js";
+import { createRequestIdentity } from "./lib/request-identity.js";
 import { SessionManager } from "./lib/session-cookie.js";
 import { getExtensions } from "./extensions.js";
 import { assertModerationProviderAllowed } from "./lib/media/moderation-provider.js";
@@ -294,15 +295,19 @@ export async function startServer(
       try {
         const ctxManager = new TrellisRequestContextManager(env);
         const sessionManager = new SessionManager();
-        const secret = env.SESSION_SECRET;
-        const session = secret
-          ? await sessionManager.getSession(webRequest, secret, env)
-          : null;
-        requestContext = await ctxManager.createRequestContext(
+        // S5: one identity slot per request. Resolving the session here fills
+        // the memo, so the middleware and handlers that read it downstream
+        // share this resolution instead of paying for their own (a JWT verify
+        // plus two to three KV round-trips each). Lazy for resolution B: an
+        // unauthenticated route never touches `identity.auth()`.
+        const identity = createRequestIdentity(webRequest, env);
+        const session = await identity.session();
+        const baseContext = await ctxManager.createRequestContext(
           webRequest,
           sessionManager,
           session,
         );
+        requestContext = { ...baseContext, identity };
       } catch (ctxErr) {
         logger.error("Failed to create request context", ctxErr);
         // Continue without context — some routes (e.g. /health) don't need it

@@ -12,6 +12,22 @@ import type { Env } from "../env.js";
 import type { Session } from "./session-cookie.js";
 
 /**
+ * Whether a session's CSRF token is old enough to be worth rotating.
+ *
+ * Pure: it reads the session and answers, rather than writing a flag into it.
+ * A session with no token, or a legacy session with no creation timestamp,
+ * needs no rotation — there is nothing to date.
+ */
+export function csrfTokenNeedsRotation(
+  session: Session | null | undefined,
+  now: number = Date.now(),
+): boolean {
+  if (!session?.csrfToken || !session.csrfTokenCreatedAt) return false;
+  const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
+  return now - session.csrfTokenCreatedAt > TWENTY_FOUR_HOURS_MS;
+}
+
+/**
  * CSRF Protection utility class
  */
 export class CSRFProtection {
@@ -63,17 +79,14 @@ export class CSRFProtection {
     // Primary method: Double Submit Cookie pattern (token in session)
     if (session?.csrfToken) {
       // Use constant-time comparison to prevent timing attacks
-      const isValid = this.constantTimeCompare(token, session.csrfToken);
-
-      // If token is valid but older than 24 hours, flag it for rotation
-      if (isValid && session.csrfTokenCreatedAt) {
-        const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
-        if (Date.now() - session.csrfTokenCreatedAt > TWENTY_FOUR_HOURS_MS) {
-          session.csrfTokenNeedsRotation = true;
-        }
-      }
-
-      return isValid;
+      // Whether the token is also due for rotation is a question about the
+      // session, not a side effect of validating it — ask
+      // `csrfTokenNeedsRotation(session)`. This used to write the answer back
+      // into the caller's session object, which nothing ever read and which
+      // is not available under the per-request identity memo, where the
+      // session is shared by every component of the request and frozen
+      // (S5, lib/request-identity.ts).
+      return this.constantTimeCompare(token, session.csrfToken);
     }
 
     // Fallback: KV storage (for migration/transition period)

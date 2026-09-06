@@ -140,11 +140,16 @@ describe("S4.2: Rate limiter fail-closed on admin/auth routes", () => {
 
 describe("S4.4: CSRF token rotation after 24 hours", () => {
   let CSRFProtection: any;
+  let csrfTokenNeedsRotation: (
+    session: unknown,
+    now?: number,
+  ) => boolean;
 
   beforeEach(async () => {
     vi.clearAllMocks();
     const csrf = await import("../../src/lib/csrf.js");
     CSRFProtection = csrf.CSRFProtection;
+    csrfTokenNeedsRotation = csrf.csrfTokenNeedsRotation as typeof csrfTokenNeedsRotation;
   });
 
   it("should store csrfTokenCreatedAt when storing token in session", () => {
@@ -166,7 +171,7 @@ describe("S4.4: CSRF token rotation after 24 hours", () => {
     expect(updatedSession.csrfTokenNeedsRotation).toBe(false);
   });
 
-  it("should set csrfTokenNeedsRotation=true when token is older than 24 hours", async () => {
+  it("reports rotation needed when the token is older than 24 hours", async () => {
     const token = "valid-token";
     const twentyFiveHoursAgo = Date.now() - 25 * 60 * 60 * 1000;
 
@@ -183,10 +188,10 @@ describe("S4.4: CSRF token rotation after 24 hours", () => {
     const isValid = await CSRFProtection.validateToken(token, session);
 
     expect(isValid).toBe(true);
-    expect(session.csrfTokenNeedsRotation).toBe(true);
+    expect(csrfTokenNeedsRotation(session)).toBe(true);
   });
 
-  it("should NOT set csrfTokenNeedsRotation when token is less than 24 hours old", async () => {
+  it("reports no rotation needed when the token is less than 24 hours old", async () => {
     const token = "valid-token";
     const oneHourAgo = Date.now() - 60 * 60 * 1000;
 
@@ -203,13 +208,17 @@ describe("S4.4: CSRF token rotation after 24 hours", () => {
     const isValid = await CSRFProtection.validateToken(token, session);
 
     expect(isValid).toBe(true);
-    expect(session.csrfTokenNeedsRotation).toBeUndefined();
+    expect(csrfTokenNeedsRotation(session)).toBe(false);
   });
 
-  it("should NOT set csrfTokenNeedsRotation when token validation fails", async () => {
+  it("never writes the rotation flag into the session it validates", async () => {
+    // S5: within one request every component shares one Session object, and
+    // the memoised one is frozen — a validity check that wrote to it would
+    // throw. The rotation question is answered about the session, not
+    // recorded in it.
     const twentyFiveHoursAgo = Date.now() - 25 * 60 * 60 * 1000;
 
-    const session = {
+    const session: { csrfTokenNeedsRotation?: boolean } = Object.freeze({
       userId: "user-123",
       email: "user@example.com",
       expiresAt: Date.now() + 3600000,
@@ -217,15 +226,14 @@ describe("S4.4: CSRF token rotation after 24 hours", () => {
       csrfTokenCreatedAt: twentyFiveHoursAgo,
       dataRegion: "EU",
       profileContext: "primary" as const,
-    };
+    });
 
-    const isValid = await CSRFProtection.validateToken("wrong-token", session);
-
-    expect(isValid).toBe(false);
+    expect(await CSRFProtection.validateToken("correct-token", session)).toBe(true);
+    expect(await CSRFProtection.validateToken("wrong-token", session)).toBe(false);
     expect(session.csrfTokenNeedsRotation).toBeUndefined();
   });
 
-  it("should handle missing csrfTokenCreatedAt gracefully (no rotation flag set)", async () => {
+  it("reports no rotation needed for a legacy session with no csrfTokenCreatedAt", async () => {
     const token = "valid-token";
 
     const session = {
@@ -241,7 +249,7 @@ describe("S4.4: CSRF token rotation after 24 hours", () => {
     const isValid = await CSRFProtection.validateToken(token, session);
 
     expect(isValid).toBe(true);
-    // Should not set rotation flag when no timestamp is available
-    expect(session.csrfTokenNeedsRotation).toBeUndefined();
+    // Nothing to date, so nothing to rotate.
+    expect(csrfTokenNeedsRotation(session)).toBe(false);
   });
 });
