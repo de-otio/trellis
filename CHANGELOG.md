@@ -243,6 +243,38 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ### Added
 
+- **A per-request identity slot, so one request resolves its session once
+  instead of three times.** The same authenticated request ran
+  `SessionManager.getSession()` in `server.ts`, again in `csrfMiddleware` or
+  `rateLimitMiddleware`, and again in the handler — a browser mutation
+  resolved it four times and the heaviest routes five. Each repeat is an
+  asymmetric JWT verify plus two to three KV round-trips (the revocation
+  blocklist, the session epoch and, for a token that carries no `userId`
+  claim, the JIT claim read), so the repeats were network calls, not cache
+  hits. `lib/request-identity.ts` adds the slot to `TrellisRequestContext`: a
+  lazy memo of the two *independent* resolutions — `getSession`, which honours
+  revocation, and `authMiddleware`, which is JWT-only — kept separate because
+  they apply different rules to the same token, and merging them would move an
+  authorization boundary. `server.ts` fills it, and `csrfMiddleware`,
+  `rateLimitMiddleware` and `mfaMiddleware` (162 route attachments between
+  them) read it through `resolveSession`. It is a memo and not a cache: no
+  key, no TTL, no eviction, and its lifetime is the request's — a token-keyed
+  cache would keep answering after a logout, because the blocklist and epoch
+  reads *are* the revocation check. Revocation semantics are unchanged: still
+  read once per request, from the live store. With no request context (a unit
+  test, or context construction having thrown) the call falls through to a
+  fresh resolution, so the degradation is slower, never someone else's
+  identity and never open. The memoized session is frozen, and the two places
+  that wrote to a session in place now copy instead — CSRF validation answers
+  the rotation question through the new pure `csrfTokenNeedsRotation(session)`
+  rather than flagging the session it was handed, and MFA verification builds
+  the updated session it re-seals — so a future in-place write throws instead
+  of becoming a later component's authorization input. Handlers still resolve
+  their own session; converting them is mechanical and can follow one file at
+  a time, guarded by the resolution-count test. Also removes
+  `lib/route-helpers.ts`, dead code reachable only from its own test, whose
+  identity derivation still carried the `sub` fallback that once seated an IdP
+  UUID as the user id.
 - **Every feed response now says which order produced it, and the query
   derives that order from the allowlist instead of restating it.** The home
   and entity feeds (`FeedResponse`) and the circles feed carry a `ranker`

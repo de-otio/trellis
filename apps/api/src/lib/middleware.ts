@@ -10,6 +10,11 @@ import type { TrellisRequestContext } from "./request-context.js";
 
 import { getLogger } from "./logger.js";
 import { RateLimiter, buildRateLimitResponse } from "./rate-limit.js";
+// S5: resolve the session through the per-request memo when the request
+// context carries one, so these three middleware and the handler they guard
+// share one resolution instead of paying for one each. Falls back to a fresh
+// resolution when there is no context (see lib/request-identity.ts).
+import { resolveSession } from "./request-identity.js";
 export interface MiddlewareContext {
   request: Request;
   env: Env;
@@ -206,12 +211,7 @@ export function rateLimitMiddleware(options?: {
     // back to the request IP internally when no identity is supplied.
     let userId: string | undefined;
     try {
-      const { SessionManager } = await import("./session-cookie.js");
-      const session = await new SessionManager().getSession(
-        request,
-        env.SESSION_SECRET,
-        env,
-      );
+      const session = await resolveSession(request, env, context.requestContext);
       userId = session?.userId ?? undefined;
     } catch {
       // ignore — fall back to IP keying inside RateLimiter
@@ -328,14 +328,9 @@ export function csrfMiddleware(): Middleware {
       }
     }
 
-    // Get session
-    const { SessionManager } = await import("./session-cookie.js");
-    const sessionManager = new SessionManager();
-
     // Get session secret with proper error handling
-    let sessionSecret: string;
     try {
-      sessionSecret = env.SESSION_SECRET;
+      const sessionSecret = env.SESSION_SECRET;
       if (!sessionSecret || typeof sessionSecret !== "string") {
         // If we can't get the secret, skip CSRF validation (let auth middleware handle it)
         return next();
@@ -346,11 +341,7 @@ export function csrfMiddleware(): Middleware {
     }
 
     const authHeader = request.headers.get("Authorization");
-    const session = await sessionManager.getSession(
-      request,
-      sessionSecret,
-      env,
-    );
+    const session = await resolveSession(request, env, context.requestContext);
 
     // If no session, let authentication middleware handle it
     // CSRF protection only applies to authenticated requests
@@ -424,22 +415,13 @@ export function mfaMiddleware(): Middleware {
   return async (context, next) => {
     const { request, env } = context;
 
-    const { SessionManager } = await import("./session-cookie.js");
-    const sessionManager = new SessionManager();
-
-    let sessionSecret: string;
     try {
-      sessionSecret = env.SESSION_SECRET;
-      if (!sessionSecret) return next();
+      if (!env.SESSION_SECRET) return next();
     } catch {
       return next();
     }
 
-    const session = await sessionManager.getSession(
-      request,
-      sessionSecret,
-      env,
-    );
+    const session = await resolveSession(request, env, context.requestContext);
     if (!session) return next(); // Let auth middleware handle missing session
 
     // Check if the user's role requires MFA

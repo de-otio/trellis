@@ -386,10 +386,17 @@ export const mfaRoutes: Route[] = [
           return CorsHandler.addCorsHeaders(res, request, env);
         }
 
-        // Update session with mfaVerified flag
-        session.mfaVerified = true;
-        session.mfaVerifiedAt = Date.now();
-        const updatedSessionData = JSON.stringify(session);
+        // Update session with mfaVerified flag. A copy, not an in-place
+        // write: under the per-request identity memo one Session object is
+        // shared by every component of the request (S5,
+        // lib/request-identity.ts), and mfaVerified is an authorization input
+        // — one component's write must not become another's decision.
+        const updatedSession = {
+          ...session,
+          mfaVerified: true,
+          mfaVerifiedAt: Date.now(),
+        };
+        const updatedSessionData = JSON.stringify(updatedSession);
         const sessionSalt = (env as any).SESSION_SALT as string | undefined;
         const encryptedSession = await sessionManager.encryptSession(
           updatedSessionData,
