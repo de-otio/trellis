@@ -1,8 +1,8 @@
 /**
  * Unit tests: per-request identity slot (S5)
  *
- * These are the guards the design pass (`plans/trellis-s5-request-context.md`
- * §4.3) named as preconditions for the refactor. In its numbering:
+ * These are the guards the S5 design pass named as preconditions for the
+ * refactor. In its numbering:
  *
  *   T1 — cross-request isolation under interleaving, with the underlying
  *        resolution deferred and completed OUT OF ORDER. A sequential loop

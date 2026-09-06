@@ -57,7 +57,11 @@
  * did before: the degradation is "slower", never "someone else's identity"
  * and never "open".
  *
- * Design: `plans/trellis-s5-request-context.md` §3.2, §4.
+ * The alternatives — AsyncLocalStorage and a token-keyed cache — were both
+ * considered and rejected: the explicit channel already reaches every
+ * middleware and handler, so an ambient store would buy nothing and fail
+ * silently and non-locally when it did fail; and the cache is the unsafe
+ * variant described above.
  */
 
 import type { Env } from "../env.js";
