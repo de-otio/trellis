@@ -471,11 +471,11 @@ describe("resolvePseudonymSecret", () => {
     expect(mockGetParameter).toHaveBeenCalledWith("/app/dev/report-pseudonym-key");
   });
 
-  it("falls back to SESSION_SECRET when the SSM parameter resolves empty", async () => {
+  it("does NOT fall back to SESSION_SECRET when the SSM parameter resolves empty (DP-10)", async () => {
     process.env.REPORT_PSEUDONYM_SECRET_PARAM = "/app/dev/report-pseudonym-key";
-    process.env.SESSION_SECRET = "session-secret";
+    process.env.SESSION_SECRET = "session-secret-that-must-never-key-a-tombstone";
     mockGetParameter.mockResolvedValue(Buffer.from("", "utf-8"));
-    await expect(resolvePseudonymSecret()).resolves.toBe("session-secret");
+    await expect(resolvePseudonymSecret()).rejects.toThrow(/no SESSION_SECRET fallback/);
   });
 
   it("a missing SSM parameter THROWS (fail-closed, unchanged semantics)", async () => {
@@ -484,10 +484,16 @@ describe("resolvePseudonymSecret", () => {
     await expect(resolvePseudonymSecret()).rejects.toThrow("Parameter not found");
   });
 
-  it("falls back to the Secrets Manager session secret via SESSION_SECRET_ARN", async () => {
+  it("does NOT fall back to the session secret via SESSION_SECRET_ARN either (DP-10)", async () => {
     process.env.SESSION_SECRET_ARN = "arn:aws:secretsmanager:eu-central-1:123:secret:session";
     mockResolveSecret.mockResolvedValue(Buffer.from("sm-secret", "utf-8"));
-    await expect(resolvePseudonymSecret()).resolves.toBe("sm-secret");
+    await expect(resolvePseudonymSecret()).rejects.toThrow(/failing closed/);
+    expect(mockResolveSecret).not.toHaveBeenCalled();
+  });
+
+  it("a plaintext SESSION_SECRET alone is a misconfiguration, not a key (DP-10)", async () => {
+    process.env.SESSION_SECRET = "session-secret-that-must-never-key-a-tombstone";
+    await expect(resolvePseudonymSecret()).rejects.toThrow(/REPORT_PSEUDONYM_SECRET/);
   });
 
   it("THROWS when nothing is configured (fail-closed, WS-2 finding 2 — never an empty key)", async () => {

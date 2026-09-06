@@ -1,9 +1,5 @@
 import { createHmac } from "node:crypto";
-import {
-  resolveParameter,
-  resolveSecret,
-  secretRef,
-} from "@de-otio/saas-foundation/secrets";
+import { resolveParameter } from "@de-otio/saas-foundation/secrets";
 import type { PrismaClient } from "@prisma/client";
 import { getExtensionModelRegistry } from "../extension-model-registry.js";
 import { getLogger } from "../logger.js";
@@ -36,10 +32,14 @@ export function pseudonymizeUserId(userId: string, secret: string): string {
  *      SecureString, fetched + KMS-decrypted + cached via AWS Lambda
  *      Powertools. This is the production path (a dedicated key, separately
  *      rotatable; destroying it crypto-shreds all prior tombstones).
- *   3. Fallback to the session secret (plaintext `SESSION_SECRET`, else
- *      `SESSION_SECRET_ARN` resolved from Secrets Manager via the foundation
- *      resolver) so a deployment without a dedicated key is still keyed, not
- *      unkeyed.
+ *
+ * There is NO session-secret fallback (security deep pass DP-10). The
+ * tombstone key must be a dedicated, never-rotated secret: `SESSION_SECRET`
+ * is the one value the estate rotates as a kill-switch, and re-keying the
+ * tombstone HMAC silently changes every future tombstone for already-deleted
+ * users, breaking the per-target counts the tombstone exists to preserve. A
+ * deployment without a dedicated key is misconfigured, and the deletion
+ * fails closed (below) rather than quietly keying off the wrong secret.
  *
  * Never reads the HMAC key from `process.env` for production secrets — the app
  * resolves those onto Env and deliberately leaves process.env empty.
@@ -65,18 +65,11 @@ export async function resolvePseudonymSecret(): Promise<string> {
     const value = (await resolveParameter(ssmParam)).toString("utf-8");
     if (value) return value;
   }
-  // Fallback: the session secret (Secrets Manager ARN or plaintext).
-  if (process.env.SESSION_SECRET) return process.env.SESSION_SECRET;
-  if (process.env.SESSION_SECRET_ARN) {
-    const resolved = (
-      await resolveSecret(secretRef(process.env.SESSION_SECRET_ARN))
-    ).toString("utf-8");
-    if (resolved) return resolved;
-  }
   throw new Error(
     "resolvePseudonymSecret: no erasure-tombstone HMAC key resolvable " +
-      "(REPORT_PSEUDONYM_SECRET / REPORT_PSEUDONYM_SECRET_PARAM / session secret) — " +
-      "failing closed; an unkeyed tombstone would be reversible",
+      "(set REPORT_PSEUDONYM_SECRET or REPORT_PSEUDONYM_SECRET_PARAM) — " +
+      "failing closed; there is no SESSION_SECRET fallback and an unkeyed " +
+      "tombstone would be reversible",
   );
 }
 

@@ -15,6 +15,7 @@ import { Prisma, PrismaClient } from "@prisma/client";
 import { getCurrentTenantId } from "@de-otio/saas-foundation/tenant";
 import { Pool } from "pg";
 import { DatabaseCircuitBreaker } from "./database-circuit-breaker.js";
+import { buildDbSslOptions } from "./db-ssl.js";
 import { getLogger, Logger, type LoggerEnv } from "./logger.js";
 import { redactConnectionString } from "./redact-connection-string.js";
 import { resolveTenantScopeMode, tenantScopeExtension } from "./tenant-scope.js";
@@ -29,6 +30,9 @@ export interface EnvWithDb {
   DATABASE_POOL_MAX?: string;
   DATABASE_POOL_MIN?: string;
   DATABASE_CONNECTION_TIMEOUT_MS?: string;
+  /** DB TLS (DP-7): CA to verify the server against — see `db-ssl.ts`. */
+  DB_SSL_CA?: string;
+  DB_SSL_CA_PATH?: string;
   DATABASE_STATEMENT_TIMEOUT_MS?: string;
   DATABASE_IDLE_TIMEOUT_MS?: string;
 }
@@ -340,13 +344,13 @@ export class DatabaseConnectionManager {
       connectionString: redactConnectionString(resolved.connectionString),
     });
 
-    // RDS requires SSL (rejectUnauthorized: false because the Amazon RDS root CA
-    // may not be in Node's default trust store; the connection is still encrypted).
-    // A local Postgres (dev / CI / the standalone test lane) is not configured for
-    // TLS, so requesting SSL fails with "server does not support SSL connections".
-    // Skip SSL only for local hosts; everything else keeps the RDS behaviour.
-    const isLocalDb = /@(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(
-      resolved.connectionString ?? "",
+    // TLS posture is decided in one place (`db-ssl.ts`): local hosts get no
+    // TLS, a configured CA gets full verification, and the unverified legacy
+    // mode survives only with a boot-time warning (security deep pass DP-7).
+    const ssl = buildDbSslOptions(
+      resolved.connectionString,
+      env,
+      (message, context) => this.logger.warn(message, context),
     );
 
     const pool = new Pool({
@@ -362,7 +366,7 @@ export class DatabaseConnectionManager {
       // network/RDS between bursts (avoids handing out a half-dead connection).
       keepAlive: true,
       allowExitOnIdle: false,
-      ssl: isLocalDb ? false : { rejectUnauthorized: false },
+      ssl,
     });
 
     pool.on("error", (err) => {
