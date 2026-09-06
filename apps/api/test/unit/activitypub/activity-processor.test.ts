@@ -872,9 +872,7 @@ describe("ActivityProcessor", () => {
         );
       });
 
-      // TRIAGE(AR14): fix — mock fixture predates the tenantId migration; not a
-      // dead skip, needs the group/actor mocks updated to carry tenantId.
-      it.skip("[T6] should process group Follow activity (mock needs tenantId)", async () => {
+      it("[T6] should process group Follow activity", async () => {
         const activity = {
           type: "Follow",
           id: "https://example.com/activities/follow-2",

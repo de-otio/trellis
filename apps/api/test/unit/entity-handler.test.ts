@@ -618,6 +618,9 @@ describe("EntityHandler", () => {
       mockDb.user.upsert.mockResolvedValue({
         id: "user-123",
         email: "test@example.com",
+        // Every account has a personal tenant (post-confirmation provisions
+        // it). With TENANT_SCOPE_MODE unset it is what scopes the new entity.
+        personalTenantId: "tenant-123",
       });
       // Mock region detection
       mockDetectRegion.mockResolvedValue("US");
@@ -697,7 +700,7 @@ describe("EntityHandler", () => {
         data: expect.objectContaining({
           name: "Buddy",
           entityType: "test",
-          ownerId: "user-123",
+          tenantId: "tenant-123",
           metadata: requestBody.metadata,
         }),
       });
@@ -752,10 +755,88 @@ describe("EntityHandler", () => {
         data: expect.objectContaining({
           name: "Max",
           entityType: "test",
-          ownerId: "user-123",
+          tenantId: "tenant-123",
           metadata: {},
         }),
       });
+    });
+
+    // Regression: v0.7 made `Entity.tenantId` a required relation and moved
+    // ownership into `EntityOwnership`, but this handler kept writing an
+    // `ownerId` scalar the model no longer has and no tenant at all — so every
+    // create 500'd on `Argument 'tenant' is missing`. `entityData` is typed
+    // `any`, so nothing but a real create caught it (the standalone lane did,
+    // and the two tests it blocked were skipped for it). These assertions fail
+    // against the pre-fix handler on all three counts.
+    it("stamps tenantId and the creator's ownership row, and never an ownerId scalar", async () => {
+      mockDb.entity.create.mockResolvedValue({
+        id: "entity-123",
+        name: "Buddy",
+        entityType: "test",
+        tenantId: "tenant-123",
+        metadata: {},
+        lifeStage: null,
+        createdAt: new Date("2024-01-01T10:00:00Z"),
+        updatedAt: new Date("2024-01-01T10:00:00Z"),
+      });
+      mockIsEnabled.mockResolvedValue(true);
+      mockValidateEntityProfile.mockReturnValue({
+        valid: true,
+        data: { name: "Buddy", entityType: "test", metadata: {} },
+      });
+
+      const response = await handler.createEntityProfile(
+        new Request("http://test.com/entities", {
+          method: "POST",
+          body: JSON.stringify({ name: "Buddy", entityType: "test" }),
+          headers: { "Content-Type": "application/json" },
+        }),
+        mockSession,
+        mockEnv,
+      );
+
+      expect(response.status).toBe(201);
+      const createArg = mockDb.entity.create.mock.calls[0][0];
+      expect(createArg.data.tenantId).toBe("tenant-123");
+      expect(createArg.data).not.toHaveProperty("ownerId");
+      expect(createArg.data.owners).toEqual({
+        create: {
+          tenantId: "tenant-123",
+          userId: "user-123",
+          role: "PRIMARY_OWNER",
+          addedByUserId: "user-123",
+        },
+      });
+    });
+
+    // Fail CLOSED: no tenant means no write. Guessing one would file the
+    // entity into somebody else's scope, which the tenancy seam exists to
+    // prevent — so a 403 is the correct outcome, not a best-effort create.
+    it("refuses the create when no tenant can be resolved (403)", async () => {
+      mockDb.user.upsert.mockResolvedValue({
+        id: "user-123",
+        email: "test@example.com",
+        personalTenantId: null,
+      });
+      mockIsEnabled.mockResolvedValue(true);
+      mockValidateEntityProfile.mockReturnValue({
+        valid: true,
+        data: { name: "Buddy", entityType: "test", metadata: {} },
+      });
+
+      const response = await handler.createEntityProfile(
+        new Request("http://test.com/entities", {
+          method: "POST",
+          body: JSON.stringify({ name: "Buddy", entityType: "test" }),
+          headers: { "Content-Type": "application/json" },
+        }),
+        mockSession,
+        mockEnv,
+      );
+
+      expect(response.status).toBe(403);
+      expect((await response.json()).error).toBe("NO_ACTIVE_TENANT");
+      expect(mockDb.entity.create).not.toHaveBeenCalled();
     });
 
     it("should return 400 for invalid input (missing name)", async () => {
@@ -893,6 +974,7 @@ describe("EntityHandler", () => {
       mockDb.user.upsert.mockResolvedValue({
         id: "user-123",
         email: "test@example.com",
+        personalTenantId: "tenant-123",
       });
       mockDb.entity.create.mockResolvedValue(createdEntity);
       mockIsEnabled.mockResolvedValueOnce(true); // entity_profiles_enabled
@@ -1444,6 +1526,7 @@ describe("EntityHandler", () => {
       mockDb.user.upsert.mockResolvedValue({
         id: "user-123",
         email: "test@example.com",
+        personalTenantId: "tenant-123",
       });
       mockDb.entity.create.mockResolvedValue(createdEntity);
       mockIsEnabled.mockResolvedValueOnce(true); // entity_profiles_enabled
