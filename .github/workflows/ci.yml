@@ -537,9 +537,11 @@ jobs:
   # checkout means no third-party code in the path of the one check that
   # authorises every merge.
   #
-  # NOT AGGREGATED HERE: `CodeQL`. It comes from GitHub's code-scanning default
-  # setup, which is a separate workflow, so it cannot be a `needs:` of a job in
-  # this file. It stays a separately required context.
+  # NOT AGGREGATED HERE: CodeQL. It lives in its own workflow
+  # (.github/workflows/codeql.yml, advanced setup), so its jobs cannot be a
+  # `needs:` of a job in this file. Its `Analyze (…)` checks stay separately
+  # required contexts — see the header of that file for why the job names are
+  # load-bearing.
   # ===========================================================================
   ci-required:
     name: ci-required
