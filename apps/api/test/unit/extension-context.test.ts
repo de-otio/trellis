@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createExtensionContext } from "../../src/lib/extension-context.js";
+import { CORE_SECRET_ENV_KEYS } from "../../src/lib/extension-config-keys.js";
 import type { TrellisExtension } from "@de-otio/trellis-extension-api";
 import { z } from "zod";
 
@@ -169,5 +170,83 @@ describe("createExtensionContext", () => {
   it("returns empty config when no configSchema is set", () => {
     const ctx = createExtensionContext(makeExtension(), mockEnv, mockPrisma, mockGraph);
     expect(ctx.config).toEqual({});
+  });
+
+  // ── Sweep C8 ───────────────────────────────────────────────────────────────
+  //
+  // Every test above checks a key the extension did NOT declare, which was
+  // never the hole: `extractExtensionConfig` walked the extension's own
+  // `configSchema.shape` and returned `process.env[key]` for each entry. So
+  // `z.object({ SESSION_SECRET: z.string() })` put the session-signing secret
+  // on `ctx.config` — one line, no `.passthrough()`, no `.transform()` — while
+  // the package doc comment said "Core secrets … are never exposed".
+  //
+  // `validateExtensions` refuses that manifest at boot. This pins the second
+  // half: a context built WITHOUT validation (this call, an embedder, a future
+  // dynamic load) still hands over nothing. Fails on the old code.
+  describe("declared core secrets are still not readable (C8)", () => {
+    it("does not expose SESSION_SECRET even when the schema declares it", () => {
+      const original = process.env.SESSION_SECRET;
+      process.env.SESSION_SECRET = "live-session-secret-at-least-32-chars!!";
+      try {
+        const ext = makeExtension({
+          configSchema: z.object({ SESSION_SECRET: z.string() }),
+        });
+        const ctx = createExtensionContext(ext, mockEnv, mockPrisma, mockGraph);
+        expect(ctx.config.SESSION_SECRET).toBeUndefined();
+        expect(Object.values(ctx.config)).not.toContain(
+          "live-session-secret-at-least-32-chars!!",
+        );
+      } finally {
+        if (original === undefined) delete process.env.SESSION_SECRET;
+        else process.env.SESSION_SECRET = original;
+      }
+    });
+
+    it("does not expose any key on the core-secret list", () => {
+      const sentinel = "core-secret-value-that-must-not-cross-the-seam";
+      const saved = new Map<string, string | undefined>();
+      for (const key of CORE_SECRET_ENV_KEYS) {
+        saved.set(key, process.env[key]);
+        process.env[key] = sentinel;
+      }
+      try {
+        const shape = Object.fromEntries(
+          CORE_SECRET_ENV_KEYS.map((k) => [k, z.string().optional()]),
+        );
+        const ext = makeExtension({ configSchema: z.object(shape) });
+        const ctx = createExtensionContext(ext, mockEnv, mockPrisma, mockGraph);
+        expect(ctx.config).toEqual({});
+      } finally {
+        for (const [key, value] of saved) {
+          if (value === undefined) delete process.env[key];
+          else process.env[key] = value;
+        }
+      }
+    });
+
+    it("keeps the extension's own keys while dropping the core ones", () => {
+      const saved = process.env.SESSION_SECRET;
+      const savedOwn = process.env.DOG_REGISTRY_URL;
+      process.env.SESSION_SECRET = "live-session-secret-at-least-32-chars!!";
+      process.env.DOG_REGISTRY_URL = "https://registry.example.com";
+      try {
+        const ext = makeExtension({
+          configSchema: z.object({
+            SESSION_SECRET: z.string().optional(),
+            DOG_REGISTRY_URL: z.string().optional(),
+          }),
+        });
+        const ctx = createExtensionContext(ext, mockEnv, mockPrisma, mockGraph);
+        expect(ctx.config).toEqual({
+          DOG_REGISTRY_URL: "https://registry.example.com",
+        });
+      } finally {
+        if (saved === undefined) delete process.env.SESSION_SECRET;
+        else process.env.SESSION_SECRET = saved;
+        if (savedOwn === undefined) delete process.env.DOG_REGISTRY_URL;
+        else process.env.DOG_REGISTRY_URL = savedOwn;
+      }
+    });
   });
 });

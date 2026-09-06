@@ -193,6 +193,10 @@ export function wrapExtensionRoute(
     method: routeDef.method,
     middleware,
     description: routeDef.description,
+    // The scope gate for this route runs below, in the handler, on this
+    // unversioned mount — not only on `/api/v1`. `assertPublicMountWiring`
+    // reads this so a private scoped extension route can boot (sweep C6).
+    scopesEnforcedBy: "extension-wrapper",
     handler: async (request, env, { params, requestContext }) => {
       const securityHeaders = new SecurityHeaders(env);
       const logger = getLogger();

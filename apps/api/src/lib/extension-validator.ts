@@ -17,6 +17,8 @@ import {
 import { getLogger, Logger } from "./logger.js";
 import { invalidCrossTenantReadModels } from "./extension-discover-db.js";
 import { getExtensionModelRegistry } from "./extension-model-registry.js";
+import { isCoreGateMiddleware } from "./middleware.js";
+import { coreSecretEnvKeysIn } from "./extension-config-keys.js";
 
 const RESERVED_IDS = ["user", "admin", "system", "internal", ""];
 const RESERVED_ROUTE_PREFIXES = [
@@ -275,18 +277,53 @@ export function validateExtensions(
     // `wrapExtensionRoutes`) is the supported way to add routes: core enforces
     // auth, CORS, CSRF and hands the handler a scoped `ExtensionContext`
     // instead of `Env`.
+    //
+    // Sweep C7 — the check is on middleware IDENTITY, not on the function's
+    // name. It used to read `m.name === "authMiddleware" || "csrfMiddleware"`,
+    // which is the label on the function object and therefore something the
+    // extension writes itself: `function authMiddleware(_c, next) { return
+    // next(); }` satisfied it while defending nothing (this file's own test
+    // proved it with a no-op), and core's real `csrfMiddleware()` — an
+    // anonymous arrow whose `.name` is `""` — was REJECTED. The one mount that
+    // bypasses every core gate was guarded by a string an attacker's
+    // extension supplies. `isCoreGateMiddleware` reads a non-enumerable
+    // `Symbol.for` tag that only `middleware.ts` stamps.
     for (const route of ext.routes) {
-      const hasAuth = route.middleware?.some(
-        (m: any) =>
-          m.name === "authMiddleware" || m.name === "csrfMiddleware",
-      );
-      if (!hasAuth) {
+      const hasGate = route.middleware?.some(isCoreGateMiddleware);
+      if (!hasGate) {
         throw new Error(
           `Extension "${ext.id}" raw route "${route.description ?? String(route.path)}" ` +
-            `has no auth middleware. Raw ext.routes bypass core auth/CSRF and receive the ` +
-            `full core Env (SESSION_SECRET, DATABASE_URL, KV bindings). Either add ` +
-            `authMiddleware/csrfMiddleware to the route, or — preferred — declare it under ` +
+            `carries no core gate middleware. Raw ext.routes bypass core auth/CSRF and ` +
+            `receive the full core Env (SESSION_SECRET, DATABASE_URL, KV bindings). ` +
+            `A locally-defined middleware does not count however it is named — attach ` +
+            `\`requireSessionMiddleware()\` or \`csrfMiddleware()\` imported from ` +
+            `"@de-otio/trellis", or — preferred — declare the route under ` +
             `\`extensionRoutes\` so core wraps it (auth enforced, scoped ExtensionContext).`,
+        );
+      }
+    }
+
+    // Sweep C8 — an extension may not name a core secret in its configSchema.
+    //
+    // `createExtensionContext` populates `ctx.config` from `process.env` for
+    // every key the schema declares, so before this check
+    // `z.object({ SESSION_SECRET: z.string() })` was a one-line request for the
+    // session-signing key — while the package docs promised "the extension
+    // never sees core secrets such as SESSION_SECRET, DATABASE_URL, or API
+    // keys". Refused at boot, and dropped again in `extractExtensionConfig`,
+    // so the promise is now enforced at both ends rather than asserted in prose.
+    if (ext.configSchema && "shape" in ext.configSchema) {
+      const declared = Object.keys(
+        (ext.configSchema as unknown as { shape: Record<string, unknown> }).shape,
+      );
+      const denied = coreSecretEnvKeysIn(declared);
+      if (denied.length > 0) {
+        throw new Error(
+          `Extension "${ext.id}" declares core secret env key(s) in its configSchema: ` +
+            `${denied.join(", ")}. ExtensionContext.config carries the extension's own ` +
+            `configuration only — core credentials are never handed across the seam. ` +
+            `Remove the key(s); if the extension genuinely needs a secret, give it its ` +
+            `own env var and its own value.`,
         );
       }
     }

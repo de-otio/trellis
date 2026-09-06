@@ -21,6 +21,25 @@ export type { ShutdownResult } from "./shutdown.js";
 export { EXTENSION_API_VERSION } from "@de-otio/trellis-extension-api";
 export { classifyApiVersion, parseApiVersion } from "./lib/extension-validator.js";
 export type { ApiVersionVerdict, ParsedApiVersion } from "./lib/extension-validator.js";
+// The raw-route escape hatch, made usable. `ext.routes` bypasses core's
+// wrapper entirely, so the validator refuses any raw route that carries no
+// core gate — and it now checks middleware IDENTITY rather than the function's
+// name, which an extension writes itself (sweep C7). These are the two gates
+// that satisfy it. `extensionRoutes` remains the supported way to add a route;
+// this exists so that "attach a real gate" is something a vertical can
+// actually do, rather than advice pointing at a middleware core never exported.
+export {
+  csrfMiddleware,
+  requireSessionMiddleware,
+  isCoreGateMiddleware,
+  CORE_GATE_MIDDLEWARE,
+} from "./lib/middleware.js";
+// Core env keys an extension may not name in its `configSchema`; declaring one
+// fails the boot and it is dropped from `ctx.config` regardless (sweep C8).
+export {
+  CORE_SECRET_ENV_KEYS,
+  isCoreSecretEnvKey,
+} from "./lib/extension-config-keys.js";
 // Realtime transport seam: a consuming app (e.g. Skybber) injects a concrete
 // transport (AppSync Events) before serving; core ships the poll/noop default.
 export { setRealtimeProvider } from "./lib/realtime/index.js";

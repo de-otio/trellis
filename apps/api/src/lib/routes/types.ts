@@ -89,6 +89,25 @@ export interface Route {
    */
   scopes?: string[];
 
+  /**
+   * Which mount actually checks this route's `scopes`.
+   *
+   * Absent (every hand-written core route) means "the `/api/v1` public mount,
+   * and nothing else" — which is why `assertPublicMountWiring` refuses
+   * non-empty `scopes` without `publicSpec: true`: such a route looks gated
+   * and is open.
+   *
+   * `"extension-wrapper"` is set by `wrapExtensionRoute` on every route it
+   * builds. For those the premise is false: the wrapper runs
+   * `requireScope(session, routeDef.scopes)` inside the handler it emits, on
+   * the unversioned `/api/ext/...` mount, whether or not the route is also
+   * published. Sweep C6 — without this marker a *private* extension route
+   * with scopes could not boot at all, so the published rule "non-empty —
+   * every listed scope required" was unexercisable as documented and a scope
+   * could only be attached to a route by also making it public.
+   */
+  scopesEnforcedBy?: "extension-wrapper";
+
   /** Grouping for the generated spec — becomes an OpenAPI tag. */
   tags?: string[];
 
