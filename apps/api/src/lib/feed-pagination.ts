@@ -89,6 +89,28 @@ export const ALLOWED_SORT_FIELDS = ["createdAt"] as const;
 export type AllowedSortField = (typeof ALLOWED_SORT_FIELDS)[number];
 
 /**
+ * The ORDER BY the home and entity feeds actually execute under
+ * `chronological@1`: the single allowed sort field, descending, with the
+ * post id as the deterministic tiebreak (it matches the keyset cursor
+ * exactly — see feed-handler.ts).
+ *
+ * This exists so the pinned constant and the executed order are ONE fact.
+ * Before it, `ALLOWED_SORT_FIELDS` had no runtime consumer: the query
+ * hardcoded its own `orderBy`, so the reproducibility-invariant test could
+ * stay green while the feed sorted by something else. The `satisfies`
+ * clause ties the two at compile time — change the allowlist without
+ * changing this, or this without the allowlist, and `tsc --build` fails.
+ * The invariant test block pins the value as well.
+ */
+export const FEED_ORDER_BY = [
+  { createdAt: "desc" },
+  { id: "desc" },
+] as const satisfies readonly [
+  { readonly [K in AllowedSortField]: "desc" },
+  { readonly id: "desc" },
+];
+
+/**
  * Feed ranking version — increment whenever ALLOWED_SORT_FIELDS changes
  * or any new ranking/ordering logic is introduced.
  *
@@ -121,9 +143,10 @@ export const FEED_RANKING_VERSION = 1 as const;
  * plans/pluggable-ranking/ would ship as `"<its-name>@1"`, not as a bump to
  * this constant — chronological@1 remains the permanent default).
  *
- * Not currently exposed on the feed HTTP response: `FeedResponse`
- * (feed-handler.ts) has no ranking-metadata field today. If one is added,
- * this is the value it should carry.
+ * Exposed on the wire as `ranker` on every feed response — `FeedResponse`
+ * (feed-handler.ts, home and entity feeds) and the circles feed
+ * (circle-handler.ts) — so a client can show the user which declared order
+ * it received rather than relying on documentation to say so.
  */
 export const FEED_RANKER_ID = "chronological@1" as const;
 

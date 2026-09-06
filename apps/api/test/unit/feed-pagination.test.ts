@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   ALLOWED_SORT_FIELDS,
+  FEED_ORDER_BY,
   FEED_RANKER_ID,
   FEED_RANKING_VERSION,
   computePaginationMetadata,
@@ -94,6 +95,17 @@ describe("feed sort-field reproducibility invariant", () => {
     // accountability contract (plans/pluggable-ranking/) — declared,
     // versioned, user-chosen, no undeclared engagement inputs.
     expect(Array.from(ALLOWED_SORT_FIELDS)).toEqual(["createdAt"]);
+  });
+
+  it("FEED_ORDER_BY is the allowlist's single field DESC with the id tiebreak — the executed order and the pinned constant are one fact", () => {
+    // feed-handler.ts spreads FEED_ORDER_BY into the query; nothing restates
+    // the order. If this fails, either the allowlist or the executed order
+    // changed — and the other must change with it, under the same sign-off.
+    expect(FEED_ORDER_BY).toEqual([
+      { [ALLOWED_SORT_FIELDS[0]]: "desc" },
+      { id: "desc" },
+    ]);
+    expect(FEED_ORDER_BY).toEqual([{ createdAt: "desc" }, { id: "desc" }]);
   });
 
   it("engagement metric fields are rejected by validateSortField", () => {

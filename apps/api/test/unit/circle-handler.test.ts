@@ -268,7 +268,9 @@ describe("CircleHandler", () => {
 
       expect(response.status).toBe(200);
       const body = await response.json();
-      expect(body).toEqual(result);
+      // The circles feed reports its declared order like the home feed does
+      // (FeedResponse.ranker) — the same chronological@1, on the wire.
+      expect(body).toEqual({ ...result, ranker: "chronological@1" });
       expect(mockGraphService.getVisiblePostIds).toHaveBeenCalledWith(
         "user-123",
         2,

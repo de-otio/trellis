@@ -29,6 +29,7 @@ import type { ProvenanceView } from "./provenance/types.js";
 import { Logger, type LoggerEnv } from "./logger.js";
 import type { TrellisRequestContext } from "./request-context.js";
 import { resolveSessionAgeTier } from "./age-gate.js";
+import { FEED_ORDER_BY, FEED_RANKER_ID } from "./feed-pagination.js";
 import type { Session } from "./session-cookie.js";
 import type { Env } from "../env.js";
 
@@ -137,6 +138,15 @@ export interface FeedPost {
 
 export interface FeedResponse {
   posts: FeedPost[];
+  /**
+   * Which declared, versioned ordering produced this page — `{name}@{version}`,
+   * always `FEED_RANKER_ID` today (`chronological@1`). The platform invariant
+   * is NO COVERT ENGAGEMENT ORDERING (docs/concepts/feed-ordering.md): every
+   * feed order is declared and user-visible, and this field is how a client
+   * makes it visible. A future user-chosen ranker (plans/pluggable-ranking/)
+   * reports its own id here; it never silently replaces the default.
+   */
+  ranker: typeof FEED_RANKER_ID;
   cursor?: string;
   hasMore: boolean;
   pageNumber?: number;
@@ -602,8 +612,11 @@ export class FeedHandler {
                   : []),
               ],
             } as any,
-            // Tiebreak matches the cursor keyset exactly (createdAt, id).
-            orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+            // The declared order, derived from ALLOWED_SORT_FIELDS (see
+            // FEED_ORDER_BY) — not restated here, so the pinned constant and
+            // the executed ORDER BY cannot drift apart. Tiebreak matches the
+            // cursor keyset exactly (createdAt, id).
+            orderBy: [...FEED_ORDER_BY],
             take: limit + 1,
             // Optimize includes: only fetch what's needed
             // On empty database, these should return quickly
@@ -760,6 +773,7 @@ export class FeedHandler {
 
       const feedResponse: FeedResponse = {
         posts: enrichedPosts,
+        ranker: FEED_RANKER_ID,
         cursor: hasReachedLimit ? undefined : nextCursor,
         hasMore: hasReachedLimit ? false : hasMore,
         pageNumber,

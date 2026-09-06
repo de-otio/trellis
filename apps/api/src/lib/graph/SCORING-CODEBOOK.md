@@ -355,6 +355,23 @@ systematically tier-promoted across many viewers. The discovery-surface
 invariant (11a). Both are deliberate limits on a single account's exposure
 concentration.
 
+### 11d. The circle roster is ordered by the edge score — and that is declared here
+
+`GET /api/circles/members` returns the viewer's own roster for a tier ordered
+by the effective edge score (`COALESCE(manual_score, computed_score) DESC`,
+`postgres/circles.ts` `getCircleMembers`). That score carries the
+`engagement`/`frequency` weights (Section 2), so this is an engagement-derived
+order the user sees. It is legitimate — it lists *people the viewer filed*, not
+content, and the viewer set or can override every score (`manualScore`) — but
+the exposure map in this section is only complete if it is named: it is the one
+user-facing list ordered by the scoring engine's output. It is not a feed; the
+feed and circles-feed responses report their order as `ranker` (11a) and never
+consult this score for ordering. Two adjacent orderings are *not* served to any
+client today and are recorded for completeness: `getCircleEntityStatus` sorts
+entities by unseen-post count, and `getTrendingTopics` (`content-discovery.ts`)
+sorts topics by post count. If either is wired to a client, it becomes a
+declared, versioned order like the discovery surface (10e).
+
 ---
 
 ## 12. Keeping the Codebook in Sync
