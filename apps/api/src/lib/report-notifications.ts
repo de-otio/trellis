@@ -64,12 +64,11 @@ async function deliver(
       const { createEmailProvider, emailProviderConfigFromEnv } = await import(
         "./email-provider.js"
       );
-      const anyEnv = env as unknown as { FROM_EMAIL?: string };
       const provider = createEmailProvider(
         emailProviderConfigFromEnv(env as unknown as Record<string, string>),
       );
       await provider.sendEmail({
-        from: anyEnv.FROM_EMAIL || "noreply@example.com",
+        from: env.FROM_EMAIL || "noreply@example.com",
         to: target.reporterEmail,
         subject: title,
         text: body,

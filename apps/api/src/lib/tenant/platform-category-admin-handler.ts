@@ -20,6 +20,8 @@
 
 import type { Env } from "../../env.js";
 import type { AuthContext } from "../auth/auth-context.js";
+import { requireSuperAdmin as requireSuperAdminGuard } from "../auth/require-super-admin.js";
+import { emitAdminAudit } from "../admin-audit.js";
 import { resolveDescendantCategoryIds } from "../org-category/tree.js";
 import {
   PLATFORM_CATEGORY_CREATED,
@@ -27,50 +29,26 @@ import {
   PLATFORM_CATEGORY_REPARENTED,
 } from "../audit-actions.js";
 import type { AuditAction } from "@de-otio/saas-foundation/audit";
-import type { Region } from "../region-detection.js";
 
 // ── Auth guard ─────────────────────────────────────────────────────────────
 
 function requireSuperAdmin(auth: AuthContext): Response | null {
-  if (auth.globalRole === "SUPER_ADMIN") return null;
-  return new Response(
-    JSON.stringify({
-      error: "FORBIDDEN",
-      message: "SUPER_ADMIN role required for platform category administration.",
-    }),
-    { status: 403, headers: { "content-type": "application/json" } },
+  return requireSuperAdminGuard(
+    auth,
+    "SUPER_ADMIN role required for platform category administration.",
   );
 }
 
 // ── Audit helper ───────────────────────────────────────────────────────────
 
-async function emitPlatformCategoryAudit(
+function emitPlatformCategoryAudit(
   action: AuditAction,
   resourceId: string,
   actorUserId: string,
   metadata: Record<string, unknown>,
   env: Env,
 ): Promise<void> {
-  try {
-    const { TrellisAuditLogger } = await import("../audit-composer.js");
-    const region: Region =
-      (env as unknown as { DEFAULT_REGION?: string }).DEFAULT_REGION as Region ?? "EU";
-    const auditLogger = new TrellisAuditLogger();
-    await auditLogger.logSystemAction(
-      action,
-      {
-        resource: "platform_category",
-        resourceId,
-        userId: actorUserId,
-        region,
-        success: true,
-        metadata: { ...metadata, actorUserId },
-      },
-      env as Parameters<InstanceType<typeof TrellisAuditLogger>["logSystemAction"]>[2],
-    );
-  } catch {
-    // Best-effort: audit failures must not block the mutation.
-  }
+  return emitAdminAudit(action, "platform_category", resourceId, actorUserId, metadata, env);
 }
 
 // ── Handler ────────────────────────────────────────────────────────────────
