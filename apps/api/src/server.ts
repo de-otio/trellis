@@ -11,7 +11,11 @@
 
 import http from "node:http";
 import { randomUUID } from "node:crypto";
-import type { CrossTenantReadDelegate } from "@de-otio/trellis-extension-api";
+import { ZodObject } from "zod";
+import type {
+  CrossTenantReadDelegate,
+  TenantId as ExtensionTenantId,
+} from "@de-otio/trellis-extension-api";
 import type { RawPrismaLike } from "./lib/extension-scoped-db.js";
 import { buildEnv, validateEnv } from "./env.js";
 import { startExtensionJobRunners } from "./lib/extension-job-runner.js";
@@ -177,9 +181,9 @@ export async function startServer(
 
   // Validate extension config schemas against scoped env vars
   for (const ext of extensions) {
-    if (ext.configSchema && "shape" in ext.configSchema) {
+    if (ext.configSchema instanceof ZodObject) {
       const scopedEnv: Record<string, string | undefined> = {};
-      for (const key of Object.keys((ext.configSchema as any).shape)) {
+      for (const key of Object.keys(ext.configSchema.shape)) {
         scopedEnv[key] = process.env[key];
       }
       const result = ext.configSchema.safeParse(scopedEnv);
@@ -232,6 +236,13 @@ export async function startServer(
       uuid: () => randomUUID(),
       readDelegateSource: (model) => {
         const { client } = dbManager.acquireClient("primary", env);
+        // Load-bearing cast: PrismaClient has no string index signature (its
+        // model delegates are named properties on the generated type), but
+        // `model` here is a runtime string picked from an extension's
+        // declared `crossTenantRead` list. `CrossTenantReadDelegate` is a
+        // structural subset of every Prisma delegate (findMany/findFirst/
+        // count/aggregate/groupBy), so this only widens what TS can see, not
+        // what is actually callable.
         return (client as unknown as Record<string, CrossTenantReadDelegate | undefined>)[
           model
         ];
@@ -243,8 +254,11 @@ export async function startServer(
         // params the extension-api `TenantId` brand. Both wrap the identical
         // runtime string; the tags are nominal-only. See ASSUMPTIONS A-P2.1.
         return createScopedDb(
+          // Load-bearing cast: same reasoning as readDelegateSource above —
+          // RawPrismaLike is Prisma's dynamic-model-name-indexed shape, which
+          // PrismaClient's generated type does not structurally declare.
           client as unknown as RawPrismaLike,
-          tid as unknown as Parameters<typeof createScopedDb>[1],
+          tid as unknown as ExtensionTenantId,
           scopedModelMetas,
         );
       },
@@ -284,6 +298,10 @@ export async function startServer(
       const webRequest = new Request(url, {
         method,
         headers,
+        // Load-bearing cast: Node's `Buffer` is a real `Uint8Array`/BufferSource
+        // at runtime and the Fetch `Request` constructor accepts it, but
+        // Buffer's `ArrayBufferLike` backing type doesn't structurally match
+        // the stricter `ArrayBufferView` shape `BodyInit` expects.
         body: body && body.byteLength > 0 ? (body as unknown as BodyInit) : undefined,
         // @ts-ignore — duplex required in Node.js 18+ for body streams
         duplex: "half",

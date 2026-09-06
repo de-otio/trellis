@@ -14,6 +14,7 @@
  * - Provides safety mechanism during development/testing phases
  */
 
+import type { Prisma } from "@prisma/client";
 import { DataRouter } from "./data-router.js";
 import { getLogger, Logger, type LoggerEnv } from "./logger.js";
 import { detectRegion } from "./region-detection.js";
@@ -193,7 +194,7 @@ export class EntityHandler {
           fallbackEmail,
           session.userId,
         );
-        const user = await (db.user.upsert({
+        const user = await db.user.upsert({
           where: { id: session.userId },
           create: {
             id: session.userId,
@@ -208,7 +209,7 @@ export class EntityHandler {
             ...(session.email ? { email: session.email } : {}),
             // Don't update region/dataRegion on existing users (preserve their region)
           },
-        }) as unknown as Promise<{ id: string; email: string }>);
+        });
         console.error("[ENTITY_HANDLER] User ensured successfully", {
           userId: user.id,
           email: user.email,
@@ -271,8 +272,8 @@ export class EntityHandler {
       const calculatedLifeStage = this.calculateEntityLifeStage(
         entityType,
         profileData.metadata,
-        (body as any).lifeStageManualOverride || false,
-        (body as any).lifeStage,
+        profileData.lifeStageManualOverride || false,
+        profileData.lifeStage,
       );
 
       const metadataValidation = extension.metadataSchema.safeParse(metadata);
@@ -283,6 +284,13 @@ export class EntityHandler {
         );
       }
 
+      // Load-bearing `any`: giving this a real `Prisma.EntityUncheckedCreateInput`
+      // shape would fail to compile as-is — `tenantId` is a required column this
+      // object never sets, and `ownerId` is not a column at all (ownership moved
+      // to `EntityOwnership[]`; this predates that migration). That is the "real
+      // handler bug" the burn list's skipped-tests lane already tracks
+      // (`EntityHandler.createEntityProfile does not stamp tenantId`) — fixing it
+      // is a behavior change out of scope for this mechanical cast cleanup.
       const entityData: any = {
         name: profileData.name.trim(),
         entityType,
@@ -295,10 +303,14 @@ export class EntityHandler {
         entityData.lifeStage = calculatedLifeStage;
         entityData.lifeStageCalculatedAt = new Date();
         entityData.lifeStageManualOverride =
-          (body as any).lifeStageManualOverride || false;
+          profileData.lifeStageManualOverride || false;
       }
 
       // Create entity in database
+      // Load-bearing cast: `entityData` above is `any` (see comment there), so
+      // TS cannot infer `create`'s return shape from it; asserting the shape we
+      // actually read below keeps call sites honest without papering over the
+      // underlying `any`.
       const entity = await (db.entity.create({
         data: entityData,
       }) as unknown as Promise<{
@@ -433,7 +445,7 @@ export class EntityHandler {
             session.userId,
           );
 
-          entity = await (regionDb.entity.findUnique({
+          entity = await regionDb.entity.findUnique({
             where: { id: entityId },
             select: {
               id: true,
@@ -444,15 +456,7 @@ export class EntityHandler {
               updatedAt: true,
               owners: { select: { userId: true, role: true }, where: { status: 'ACTIVE' } },
             },
-          }) as unknown as Promise<{
-            id: string;
-            name: string;
-            entityType: string | null;
-            metadata: any;
-            createdAt: Date;
-            updatedAt: Date;
-            owners: { userId: string; role: string }[];
-          } | null>);
+          });
 
           if (entity) {
             if (region !== userDataRegion) {
@@ -668,7 +672,7 @@ export class EntityHandler {
             request,
             session.userId,
           );
-          existingEntity = await (regionDb.entity.findUnique({
+          existingEntity = await regionDb.entity.findUnique({
             where: { id: entityId },
             select: {
               id: true,
@@ -678,14 +682,7 @@ export class EntityHandler {
               lifeStageManualOverride: true,
               owners: { select: { userId: true, role: true }, where: { status: 'ACTIVE' } },
             },
-          }) as unknown as Promise<{
-            id: string;
-            entityType: string | null;
-            metadata: any;
-            lifeStage: string | null;
-            lifeStageManualOverride: boolean;
-            owners: { userId: string; role: string }[];
-          } | null>);
+          });
 
           if (existingEntity) {
             foundRegion = region;
@@ -788,7 +785,7 @@ export class EntityHandler {
       const calculatedLifeStage = this.calculateEntityLifeStage(
         existingEntity.entityType || profileData.entityType || "",
         profileData.metadata,
-        (body as any).lifeStageManualOverride ||
+        profileData.lifeStageManualOverride ||
           existingEntity.lifeStageManualOverride,
         existingEntity.lifeStage,
       );
@@ -814,7 +811,7 @@ export class EntityHandler {
       }
 
       // Prepare update data
-      const updateData: any = {
+      const updateData: Prisma.EntityUpdateInput = {
         updatedAt: new Date(),
       };
 
@@ -831,24 +828,15 @@ export class EntityHandler {
         updateData.lifeStage = calculatedLifeStage;
         updateData.lifeStageCalculatedAt = new Date();
         updateData.lifeStageManualOverride =
-          (body as any).lifeStageManualOverride ||
+          profileData.lifeStageManualOverride ||
           existingEntity.lifeStageManualOverride;
       }
 
       // Update entity in database
-      const entity = await (db.entity.update({
+      const entity = await db.entity.update({
         where: { id: entityId },
         data: updateData,
-      }) as unknown as Promise<{
-        id: string;
-        tenantId: string;
-        name: string;
-        entityType: string | null;
-        metadata: any;
-        lifeStage: string | null;
-        createdAt: Date;
-        updatedAt: Date;
-      }>);
+      });
 
       // Dual-write: sync updated entity to graph database
       try {
@@ -954,7 +942,7 @@ export class EntityHandler {
         entities = await withQueryTimeoutAndRetry(
           sharedDatabaseConnectionManager,
           userDataRegion,
-          env as any,
+          env,
           async (db) => {
             return await db.entity.findMany({
               where: {
@@ -1064,7 +1052,7 @@ export class EntityHandler {
             session.userId,
             region,
             env,
-            null as any,
+            undefined,
           );
           if (user?.dataRegion) {
             entityRegion = user.dataRegion;
@@ -1101,17 +1089,13 @@ export class EntityHandler {
           const regionDb = DataRouter.getDatabaseForRegion(
             region,
             env,
-            null as any,
+            undefined,
             session.userId,
           );
-          entity = await (regionDb.entity.findUnique({
+          entity = await regionDb.entity.findUnique({
             where: { id: entityId },
             select: { id: true, name: true, owners: { select: { userId: true, role: true }, where: { status: 'ACTIVE' } } },
-          }) as unknown as Promise<{
-            id: string;
-            name: string;
-            owners: { userId: string; role: string }[];
-          } | null>);
+          });
 
           if (entity) {
             foundRegion = region;
@@ -1158,7 +1142,7 @@ export class EntityHandler {
       const db = DataRouter.getDatabaseForRegion(
         foundRegion,
         env,
-        null as any,
+        undefined,
         session.userId,
       );
 

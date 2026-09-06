@@ -8,6 +8,7 @@
  * Performance: Uses cached database connections (via createPrismaForRegion).
  */
 
+import type { Prisma, SyntheticSourceType, UserRole } from "@prisma/client";
 import { createPrismaForRegion, type EnvWithDb } from "../db.js";
 import {
   TrellisAuditLogger,
@@ -23,6 +24,25 @@ import { deriveUniqueHandle } from "./user/derive-handle.js";
 import { isValidRegion, type Region } from "./region-detection.js";
 
 /**
+ * Thrown when a request would read `dataRegion` data from a different
+ * `requestedRegion` without recorded cross-region consent. Carries the two
+ * regions and a stable `code` so callers (and tests) can branch on it without
+ * string-matching the message.
+ */
+export class CrossRegionAccessError extends Error {
+  readonly code = "CROSS_REGION_ACCESS_REQUIRES_CONSENT" as const;
+  constructor(
+    public readonly dataRegion: string,
+    public readonly requestedRegion: string,
+  ) {
+    super(
+      `CROSS_REGION_ACCESS_REQUIRES_CONSENT: Cannot access ${dataRegion} data from ${requestedRegion} region`,
+    );
+    this.name = "CrossRegionAccessError";
+  }
+}
+
+/**
  * Environment interface for data router
  */
 export interface DataRouterEnv extends EnvWithDb, TrellisAuditLoggerEnv {
@@ -30,6 +50,10 @@ export interface DataRouterEnv extends EnvWithDb, TrellisAuditLoggerEnv {
   DEFAULT_REGION?: string;
   // Optional: Database wrapper environment (for monitoring)
   LOG_LEVEL?: string;
+  // CI detection (populated from process.env by buildEnv() in env.ts) — used
+  // to relax timeouts for slower CI database connections.
+  CI?: string;
+  GITHUB_ACTIONS?: string;
 }
 
 /**
@@ -38,7 +62,7 @@ export interface DataRouterEnv extends EnvWithDb, TrellisAuditLoggerEnv {
 export interface CreateUserInput {
   id: string;
   email: string;
-  role?: string;
+  role?: UserRole;
   username?: string;
   [key: string]: unknown;
 }
@@ -202,13 +226,7 @@ export class DataRouter {
       }
 
       // Throw error with specific code that frontend can detect
-      const error = new Error(
-        `CROSS_REGION_ACCESS_REQUIRES_CONSENT: Cannot access ${dataRegion} data from ${requestedRegion} region`,
-      );
-      (error as any).code = "CROSS_REGION_ACCESS_REQUIRES_CONSENT";
-      (error as any).dataRegion = dataRegion;
-      (error as any).requestedRegion = requestedRegion;
-      throw error;
+      throw new CrossRegionAccessError(dataRegion, requestedRegion);
     }
   }
 
@@ -372,8 +390,7 @@ export class DataRouter {
       userData.email?.includes("test-");
 
     // Detect CI environment for timeout adjustment
-    const isCI =
-      (env as any).CI === "true" || (env as any).GITHUB_ACTIONS === "true";
+    const isCI = env.CI === "true" || env.GITHUB_ACTIONS === "true";
 
     // OPTIMIZATION: For test users, use aggressive timeouts since they should be fast
     // Test users are created frequently in tests and should complete quickly
@@ -408,20 +425,14 @@ export class DataRouter {
         // This optimizes the common case where test users are new
         if (isTestUser) {
           try {
-            return await (db.user.create({
+            return await db.user.create({
               data: {
                 ...userData,
                 handle,
                 region,
                 dataRegion: region, // CRITICAL: Must match region
-              } as any,
-            }) as unknown as Promise<{
-              id: string;
-              email: string;
-              region: string;
-              dataRegion: string | null;
-              [key: string]: unknown;
-            }>);
+              },
+            });
           } catch (createError: any) {
             // If user already exists (unique constraint violation), use upsert
             // This handles cross-region test scenarios where user might exist in different region
@@ -445,16 +456,14 @@ export class DataRouter {
         // This prevents unique constraint violations when user ID is globally unique
         // CRITICAL: Set region and dataRegion to match
         // dataRegion must match region for compliance
-        // Note: Type assertion needed since Prisma client hasn't been regenerated with region/dataRegion fields
-        // TODO: Remove type assertion after running `npx prisma generate`
-        return await (db.user.upsert({
+        return await db.user.upsert({
           where: { id: userData.id },
           create: {
             ...userData,
             handle,
             region,
             dataRegion: region, // CRITICAL: Must match region
-          } as any,
+          },
           update: {
             // Update email if provided and different
             email: userData.email,
@@ -468,14 +477,8 @@ export class DataRouter {
               : {
                   // Don't update region/dataRegion on existing users (preserve their region)
                 }),
-          } as any,
-        }) as unknown as Promise<{
-          id: string;
-          email: string;
-          region: string;
-          dataRegion: string | null;
-          [key: string]: unknown;
-        }>);
+          },
+        });
       },
       {
         timeoutMs: isTestUser ? testUserTimeoutMs : 3000, // 2s in CI / 1s locally for test users, 3s for real users
@@ -585,17 +588,9 @@ export class DataRouter {
     const db = this.getDatabaseForRegion(region, env, request, userId);
 
     // Find user in region-specific database
-    // Note: Type assertion needed since Prisma client hasn't been regenerated with region/dataRegion fields
-    // TODO: Remove type assertion after running `npx prisma generate`
-    const user = await (db.user.findUnique({
+    const user = await db.user.findUnique({
       where: { id: userId },
-    }) as unknown as Promise<{
-      id: string;
-      email: string;
-      region: string;
-      dataRegion: string | null;
-      [key: string]: unknown;
-    } | null>);
+    });
 
     // CRITICAL: Verify dataRegion matches requested region
     // This is defense in depth - routing should prevent this, but we check anyway
@@ -711,18 +706,10 @@ export class DataRouter {
     const db = this.getDatabaseForRegion(region, env, request, userId);
 
     // Update user
-    // Note: Type assertion needed since Prisma client hasn't been regenerated with region/dataRegion fields
-    // TODO: Remove type assertion after running `npx prisma generate`
-    const user = await (db.user.update({
+    const user = await db.user.update({
       where: { id: userId },
-      data: updateData as any, // Type assertion needed for updateData (role type mismatch)
-    }) as unknown as Promise<{
-      id: string;
-      email: string;
-      region: string;
-      dataRegion: string | null;
-      [key: string]: unknown;
-    }>);
+      data: updateData,
+    });
 
     // CRITICAL: Verify dataRegion still matches region using validation middleware
     this.validateRegionAccess(
@@ -791,7 +778,11 @@ export class DataRouter {
       // Media attachments. `sourceType` is the author's Art. 50 provenance
       // declaration for THAT attachment; it lands on the PostMedia join row, not
       // on the shared MediaFile (which is deduped within-tenant).
-      media?: Array<{ id: string; alt?: string; sourceType?: string }>;
+      media?: Array<{
+        id: string;
+        alt?: string;
+        sourceType?: SyntheticSourceType;
+      }>;
       [key: string]: unknown;
     },
     region: string,
@@ -926,7 +917,7 @@ export class DataRouter {
 
     // Use transaction to ensure atomicity
     const result = await db.$transaction(
-      async (tx: any) => {
+      async (tx: Prisma.TransactionClient) => {
         // Validate entity tagging permissions within transaction (if entities provided and session available)
         if (entityRefs.length > 0 && session) {
           const { validateEntityTagging } = await import(
@@ -939,7 +930,7 @@ export class DataRouter {
           await validateEntityTagging(
             String(session.userId),
             entityRefs,
-            tx as any, // Transaction client
+            tx,
             // The post's tenant — the same value stamped onto the row below.
             // The friendship half of the tagging check is tenant-scoped
             // (lib/friend-ids.ts), so it must be resolved in this tenant.
@@ -948,9 +939,8 @@ export class DataRouter {
         }
 
         // CRITICAL: Set dataRegion to match region
-        // Note: Type assertion needed since Prisma client hasn't been regenerated with dataRegion field
         // Explicitly construct data object to avoid Symbol serialization issues
-        const createData: Record<string, any> = {
+        const createData: Prisma.PostUncheckedCreateInput = {
           authorId: sanitizedPostData.authorId,
           text: sanitizedPostData.text,
           tenantId: String(postData.tenantId), // Tenancy: stamp active tenant (NON-NULL)
@@ -985,14 +975,9 @@ export class DataRouter {
           createData.textBasis = "AUTHOR_DECLARED";
         }
 
-        const post = await (tx.post.create({
-          data: createData as any, // Type assertion needed until Prisma client is regenerated
-        }) as unknown as Promise<{
-          id: string;
-          authorId: string;
-          dataRegion: string | null;
-          [key: string]: unknown;
-        }>);
+        const post = await tx.post.create({
+          data: createData,
+        });
 
         // CRITICAL: Verify dataRegion was set correctly
         if (post.dataRegion !== region) {
@@ -1027,8 +1012,19 @@ export class DataRouter {
         });
 
         // Create PostEntity records if entities are tagged
+        //
+        // PRE-EXISTING BUG, found while removing `tx: any` for this cast-cleanup
+        // pass (not fixed here — that would be a behavior change, out of scope):
+        // there is no `postEntity` model. The schema's post/entity join table is
+        // `PostSubject` (`postId`/`entityId` columns, `@@map("post_subjects")`) —
+        // `tx.postEntity` is `undefined` on a real Prisma client, so this throws
+        // inside the transaction for every post created with tagged entities.
+        // The unit test mocking this call (`data-router.test.ts`) also mocks a
+        // `postEntity` delegate, which is why it doesn't catch this. Load-bearing
+        // `as any` kept here ONLY to preserve exact current (broken) behavior
+        // pending a dedicated fix.
         if (entityRefs.length > 0) {
-          await tx.postEntity.createMany({
+          await (tx as any).postEntity.createMany({
             data: entityRefs.map((entityId) => ({
               postId: post.id,
               entityId,
@@ -1042,7 +1038,7 @@ export class DataRouter {
           await tx.postMedia.createMany({
             data: media.map((m, index) => ({
               // PostMedia inherits the owning post's tenant.
-              tenantId: (post as { tenantId?: string }).tenantId,
+              tenantId: post.tenantId,
               postId: post.id,
               mediaId: m.id,
               alt: m.alt || "",
@@ -1157,16 +1153,9 @@ export class DataRouter {
     );
 
     // Find post in region-specific database
-    // Note: Type assertion needed since Prisma client hasn't been regenerated with dataRegion field
-    // TODO: Remove type assertion after running `npx prisma generate`
-    const post = await (db.post.findUnique({
+    const post = await db.post.findUnique({
       where: { id: postId },
-    }) as unknown as Promise<{
-      id: string;
-      authorId: string;
-      dataRegion: string | null;
-      [key: string]: unknown;
-    } | null>);
+    });
 
     // CRITICAL: Verify dataRegion matches requested region
     if (post && post.dataRegion && post.dataRegion !== region) {
