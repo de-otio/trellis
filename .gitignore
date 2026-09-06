@@ -38,7 +38,15 @@ amplify_outputs.json
 .vscode/
 temp/
 tmp/
-.claude/
+# Claude Code: the shared roster (.claude/settings.json, .claude/agents/,
+# .claude/README.md) IS committed. Only per-machine state stays out.
+# The leading negation overrides a machine-level global ignore of `.claude/`.
+!.claude/
+.claude/settings.local.json
+.claude/settings.local.json.bak
+.claude/.cc-writes/
+.claude/worktrees/
+.claude/projects/
 # Internal-only doc trees — kept private (see de-otio/trellis-internal)
 plans/
 analysis/
