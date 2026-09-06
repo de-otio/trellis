@@ -36,6 +36,14 @@ name: CodeQL
 # extractor), query suite `default`, threat model `remote`. `queries:` is
 # therefore deliberately unset — setting it would change the suite — and the
 # weekly `schedule:` below reproduces default setup's weekly full scan.
+#
+# CUTOVER, for the record. Default setup was turned off on 2026-09-06 once this
+# workflow was on `main` — the two cannot coexist, GitHub rejects an advanced
+# configuration's SARIF with "CodeQL analyses from advanced configurations
+# cannot be processed when the default setup is enabled" for as long as default
+# setup is on. The first run after it was disabled returned the same 11 results
+# and the same two open alerts the last default-setup run did, so the switch
+# changed the plumbing and not the analysis.
 # =============================================================================
 
 on:
