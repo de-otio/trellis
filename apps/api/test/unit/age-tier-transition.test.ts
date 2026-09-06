@@ -50,13 +50,44 @@ describe("computeAgeTier", () => {
 describe("checkAgeTierTransitions", () => {
   let mockEnv: Env;
 
+  // `checkAgeTierTransitions` reads the clock itself (`const now = new
+  // Date()`, not an injected parameter), and `computeAgeTier` compares it
+  // against the DOB entirely in UTC (see age-gate.ts). Pinning `now` with
+  // fake timers and building every DOB below from that same pinned instant
+  // via `Date.UTC(...)` keeps both operands in one frame, deterministically,
+  // regardless of the host's local time zone — the exact mixed-frame bug
+  // class `age-gate.test.ts`'s "clock frame (regression)" suite exists to
+  // catch (B6). The previous version built DOBs with local-time
+  // `.setFullYear`/`.setDate` off the *real* `new Date()`, which only
+  // happened to agree with the UTC comparison because CI runs in UTC and a
+  // one-day margin was baked into every DOB.
+  const NOW = new Date("2026-03-15T12:00:00.000Z");
+
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
     mockEnv = {
       DATABASE_URL: "postgresql://test:test@localhost:5432/test",
       SESSION_SECRET: "test-secret-32-characters-long!!",
     } as Env;
   });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /**
+   * A UTC date of birth `years` years before the pinned `NOW`, `dayOffset`
+   * days before that anniversary (so `dayOffset: 1` means "birthday was
+   * yesterday" — already past, matching the pre-existing tests' intent of a
+   * definite, non-boundary transition).
+   */
+  function dobYearsAgoUtc(years: number, dayOffset: number): Date {
+    return new Date(
+      Date.UTC(NOW.getUTCFullYear() - years, NOW.getUTCMonth(), NOW.getUTCDate() - dayOffset),
+    );
+  }
 
   it("should return 0 transitions when no users have DOB", async () => {
     mockPrisma.user.findMany.mockResolvedValue([]);
@@ -68,9 +99,7 @@ describe("checkAgeTierTransitions", () => {
 
   it("should transition CHILD to TEEN when birthday crosses 13", async () => {
     // User is 13 years old now but still marked as CHILD
-    const dob = new Date();
-    dob.setFullYear(dob.getFullYear() - 13);
-    dob.setDate(dob.getDate() - 1); // ensure past birthday
+    const dob = dobYearsAgoUtc(13, 1); // birthday was yesterday
 
     mockPrisma.user.findMany.mockResolvedValue([
       {
@@ -107,9 +136,7 @@ describe("checkAgeTierTransitions", () => {
   });
 
   it("should keep more restrictive user settings on CHILD to TEEN transition", async () => {
-    const dob = new Date();
-    dob.setFullYear(dob.getFullYear() - 13);
-    dob.setDate(dob.getDate() - 1);
+    const dob = dobYearsAgoUtc(13, 1);
 
     mockPrisma.user.findMany.mockResolvedValue([
       {
@@ -147,9 +174,7 @@ describe("checkAgeTierTransitions", () => {
   });
 
   it("should notify guardian on TEEN to ADULT transition", async () => {
-    const dob = new Date();
-    dob.setFullYear(dob.getFullYear() - 18);
-    dob.setDate(dob.getDate() - 1);
+    const dob = dobYearsAgoUtc(18, 1);
 
     mockPrisma.user.findMany.mockResolvedValue([
       {
@@ -198,9 +223,7 @@ describe("checkAgeTierTransitions", () => {
   });
 
   it("should send notifications to user and guardian", async () => {
-    const dob = new Date();
-    dob.setFullYear(dob.getFullYear() - 13);
-    dob.setDate(dob.getDate() - 1);
+    const dob = dobYearsAgoUtc(13, 1);
 
     mockPrisma.user.findMany.mockResolvedValue([
       {
@@ -232,13 +255,8 @@ describe("checkAgeTierTransitions", () => {
   });
 
   it("should continue processing other users when one fails", async () => {
-    const dob13 = new Date();
-    dob13.setFullYear(dob13.getFullYear() - 13);
-    dob13.setDate(dob13.getDate() - 1);
-
-    const dob18 = new Date();
-    dob18.setFullYear(dob18.getFullYear() - 18);
-    dob18.setDate(dob18.getDate() - 1);
+    const dob13 = dobYearsAgoUtc(13, 1);
+    const dob18 = dobYearsAgoUtc(18, 1);
 
     mockPrisma.user.findMany.mockResolvedValue([
       {

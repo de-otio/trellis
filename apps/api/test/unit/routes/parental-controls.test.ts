@@ -32,6 +32,7 @@ vi.mock("../../../src/lib/security-headers", () => ({
   },
 }));
 
+import { composeMiddleware } from "../../../src/lib/middleware.js";
 import { parentalControlRoutes } from "../../../src/lib/routes/parental-controls.js";
 
 const mockEnv = { SESSION_SECRET: "test-secret-32-characters-long!!" } as any;
@@ -78,18 +79,45 @@ function isGone(route: (typeof parentalControlRoutes)[number]): boolean {
   return (route.description ?? "").includes("GONE");
 }
 
-async function invoke(
-  route: (typeof parentalControlRoutes)[number],
-  method: string,
-) {
-  const pathname = "/api/parental/children/child-123/settings";
+function requestFor(pathname: string, method: string): Request {
   const init: RequestInit = { method };
   if (method !== "GET" && method !== "HEAD") {
     init.body = JSON.stringify({});
     init.headers = { "content-type": "application/json" };
   }
-  const request = new Request(`https://api.example.com${pathname}`, init);
+  return new Request(`https://api.example.com${pathname}`, init);
+}
+
+async function invoke(route: (typeof parentalControlRoutes)[number], method: string) {
+  const pathname = "/api/parental/children/child-123/settings";
+  const request = requestFor(pathname, method);
   return route.handler(request, mockEnv, ctxFor(pathname) as any);
+}
+
+/**
+ * Run a request through the route's *actual* middleware chain
+ * (`composeMiddleware(route.middleware)`, terminated by the handler) rather
+ * than calling `route.handler` directly. This is the same composition
+ * production uses (`app.ts`'s `mount()`: `[...route.middleware, …, handler]`)
+ * and is load-bearing for the GONE-authenticated-caller assertion below:
+ * `route.handler` alone always returns 410 regardless of CSRF, so invoking it
+ * directly (as `invoke` above does) cannot detect a broken
+ * `gateWhileMinorsUnsupported` CSRF strip (B2). Composing the real chain
+ * means a CSRF middleware that survives the strip actually intercepts the
+ * request — with a session present and no `X-CSRF-Token` header, it answers
+ * 403 before the handler ever runs.
+ */
+async function invokeThroughMiddleware(
+  route: (typeof parentalControlRoutes)[number],
+  method: string,
+) {
+  const pathname = "/api/parental/children/child-123/settings";
+  const request = requestFor(pathname, method);
+  const url = new URL(request.url);
+  const chain = composeMiddleware(route.middleware ?? []);
+  return chain({ request, env: mockEnv, url, pathname, method }, () =>
+    route.handler(request, mockEnv, ctxFor(pathname) as any),
+  );
 }
 
 describe("parental-controls routes: auth gating", () => {
@@ -124,7 +152,7 @@ describe("parental-controls routes: auth gating", () => {
     expect(getSessionMock).toHaveBeenCalledTimes(liveRouteCount);
   });
 
-  it("every GONE route also returns 410 for an authenticated caller", async () => {
+  it("every GONE route also returns 410 for an authenticated caller, through the real middleware chain", async () => {
     getSessionMock.mockResolvedValue({
       userId: "guardian1",
       email: "guardian@example.com",
@@ -133,10 +161,16 @@ describe("parental-controls routes: auth gating", () => {
 
     for (const route of parentalControlRoutes.filter(isGone)) {
       const method = Array.isArray(route.method) ? route.method[0] : route.method!;
-      const res = await invoke(route, method);
+      // No X-CSRF-Token header: a state-changing (PUT/DELETE) request with an
+      // authenticated session but no CSRF token is exactly the request shape
+      // csrfMiddleware() answers with 403 "CSRF token required" when it is
+      // still wired into the chain. Running through the composed middleware
+      // (not the handler alone) is what makes this assertion meaningful — see
+      // `invokeThroughMiddleware`.
+      const res = await invokeThroughMiddleware(route, method);
       expect(
         res.status,
-        `route "${route.description}" (${method}) must stay 410 even for an authenticated caller`,
+        `route "${route.description}" (${method}) must stay 410 even for an authenticated caller (a 403 here means the CSRF strip in gateWhileMinorsUnsupported broke)`,
       ).toBe(410);
     }
   });

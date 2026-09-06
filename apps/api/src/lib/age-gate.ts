@@ -22,6 +22,8 @@
 
 import type { AgeTier } from "@prisma/client";
 
+import { getLogger } from "./logger.js";
+
 /**
  * Minimum age, in years, to hold an account.
  *
@@ -263,6 +265,19 @@ export function requiresParentalConsent(ageTier: AgeTier): boolean {
 
 /**
  * Returns the feature access configuration for the given age tier.
+ *
+ * Fail-closed on anything outside the known `AgeTier` values: at the type
+ * level the switch below is exhaustive, but the runtime input can be an
+ * unchecked JWT/session claim cast to `AgeTier` (see `resolveSessionAgeTier`
+ * callers), or a future schema enum value this function hasn't been taught
+ * about yet. Falling through to `undefined` — the pre-existing behaviour —
+ * turns every boolean read (`canEditNotificationPreferences`, …) into a falsy
+ * "restricted" value, but turns every nullable numeric cap
+ * (`maxFeedPages`, …) into an effectively *unlimited* one, because callers
+ * compare with `!= null`. That split is the wrong direction for a function
+ * whose whole purpose is to restrict by tier: an unrecognised tier must be
+ * treated at least as restrictively as the most restrictive known tier
+ * (CHILD), not treated as adult-unlimited for half its fields.
  */
 export function getFeatureAccess(ageTier: AgeTier): FeatureAccess {
   switch (ageTier) {
@@ -313,5 +328,15 @@ export function getFeatureAccess(ageTier: AgeTier): FeatureAccess {
         showUnreadCount: true,
         dmAccess: "connections",
       };
+
+    default:
+      // Fail-closed: an ageTier value outside the known enum (an unchecked
+      // claim, a future schema addition this switch hasn't been updated for)
+      // gets the most restrictive tier's access rather than `undefined`.
+      getLogger().error(
+        "[age-gate] getFeatureAccess received an unrecognised ageTier; failing closed to CHILD access",
+        { ageTier },
+      );
+      return getFeatureAccess("CHILD" as AgeTier);
   }
 }
