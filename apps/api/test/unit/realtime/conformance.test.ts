@@ -8,6 +8,13 @@
  * InMemorySettingStore (ciphertext-only, optimistic concurrency). We do NOT
  * import WS5's PrismaEncryptedSettingsStore — the conformance suite must stay
  * runnable with zero infra.
+ *
+ * Thin-test audit (2026-09): this file itself has 0 `expect()` calls — that
+ * is intentional. It only wires two harnesses into the shared
+ * `runRealtimeTransportConformance()` suite (`test/_helpers/realtime-conformance.ts`),
+ * which defines ~11 real `it()`s per transport with substantial assertions
+ * (fence-runs-once, policy-denied dropping, error containment, store
+ * round-tripping). Confirmed by reading that helper directly.
  */
 
 import { describe } from "vitest";
