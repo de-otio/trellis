@@ -9,6 +9,7 @@ import { Create, Note } from "@fedify/fedify/vocab";
 // See post-service-fedify.ts: polyfill VALUE for runtime, global `Temporal` type
 // (fedify 2 / TS6 lib.esnext.temporal) for the vocab constructor signatures.
 import { Temporal as TemporalPolyfill } from "@js-temporal/polyfill";
+import * as crypto from "node:crypto";
 import type { Env } from "../../../env.js";
 import type { User } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
@@ -165,7 +166,10 @@ export class DmServiceFedify {
     }
 
     const published = new Date();
-    const dmId = `dm_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+    // The id becomes a dereferenceable object URI. `Math.random` gave it ~5
+    // base-36 characters of non-cryptographic entropy on top of a timestamp,
+    // which made DM URIs guessable; a v4 UUID is 122 random bits.
+    const dmId = `dm_${crypto.randomUUID()}`;
     const uris = this.generateDmUris(dmId, env, requestUrl);
     const activity = await this.createDmCreateActivity(
       dmId,

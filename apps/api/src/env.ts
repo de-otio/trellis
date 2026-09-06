@@ -75,6 +75,17 @@ export interface Env {
   SESSION_SECRET: string;
   SESSION_SECRET_FALLBACK?: string;
   SESSION_SALT?: string;
+
+  // MFA verification throttle (AUTH-1 hardening). Thresholds are runtime
+  // config, never compiled-in constants (AGENTS.md §7). Defaults live in
+  // lib/routes/mfa.ts: 5 attempts per user and 20 per client IP, both over a
+  // 300-second window, on /api/mfa/verify and /api/mfa/enroll/finalize.
+  /** Max verification attempts per user per window. Default 5. */
+  MFA_VERIFY_MAX_ATTEMPTS?: string;
+  /** Max verification attempts per client IP per window. Default 20. */
+  MFA_VERIFY_MAX_ATTEMPTS_PER_IP?: string;
+  /** Window the attempt budgets refill over, in seconds. Default 300. */
+  MFA_VERIFY_WINDOW_SECONDS?: string;
   COGNITO_USER_POOL_ID?: string;
   COGNITO_APP_CLIENT_ID?: string;
   COGNITO_REGION?: string;
@@ -1625,6 +1636,9 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     SESSION_SECRET: sessionSecret,
     SESSION_SECRET_FALLBACK: sessionSecretFallback,
     SESSION_SALT: process.env.SESSION_SALT,
+    MFA_VERIFY_MAX_ATTEMPTS: process.env.MFA_VERIFY_MAX_ATTEMPTS,
+    MFA_VERIFY_MAX_ATTEMPTS_PER_IP: process.env.MFA_VERIFY_MAX_ATTEMPTS_PER_IP,
+    MFA_VERIFY_WINDOW_SECONDS: process.env.MFA_VERIFY_WINDOW_SECONDS,
     COGNITO_USER_POOL_ID: process.env.COGNITO_USER_POOL_ID,
     COGNITO_APP_CLIENT_ID: process.env.COGNITO_APP_CLIENT_ID,
     COGNITO_REGION: process.env.COGNITO_REGION || process.env.AWS_REGION || "us-east-1",

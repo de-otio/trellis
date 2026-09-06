@@ -217,6 +217,12 @@ export function buildBootEnvSchema(stage: BootStage) {
       SESSION_SECRET_ARN: z.string().min(1).optional(),
       SESSION_SALT: z.string().min(1).optional(),
 
+      // MFA verification throttle (see Env in env.ts). Positive integers as
+      // strings; the route falls back to its defaults when unset.
+      MFA_VERIFY_MAX_ATTEMPTS: z.string().regex(/^[1-9]\d*$/).optional(),
+      MFA_VERIFY_MAX_ATTEMPTS_PER_IP: z.string().regex(/^[1-9]\d*$/).optional(),
+      MFA_VERIFY_WINDOW_SECONDS: z.string().regex(/^[1-9]\d*$/).optional(),
+
       COGNITO_USER_POOL_ID: z.string().min(1).optional(),
       COGNITO_APP_CLIENT_ID: z.string().min(1).optional(),
 

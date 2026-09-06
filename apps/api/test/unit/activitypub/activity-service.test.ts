@@ -332,6 +332,27 @@ describe("ActivityService", () => {
       expect(sql).toContain("p.hidden_by_author = false");
     });
 
+    it("withholds blind-recipient-only rows in the SAME statement (DP-4)", async () => {
+      (mockPrisma.$queryRaw as any).mockResolvedValue([]);
+
+      await ActivityService.getOutboxActivities(
+        mockPrisma as PrismaClient,
+        ACTOR,
+        1,
+        20,
+      );
+
+      const sql = normalize((mockPrisma.$queryRaw as any).mock.calls[0][0].sql);
+
+      // A DM is a Create with `bto` and no `to`/`cc`, and no `posts` row — the
+      // object-identity clause alone passes it through. The second clause must
+      // be present, and it must key on the ABSENCE of a public audience, not
+      // on the activity type.
+      expect(sql).toContain("a.bto IS NOT NULL OR a.bcc IS NOT NULL");
+      expect(sql).toContain("a.to IS NULL");
+      expect(sql).toContain("a.cc IS NULL");
+    });
+
     it("cuts the page after the gate, not before", async () => {
       (mockPrisma.$queryRaw as any).mockResolvedValue([]);
 
