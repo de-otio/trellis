@@ -5,6 +5,14 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # D4 — the merge queue re-runs CI against the speculative merge commit on a
+  # `refs/heads/gh-readonly-queue/main/...` ref. Without this trigger the whole
+  # workflow never fires there, `ci-required` never reports, and the queue waits
+  # on a check that will never arrive until it times out and evicts the pull
+  # request. That failure mode is silent: the pull request looks queued, not
+  # broken. This trigger is a hard prerequisite for enabling the `merge_queue`
+  # rule on `main` — never add the rule before this is on `main`.
+  merge_group:
   workflow_dispatch:
 
 # MED-1 (2026-08 security review): id-token: write used to be granted here
@@ -21,9 +29,11 @@ on:
 permissions:
   contents: read
 
+# A cancelled merge-queue run reports no result, which the queue reads the same
+# way as a failure — so merge_group is never cancel-eligible, alongside main.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  cancel-in-progress: ${{ github.event_name != 'merge_group' && github.ref != 'refs/heads/main' }}
 
 jobs:
   lint-and-test:
