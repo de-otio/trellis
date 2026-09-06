@@ -221,6 +221,14 @@ export class ActivityProcessor {
           objectId,
           activityId: activity.id || undefined,
           read: false,
+          // Trusting the remote `published` as `createdAt` is acceptable for a
+          // DM (one recipient, no shared ordering). Do NOT copy this pattern
+          // into post ingestion when processCreate/processAnnounce land: the
+          // feed's declared order is `createdAt DESC` (feed-pagination.ts),
+          // so a remote actor choosing `published` would choose its position
+          // in every follower's chronological feed — future-dating pins to
+          // the top. Posts take receive time as `createdAt` and keep the
+          // author's claim in `Post.published` for display.
           createdAt: activity.published
             ? new Date(activity.published)
             : new Date(),

@@ -10,6 +10,10 @@ import {
   buildPostAudienceFilter,
   FeedHandler,
 } from "../../src/lib/feed-handler.js";
+import {
+  FEED_ORDER_BY,
+  FEED_RANKER_ID,
+} from "../../src/lib/feed-pagination.js";
 import type { TrellisRequestContext } from "../../src/lib/request-context.js";
 import type { Session } from "../../src/lib/session-cookie.js";
 
@@ -463,6 +467,31 @@ describe("FeedHandler", () => {
           }),
         }),
       );
+    });
+
+    it("issues the query with FEED_ORDER_BY and reports the ranker on the response — no covert ordering, first page included", async () => {
+      // The invariant test in feed-pagination.test.ts pins the constant;
+      // this pins that the QUERY uses it (the two were unrelated facts
+      // before FEED_ORDER_BY existed) and that the order is on the wire.
+      const request = new Request("http://test.com/feeds/home");
+      const response = await handler.getHomeFeed(
+        mockSession,
+        request,
+        mockEnv,
+        { limit: 20 },
+        mockRequestContext,
+        TEST_TENANT_ID,
+      );
+
+      expect(mockDb.post.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          orderBy: [...FEED_ORDER_BY],
+        }),
+      );
+      expect(response.status).toBe(200);
+      const data = await response.json();
+      expect(data.ranker).toBe(FEED_RANKER_ID);
+      expect(data.ranker).toBe("chronological@1");
     });
 
     it("should handle pagination with cursor", async () => {

@@ -218,6 +218,23 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ### Added
 
+- **Every feed response now says which order produced it, and the query
+  derives that order from the allowlist instead of restating it.** The home
+  and entity feeds (`FeedResponse`) and the circles feed carry a `ranker`
+  field — `"chronological@1"`, the value of `FEED_RANKER_ID` — so a client
+  can show the user how the page is ordered; the no-covert-engagement-ordering
+  invariant (`docs/concepts/feed-ordering.md`) requires every order to be
+  declared *and user-visible*, and until now the visibility half lived only
+  in documentation. Underneath, the feed's `orderBy` is now `FEED_ORDER_BY`
+  (`feed-pagination.ts`), built from `ALLOWED_SORT_FIELDS` and tied to it
+  with a `satisfies` clause. Before this the pinned constants had no runtime
+  consumer at all: the query hardcoded `createdAt DESC, id DESC` on its own,
+  so the "reproducibility invariant" test could stay green while the feed
+  sorted by something else. The invariant test block now pins
+  `FEED_ORDER_BY`, and the feed-handler tests assert the query is issued with
+  it. Additive: no existing field changes. Also documented (`SCORING-CODEBOOK.md`
+  §11d) the one user-facing list that *is* ordered by the scoring engine's
+  output — the viewer's own circle roster — so the exposure map is complete.
 - **Content reports — the Art. 16 notice-and-action path (`reportType:
   "CONTENT"`).** A reporter picks from a data-driven category vocabulary
   (`GET /api/report-categories` returns the ACTIVE `ReportCategory` rows a

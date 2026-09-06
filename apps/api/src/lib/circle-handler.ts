@@ -16,6 +16,7 @@
  */
 
 import type { Env } from "../env.js";
+import { FEED_RANKER_ID } from "./feed-pagination.js";
 import type { OrgCategoryFeedFilter } from "./graph/graph-service.js";
 import type { TrellisRequestContext } from "./request-context.js";
 import type { Session } from "./session-cookie.js";
@@ -111,7 +112,10 @@ export class CircleHandler {
         orgFilter,
       );
 
-      return new Response(JSON.stringify(result), {
+      // Same declared order as the home feed (`created_at DESC, id DESC` in
+      // lib/graph/postgres/circles.ts), reported the same way — see
+      // FeedResponse.ranker in feed-handler.ts.
+      return new Response(JSON.stringify({ ...result, ranker: FEED_RANKER_ID }), {
         status: 200,
         headers: { "content-type": "application/json" },
       });

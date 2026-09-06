@@ -33,10 +33,10 @@ current implementation:
   part after it is `FEED_RANKING_VERSION`. The two are always in lockstep —
   see the constant's doc comment for the discipline.
 
-None of this is currently returned on the feed API response (`FeedResponse`
-in `apps/api/src/lib/feed-handler.ts` carries no ranking-metadata field
-today). If a ranking-metadata field is ever added to that response,
-`FEED_RANKER_ID` is the value it should carry.
+Every feed response says which order produced it: `ranker` on the home and
+entity feeds (`FeedResponse` in `apps/api/src/lib/feed-handler.ts`) and on
+the circles feed carries `FEED_RANKER_ID`. A client can show it; "declared
+and user-visible" is a property of the wire, not only of this page.
 
 ## What is — and isn't — used to order the feed
 
@@ -93,15 +93,22 @@ research-lead sign-off — see `apps/api/src/lib/REPRODUCIBILITY.md`.
 
 ## How it's enforced
 
-- **`validateSortField()`** (`feed-pagination.ts`) rejects any sort field not
-  in `ALLOWED_SORT_FIELDS` — engagement-metric field names like
-  `sentimentCount`, `commentCount`, `score`, and `relevance` are explicitly
-  tested as rejected.
+- **The query derives its order from the allowlist.** The feed's `orderBy`
+  is `FEED_ORDER_BY` (`feed-pagination.ts`), built from `ALLOWED_SORT_FIELDS`
+  and tied to it with a `satisfies` clause — so the pinned constant and the
+  executed `ORDER BY` are one fact, and changing either without the other
+  fails `tsc --build`. The feed does not accept a sort parameter;
+  `validateSortField()` exists for any future request-supplied sort and is
+  unit-tested to reject engagement-metric names (`sentimentCount`,
+  `commentCount`, `score`, `relevance`, …), but nothing on the request path
+  calls it today.
 - A CI-enforced test suite
   (`apps/api/test/unit/feed-pagination.test.ts`, the "feed sort-field
   reproducibility invariant" block) pins the exact expected values of
-  `ALLOWED_SORT_FIELDS`, `FEED_RANKING_VERSION`, and `FEED_RANKER_ID`. If
-  any of them drift, that test fails the build.
+  `ALLOWED_SORT_FIELDS`, `FEED_ORDER_BY`, `FEED_RANKING_VERSION`, and
+  `FEED_RANKER_ID`, and `apps/api/test/unit/feed-handler.test.ts` asserts
+  the query is issued with `FEED_ORDER_BY` and the response reports the
+  ranker. If any of them drift, that test fails the build.
 - A sibling test
   (`apps/api/test/unit/feed-personalization-options.test.ts`) pins the exact
   set of personalization option names and fails if a scoring-shaped name

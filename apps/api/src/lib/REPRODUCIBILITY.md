@@ -67,8 +67,10 @@ export const FEED_RANKER_ID = "chronological@1" as const;
 `FEED_RANKING_VERSION` carries as a bare integer — `{name}@{version}`. It
 follows identical bump discipline: the `@N` suffix must always equal
 `FEED_RANKING_VERSION`, and both change together, under the same sign-off.
-It is not currently exposed on the feed HTTP response (`FeedResponse` in
-`feed-handler.ts` has no ranking-metadata field today); see
+It is returned as `ranker` on every feed response (`FeedResponse` in
+`feed-handler.ts`; the circles feed in `circle-handler.ts`), and the
+executed `ORDER BY` is derived from `ALLOWED_SORT_FIELDS` through
+`FEED_ORDER_BY` rather than restated in the query; see
 [`docs/concepts/feed-ordering.md`](../../../../docs/concepts/feed-ordering.md)
 for the user-facing explanation of how the feed is ordered.
 
