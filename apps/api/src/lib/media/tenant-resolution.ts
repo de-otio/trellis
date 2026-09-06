@@ -53,3 +53,13 @@ export function resolveMediaTenantId(
   }
   return { ok: false, reason: "no-tenant" };
 }
+
+/**
+ * The same decision, for any tenant-scoped WRITE reached over a
+ * cookie-authenticated path rather than a Bearer JWT (entity create — the
+ * Bearer routes take the tenant from `auth.activeTenantId` instead).
+ *
+ * Exported under a neutral alias so a non-media caller does not have to read
+ * as media code: one decision, one place to change it, one test suite.
+ */
+export const resolveWriteTenantId = resolveMediaTenantId;

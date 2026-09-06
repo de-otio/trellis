@@ -150,9 +150,7 @@ describe("SecurityMonitor", () => {
   });
 
   describe("logSecurityEvent", () => {
-    // TRIAGE(AR14): fix — mock fixture predates the tenantId migration (still
-    // keyed on the old partnerId field); not a dead skip.
-    it.skip("[T7] should store security event in database (replace partnerId mock with tenantId)", async () => {
+    it("[T7] should store security event in database", async () => {
       await monitor.logSecurityEvent(
         {
           type: "sso_config_error",
@@ -172,7 +170,9 @@ describe("SecurityMonitor", () => {
             type: "sso_config_error",
             severity: "medium",
             userId: null,
-            partnerId: null,
+            // T1 (v0.7): the column is `tenantId`; the input event shape keeps
+            // the legacy `partnerId` key, but nothing persists under that name.
+            tenantId: null,
             ipAddress: "192.168.1.1",
             userAgent: "test-agent",
             details: expect.stringContaining("tokens_in_url"),
@@ -533,8 +533,9 @@ describe("SecurityMonitor", () => {
       expect(global.fetch).not.toHaveBeenCalled();
     });
 
-    // TRIAGE(AR14): fix — same partnerId→tenantId rename debt as above.
-    it.skip("[T7] should include partnerId in security event (rename to tenantId)", async () => {
+    // The event payload still carries `partnerId` (the pre-v0.7 spelling of the
+    // caller-facing field); the row it produces must be keyed on `tenantId`.
+    it("[T7] should persist the event's partnerId as tenantId", async () => {
       await monitor.logSecurityEvent(
         {
           type: "sso_login",
@@ -548,7 +549,7 @@ describe("SecurityMonitor", () => {
       expect(mockPrisma.securityEvent.create).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({
-            partnerId: "partner-123",
+            tenantId: "partner-123",
           }),
         }),
       );

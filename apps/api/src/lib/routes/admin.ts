@@ -144,6 +144,82 @@ async function requireSuperAdminSession(
   return null;
 }
 
+/**
+ * Give a synthetic test user the personal tenant a real account receives at
+ * post-confirmation (`lib/identity/provision-confirmed-user.ts`), so
+ * tenant-scoped writes on its behalf have a tenant to resolve.
+ *
+ * Idempotent and best-effort: a user that already has one is left alone, and a
+ * failure is logged rather than failing user creation — the seam's contract is
+ * "a usable test user", and the tenant-less case is exactly what callers hit
+ * before this existed. Deliberately a local helper, not a call into the
+ * production provisioning path, which does a great deal more (handles, actor
+ * URIs, claim invalidation) that a synthetic user has no use for.
+ */
+async function ensurePersonalTenant(
+  userId: string,
+  region: string,
+  env: any,
+  logger: Logger,
+): Promise<void> {
+  try {
+    await withQueryTimeoutAndRetry(
+      sharedDatabaseConnectionManager,
+      region,
+      env,
+      async (db) => {
+        const existing = await db.user.findUnique({
+          where: { id: userId },
+          select: { personalTenantId: true, handle: true },
+        });
+        if (!existing || existing.personalTenantId) return;
+
+        // Upsert on the slug: the tenant survives `deleteUserData` (the FK is
+        // ON DELETE SET NULL), so re-minting a user with the same id must
+        // re-adopt its old personal tenant rather than collide on the slug.
+        const slug = `personal-${userId}`;
+        const tenant = await db.tenant.upsert({
+          where: { slug },
+          create: {
+            slug,
+            displayName: existing.handle ?? "personal",
+            type: "PERSONAL",
+            personalOwnerUserId: userId,
+            region,
+          },
+          update: { personalOwnerUserId: userId, status: "ACTIVE" },
+        });
+        await db.tenantMember.upsert({
+          where: { tenantId_userId: { tenantId: tenant.id, userId } },
+          create: {
+            tenantId: tenant.id,
+            userId,
+            role: "OWNER",
+            status: "ACTIVE",
+            joinedAt: new Date(),
+          },
+          update: { status: "ACTIVE" },
+        });
+        await db.user.update({
+          where: { id: userId },
+          data: { personalTenantId: tenant.id },
+        });
+      },
+      {
+        ...QueryTimeoutPresets.STANDARD,
+        timeoutMs: 5000,
+        maxRetries: 1,
+        context: { operation: "testUserPersonalTenant", userId },
+      },
+    );
+  } catch (error: any) {
+    logger.warn("[Admin Test] Could not provision personal tenant", {
+      userId,
+      error: error?.message,
+    });
+  }
+}
+
 export const adminRoutes: Route[] = [
   // Test-only endpoints (must be before wildcard routes)
   // Test-only endpoint: Create test user. SEC L1: explicitly gated AND
@@ -263,6 +339,14 @@ export const adminRoutes: Route[] = [
           userId: createdUser.id,
           region,
         });
+
+        // Every REAL account gets a personal tenant at post-confirmation
+        // (lib/identity/provision-confirmed-user.ts). This synthetic seam
+        // bypasses that hook, so users minted here used to have no tenant at
+        // all — and any tenant-scoped write on their behalf (entity create,
+        // media upload) then failed closed with no tenant to resolve. Mint
+        // one here so a test user matches the shape of a real one.
+        await ensurePersonalTenant(createdUser.id, region, env, logger);
 
         // Create a session for the test user so tests don't need to know SESSION_SECRET
         const sessionManager = new SessionManager();

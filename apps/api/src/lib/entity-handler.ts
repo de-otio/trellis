@@ -178,6 +178,9 @@ export class EntityHandler {
           region: finalRegion,
         },
       );
+      // Resolved from the user row the upsert below returns; feeds the
+      // tenant resolution that scopes the entity (see the create call).
+      let personalTenantId: string | null = null;
       try {
         console.error("[ENTITY_HANDLER] About to upsert user", {
           userId: session.userId,
@@ -208,7 +211,14 @@ export class EntityHandler {
             ...(session.email ? { email: session.email } : {}),
             // Don't update region/dataRegion on existing users (preserve their region)
           },
-        }) as unknown as Promise<{ id: string; email: string }>);
+        }) as unknown as Promise<{
+          id: string;
+          email: string;
+          personalTenantId?: string | null;
+        }>);
+        // The upsert returns the whole row, so the personal tenant needed to
+        // scope the entity below costs no extra query.
+        personalTenantId = user.personalTenantId ?? null;
         console.error("[ENTITY_HANDLER] User ensured successfully", {
           userId: user.id,
           email: user.email,
@@ -283,11 +293,61 @@ export class EntityHandler {
         );
       }
 
+      // Multi-tenancy (v0.7): `Entity.tenantId` is a required relation and
+      // ownership moved off the row into `EntityOwnership`. This handler was
+      // not updated with the rest of the identity-federation migration, so it
+      // wrote neither — it sent an `ownerId` scalar that no longer exists and
+      // omitted the tenant, and every create 500'd on `Argument 'tenant' is
+      // missing`. `entityData` is `any`, so the compiler never saw it.
+      //
+      // Tenant resolution follows the same rule as the media write path
+      // (lib/media/tenant-resolution.ts): the ambient tenant from the auth
+      // seam wins; with TENANT_SCOPE_MODE="off" (the default) fall back to the
+      // creator's personal tenant. FAIL CLOSED — never guess a tenant.
+      const { getCurrentTenantId } = await import(
+        "@de-otio/saas-foundation/tenant"
+      );
+      const { resolveTenantScopeMode } = await import("./tenant-scope.js");
+      const { resolveWriteTenantId } = await import(
+        "./media/tenant-resolution.js"
+      );
+      const tenantResolution = resolveWriteTenantId(
+        getCurrentTenantId(),
+        personalTenantId,
+        resolveTenantScopeMode(),
+      );
+      if (!tenantResolution.ok) {
+        this.logger.warn(
+          "[ENTITY_HANDLER] Refusing entity create — no tenant could be resolved",
+          { userId: session.userId, region: finalRegion },
+        );
+        return new Response(
+          JSON.stringify({
+            error: "NO_ACTIVE_TENANT",
+            message: "No active tenant for this account",
+          }),
+          { status: 403, headers: { "content-type": "application/json" } },
+        );
+      }
+      const entityTenantId = tenantResolution.tenantId;
+
       const entityData: any = {
         name: profileData.name.trim(),
         entityType,
-        ownerId: session.userId,
+        tenantId: entityTenantId,
         metadata,
+        // The creator's ownership row, written in the same statement so an
+        // entity is never persisted without an owner. (The graph dual-write
+        // below also upserts it, but only when an AMBIENT tenant is set —
+        // which it is not in the default scope mode.)
+        owners: {
+          create: {
+            tenantId: entityTenantId,
+            userId: session.userId,
+            role: "PRIMARY_OWNER",
+            addedByUserId: session.userId,
+          },
+        },
       };
 
       // Set life stage if calculated
