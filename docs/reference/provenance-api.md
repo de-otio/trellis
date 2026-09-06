@@ -97,7 +97,7 @@ On create (`POST /api/posts`, `POST /api/posts/:id/comments`):
 - Omitting `provenance` is always valid unless the tenant's posture requires it
   (see below).
 
-On edit (`PATCH /api/posts/:id`, `PATCH /api/posts/:postId/comments/:id`), the same
+On edit (`PATCH /api/posts/:id`, `PATCH /api/comments/:id`), the same
 shape applies, with one rule:
 
 > **A declaration may be raised, never lowered.** An attempt to reduce it returns

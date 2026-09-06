@@ -62,6 +62,18 @@ exposes the root only, so deep specifiers into `lib/` do not resolve.
 > declaration only — the `scopes`/`events` _catalogs_ on `TrellisExtension`
 > and `ExtensionSession.clientId` — see [Live since 0.10.0](#live-since-0100).
 >
+> **Threat model for `scopes`: a guard rail, not a sandbox.** Extension code
+> runs in-process and unsandboxed — see
+> [Trust model](../../packages/extension-api/README.md#trust-model--extensions-are-not-sandboxed).
+> The `scopes` check on `extensionRoutes` is real: it is enforced before your
+> handler runs, and it is a genuine confused-deputy defence against a hostile
+> HTTP caller trying to reach a route it should not be able to invoke. It does
+> **not** contain a hostile extension — an extension is trusted code that can
+> read `process.env` or import the database client directly regardless of what
+> any route declares. Read `scopes` as protecting the platform from an
+> honest-but-wrong extension and from callers the extension did not mean to
+> authorize, never as an isolation boundary around the extension itself.
+>
 > `0.9.1 → 0.9.2` tightens `ExtensionModelMap` from `Record<string, object>` to
 > `Record<string, ScopedDelegate>`, with **no runtime change**. If you declare a
 > model map by hand, each delegate must now carry all thirteen scoped
@@ -325,7 +337,13 @@ unless raw control is required.
 ## The extension context
 
 Every handler and enrichment callback receives an `ExtensionContext` — a
-deliberately restricted runtime environment. Core secrets are never exposed.
+deliberately restricted runtime environment. Core secrets are never exposed
+*through this object*: it carries a tenant-scoped `db`, not `env.SESSION_SECRET`
+or a raw Prisma client. That is a narrowed API surface, not process isolation —
+extension code runs in the same process and can reach `process.env` or
+`import("@prisma/client")` directly, regardless of what `ExtensionContext`
+offers it. See
+[Trust model — extensions are NOT sandboxed](../../packages/extension-api/README.md#trust-model--extensions-are-not-sandboxed).
 (Scheduled jobs receive the narrower `ExtensionJobContext` instead — see
 [Scheduled jobs](#scheduled-jobs).)
 
