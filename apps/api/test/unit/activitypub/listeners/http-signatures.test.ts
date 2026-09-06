@@ -13,6 +13,7 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "../../../../src/env.js";
 import {
   signRequest,
+  SigningUnavailableError,
   verifyHttpSignature,
   verifyInboxRequest,
 } from "../../../../src/lib/activitypub/listeners/http-signatures.js";
@@ -235,19 +236,28 @@ describe("verifyInboxRequest", () => {
 });
 
 describe("signRequest", () => {
-  it("returns the original request when no key pair is available", async () => {
+  it("THROWS when no key pair is available — never returns an unsigned request", async () => {
     mockGetKeyPair = vi.fn().mockResolvedValue(null);
     const request = new Request("https://remote.example/inbox", {
       method: "POST",
       body: "{}",
     });
 
-    const signed = await signRequest(
-      request,
-      mockEnv as Env,
-      "https://example.com/users/bob",
-    );
-    expect(signed.headers.get("Signature")).toBeNull();
+    await expect(
+      signRequest(request, mockEnv as Env, "https://example.com/users/bob"),
+    ).rejects.toBeInstanceOf(SigningUnavailableError);
+  });
+
+  it("THROWS when the key lookup itself fails", async () => {
+    mockGetKeyPair = vi.fn().mockRejectedValue(new Error("db down"));
+    const request = new Request("https://remote.example/inbox", {
+      method: "POST",
+      body: "{}",
+    });
+
+    await expect(
+      signRequest(request, mockEnv as Env, "https://example.com/users/bob"),
+    ).rejects.toBeInstanceOf(SigningUnavailableError);
   });
 
   it("signs with the local private key, covering the digest", async () => {

@@ -1446,6 +1446,20 @@ export function validateEnv(env: Env): string[] {
     }
   }
 
+  // SECURITY (deep pass DP-13): the federation inbox's per-instance rate limit
+  // is only "shared" when a distributed limiter backs it. Without
+  // KV_PROVIDER=postgres (or a RATE_LIMIT_TABLE) the limiter silently becomes
+  // per-process memory — the exact F6 defect — so refuse to enable federation
+  // on top of it rather than let a rolling deploy reset every bucket.
+  if (env.ACTIVITYPUB_ENABLED) {
+    const kvProvider = process.env.KV_PROVIDER;
+    if (kvProvider !== "postgres" && !env.RATE_LIMIT_TABLE) {
+      errors.push(
+        "ACTIVITYPUB_ENABLED is true but the rate limiter would be per-process memory — set KV_PROVIDER=postgres (or RATE_LIMIT_TABLE) so federation limits are shared across replicas.",
+      );
+    }
+  }
+
   // SECURITY (Phase 6 M3): in production a missing Safe Browsing key means
   // every uncached link check fails to UNKNOWN and the interstitial fires on
   // everything — a link-safety feature that silently does nothing. Refuse the

@@ -8,9 +8,19 @@
 import type { PrismaClient, User } from "@prisma/client";
 import type { ActivityStreamsActivity } from "./activity-service.js";
 import { getLogger, Logger } from "../logger.js";
+import { sanitizeRemoteContent } from "./remote-content.js";
 
 export interface ActivityProcessorEnv {
   LOG_LEVEL?: string;
+}
+
+/**
+ * Where the activity arrived. The group inbox passes its own group id so a
+ * Follow can be bound to the inbox it was posted to — without this, a Follow
+ * of group A delivered to group B's inbox was processed against A.
+ */
+export interface ActivityProcessorContext {
+  readonly inboxGroupId?: string;
 }
 
 export class ActivityProcessor {
@@ -22,6 +32,7 @@ export class ActivityProcessor {
     activity: ActivityStreamsActivity,
     user: User,
     env: ActivityProcessorEnv,
+    context: ActivityProcessorContext = {},
   ): Promise<void> {
     const logger = getLogger();
 
@@ -30,7 +41,7 @@ export class ActivityProcessor {
         await this.processCreate(prisma, activity, user, logger);
         break;
       case "Follow":
-        await this.processFollow(prisma, activity, user, logger);
+        await this.processFollow(prisma, activity, user, logger, context);
         break;
       case "Like":
         await this.processLike(prisma, activity, user, logger);
@@ -175,7 +186,10 @@ export class ActivityProcessor {
     }
 
     const objectId = (object as any).id;
-    const content = (object as any).content;
+    // Remote `content` is HTML by convention (Mastodon sends it that way). It
+    // is stored in a plain-text column and re-served verbatim, so strip markup
+    // and control characters here, at the point it arrives.
+    const content = sanitizeRemoteContent((object as any).content);
 
     if (!objectId || !content) {
       logger.warn("[ActivityProcessor] DM object missing id or content");
@@ -250,6 +264,7 @@ export class ActivityProcessor {
     activity: ActivityStreamsActivity,
     user: User,
     logger: Logger,
+    context: ActivityProcessorContext = {},
   ): Promise<void> {
     const actorUri =
       typeof activity.actor === "string"
@@ -289,6 +304,20 @@ export class ActivityProcessor {
     });
 
     if (targetGroup) {
+      // A Follow that arrived at a group inbox must target THAT group. Without
+      // this binding, a Follow of group A posted to group B's inbox joined A.
+      if (context.inboxGroupId && context.inboxGroupId !== targetGroup.id) {
+        logger.warn(
+          "[ActivityProcessor] Follow target group does not match the inbox it was delivered to — refusing",
+          {
+            activityId: activity.id,
+            actorUri,
+            targetGroupId: targetGroup.id,
+            inboxGroupId: context.inboxGroupId,
+          },
+        );
+        return;
+      }
       await this.processGroupFollow(
         prisma,
         activity,
@@ -483,16 +512,19 @@ export class ActivityProcessor {
       return;
     }
 
-    // Check group privacy settings
+    // A PRIVATE group's membership is a decision its admins make, not a side
+    // effect of a signed Follow. There is no pending-request model yet, so the
+    // request is refused (logged, no row) rather than silently granted — the
+    // previous behaviour let any remote actor join a private group as MEMBER.
     if (group.privacy === "PRIVATE") {
-      // For private groups, membership requires approval
-      // Store as pending (we'll need to add a status field or handle via Follow/Accept pattern)
-      logger.info("[ActivityProcessor] Private group membership request", {
-        actorUri,
-        groupId: group.id,
-      });
-      // For now, we'll add them as MEMBER but in production you'd want a PENDING status
-      // This can be handled via Accept/Reject activities later
+      logger.warn(
+        "[ActivityProcessor] Follow of a PRIVATE group refused — membership requires admin approval, which has no federated path yet",
+        {
+          actorUri,
+          groupId: group.id,
+        },
+      );
+      return;
     }
 
     // Add user as group member
