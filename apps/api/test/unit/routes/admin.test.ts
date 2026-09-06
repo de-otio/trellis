@@ -481,6 +481,20 @@ describe("Admin Routes", () => {
       (r) => r.method === "DELETE" && r.path.toString().includes("test/users"),
     );
 
+    // The deletion path resolves the erasure-tombstone HMAC key from
+    // process.env (resolvePseudonymSecret). It used to fall back to
+    // SESSION_SECRET; that fallback is gone (DP-10), so the dedicated key
+    // must be present here, exactly as a real deployment must set it.
+    let savedPseudonymSecret: string | undefined;
+    beforeEach(() => {
+      savedPseudonymSecret = process.env.REPORT_PSEUDONYM_SECRET;
+      process.env.REPORT_PSEUDONYM_SECRET = "test-report-pseudonym-secret";
+    });
+    afterEach(() => {
+      if (savedPseudonymSecret === undefined) delete process.env.REPORT_PSEUDONYM_SECRET;
+      else process.env.REPORT_PSEUDONYM_SECRET = savedPseudonymSecret;
+    });
+
     /** Make the caller a verified SUPER_ADMIN. */
     function asSuperAdmin() {
       mockGetSession.mockResolvedValue(mockSession);
