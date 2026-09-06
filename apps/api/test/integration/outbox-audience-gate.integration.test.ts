@@ -116,6 +116,10 @@ const REMOTE_OBJECT = `${RUN}-act-remote`;
 const UPDATE_OF_NARROWED = `${RUN}-act-update-narrowed`;
 /** Another actor's row, to prove the actor scoping still holds. */
 const OTHER_ACTORS_ROW = `${RUN}-act-otheractor`;
+/** A direct message: `bto` only, no `to`/`cc`, no `posts` row (DP-4). */
+const DM_CREATE = `${RUN}-act-dm`;
+/** A public Create that ALSO names a blind recipient — must still be served. */
+const PUBLIC_WITH_BTO = `${RUN}-act-public-bto`;
 
 const activityIdFor = (key: string) => `${RUN}-act-${key}`;
 const postIdFor = (key: string) => `${RUN}-post-${key}`;
@@ -239,6 +243,35 @@ beforeAll(async () => {
     },
   });
 
+  // A direct message. DMs are Creates addressed with `bto` only; they have no
+  // `posts` row, so the object-identity clause cannot withhold them. Before
+  // DP-4 this row — and with it the DM's object URI — was served to anyone.
+  await prisma.activity.create({
+    data: {
+      id: DM_CREATE,
+      actorUri: ACTOR,
+      type: "Create",
+      objectId: `https://example.com/messages/${RUN}-dm`,
+      bto: [OTHER_ACTOR],
+      published: new Date(Date.UTC(2026, 0, 6)),
+      outboxActorUri: ACTOR,
+    },
+  });
+  // A public Create that also carries a blind recipient. The blind clause keys
+  // on the ABSENCE of a public audience, so this one must survive it.
+  await prisma.activity.create({
+    data: {
+      id: PUBLIC_WITH_BTO,
+      actorUri: ACTOR,
+      type: "Create",
+      objectId: "https://remote.example/posts/1000",
+      to: ["https://www.w3.org/ns/activitystreams#Public"],
+      bto: [OTHER_ACTOR],
+      published: new Date(Date.UTC(2026, 0, 5)),
+      outboxActorUri: ACTOR,
+    },
+  });
+
   // A different actor's public post + activity. Must never appear in ACTOR's
   // outbox — the gate must not have relaxed the actor scoping.
   const otherPostId = postIdFor("otheractor");
@@ -331,6 +364,20 @@ describe("outbox audience gate (H2)", () => {
   it("does not relax the actor scoping", async () => {
     expect(await outboxIds()).not.toContain(OTHER_ACTORS_ROW);
   });
+
+  it("WITHHOLDS a blind-recipient-only Create — a direct message (DP-4)", async () => {
+    const ids = await outboxIds();
+    expect(ids).not.toContain(DM_CREATE);
+    // Non-vacuity: the row exists and is in this actor's outbox.
+    const stillStored = await prisma.activity.findUnique({
+      where: { id: DM_CREATE },
+    });
+    expect(stillStored?.outboxActorUri).toBe(ACTOR);
+  });
+
+  it("STILL SERVES a public Create that also names a blind recipient", async () => {
+    expect(await outboxIds()).toContain(PUBLIC_WITH_BTO);
+  });
 });
 
 describe("the SQL gate and mayFederatePost agree (drift pin)", () => {
@@ -363,11 +410,11 @@ describe("count and list cannot disclose different sets", () => {
     const ids = await outboxIds();
     const count = await ActivityService.getOutboxCount(prisma, ACTOR);
 
-    // If the count were taken over the raw table it would be 9 (5 post Creates
-    // + Update + Accept + Follow + Announce); the gate withholds 5 of them, so
-    // both sides must read 4.
+    // If the count were taken over the raw table it would be 11 (5 post
+    // Creates + Update + Accept + Follow + Announce + DM + public-with-bto);
+    // the gate withholds 6 of them, so both sides must read 5.
     expect(count).toBe(ids.length);
-    expect(count).toBe(4);
+    expect(count).toBe(5);
   });
 
   it("the raw table really does hold more rows than either side reports", async () => {
@@ -376,7 +423,7 @@ describe("count and list cannot disclose different sets", () => {
     const ungated = await prisma.activity.count({
       where: { outboxActorUri: ACTOR },
     });
-    expect(ungated).toBe(9);
+    expect(ungated).toBe(11);
   });
 });
 
@@ -396,7 +443,9 @@ describe("pagination cuts the page AFTER the gate", () => {
   });
 
   it("preserves published-desc ordering and offsets over the gated set", async () => {
+    // Announce (Jan 7), then the DM (Jan 6, withheld), then the public Create
+    // with a blind recipient (Jan 5, served).
     const page2 = await ActivityService.getOutboxActivities(prisma, ACTOR, 2, 3);
-    expect(page2.map((r) => r.id)).toEqual([REMOTE_OBJECT]);
+    expect(page2.map((r) => r.id)).toEqual([REMOTE_OBJECT, PUBLIC_WITH_BTO]);
   });
 });

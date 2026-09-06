@@ -170,6 +170,58 @@ describe("Fedify Outbox Listener", () => {
       expect(body["@context"]).toBe("https://www.w3.org/ns/activitystreams");
     });
 
+    it("never publishes bto/bcc on served items (AS2 blind recipients)", async () => {
+      const request = new Request("https://example.com/users/bob/outbox", {
+        method: "GET",
+      });
+
+      const mockDb = {
+        user: {
+          findUnique: vi.fn().mockResolvedValue({
+            id: "user-123",
+            username: "bob",
+            actorUri: "https://example.com/users/bob",
+          }),
+        },
+      };
+
+      const { withQueryTimeoutAndRetry } = await import(
+        "../../../../src/lib/db-query-helper.js"
+      );
+      vi.mocked(withQueryTimeoutAndRetry).mockImplementation(
+        async (dbManager, region, env, callback) => {
+          return callback(mockDb as any);
+        },
+      );
+
+      const { ActivityService } = await import(
+        "../../../../src/lib/activitypub/activity-service.js"
+      );
+      vi.mocked(ActivityService.getOutboxActivities).mockResolvedValue([
+        {
+          type: "Create",
+          actorUri: "https://example.com/users/bob",
+          objectId: "https://example.com/posts/123",
+          targetId: null,
+          to: ["https://www.w3.org/ns/activitystreams#Public"],
+          cc: null,
+          bto: ["https://example.com/users/carol"],
+          bcc: ["https://example.com/users/dave"],
+          published: new Date("2024-01-01T00:00:00Z"),
+        },
+      ] as any);
+      vi.mocked(ActivityService.getOutboxCount).mockResolvedValue(1);
+
+      const response = await getOutboxActivities(request, mockEnv as Env, "bob");
+      const body = await response.json();
+      const item = body.orderedItems[0];
+      expect(item.to).toEqual(["https://www.w3.org/ns/activitystreams#Public"]);
+      expect(item).not.toHaveProperty("bto");
+      expect(item).not.toHaveProperty("bcc");
+      expect(JSON.stringify(body)).not.toContain("carol");
+      expect(JSON.stringify(body)).not.toContain("dave");
+    });
+
     it("should return empty OrderedCollection for user with no activities", async () => {
       const request = new Request("https://example.com/users/bob/outbox", {
         method: "GET",

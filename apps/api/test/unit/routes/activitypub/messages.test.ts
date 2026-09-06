@@ -50,10 +50,30 @@ vi.mock("../../../../src/lib/region-detection", () => ({
 
 // Mock DmServiceFedify
 const mockCreateDirectMessage = vi.fn();
+const mockCreateDmNote = vi.fn();
 vi.mock("../../../../src/lib/activitypub/services/dm-service-fedify", () => ({
   DmServiceFedify: {
     createDirectMessage: (...args: any[]) => mockCreateDirectMessage(...args),
+    createDmNote: (...args: any[]) => mockCreateDmNote(...args),
   },
+}));
+
+// Mock the HTTP-signature verifier (the federation credential for the object route)
+const mockVerifyInboxRequest = vi.fn();
+vi.mock("../../../../src/lib/activitypub/listeners/http-signatures", () => ({
+  verifyInboxRequest: (...args: any[]) => mockVerifyInboxRequest(...args),
+}));
+
+// Mock Fedify serialisation so the object route can run without a Federation
+vi.mock("../../../../src/lib/activitypub/fedify/context", () => ({
+  getFedifyContext: () => ({}),
+}));
+vi.mock("@fedify/fedify", () => ({
+  respondWithObject: async () =>
+    new Response(JSON.stringify({ type: "Note", content: "secret" }), {
+      status: 200,
+      headers: { "content-type": "application/activity+json" },
+    }),
 }));
 
 describe("ActivityPub Messages Routes", () => {
@@ -237,6 +257,121 @@ describe("ActivityPub Messages Routes", () => {
 
       // Logger error should be called
       expect(response.status).toBe(500);
+    });
+  });
+
+  describe("GET /messages/:messageId - DM object route (DP-4)", () => {
+    const route = messageRoutes.find(
+      (r) => r.method === "GET" && r.path === "/messages/:messageId",
+    );
+    const SENDER_ACTOR = "https://example.com/users/alice";
+    const RECIPIENT_ACTOR = "https://example.com/users/bob";
+    const dm = {
+      id: "dm-1",
+      senderId: "user-alice",
+      recipientId: "user-bob",
+      text: "secret",
+      objectId: "https://example.com/messages/dm-1",
+      createdAt: new Date("2026-01-01T00:00:00Z"),
+      sender: { id: "user-alice", username: "alice", actorUri: SENDER_ACTOR, publicKey: "pem" },
+      recipient: { id: "user-bob", username: "bob", actorUri: RECIPIENT_ACTOR, publicKey: "pem" },
+    };
+    const DENY = JSON.stringify({ error: "Message not found" });
+
+    const call = (req?: Request) =>
+      route!.handler(
+        req ??
+          new Request("https://example.com/messages/dm-1", { method: "GET" }),
+        mockEnv,
+        { params: { messageId: "dm-1" }, url: new URL("https://example.com/messages/dm-1") } as any,
+      );
+
+    beforeEach(() => {
+      mockDb.directMessage = { findUnique: vi.fn().mockResolvedValue(dm) };
+      mockCreateDmNote.mockResolvedValue({ type: "Note" });
+      mockGetSession.mockResolvedValue(null);
+      mockVerifyInboxRequest.mockResolvedValue({ valid: false, reason: "missing-signature" });
+    });
+
+    it("refuses an anonymous caller with the uniform deny body", async () => {
+      const response = await call();
+      expect(response.status).toBe(404);
+      expect(await response.text()).toBe(DENY);
+      expect(mockCreateDmNote).not.toHaveBeenCalled();
+    });
+
+    it("serves the sender's session", async () => {
+      mockGetSession.mockResolvedValue({ userId: "user-alice" });
+      const response = await call();
+      expect(response.status).toBe(200);
+      expect(mockCreateDmNote).toHaveBeenCalled();
+    });
+
+    it("serves the recipient's session", async () => {
+      mockGetSession.mockResolvedValue({ userId: "user-bob" });
+      const response = await call();
+      expect(response.status).toBe(200);
+    });
+
+    it("refuses an unrelated session with the SAME body as not-found", async () => {
+      mockGetSession.mockResolvedValue({ userId: "user-mallory" });
+      const response = await call();
+      expect(response.status).toBe(404);
+      expect(await response.text()).toBe(DENY);
+      expect(mockCreateDmNote).not.toHaveBeenCalled();
+      // A session that is not a party never falls through to the signature path.
+      expect(mockVerifyInboxRequest).not.toHaveBeenCalled();
+    });
+
+    it("refuses when the message does not exist, with the same body", async () => {
+      mockDb.directMessage.findUnique.mockResolvedValue(null);
+      mockGetSession.mockResolvedValue({ userId: "user-alice" });
+      const response = await call();
+      expect(response.status).toBe(404);
+      expect(await response.text()).toBe(DENY);
+    });
+
+    it("serves a signed GET whose verified key owner is the recipient", async () => {
+      mockVerifyInboxRequest.mockResolvedValue({
+        valid: true,
+        keyId: `${RECIPIENT_ACTOR}#main-key`,
+        owner: RECIPIENT_ACTOR,
+        body: Buffer.alloc(0),
+      });
+      const req = new Request("https://example.com/messages/dm-1", {
+        method: "GET",
+        headers: { signature: 'keyId="x",algorithm="rsa-sha256",headers="(request-target)",signature="y"' },
+      });
+      const response = await call(req);
+      expect(response.status).toBe(200);
+      expect(mockVerifyInboxRequest).toHaveBeenCalledTimes(1);
+    });
+
+    it("refuses a signed GET from a third actor, and never trusts the body", async () => {
+      mockVerifyInboxRequest.mockResolvedValue({
+        valid: true,
+        keyId: "https://remote.example/users/mallory#main-key",
+        owner: "https://remote.example/users/mallory",
+        body: Buffer.alloc(0),
+      });
+      const req = new Request("https://example.com/messages/dm-1", {
+        method: "GET",
+        headers: { signature: 'keyId="x",algorithm="rsa-sha256",headers="(request-target)",signature="y"' },
+      });
+      const response = await call(req);
+      expect(response.status).toBe(404);
+      expect(await response.text()).toBe(DENY);
+    });
+
+    it("refuses a signed GET whose signature does not verify", async () => {
+      const req = new Request("https://example.com/messages/dm-1", {
+        method: "GET",
+        headers: { signature: "garbage" },
+      });
+      mockVerifyInboxRequest.mockResolvedValue({ valid: false, reason: "bad-signature" });
+      const response = await call(req);
+      expect(response.status).toBe(404);
+      expect(await response.text()).toBe(DENY);
     });
   });
 
