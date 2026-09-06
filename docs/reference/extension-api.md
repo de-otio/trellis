@@ -222,6 +222,14 @@ it against the extension's **scoped** config values only — the extension never
 sees core secrets such as `SESSION_SECRET`, `DATABASE_URL`, or API keys. The
 validated values are exposed on `ExtensionContext.config`.
 
+Declaring a core secret key is refused at boot, and the key is dropped from
+`ctx.config` regardless of how the context was built. The denied set is
+`CORE_SECRET_ENV_KEYS`, exported from `@de-otio/trellis`: the database
+credentials in all three accepted forms, `SESSION_SECRET`/`SESSION_SECRET_ARN`/
+`SESSION_SALT`, the at-rest KEKs, `IDENTITY_ADMIN_CLIENT_SECRET`, and the
+ambient AWS credential trio. If an extension needs a secret of its own, give it
+its own env var and its own value.
+
 ### `shutdown`
 
 ```ts
@@ -383,10 +391,20 @@ enforced, what is not, and the one runtime precondition.
   sweeper or subscriber — so `emit` records that something happened and
   delivers nothing; emission points are what is expensive to retrofit later,
   delivery is not.
-- **Two wiring rules fail startup** rather than serve a route that looks
+- **Three wiring rules fail startup** rather than serve a route that looks
   gated: an `extensionRoutes` entry with `auth: "none"` and a non-empty
-  `scopes`, and a raw `routes` entry that declares no auth middleware (see the
-  package README's trust-model section).
+  `scopes`; a raw `routes` entry carrying no core gate middleware — recognised
+  by identity, so it must be `requireSessionMiddleware()` or `csrfMiddleware()`
+  imported from `@de-otio/trellis`, never a locally defined function named to
+  look like one (see the package README's trust-model section); and a
+  `configSchema` that names a core secret env key.
+
+  A **private** `extensionRoutes` entry with non-empty `scopes` — scopes but no
+  `publicSpec` — is *not* one of them. Its gate is the wrapper, on the
+  unversioned `/api/ext/...` mount, and it boots and enforces exactly as
+  documented. (The same declaration on a hand-written *core* route still fails
+  startup, because for a core route the `/api/v1` mount is the only thing that
+  would check it.)
 
 **Runtime precondition — `TENANT_SCOPE_MODE`:**
 

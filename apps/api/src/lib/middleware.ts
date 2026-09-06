@@ -25,6 +25,52 @@ export type Middleware = (
 ) => Promise<Response>;
 
 /**
+ * Identity tag for a core-supplied middleware that actually gates a request —
+ * i.e. one that can refuse it before the handler runs.
+ *
+ * `extension-validator.ts` uses this to decide whether a raw `ext.routes`
+ * entry is defended. It used to decide that from `middleware.name`, which is a
+ * label anyone can write: a hand-written `function authMiddleware(_c, next) {
+ * return next(); }` passed, and core's own `csrfMiddleware()` — an anonymous
+ * arrow, `.name === ""` — did not. A tag the extension cannot mint is the
+ * cheapest thing that is actually an identity.
+ *
+ * `Symbol.for` (the cross-realm global registry) rather than `Symbol()`, so a
+ * deployment that ends up with two copies of `@de-otio/trellis` in one process
+ * still recognises the other copy's middleware instead of failing the boot
+ * with a mystery.
+ */
+export const CORE_GATE_MIDDLEWARE = Symbol.for(
+  "de-otio.trellis.coreGateMiddleware",
+);
+
+/**
+ * Stamp a core middleware with {@link CORE_GATE_MIDDLEWARE}. Non-enumerable so
+ * the tag never shows up in a spread, a log line or a JSON dump of the route.
+ */
+function asCoreGate(middleware: Middleware): Middleware {
+  Object.defineProperty(middleware, CORE_GATE_MIDDLEWARE, {
+    value: true,
+    enumerable: false,
+    writable: false,
+    configurable: false,
+  });
+  return middleware;
+}
+
+/**
+ * True only for a middleware core itself built and tagged. Total for any input
+ * — an extension manifest is untrusted data, so this is called on values the
+ * types say are `Middleware` and reality says could be anything.
+ */
+export function isCoreGateMiddleware(value: unknown): boolean {
+  return (
+    typeof value === "function" &&
+    (value as unknown as Record<symbol, unknown>)[CORE_GATE_MIDDLEWARE] === true
+  );
+}
+
+/**
  * Compose multiple middleware functions
  */
 export function composeMiddleware(middlewares: Middleware[]): Middleware {
@@ -292,7 +338,7 @@ export function rateLimitMiddleware(options?: {
  * - CSRF token in session (or KV fallback if configured)
  */
 export function csrfMiddleware(): Middleware {
-  return async (context, next) => {
+  return asCoreGate(async (context, next) => {
     const { request, env } = context;
 
     // Skip for safe methods
@@ -407,7 +453,52 @@ export function csrfMiddleware(): Middleware {
     }
 
     return next();
-  };
+  });
+}
+
+/**
+ * Require an authenticated session, or answer 401 before the handler runs.
+ *
+ * Core's `authMiddleware` (`auth/auth-middleware.ts`) is *not* a `Middleware`
+ * — it is `(request, env) => AuthContext | null`, a resolver each handler
+ * calls itself. So until now there was no core middleware a raw `ext.routes`
+ * entry could attach to actually enforce authentication; the validator's
+ * name check advertised one that did not exist. This is it: the single
+ * supported gate for the raw-route escape hatch.
+ *
+ * Prefer `extensionRoutes`. A wrapped route gets this plus CORS, CSRF, the
+ * scope gate, security headers and a scoped `ExtensionContext` instead of the
+ * full core `Env`.
+ */
+export function requireSessionMiddleware(): Middleware {
+  return asCoreGate(async (context, next) => {
+    const { request, env } = context;
+
+    const { SessionManager } = await import("./session-cookie.js");
+
+    // A missing SESSION_SECRET is a boot misconfiguration, not an
+    // authorization decision — but this middleware exists to fail closed, so
+    // it answers 401 rather than falling through to the handler.
+    let sessionSecret: string | undefined;
+    try {
+      sessionSecret = env.SESSION_SECRET;
+    } catch {
+      sessionSecret = undefined;
+    }
+
+    const session = sessionSecret
+      ? await new SessionManager().getSession(request, sessionSecret, env)
+      : null;
+
+    if (!session) {
+      return new Response(JSON.stringify({ error: "Unauthorized" }), {
+        status: 401,
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    return next();
+  });
 }
 
 /**

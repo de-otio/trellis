@@ -79,11 +79,14 @@ cookies for arbitrary users, read or write any table across every tenant, and
 reach any bound infrastructure — regardless of what its own handler advertises.
 
 Core enforces one startup check on this path: `validateExtensions` **rejects**
-(does not merely warn about) any raw `routes` entry that declares no
-`authMiddleware`/`csrfMiddleware`, so an unauthenticated raw route cannot boot.
-That check bounds *who can call* the route; it does not sandbox *what the
-handler can do* once called. Raw routes are also blocked from shadowing
-reserved core prefixes (`/api/auth`, `/api/admin`, `/.well-known`, …).
+(does not merely warn about) any raw `routes` entry that carries no core gate
+middleware, so an unauthenticated raw route cannot boot. A gate is recognised
+by **identity, not by name** — it must be `requireSessionMiddleware()` or
+`csrfMiddleware()` imported from `@de-otio/trellis`. A locally defined function
+does not qualify however it is spelled. That check bounds *who can call* the
+route; it does not sandbox *what the handler can do* once called. Raw routes
+are also blocked from shadowing reserved core prefixes (`/api/auth`,
+`/api/admin`, `/.well-known`, …).
 
 **Guidance**
 

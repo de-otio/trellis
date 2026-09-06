@@ -20,6 +20,7 @@ import {
   type RawPrismaLike,
 } from "./extension-scoped-db.js";
 import { createDiscoverDb } from "./extension-discover-db.js";
+import { isCoreSecretEnvKey } from "./extension-config-keys.js";
 import {
   createExtensionEventEmitter,
   type TransactionRunner,
@@ -196,6 +197,13 @@ export function createExtensionContext(
  * Extract only the env vars whose keys are declared in the extension's configSchema.
  * This prevents extensions from reading SESSION_SECRET, DATABASE_URL, etc.
  * via .passthrough() or .transform() on their Zod schema.
+ *
+ * Sweep C8 — declaring the key used to be enough. `.shape` is the extension's
+ * own object, so `z.object({ SESSION_SECRET: z.string() })` put the
+ * session-signing secret on `ctx.config` while the docs said core secrets are
+ * "never exposed". `validateExtensions` now refuses that manifest at boot;
+ * this second filter is what makes the guarantee hold for a context built
+ * without going through validation (tests, embedders, a future dynamic load).
  */
 function extractExtensionConfig(
   ext: TrellisExtension,
@@ -203,6 +211,7 @@ function extractExtensionConfig(
   if (!ext.configSchema || !("shape" in ext.configSchema)) return {};
   const config: Record<string, string> = {};
   for (const key of Object.keys((ext.configSchema as any).shape)) {
+    if (isCoreSecretEnvKey(key)) continue;
     if (process.env[key]) config[key] = process.env[key]!;
   }
   return config;
