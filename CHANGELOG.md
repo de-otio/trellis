@@ -138,9 +138,14 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   declares `routes: []`. Core middleware is now stamped with a non-enumerable
   `Symbol.for("de-otio.trellis.coreGateMiddleware")` tag that only
   `middleware.ts` sets, and the guard reads the tag. `requireSessionMiddleware()`
-  is new and exported alongside `csrfMiddleware()` from `@de-otio/trellis`, so
-  "attach a real gate" is now something a vertical can actually do rather than
-  advice pointing at a middleware core never exported. Pinned by tests that a
+  is new — a real 401-before-handler gate, since core had no `Middleware` that
+  enforced authentication at all — and it and `csrfMiddleware()` are reachable
+  from `@de-otio/trellis/dist/lib/middleware.js`, so "attach a real gate" is now
+  something a vertical can actually do rather than advice pointing at a
+  middleware that could not satisfy the check. (Promoting the two to the
+  top-level `@de-otio/trellis` export would move
+  `apps/api/etc/public-api.snapshot.d.ts` and is left as its own reviewed
+  change.) Pinned by tests that a
   hand-named no-op, a lambda with `name` reassigned to match, and a plain
   object carrying the symbol are all refused, and that both core gates are
   accepted.

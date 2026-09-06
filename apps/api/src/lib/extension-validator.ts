@@ -297,8 +297,9 @@ export function validateExtensions(
             `receive the full core Env (SESSION_SECRET, DATABASE_URL, KV bindings). ` +
             `A locally-defined middleware does not count however it is named — attach ` +
             `\`requireSessionMiddleware()\` or \`csrfMiddleware()\` imported from ` +
-            `"@de-otio/trellis", or — preferred — declare the route under ` +
-            `\`extensionRoutes\` so core wraps it (auth enforced, scoped ExtensionContext).`,
+            `"@de-otio/trellis/dist/lib/middleware.js", or — preferred — declare the ` +
+            `route under \`extensionRoutes\` so core wraps it (auth enforced, scoped ` +
+            `ExtensionContext).`,
         );
       }
     }

@@ -224,7 +224,8 @@ validated values are exposed on `ExtensionContext.config`.
 
 Declaring a core secret key is refused at boot, and the key is dropped from
 `ctx.config` regardless of how the context was built. The denied set is
-`CORE_SECRET_ENV_KEYS`, exported from `@de-otio/trellis`: the database
+`CORE_SECRET_ENV_KEYS` (`@de-otio/trellis/dist/lib/extension-config-keys.js`):
+the database
 credentials in all three accepted forms, `SESSION_SECRET`/`SESSION_SECRET_ARN`/
 `SESSION_SALT`, the at-rest KEKs, `IDENTITY_ADMIN_CLIENT_SECRET`, and the
 ambient AWS credential trio. If an extension needs a secret of its own, give it
@@ -395,8 +396,9 @@ enforced, what is not, and the one runtime precondition.
   gated: an `extensionRoutes` entry with `auth: "none"` and a non-empty
   `scopes`; a raw `routes` entry carrying no core gate middleware — recognised
   by identity, so it must be `requireSessionMiddleware()` or `csrfMiddleware()`
-  imported from `@de-otio/trellis`, never a locally defined function named to
-  look like one (see the package README's trust-model section); and a
+  imported from `@de-otio/trellis/dist/lib/middleware.js`, never a locally
+  defined function named to look like one (see the package README's trust-model
+  section); and a
   `configSchema` that names a core secret env key.
 
   A **private** `extensionRoutes` entry with non-empty `scopes` — scopes but no
