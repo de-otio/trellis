@@ -43,6 +43,68 @@ function decodeEntities(input: string): string {
   );
 }
 
+/** Tags whose close (or `br`) marks a line boundary worth keeping. */
+const BLOCK_BOUNDARY_TAGS: ReadonlySet<string> = new Set([
+  "br",
+  "/p",
+  "/div",
+  "/li",
+  "/h1",
+  "/h2",
+  "/h3",
+  "/h4",
+  "/h5",
+  "/h6",
+]);
+
+/** Elements whose entire BODY is dropped, not just their tags. */
+const DROP_BODY_TAGS: ReadonlySet<string> = new Set(["script", "style"]);
+
+/** Lower-cased tag name (with a leading `/` for closing tags), or "" */
+function tagName(tagBody: string): string {
+  const m = /^\s*(\/?)\s*([a-zA-Z][a-zA-Z0-9-]*)/.exec(tagBody);
+  return m ? `${m[1]}${m[2].toLowerCase()}` : "";
+}
+
+/**
+ * Remove every tag in ONE left-to-right scan.
+ *
+ * A scanner rather than `replace(/<[^>]*>/g, "")`: a regex pass can leave
+ * `<script` behind when its own match boundaries are chosen adversarially
+ * (`<scr<script>ipt>`), and static analysis rightly flags that shape. Here
+ * every `<` starts a tag that is consumed up to the next `>` — or to the end
+ * of the input when there is none — so no `<` from the input survives.
+ */
+function stripTags(input: string): string {
+  let out = "";
+  let i = 0;
+  const n = input.length;
+  while (i < n) {
+    const lt = input.indexOf("<", i);
+    if (lt === -1) {
+      out += input.slice(i);
+      break;
+    }
+    out += input.slice(i, lt);
+    const gt = input.indexOf(">", lt + 1);
+    if (gt === -1) {
+      // Unterminated tag: everything after `<` is dropped.
+      break;
+    }
+    const name = tagName(input.slice(lt + 1, gt));
+    if (DROP_BODY_TAGS.has(name)) {
+      const close = input.toLowerCase().indexOf(`</${name}`, gt + 1);
+      if (close === -1) break; // unterminated body: drop the rest
+      const closeGt = input.indexOf(">", close);
+      i = closeGt === -1 ? n : closeGt + 1;
+      continue;
+    }
+    if (BLOCK_BOUNDARY_TAGS.has(name)) out += "\n";
+    i = gt + 1;
+  }
+  return out;
+}
+
 /**
  * Reduce remote HTML `content` to plain text.
  *
@@ -57,15 +119,7 @@ function decodeEntities(input: string): string {
 export function sanitizeRemoteContent(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
 
-  let text = value
-    // Drop script/style bodies entirely, not just their tags.
-    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, "")
-    // Line breaks for block-level boundaries.
-    .replace(/<\s*(br|\/p|\/div|\/li|\/h[1-6])\b[^>]*>/gi, "\n")
-    // Everything else that looks like a tag.
-    .replace(/<[^>]*>/g, "");
-
-  text = decodeEntities(text)
+  const text = decodeEntities(stripTags(value))
     // Control characters (keep \n and \t).
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
     // Collapse runs of blank lines.
