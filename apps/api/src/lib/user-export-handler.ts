@@ -146,7 +146,7 @@ export interface UserExportData {
   // Geo-indexed posts (location data)
   geoIndexedPosts: Array<{
     postUri: string;
-    entityRef: string;
+    entityRef: string | null;
     geohash: string;
     lat: number;
     lng: number;
@@ -382,13 +382,13 @@ export class UserExportHandler {
       }
 
       // PREPARATORY: Get all posts by user with dataRegion filter
-      const posts = await (db.post.findMany({
+      const posts = await db.post.findMany({
         where: {
           authorId: userId,
           deletedAt: null,
           // CRITICAL: Only get posts from the correct region
-          dataRegion: region, // Type assertion needed until Prisma client is regenerated
-        } as any,
+          dataRegion: region,
+        },
         include: {
           media: {
             orderBy: { order: "asc" },
@@ -405,11 +405,11 @@ export class UserExportHandler {
           },
         },
         orderBy: { createdAt: "desc" },
-      }) as unknown as Promise<any[]>);
+      });
 
       // PREPARATORY: Get comments made by user on others' posts
       // Comments inherit region from their parent post, so we query the region-specific database
-      const commentsOnOthersPosts = await (db.postComment.findMany({
+      const commentsOnOthersPosts = await db.postComment.findMany({
         where: {
           authorId: userId,
           post: {
@@ -423,10 +423,10 @@ export class UserExportHandler {
           sentiments: true,
         },
         orderBy: { createdAt: "desc" },
-      }) as unknown as Promise<any[]>);
+      });
 
       // PREPARATORY: Get reactions on others' posts
-      const reactionsOnOthersPosts = await (db.postSentiment.findMany({
+      const reactionsOnOthersPosts = await db.postSentiment.findMany({
         where: {
           authorId: userId,
           post: {
@@ -434,10 +434,10 @@ export class UserExportHandler {
           },
         },
         orderBy: { createdAt: "desc" },
-      }) as unknown as Promise<any[]>);
+      });
 
       // PREPARATORY: Get reactions on others' comments
-      const reactionsOnOthersComments = await (db.commentSentiment.findMany({
+      const reactionsOnOthersComments = await db.commentSentiment.findMany({
         where: {
           authorId: userId,
           comment: {
@@ -445,17 +445,17 @@ export class UserExportHandler {
           },
         },
         orderBy: { createdAt: "desc" },
-      }) as unknown as Promise<any[]>);
+      });
 
       // Get geo-indexed posts
-      const geoIndexedPosts = await (db.postGeoIndex.findMany({
+      const geoIndexedPosts = await db.postGeoIndex.findMany({
         where: {
           postUri: {
             in: posts.filter((p) => p.uri).map((p) => p.uri!),
           },
         },
         orderBy: { createdAt: "desc" },
-      }) as unknown as Promise<any[]>);
+      });
 
       // Extension-owned data where the user is the erasure subject (O-1 / GDPR
       // Art. 15/20). Empty unless an extension owns such a table (e.g. dogs'
@@ -468,79 +468,96 @@ export class UserExportHandler {
         format,
         version: "1.0",
         user: {
-          id: (user as any).id,
-          email: (user as any).email,
-          did: (user as any).did || null,
-          handle: (user as any).handle || null,
-          createdAt: (user as any).createdAt
-            ? new Date((user as any).createdAt).toISOString()
-            : new Date().toISOString(),
+          id: user.id,
+          email: user.email,
+          // `did` (AT Protocol DID) is not a User column — this codebase never
+          // adopted AT Proto identity; kept `null` for export-shape stability
+          // with the legacy `atproto` export format below.
+          did: null,
+          // `handle`/`createdAt` are real, non-nullable User columns, but
+          // DataRouter.getUser()'s declared return type only names id/email/
+          // region/dataRegion (the rest falls under its `[key: string]:
+          // unknown` index signature) — narrow them here rather than in that
+          // shared helper.
+          handle: typeof user.handle === "string" ? user.handle : null,
+          createdAt:
+            user.createdAt instanceof Date
+              ? user.createdAt.toISOString()
+              : typeof user.createdAt === "string"
+                ? new Date(user.createdAt).toISOString()
+                : new Date().toISOString(),
         },
-        posts: (posts as any[]).map((post: any) => ({
+        posts: posts.map((post) => ({
           id: post.id,
           text: post.text,
-          visibility: post.visibility,
-          entityRef: post.entityRef,
+          // `visibility`/`entityRef` are not Post columns (visibility was
+          // replaced by `radius`/audience scopes; see data-router.ts — there is
+          // no `visibility` column, and `entityRef` was never one). Both were
+          // always `undefined` here even before this cast cleanup, which
+          // `JSON.stringify` drops silently, so this export field is always
+          // absent in practice. Kept as a typed cast (not `any`) so the export
+          // shape is unchanged pending a decision on whether to drop these
+          // fields from `UserExportData` outright.
+          visibility: (post as { visibility?: string }).visibility as string,
+          entityRef: (post as { entityRef?: string | null }).entityRef,
           geoData: post.geoData,
           uri: post.uri,
           contentWarnings: post.contentWarnings,
           createdAt: post.createdAt.toISOString(),
           updatedAt: post.updatedAt.toISOString(),
-          media: (post.media || []).map((m: any) => ({
+          media: post.media.map((m) => ({
             id: m.id,
             mediaId: m.mediaId,
             alt: m.alt,
             order: m.order,
           })),
-          sentiments: (post.sentiments || []).map((s: any) => ({
+          sentiments: post.sentiments.map((s) => ({
             id: s.id,
             sentiment: s.sentiment,
             createdAt: s.createdAt.toISOString(),
           })),
-          comments: (post.comments || []).map((c: any) => ({
+          comments: post.comments.map((c) => ({
             id: c.id,
             text: c.text,
             postUri: c.postUri,
             rootUri: c.rootUri,
             replyToUri: c.replyToUri,
             createdAt: c.createdAt.toISOString(),
-            media: (c.media || []).map((m: any) => ({
+            media: c.media.map((m) => ({
               id: m.id,
               mediaId: m.mediaId,
               alt: m.alt,
               order: m.order,
             })),
-            sentiments: (c.sentiments || []).map((s: any) => ({
+            sentiments: c.sentiments.map((s) => ({
               id: s.id,
               sentiment: s.sentiment,
               createdAt: s.createdAt.toISOString(),
             })),
           })),
         })),
-        commentsOnOthersPosts: (commentsOnOthersPosts as any[]).map(
-          (comment: any) => ({
-            id: comment.id,
-            postId: comment.postId,
-            postUri: comment.postUri,
-            text: comment.text,
-            rootUri: comment.rootUri,
-            replyToUri: comment.replyToUri,
-            createdAt: comment.createdAt.toISOString(),
-            media: (comment.media || []).map((m: any) => ({
-              id: m.id,
-              mediaId: m.mediaId,
-              alt: m.alt,
-              order: m.order,
-            })),
-            sentiments: (comment.sentiments || []).map((s: any) => ({
-              id: s.id,
-              sentiment: s.sentiment,
-              createdAt: s.createdAt.toISOString(),
-            })),
-          }),
-        ),
-        reactionsOnOthersPosts: (reactionsOnOthersPosts as any[]).map(
-          (reaction: any) => ({
+        commentsOnOthersPosts: commentsOnOthersPosts.map((comment) => ({
+          id: comment.id,
+          postId: comment.postId,
+          postUri: comment.postUri,
+          text: comment.text,
+          rootUri: comment.rootUri,
+          replyToUri: comment.replyToUri,
+          createdAt: comment.createdAt.toISOString(),
+          media: comment.media.map((m) => ({
+            id: m.id,
+            mediaId: m.mediaId,
+            alt: m.alt,
+            order: m.order,
+          })),
+          sentiments: comment.sentiments.map((s) => ({
+            id: s.id,
+            sentiment: s.sentiment,
+            createdAt: s.createdAt.toISOString(),
+          })),
+        })),
+        reactionsOnOthersPosts: reactionsOnOthersPosts.map(
+          (reaction) => ({
             id: reaction.id,
             postId: reaction.postId,
             postUri: reaction.postUri,
@@ -548,8 +565,8 @@ export class UserExportHandler {
             createdAt: reaction.createdAt.toISOString(),
           }),
         ),
-        reactionsOnOthersComments: (reactionsOnOthersComments as any[]).map(
-          (reaction: any) => ({
+        reactionsOnOthersComments: reactionsOnOthersComments.map(
+          (reaction) => ({
             id: reaction.id,
             commentId: reaction.commentId,
             commentUri: reaction.commentUri,
@@ -694,9 +711,19 @@ export class UserExportHandler {
   }
 
   /**
-   * Transform export data to AT Protocol-compatible format
+   * Transform export data to AT Protocol-compatible format.
+   *
+   * Returns `Record<string, unknown>`, not `UserExportData`: the atproto
+   * `posts` shape below ($type/thread/blob refs) is genuinely different from
+   * `UserExportData.posts` (id/visibility/media/…) — the old `UserExportData`
+   * return type combined with an `as any` on `posts` was papering over that.
+   * The only consumer (`getExportedFile`/its caller) immediately
+   * `JSON.stringify`s the result, so this is a type-honesty fix with no
+   * behavior change.
    */
-  private transformToATProtoFormat(data: UserExportData): UserExportData {
+  private transformToATProtoFormat(
+    data: UserExportData,
+  ): Record<string, unknown> {
     const atprotoPosts = data.posts.map((post) => ({
       $type: "com.trellis.dog.post",
       text: post.text,
@@ -729,7 +756,7 @@ export class UserExportHandler {
     return {
       ...data,
       format: "atproto",
-      posts: atprotoPosts as any,
+      posts: atprotoPosts,
     };
   }
 }

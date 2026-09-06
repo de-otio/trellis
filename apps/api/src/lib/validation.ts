@@ -18,6 +18,10 @@ export interface EntityProfileInput {
     [key: string]: any; // Flexible for different entity types
   };
   id?: string; // Optional ID for updating existing profiles
+  /** Caller-supplied life-stage override (unvalidated pass-through). */
+  lifeStageManualOverride?: boolean;
+  /** Caller-supplied explicit life stage (unvalidated pass-through). */
+  lifeStage?: string;
 }
 
 
@@ -77,6 +81,8 @@ export class Validator {
         entityType,
         metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
         id: input.id,
+        lifeStageManualOverride: input.lifeStageManualOverride,
+        lifeStage: input.lifeStage,
       },
     };
   }
