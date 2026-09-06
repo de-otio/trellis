@@ -16,7 +16,7 @@ import {
   generateBackupCodes,
   generateSecret,
   hashBackupCode,
-  verifyTOTP,
+  verifyTOTPStep,
 } from "./totp-service.js";
 
 const MFA_REQUIRED_ROLES = ["SUPER_ADMIN", "PARTNER_ADMIN"];
@@ -80,9 +80,11 @@ export class MfaHandler {
     verificationCode: string,
     encryptionKey: string,
   ): Promise<{ success: boolean; error?: string }> {
-    // Verify the user can generate a valid code
-    const valid = await verifyTOTP(secret, verificationCode);
-    if (!valid) {
+    // Verify the user can generate a valid code. The matched step is
+    // persisted so the enrollment code itself cannot be replayed as the
+    // first verification.
+    const step = await verifyTOTPStep(secret, verificationCode);
+    if (step === null) {
       return { success: false, error: "Invalid verification code" };
     }
 
@@ -101,11 +103,13 @@ export class MfaHandler {
         userId,
         encryptedSecret: encrypted,
         backupCodes: hashedCodes,
+        lastUsedStep: step,
       },
       update: {
         encryptedSecret: encrypted,
         backupCodes: hashedCodes,
         lastUsedAt: null,
+        lastUsedStep: step,
       },
     });
 
@@ -115,6 +119,13 @@ export class MfaHandler {
 
   /**
    * Verify a TOTP code for an enrolled user.
+   *
+   * A code is accepted only if it verifies AND its time-step is above the
+   * highest step already accepted for this enrollment. RFC 6238 §5.2: "the
+   * verifier MUST NOT accept the second attempt of the OTP after the
+   * successful validation has been issued for the first OTP". Without this a
+   * code observed once (shoulder-surfed, relayed through a phishing page)
+   * stayed valid for the whole ±1-step window.
    */
   async verifyCode(
     prisma: PrismaClient,
@@ -131,16 +142,25 @@ export class MfaHandler {
       enrollment.encryptedSecret,
       encryptionKey,
     );
-    const valid = await verifyTOTP(secret, code);
+    const step = await verifyTOTPStep(secret, code);
+    if (step === null) return false;
 
-    if (valid) {
-      await prisma.mfaEnrollment.update({
-        where: { userId },
-        data: { lastUsedAt: new Date() },
+    const lastUsedStep = enrollment.lastUsedStep ?? null;
+    if (lastUsedStep !== null && step <= lastUsedStep) {
+      this.logger.warn("[MFA] Replayed TOTP code refused", {
+        userId,
+        step,
+        lastUsedStep,
       });
+      return false;
     }
 
-    return valid;
+    await prisma.mfaEnrollment.update({
+      where: { userId },
+      data: { lastUsedAt: new Date(), lastUsedStep: step },
+    });
+
+    return true;
   }
 
   /**

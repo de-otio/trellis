@@ -10,9 +10,93 @@ import { CorsHandler } from "../cors-handler.js";
 import { getLogger, Logger } from "../logger.js";
 import { MfaHandler } from "../mfa/mfa-handler.js";
 import { corsMiddleware, csrfMiddleware } from "../middleware.js";
+import { trustedClientIp } from "../net/trusted-client-ip.js";
+import { RateLimiter } from "../rate-limit.js";
 import { SecurityHeaders } from "../security-headers.js";
 import { SessionManager } from "../session-cookie.js";
+import type { Env } from "../../env.js";
 import type { Route } from "./types.js";
+
+/**
+ * Verification-attempt throttle (DP-2).
+ *
+ * A six-digit TOTP with a ±1-step window is three valid codes in a million;
+ * unthrottled, the second factor falls to ~3×10⁵ POSTs from whoever holds the
+ * first (a session). Both `/verify` and `/enroll/finalize` count attempts —
+ * failed AND successful, so the budget is spent before the code is checked
+ * and a slow-drip attacker cannot probe for free.
+ *
+ * Two buckets: per user (the session's user — a stolen session IS the user)
+ * and per trusted client IP (so one address cannot spread attempts across
+ * accounts). Thresholds are runtime config with defaults, never constants
+ * (AGENTS.md §7 threshold-secrecy rule).
+ */
+const DEFAULT_MFA_MAX_ATTEMPTS = 5;
+const DEFAULT_MFA_MAX_ATTEMPTS_PER_IP = 20;
+const DEFAULT_MFA_WINDOW_SECONDS = 300;
+
+function positiveInt(raw: string | undefined, fallback: number): number {
+  const n = raw === undefined ? NaN : Number.parseInt(raw, 10);
+  return Number.isInteger(n) && n > 0 ? n : fallback;
+}
+
+/** Resolve the throttle from env, falling back to the defaults above. */
+export function mfaAttemptLimits(env: Env): {
+  perUser: number;
+  perIp: number;
+  windowSeconds: number;
+} {
+  return {
+    perUser: positiveInt(env.MFA_VERIFY_MAX_ATTEMPTS, DEFAULT_MFA_MAX_ATTEMPTS),
+    perIp: positiveInt(
+      env.MFA_VERIFY_MAX_ATTEMPTS_PER_IP,
+      DEFAULT_MFA_MAX_ATTEMPTS_PER_IP,
+    ),
+    windowSeconds: positiveInt(
+      env.MFA_VERIFY_WINDOW_SECONDS,
+      DEFAULT_MFA_WINDOW_SECONDS,
+    ),
+  };
+}
+
+/**
+ * Consume one attempt from both buckets. Returns the 429 to send, or null.
+ *
+ * The IP bucket is keyed on `trustedClientIp` rather than the limiter's own
+ * raw-header fallback, so a spoofed X-Forwarded-For cannot mint fresh buckets
+ * when no trusted proxy is configured. It rides in the limiter's `sessionId`
+ * slot purely as a key component — there is no session semantics to it.
+ */
+async function consumeMfaAttempt(
+  rateLimiter: RateLimiter,
+  env: Env,
+  request: Request,
+  endpoint: string,
+  userId: string,
+): Promise<Response | null> {
+  const { perUser, perIp, windowSeconds } = mfaAttemptLimits(env);
+
+  const perUserLimited = await rateLimiter.applyRateLimitKV(
+    env as any,
+    request,
+    `${endpoint}:user`,
+    perUser,
+    windowSeconds,
+    undefined,
+    undefined,
+    userId,
+  );
+  if (perUserLimited) return perUserLimited;
+
+  return rateLimiter.applyRateLimitKV(
+    env as any,
+    request,
+    `${endpoint}:ip`,
+    perIp,
+    windowSeconds,
+    `ip:${trustedClientIp(request, env as any)}`,
+  );
+}
 
 const BeginEnrollmentSchema = z.object({});
 
@@ -151,6 +235,21 @@ export const mfaRoutes: Route[] = [
           return CorsHandler.addCorsHeaders(res, request, env);
         }
 
+        const limited = await consumeMfaAttempt(
+          new RateLimiter(),
+          env,
+          request,
+          "/api/mfa/enroll/finalize",
+          session.userId,
+        );
+        if (limited) {
+          return CorsHandler.addCorsHeaders(
+            securityHeaders.addSecurityHeaders(limited),
+            request,
+            env,
+          );
+        }
+
         const body = await request.json();
         const parsed = FinalizeEnrollmentSchema.safeParse(body);
         if (!parsed.success) {
@@ -225,6 +324,21 @@ export const mfaRoutes: Route[] = [
             { status: 401, headers: { "content-type": "application/json" } },
           );
           return CorsHandler.addCorsHeaders(res, request, env);
+        }
+
+        const limited = await consumeMfaAttempt(
+          new RateLimiter(),
+          env,
+          request,
+          "/api/mfa/verify",
+          session.userId,
+        );
+        if (limited) {
+          return CorsHandler.addCorsHeaders(
+            securityHeaders.addSecurityHeaders(limited),
+            request,
+            env,
+          );
         }
 
         const body = await request.json();

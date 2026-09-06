@@ -31,27 +31,49 @@ export async function generateTOTP(
 }
 
 /**
+ * Verify a TOTP code against a secret and return the time-step it matched.
+ *
+ * Allows a window of ±1 period to account for clock skew. Returns the RFC 6238
+ * counter (`floor(unixSeconds / 30)`) the code was generated for, or `null`
+ * when nothing in the window matches. Callers that persist the returned step
+ * and refuse anything at or below it get replay protection for free: a code
+ * observed once cannot be presented a second time inside its own window.
+ */
+export async function verifyTOTPStep(
+  secret: string,
+  code: string,
+  window: number = 1,
+): Promise<number | null> {
+  if (!code || code.length !== TOTP_DIGITS) return null;
+
+  const now = Math.floor(Date.now() / 1000);
+  const currentCounter = Math.floor(now / TOTP_PERIOD);
+
+  for (let i = -window; i <= window; i++) {
+    const step = currentCounter + i;
+    const expected = await hmacBasedOTP(secret, step);
+    if (constantTimeEqual(code, expected)) {
+      return step;
+    }
+  }
+
+  return null;
+}
+
+/**
  * Verify a TOTP code against a secret.
  * Allows a window of ±1 period to account for clock skew.
+ *
+ * Boolean form of {@link verifyTOTPStep}; it cannot detect a replay on its
+ * own, so anything that gates access on the result should use the step form
+ * and persist the accepted step.
  */
 export async function verifyTOTP(
   secret: string,
   code: string,
   window: number = 1,
 ): Promise<boolean> {
-  if (!code || code.length !== TOTP_DIGITS) return false;
-
-  const now = Math.floor(Date.now() / 1000);
-  const currentCounter = Math.floor(now / TOTP_PERIOD);
-
-  for (let i = -window; i <= window; i++) {
-    const expected = await hmacBasedOTP(secret, currentCounter + i);
-    if (constantTimeEqual(code, expected)) {
-      return true;
-    }
-  }
-
-  return false;
+  return (await verifyTOTPStep(secret, code, window)) !== null;
 }
 
 /**
