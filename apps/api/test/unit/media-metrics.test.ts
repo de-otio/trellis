@@ -2,22 +2,29 @@
  * Unit Tests: Media Metrics
  *
  * Tests for media operation metrics tracking and analytics engine integration.
+ *
+ * Logger note: `MediaMetrics` gets its logger from `getLogger()`, which
+ * delegates to the foundation root logger — there is no injection seam, so
+ * `vi.fn()` stand-ins for `logger.info`/`.warn`/`.error` are never wired up
+ * and asserting against them proves nothing. We use `createTestLogCapture`
+ * (same pattern as `database-monitor.test.ts`) to observe the real log
+ * lines: level, message, and the structured context fields.
  */
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createTestLogCapture } from "@de-otio/saas-foundation/logger";
 import { MediaMetrics, type MediaMetricsEnv } from "../../src/lib/media-metrics.js";
-
-const mockLoggerInfo = vi.fn();
-const mockLoggerWarn = vi.fn();
-const mockLoggerError = vi.fn();
 
 describe("MediaMetrics", () => {
   let metrics: MediaMetrics;
   let mockEnv: MediaMetricsEnv;
-  let mockAnalytics: any;
+  let mockAnalytics: { writeDataPoint: ReturnType<typeof vi.fn> };
+  let capture: ReturnType<typeof createTestLogCapture>;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    capture = createTestLogCapture();
+    capture.installAsRoot();
 
     mockAnalytics = {
       writeDataPoint: vi.fn(),
@@ -26,9 +33,13 @@ describe("MediaMetrics", () => {
     mockEnv = {
       ENVIRONMENT: "dev",
       ANALYTICS: mockAnalytics,
-    } as any;
+    } as unknown as MediaMetricsEnv;
 
     metrics = new MediaMetrics(mockEnv);
+  });
+
+  afterEach(() => {
+    capture.restore();
   });
 
   describe("trackOperation", () => {
@@ -41,7 +52,18 @@ describe("MediaMetrics", () => {
         resultCount: 10,
       });
 
-          });
+      expect(capture.entries()).toContainEqual(
+        expect.objectContaining({
+          level: "info",
+          msg: expect.stringContaining("Operation completed: list"),
+          operation: "list",
+          endpoint: "/api/media",
+          duration: 150,
+          statusCode: 200,
+          resultCount: 10,
+        }),
+      );
+    });
 
     it("should log failed operation (4xx/5xx) as error", () => {
       metrics.trackOperation({
@@ -52,7 +74,16 @@ describe("MediaMetrics", () => {
         errorType: "DatabaseError",
       });
 
-          });
+      expect(capture.entries()).toContainEqual(
+        expect.objectContaining({
+          level: "error",
+          msg: expect.stringContaining("Operation failed: details"),
+          operation: "details",
+          statusCode: 500,
+          errorType: "DatabaseError",
+        }),
+      );
+    });
 
     it("should log slow operation (>2000ms) as warning", () => {
       metrics.trackOperation({
@@ -63,7 +94,15 @@ describe("MediaMetrics", () => {
         resultCount: 50,
       });
 
-          });
+      expect(capture.entries()).toContainEqual(
+        expect.objectContaining({
+          level: "warn",
+          msg: expect.stringContaining("Slow operation: grouped"),
+          operation: "grouped",
+          duration: 3000,
+        }),
+      );
+    });
 
     it("should write to analytics engine when available", () => {
       metrics.trackOperation({
@@ -78,12 +117,7 @@ describe("MediaMetrics", () => {
       expect(mockAnalytics.writeDataPoint).toHaveBeenCalledWith({
         blobs: ["media-operation", "list", "/api/media", "US", "success"],
         doubles: [expect.any(Number), 100, 200, 5],
-        indexes: [
-          "media:list",
-          "media:/api/media",
-          "media:list:200",
-          "media:US",
-        ],
+        indexes: ["media:list", "media:/api/media", "media:list:200", "media:US"],
       });
     });
 
@@ -92,14 +126,22 @@ describe("MediaMetrics", () => {
         throw new Error("Analytics unavailable");
       });
 
-      // Should not throw
-      metrics.trackOperation({
-        operation: "list",
-        endpoint: "/api/media",
-        duration: 100,
-      });
+      expect(() =>
+        metrics.trackOperation({
+          operation: "list",
+          endpoint: "/api/media",
+          duration: 100,
+        }),
+      ).not.toThrow();
 
-          });
+      expect(mockAnalytics.writeDataPoint).toHaveBeenCalledTimes(1);
+      expect(capture.entries()).toContainEqual(
+        expect.objectContaining({
+          level: "warn",
+          msg: expect.stringContaining("Failed to write analytics data point"),
+        }),
+      );
+    });
 
     it("should use default values for missing optional fields", () => {
       metrics.trackOperation({
@@ -121,14 +163,30 @@ describe("MediaMetrics", () => {
     it("should track list operation correctly", () => {
       metrics.trackList("/api/media", 150, 10, 200, "US", "user-123");
 
-          });
+      expect(capture.entries()).toContainEqual(
+        expect.objectContaining({
+          level: "info",
+          msg: expect.stringContaining("Operation completed: list"),
+          endpoint: "/api/media",
+          duration: 150,
+          resultCount: 10,
+          statusCode: 200,
+          region: "US",
+        }),
+      );
+      expect(mockAnalytics.writeDataPoint).toHaveBeenCalledWith(
+        expect.objectContaining({
+          blobs: ["media-operation", "list", "/api/media", "US", "success"],
+        }),
+      );
+    });
   });
 
   describe("trackGrouped", () => {
     it("should track grouped operation and write items metric", () => {
       metrics.trackGrouped("/api/media/grouped", 200, 5, 50, 200, "US");
 
-            // Two writeDataPoint calls: one for the operation, one for items
+      // Two writeDataPoint calls: one for the operation, one for items
       expect(mockAnalytics.writeDataPoint).toHaveBeenCalledTimes(2);
       expect(mockAnalytics.writeDataPoint).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -145,17 +203,34 @@ describe("MediaMetrics", () => {
         if (callCount === 2) throw new Error("Analytics down");
       });
 
-      // Should not throw
-      metrics.trackGrouped("/api/media/grouped", 200, 5, 50, 200);
+      expect(() => metrics.trackGrouped("/api/media/grouped", 200, 5, 50, 200)).not.toThrow();
 
-          });
+      expect(mockAnalytics.writeDataPoint).toHaveBeenCalledTimes(2);
+      expect(capture.entries()).toContainEqual(
+        expect.objectContaining({
+          level: "warn",
+          msg: expect.stringContaining("Failed to write grouped items metric"),
+        }),
+      );
+    });
   });
 
   describe("trackStats", () => {
     it("should track stats operation", () => {
       metrics.trackStats("/api/media/stats", 100, 250, 200, "EU");
 
-          });
+      expect(capture.entries()).toContainEqual(
+        expect.objectContaining({
+          level: "info",
+          msg: expect.stringContaining("Operation completed: stats"),
+          endpoint: "/api/media/stats",
+          duration: 100,
+          resultCount: 250,
+          statusCode: 200,
+          region: "EU",
+        }),
+      );
+    });
   });
 
   describe("trackMediaAction", () => {
@@ -170,8 +245,18 @@ describe("MediaMetrics", () => {
         "user-123",
       );
 
-            // Verify analytics was called with media action data
-      expect(mockAnalytics.writeDataPoint).toHaveBeenCalled();
+      // Verify analytics was called with media action data
+      expect(mockAnalytics.writeDataPoint).toHaveBeenCalledWith(
+        expect.objectContaining({
+          blobs: ["media-operation", "hide", "/api/media/123/hide", "US", "success"],
+        }),
+      );
+      expect(capture.entries()).toContainEqual(
+        expect.objectContaining({
+          level: "info",
+          msg: expect.stringContaining("Operation completed: hide"),
+        }),
+      );
     });
 
     it("should track delete action with error type", () => {
@@ -186,17 +271,35 @@ describe("MediaMetrics", () => {
         "NotFound",
       );
 
-          });
+      expect(capture.entries()).toContainEqual(
+        expect.objectContaining({
+          level: "error",
+          msg: expect.stringContaining("Operation failed: delete"),
+          errorType: "NotFound",
+        }),
+      );
+      expect(mockAnalytics.writeDataPoint).toHaveBeenCalledWith(
+        expect.objectContaining({
+          blobs: ["media-operation", "delete", "/api/media/123", "US", "NotFound"],
+        }),
+      );
+    });
   });
 
   describe("trackCleanup", () => {
     it("should track successful cleanup", () => {
       metrics.trackCleanup("US", 100, 50, 0, 10, 5000);
 
-            expect(mockAnalytics.writeDataPoint).toHaveBeenCalledWith(
+      expect(mockAnalytics.writeDataPoint).toHaveBeenCalledWith(
         expect.objectContaining({
           blobs: ["media-cleanup", "US"],
           doubles: [expect.any(Number), 100, 50, 0, 10, 5000],
+        }),
+      );
+      expect(capture.entries()).toContainEqual(
+        expect.objectContaining({
+          level: "info",
+          msg: expect.stringContaining("Cleanup job completed"),
         }),
       );
     });
@@ -204,23 +307,47 @@ describe("MediaMetrics", () => {
     it("should log cleanup with errors as error level", () => {
       metrics.trackCleanup("US", 100, 50, 5, 10, 5000);
 
-          });
+      expect(capture.entries()).toContainEqual(
+        expect.objectContaining({
+          level: "error",
+          msg: expect.stringContaining("Cleanup job completed with errors"),
+          errors: 5,
+        }),
+      );
+    });
 
     it("should handle analytics failure during cleanup tracking", () => {
       mockAnalytics.writeDataPoint.mockImplementation(() => {
         throw new Error("Analytics failure");
       });
 
-      metrics.trackCleanup("US", 100, 50, 0, 10, 5000);
+      expect(() => metrics.trackCleanup("US", 100, 50, 0, 10, 5000)).not.toThrow();
 
-          });
+      expect(capture.entries()).toContainEqual(
+        expect.objectContaining({
+          level: "warn",
+          msg: expect.stringContaining("Failed to write cleanup metric"),
+        }),
+      );
+    });
   });
 
   describe("trackRateLimit", () => {
     it("should track rate limit violation", () => {
       metrics.trackRateLimit("/api/media", "user-123", "1.2.3.4", 100, 3600);
 
-            expect(mockAnalytics.writeDataPoint).toHaveBeenCalledWith(
+      expect(capture.entries()).toContainEqual(
+        expect.objectContaining({
+          level: "warn",
+          msg: expect.stringContaining("Rate limit exceeded"),
+          endpoint: "/api/media",
+          userId: "user-123",
+          ipAddress: "1.2.3.4",
+          limit: 100,
+          windowSeconds: 3600,
+        }),
+      );
+      expect(mockAnalytics.writeDataPoint).toHaveBeenCalledWith(
         expect.objectContaining({
           blobs: ["media-rate-limit", "/api/media"],
         }),
@@ -230,7 +357,20 @@ describe("MediaMetrics", () => {
     it("should handle missing optional parameters", () => {
       metrics.trackRateLimit("/api/media");
 
-          });
+      expect(capture.entries()).toContainEqual(
+        expect.objectContaining({
+          level: "warn",
+          msg: expect.stringContaining("Rate limit exceeded"),
+          endpoint: "/api/media",
+        }),
+      );
+      expect(mockAnalytics.writeDataPoint).toHaveBeenCalledWith(
+        expect.objectContaining({
+          blobs: ["media-rate-limit", "/api/media"],
+          doubles: [expect.any(Number), 0, 0],
+        }),
+      );
+    });
   });
 
   describe("Constructor edge cases", () => {
@@ -241,16 +381,23 @@ describe("MediaMetrics", () => {
     });
 
     it("should work without analytics in env", () => {
-      const envNoAnalytics = { ENVIRONMENT: "dev" } as any;
+      const envNoAnalytics = { ENVIRONMENT: "dev" } as MediaMetricsEnv;
       const metricsNoAnalytics = new MediaMetrics(envNoAnalytics);
 
-      // Should not throw when tracking without analytics
+      // Should not throw when tracking without analytics, and still logs.
       metricsNoAnalytics.trackOperation({
         operation: "list",
         endpoint: "/api/media",
         duration: 100,
       });
 
-          });
+      expect(capture.entries()).toContainEqual(
+        expect.objectContaining({
+          level: "info",
+          msg: expect.stringContaining("Operation completed: list"),
+        }),
+      );
+      expect(mockAnalytics.writeDataPoint).not.toHaveBeenCalled();
+    });
   });
 });
