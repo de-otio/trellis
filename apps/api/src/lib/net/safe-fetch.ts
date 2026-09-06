@@ -459,15 +459,26 @@ export async function safeFetch(
 export async function safeFetchJson<T = unknown>(
   rawUrl: string | URL,
   options: SafeFetchOptions = {},
-): Promise<{ status: number; data: T | null }> {
+): Promise<{
+  status: number;
+  data: T | null;
+  /** Final URL after redirects — callers that trust a document's `id` must compare against THIS. */
+  url: string;
+  redirectChain: readonly string[];
+}> {
   const result = await safeFetch(rawUrl, options);
+  const location = { url: result.url, redirectChain: result.redirectChain };
   if (result.status < 200 || result.status >= 300) {
-    return { status: result.status, data: null };
+    return { status: result.status, data: null, ...location };
   }
   try {
-    return { status: result.status, data: JSON.parse(result.body.toString("utf8")) as T };
+    return {
+      status: result.status,
+      data: JSON.parse(result.body.toString("utf8")) as T,
+      ...location,
+    };
   } catch {
-    return { status: result.status, data: null };
+    return { status: result.status, data: null, ...location };
   }
 }
 

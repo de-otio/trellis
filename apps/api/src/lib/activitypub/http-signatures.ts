@@ -203,9 +203,12 @@ export class HttpSignatureService {
     body?: string | Buffer,
   ): Headers {
     const url = new URL(request.url);
+    // `(request-target)` is path AND query — that is what peers (and our own
+    // verifier) reconstruct; signing the bare path fails at any inbox URL
+    // that carries a query string.
     const { signature, date, digest } = this.signRequest(
       request.method,
-      url.pathname,
+      `${url.pathname}${url.search}`,
       url.host,
       privateKey,
       keyId,
@@ -311,7 +314,7 @@ export class HttpSignatureService {
 
       // ---- (4) The key comes from the REMOTE actor document ---------------
       const fetchKey = options.fetchKey ?? defaultFetchKey;
-      const key = await fetchKey(keyId, env);
+      let key = await fetchKey(keyId, env);
       if (!key) {
         return fail(logger, "key-unavailable", `keyId=${keyId}`);
       }
@@ -331,13 +334,19 @@ export class HttpSignatureService {
         );
       }
 
-      const verify = crypto.createVerify("RSA-SHA256");
-      verify.update(signatureString);
-      let isValid = false;
-      try {
-        isValid = verify.verify(key.pem, signature, "base64");
-      } catch (error) {
-        return fail(logger, "bad-signature", (error as Error).message);
+      let isValid = verifySignature(signatureString, key.pem, signature);
+
+      // A peer that rotated its key is refused for as long as its actor
+      // document sits in our cache. When the DEFAULT fetcher is in play (a
+      // test-injected one has no cache to bust), evict and try exactly once
+      // more with a freshly dereferenced key. One retry, never a loop.
+      if (!isValid && !options.fetchKey) {
+        await invalidateActorCache(keyId);
+        const fresh = await defaultFetchKey(keyId, env);
+        if (fresh && fresh.pem !== key.pem) {
+          key = fresh;
+          isValid = verifySignature(signatureString, key.pem, signature);
+        }
       }
       if (!isValid) {
         return fail(logger, "bad-signature", `keyId=${keyId}`);
@@ -521,12 +530,55 @@ export class HttpSignatureService {
   }
 }
 
+/** RSA-SHA256 over the reconstructed string; a malformed key or signature is simply "not valid". */
+function verifySignature(
+  signatureString: string,
+  pem: string,
+  signature: string,
+): boolean {
+  try {
+    const verify = crypto.createVerify("RSA-SHA256");
+    verify.update(signatureString);
+    return verify.verify(pem, signature, "base64");
+  } catch {
+    return false;
+  }
+}
+
+/** Drop the cached actor document behind a keyId so the next fetch is fresh. */
+async function invalidateActorCache(keyId: string): Promise<void> {
+  const actorUri = keyId.split("#")[0];
+  if (!actorUri) return;
+  const { RemoteFetchService } = await import("./remote-fetch-service.js");
+  RemoteFetchService.invalidateCache(actorUri);
+}
+
 /**
  * Default key fetcher: dereference the actor document named by the keyId over
- * TLS and take `publicKey.publicKeyPem`, asserting `publicKey.id === keyId`.
+ * TLS and take `publicKey.publicKeyPem`.
  *
- * The fetch goes through `RemoteFetchService`, which is https-only and SSRF-
- * guarded, so an actor URI pointing at internal space cannot be dereferenced.
+ * The fetch goes through `RemoteFetchService`, which is https-only, SSRF-
+ * guarded, and — since the 2026-09-06 deep pass — refuses any document whose
+ * `id` is not the URL it was served from. This function adds the identity
+ * rules on top. They exist because the previous version took
+ * `publicKey.owner` (falling back to `actor.id`) VERBATIM from the fetched
+ * document: an attacker hosting `https://attacker.example/users/evil` could
+ * serve `{ id: "https://victim.example/users/admin", publicKey: { id:
+ * "<attacker keyId>", owner: "https://victim.example/users/admin",
+ * publicKeyPem: <attacker key> } }`, sign with their own key, and the actor
+ * binding then compared the victim with the victim. Full impersonation of any
+ * actor on any instance, from any instance. The rules:
+ *
+ *   1. The instance is not on the blocklist. Checked BEFORE the fetch — a
+ *      defederated instance must not be able to make us dereference it on
+ *      every delivery.
+ *   2. `actor.id` equals the URL we dereferenced (the fetcher enforces this;
+ *      asserted again here so the rule does not depend on a cache path).
+ *   3. `publicKey.id === keyId`.
+ *   4. `keyId` and `actor.id` share an origin — a key document cannot vouch
+ *      for an actor on another host.
+ *   5. `publicKey.owner`, when present, equals `actor.id`. It never CHOOSES
+ *      the owner; the owner is `actor.id`, full stop.
  */
 async function defaultFetchKey(
   keyId: string,
@@ -547,6 +599,27 @@ async function defaultFetchKey(
     // own key; refusing it is the point of the rewrite.
     logger.warn("[HttpSignatureService] Refusing a local keyId on an inbound request", {
       keyId,
+    });
+    return null;
+  }
+
+  // (1) Blocklist before any network I/O.
+  const { parseBlockedDomains, isDomainBlocked, instanceDomainOf } =
+    await import("./services/abuse-prevention.js");
+  const keyDomain = instanceDomainOf(actorUri);
+  if (!keyDomain) {
+    logger.warn("[HttpSignatureService] keyId has no resolvable host", { keyId });
+    return null;
+  }
+  if (
+    isDomainBlocked(
+      keyDomain,
+      parseBlockedDomains((env as any).ACTIVITYPUB_BLOCKED_DOMAINS),
+    )
+  ) {
+    logger.warn("[HttpSignatureService] Refusing key fetch from a blocked instance", {
+      keyId,
+      domain: keyDomain,
     });
     return null;
   }
@@ -572,6 +645,16 @@ async function defaultFetchKey(
     return null;
   }
 
+  // (2) The document is authoritative only for the URL it came from.
+  const actorId = typeof actor.id === "string" ? actor.id : null;
+  if (!actorId || !sameUri(actorId, actorUri)) {
+    logger.warn("[HttpSignatureService] Actor document id does not match the keyId's actor URI", {
+      actorUri,
+      actorId,
+    });
+    return null;
+  }
+
   const publicKey = actor.publicKey;
   if (!publicKey || typeof publicKey !== "object") {
     logger.warn("[HttpSignatureService] Actor document missing publicKey", {
@@ -580,10 +663,32 @@ async function defaultFetchKey(
     return null;
   }
 
+  // (3)
   if (publicKey.id !== keyId) {
     logger.warn("[HttpSignatureService] KeyId mismatch", {
       expected: keyId,
       actual: publicKey.id,
+    });
+    return null;
+  }
+
+  // (4)
+  if (!sameOrigin(keyId, actorId)) {
+    logger.warn("[HttpSignatureService] keyId is not on the actor's origin", {
+      keyId,
+      actorId,
+    });
+    return null;
+  }
+
+  // (5) `owner` may confirm the actor; it may never nominate a different one.
+  if (
+    publicKey.owner !== undefined &&
+    (typeof publicKey.owner !== "string" || !sameUri(publicKey.owner, actorId))
+  ) {
+    logger.warn("[HttpSignatureService] publicKey.owner does not match the actor document", {
+      actorId,
+      owner: publicKey.owner,
     });
     return null;
   }
@@ -596,22 +701,7 @@ async function defaultFetchKey(
     return null;
   }
 
-  // `owner` is the authenticated identity. Fall back to the document's own id
-  // when the key omits it (common), but never to anything from the request.
-  const owner =
-    typeof publicKey.owner === "string" && publicKey.owner.length > 0
-      ? publicKey.owner
-      : typeof actor.id === "string"
-        ? actor.id
-        : null;
-  if (!owner) {
-    logger.warn("[HttpSignatureService] Cannot determine key owner", {
-      actorUri,
-    });
-    return null;
-  }
-
-  return { pem, owner };
+  return { pem, owner: actorId };
 }
 
 function fail(

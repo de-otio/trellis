@@ -9,10 +9,8 @@ import { addCorsHeaders } from "../../../worker.js";
 import { ActivityProcessor } from "../../activitypub/activity-processor.js";
 import { ActivityService } from "../../activitypub/activity-service.js";
 import { GroupService } from "../../activitypub/group-service.js";
-import {
-  assertActorBinding,
-  HttpSignatureService,
-} from "../../activitypub/http-signatures.js";
+import { assertActorBinding } from "../../activitypub/http-signatures.js";
+import { verifyInboxRequest } from "../../activitypub/listeners/http-signatures.js";
 import { admitActivity } from "../../activitypub/services/abuse-prevention.js";
 import { sharedDatabaseConnectionManager } from "../../database-connection-manager.js";
 import {
@@ -228,11 +226,10 @@ export const groupRoutes: Route[] = [
       try {
         // Verify HTTP Signature. This authenticates the body (signed digest,
         // constant-time compared), bounds the Date, and returns the actor URI
-        // that owns the signing key.
-        const verification = await HttpSignatureService.verifyRequest(
-          request.clone(),
-          env as any,
-        );
+        // that owns the signing key. Through the inbox entry point so the
+        // group inbox shares the user inbox's replay suppression — calling the
+        // service directly left this inbox with only the skew window.
+        const verification = await verifyInboxRequest(request.clone(), env);
         if (!verification.valid) {
           logger.warn("[GroupInbox] Invalid HTTP signature", {
             groupId,

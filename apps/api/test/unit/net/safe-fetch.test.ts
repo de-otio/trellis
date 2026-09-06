@@ -331,7 +331,8 @@ describe("safeFetchJson", () => {
       resolver: fixedResolver("93.184.216.34"),
       transport,
     });
-    expect(result).toEqual({ status: 404, data: null });
+    expect(result).toMatchObject({ status: 404, data: null });
+    expect(result.url).toBe("https://a.example/");
   });
 
   it("returns null data on unparseable JSON rather than throwing", async () => {
