@@ -163,17 +163,37 @@ setMediaModerationProvider(
     images: new MyImageOnlyProvider(),
     transcode: myTranscodePort,        // must implement sampleFrames + deleteFrame
     config: {
-      framesPerSecond: Number(process.env.MEDIA_SAMPLE_FPS),
-      maxFramesPerJob: Number(process.env.MEDIA_MAX_FRAMES_PER_JOB),
-      maxDurationSeconds: Number(process.env.MEDIA_MAX_DURATION_SECONDS),
+      framesPerSecond: myConfig.samplingFramesPerSecond,
+      maxFramesPerJob: myConfig.samplingMaxFramesPerJob,
+      maxDurationSeconds: myConfig.samplingMaxDurationSeconds,
       policy: myLabelPolicy,             // optional; governs every frame
-      policyVersion: process.env.MEDIA_SAMPLING_POLICY_VERSION,
+      policyVersion: myConfig.samplingPolicyVersion,
     },
     frameDirFor: (jobId) => `processing/frames/${jobId}`,
     newJobId: () => randomUUID(),
   }),
 );
 ```
+
+Every field under `config` is **operator-supplied with no compiled default and no
+built-in env var** — `FrameSamplingConfig` in core's source says so explicitly:
+absence means the feature refuses to run rather than guessing a rate. This
+package does not read `process.env` for any of them; `myConfig` above is
+however you choose to source these four numbers (your own env vars, a config
+file, a feature-flag service).
+
+Two names are worth calling out because they look like they should already be
+wired up and are not:
+
+- `maxDurationSeconds` here is a **different setting** from the platform's own
+  `MEDIA_MAX_DURATION_SECONDS` (declared in `apps/api/src/env-schema.ts`,
+  documented in `Env.media.maxDurationSeconds`). That one caps upload duration
+  *before transcoding starts* — an entirely separate gate from this adapter's
+  per-job sampling ceiling. Reusing the same env var for both would silently
+  couple two independent policies; give your sampling ceiling its own name.
+- There is no `MEDIA_SAMPLE_FPS`, `MEDIA_MAX_FRAMES_PER_JOB` or
+  `MEDIA_SAMPLING_POLICY_VERSION` anywhere in this codebase. Nothing reserves
+  those names — pick whatever you like.
 
 What the adapter does, and what you should know about it:
 
@@ -265,7 +285,7 @@ import { withModerationDeadline } from "@de-otio/trellis";
 
 setMediaModerationProvider(
   withModerationDeadline(new MyProvider(), {
-    timeoutMs: Number(process.env.MEDIA_MODERATION_TIMEOUT_MS),
+    timeoutMs: myConfig.moderationTimeoutMs,
   }),
 );
 ```
@@ -273,8 +293,12 @@ setMediaModerationProvider(
 The deadline binds the **decision**, not merely the wait. When it expires, core
 commits a fail-closed outcome, and if your call resolves `approved` a second
 later that resolution is discarded. Do not design around a late answer being
-used; it will not be. There is no default timeout — an unconfigured wrapper
-refuses to construct.
+used; it will not be. There is no default timeout, and no built-in
+`MEDIA_MODERATION_TIMEOUT_MS` or any other env var reads it for you — an
+unconfigured wrapper refuses to construct, deliberately: a timeout compiled
+into a public tarball tells an adversary exactly how long to stall a call to
+force it into review. `myConfig.moderationTimeoutMs` above is whatever
+operator-chosen source you wire it to.
 
 Check `signal.aborted` at the start of your call as well as listening for the
 event: a signal that was already aborted fires no event.
@@ -325,12 +349,26 @@ import { createLabelPolicy, setMediaLabelPolicy } from "@de-otio/trellis";
 
 setMediaLabelPolicy(
   createLabelPolicy({
-    categories: JSON.parse(process.env.MEDIA_THRESHOLDS_JSON!),
+    categories: myConfig.categoryThresholds,
     pinMode: "config",
-    expectedModelVersion: process.env.MEDIA_TAXONOMY_VERSION,
+    expectedModelVersion: myConfig.expectedTaxonomyVersion,
   }),
 );
 ```
+
+`categories` and `expectedModelVersion` are operator config with no compiled
+default; `createLabelPolicy` refuses to construct without them. There is no
+built-in `MEDIA_TAXONOMY_VERSION` env var — pick your own name.
+
+`MEDIA_THRESHOLDS_JSON` **is** a real env var (`apps/api/src/env-schema.ts`),
+and it happens to share `CategoryPolicy`'s `{ review, quarantine }` shape, but
+it feeds a different, core-internal concept: a threshold snapshot recorded
+alongside each moderation job for audit (`ThresholdSnapshot` in
+`apps/api/src/lib/workers/media-processing.ts`). Core treats that value as an
+opaque blob and never applies it as a policy — `createLabelPolicy` is never
+called with it. Parsing `MEDIA_THRESHOLDS_JSON` for your own `categories` would
+work today by coincidence of shape, but ties your provider's policy to a value
+core owns for an unrelated purpose. Give your policy's source its own name.
 
 This shifts authorship of the policy from you to them, which is the point: the
 operator can audit and change it without asking you. It can only ever *degrade*

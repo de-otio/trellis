@@ -57,6 +57,13 @@ Still declaration only: the `scopes` and `events` *catalogs* on
 `ExtensionSession.clientId`. The line-by-line account is in
 [Extension API reference — Live since 0.10.0](../../docs/reference/extension-api.md#live-since-0100).
 
+**`scopes` is a guard rail, not a sandbox.** The enforcement above is real —
+a caller without the required scope never reaches your handler — but it
+defends against an honest-but-wrong extension and a hostile HTTP caller, not
+against a hostile extension. See
+[Trust model](#trust-model--extensions-are-not-sandboxed) below: nothing about
+`scopes` changes the fact that extension code runs in-process and unsandboxed.
+
 ## Trust model — extensions are NOT sandboxed
 
 Registering a `TrellisExtension` is a decision to trust that code at the same
