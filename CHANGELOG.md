@@ -18,6 +18,28 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ### Fixed
 
+- **A private extension route with scopes can boot.** The published contract for
+  `ExtensionRouteDefinition.scopes` is three-valued, and the third value —
+  non-empty, "every listed scope required" — could not be declared at all
+  unless the route was *also* `publicSpec`. `describedExtensionRoutes` copies
+  `def.scopes` onto the core `Route`, and `buildPublicV1Routes()` runs
+  `assertPublicMountWiring` over a table that includes extension routes; its
+  second rule threw for non-empty `scopes` without `publicSpec: true`, on the
+  premise that "only the `/api/v1` mount checks a core route's scopes, so this
+  declaration is never enforced anywhere". True of every hand-written core
+  route, which is what the rule was written for, and false of an extension
+  route: `wrapExtensionRoute` runs `requireScope` inside the handler it emits,
+  on the unversioned `/api/ext/...` mount. So a documented declaration failed
+  the boot with a message asserting the opposite of what the code does, and a
+  scope could be attached to an extension route only by publishing it. Nobody
+  saw it because the mount test used a core route and the one live consumer
+  attaches no per-route scopes. `wrapExtensionRoute` now marks the routes it
+  builds `scopesEnforcedBy: "extension-wrapper"` — the route declaring where
+  its gate lives, rather than the guard pattern-matching on `/api/ext/` — and
+  the rule exempts exactly those. The other two wiring rules (a hand-written
+  `/api/v1` path, a public route that cannot be published) still apply to them,
+  and the original rule is unchanged for core routes; all four cases are
+  pinned.
 - **An IP-literal database endpoint is no longer sent as the TLS server name.**
   `buildDbSslOptions` (`db-ssl.ts`) set `servername` to the connection-string
   host unconditionally. On a Managed Postgres private endpoint that host is an
@@ -97,6 +119,55 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ### Security
 
+- **The raw-route auth check is now on middleware identity, not on the
+  function's name.** `validateExtensions` rejects any `ext.routes` entry that
+  carries no auth middleware — the one route mount that bypasses every core
+  gate (no auth, no CSRF, no security headers, and the full core `Env` handed
+  to the handler). It decided "has auth middleware" with
+  `m.name === "authMiddleware" || m.name === "csrfMiddleware"`. `.name` is a
+  property of the function the *extension* supplies, so the check tested a
+  label the caller writes: `function authMiddleware(_c, next) { return
+  next(); }` passed while defending nothing, and `Function.prototype.name` is
+  configurable, so even a lambda can claim it. The mirror image was worse —
+  core's real `csrfMiddleware()` returns an anonymous arrow whose `.name` is
+  `""`, and core's `authMiddleware` is not a `Middleware` at all
+  (`(request, env) => AuthContext | null`), so *neither* of the two things the
+  message told you to attach could satisfy it. Nobody saw it because the
+  validator's own test asserted the guard with a hand-named no-op, which is
+  precisely the shape that should have been refused, and the one live consumer
+  declares `routes: []`. Core middleware is now stamped with a non-enumerable
+  `Symbol.for("de-otio.trellis.coreGateMiddleware")` tag that only
+  `middleware.ts` sets, and the guard reads the tag. `requireSessionMiddleware()`
+  is new — a real 401-before-handler gate, since core had no `Middleware` that
+  enforced authentication at all — and it and `csrfMiddleware()` are reachable
+  from `@de-otio/trellis/dist/lib/middleware.js`, so "attach a real gate" is now
+  something a vertical can actually do rather than advice pointing at a
+  middleware that could not satisfy the check. (Promoting the two to the
+  top-level `@de-otio/trellis` export would move
+  `apps/api/etc/public-api.snapshot.d.ts` and is left as its own reviewed
+  change.) Pinned by tests that a
+  hand-named no-op, a lambda with `name` reassigned to match, and a plain
+  object carrying the symbol are all refused, and that both core gates are
+  accepted.
+- **An extension can no longer read a core secret by naming it.**
+  `ExtensionContext.config` is documented — in the package's own doc comment
+  and in the reference docs — as never exposing core secrets such as
+  `SESSION_SECRET`, `DATABASE_URL` or API keys. `extractExtensionConfig`
+  implemented that by walking the extension's own `configSchema.shape` and
+  returning `process.env[key]` for every entry, so declaring the key *was* the
+  exploit: `z.object({ SESSION_SECRET: z.string() })` put the session-signing
+  key on `ctx.config`, no `.passthrough()` or `.transform()` required. The
+  existing test only checked an *undeclared* key, which was never the hole, and
+  the live consumer declares an empty schema, so nothing failed. A
+  `configSchema` naming any key in `CORE_SECRET_ENV_KEYS` (database credentials
+  in all three accepted forms, the session secret/ARN/salt, the at-rest KEKs,
+  the identity admin client secret, and the ambient AWS credential trio) now
+  fails the boot naming every offending key, and `extractExtensionConfig` drops
+  them regardless, so a context built without validation cannot leak one
+  either. Extensions are in-process and unsandboxed — this is not a sandbox,
+  it is the guard rail that makes the published surface tell the truth. A drift
+  test re-derives the secret-shaped keys from `env-schema.ts` and fails when
+  one is added there without being added to the list.
 - **A route that declares no scopes is now first-party only, as published.**
   `ExtensionRouteDefinition.scopes` is three-valued — absent means "first-party
   only; no third-party client reaches it", `[]` means "any authenticated

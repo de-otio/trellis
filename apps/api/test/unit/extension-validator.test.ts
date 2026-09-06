@@ -17,6 +17,11 @@ import {
   classifyApiVersion,
   MAX_API_VERSION_LENGTH,
 } from "../../src/lib/extension-validator.js";
+import {
+  csrfMiddleware,
+  requireSessionMiddleware,
+} from "../../src/lib/middleware.js";
+import { CORE_SECRET_ENV_KEYS } from "../../src/lib/extension-config-keys.js";
 import { EXTENSION_API_VERSION } from "@de-otio/trellis-extension-api";
 import type { TrellisExtension } from "@de-otio/trellis-extension-api";
 import { z } from "zod";
@@ -30,7 +35,19 @@ function warnedMessages(): string {
   return mockLogger.warn.mock.calls.map((c) => String(c[0])).join("\n");
 }
 
-/** Named so `.name === "authMiddleware"` — what the validator matches on. */
+/**
+ * A gate core actually built. Core's `Middleware` context carries `env`, which
+ * the extension-api `Middleware` type does not, so a real extension casts here
+ * too — the cast is the shape of the seam, not a test shortcut.
+ */
+function coreGate() {
+  return requireSessionMiddleware() as any;
+}
+
+/**
+ * A hand-written no-op named exactly like core's gate. The validator used to
+ * accept this on `.name` alone; it defends nothing.
+ */
 async function authMiddleware(_ctx: any, next: () => Promise<Response>) {
   return next();
 }
@@ -165,7 +182,7 @@ describe("validateExtensions", () => {
           {
             path: "/api/dogs/breeds",
             handler: async () => new Response(""),
-            middleware: [authMiddleware as any],
+            middleware: [coreGate()],
           },
         ],
       });
@@ -179,7 +196,7 @@ describe("validateExtensions", () => {
           {
             path: /^\/entities\/dog\/[^/]+$/,
             handler: async () => new Response(""),
-            middleware: [authMiddleware as any],
+            middleware: [coreGate()],
           },
         ],
       });
@@ -205,7 +222,7 @@ describe("validateExtensions", () => {
         ],
       });
       expect(() => validateExtensions([ext])).toThrow(
-        /raw route "List dogs" has no auth middleware/,
+        /raw route "List dogs" carries no core gate middleware/,
       );
     });
 
@@ -220,7 +237,7 @@ describe("validateExtensions", () => {
           },
         ],
       });
-      expect(() => validateExtensions([ext])).toThrow(/no auth middleware/);
+      expect(() => validateExtensions([ext])).toThrow(/no core gate middleware/);
     });
 
     it("REJECTS when middleware is present but none of it is auth/CSRF", () => {
@@ -237,7 +254,7 @@ describe("validateExtensions", () => {
           },
         ],
       });
-      expect(() => validateExtensions([ext])).toThrow(/no auth middleware/);
+      expect(() => validateExtensions([ext])).toThrow(/no core gate middleware/);
     });
 
     it("names the offending extension and points at the wrapped path", () => {
@@ -258,14 +275,14 @@ describe("validateExtensions", () => {
       expect(message).toContain("SESSION_SECRET");
     });
 
-    it("accepts a raw route carrying authMiddleware", () => {
+    it("accepts a raw route carrying core's requireSessionMiddleware()", () => {
       const ext = makeExtension({
         id: "dog",
         routes: [
           {
             path: "/api/dogs",
             handler: async () => new Response(""),
-            middleware: [authMiddleware as any],
+            middleware: [coreGate()],
             description: "List dogs",
           },
         ],
@@ -273,7 +290,48 @@ describe("validateExtensions", () => {
       expect(() => validateExtensions([ext])).not.toThrow();
     });
 
-    it("accepts a raw route carrying csrfMiddleware", () => {
+    it("accepts a raw route carrying core's csrfMiddleware()", () => {
+      // This is the case the OLD name check REJECTED: `csrfMiddleware()`
+      // returns an anonymous arrow, so its `.name` is "" and the guard that
+      // claimed to look for it never matched it.
+      const ext = makeExtension({
+        id: "dog",
+        routes: [
+          {
+            path: "/api/dogs",
+            handler: async () => new Response(""),
+            middleware: [csrfMiddleware() as any],
+          },
+        ],
+      });
+      expect(() => validateExtensions([ext])).not.toThrow();
+    });
+
+    // ── Sweep C7 — the guard is on identity, not on the label ──────────────
+    //
+    // The old guard read `m.name === "authMiddleware" || "csrfMiddleware"`.
+    // `.name` is a property of the function the EXTENSION supplies, so the one
+    // route mount that bypasses every core gate was protected by a string the
+    // attacker writes. These four tests are the ones that fail on the old code.
+
+    it("REJECTS a hand-written no-op named authMiddleware", () => {
+      const ext = makeExtension({
+        id: "dog",
+        routes: [
+          {
+            path: "/api/dogs",
+            handler: async () => new Response(""),
+            middleware: [authMiddleware as any],
+            description: "Pretend gate",
+          },
+        ],
+      });
+      expect(() => validateExtensions([ext])).toThrow(
+        /carries no core gate middleware/,
+      );
+    });
+
+    it("REJECTS a hand-written no-op named csrfMiddleware", () => {
       async function csrfMiddleware(_ctx: any, next: () => Promise<Response>) {
         return next();
       }
@@ -287,7 +345,68 @@ describe("validateExtensions", () => {
           },
         ],
       });
-      expect(() => validateExtensions([ext])).not.toThrow();
+      expect(() => validateExtensions([ext])).toThrow(/no core gate middleware/);
+    });
+
+    it("REJECTS a no-op whose `name` is assigned to match after the fact", () => {
+      // `Function.prototype.name` is configurable, so even a lambda can claim
+      // the label. Nothing an extension can write to its own function object
+      // may satisfy the guard.
+      const impostor = async (_ctx: any, next: () => Promise<Response>) => next();
+      Object.defineProperty(impostor, "name", { value: "csrfMiddleware" });
+      expect(impostor.name).toBe("csrfMiddleware");
+
+      const ext = makeExtension({
+        id: "dog",
+        routes: [
+          {
+            path: "/api/dogs",
+            handler: async () => new Response(""),
+            middleware: [impostor as any],
+          },
+        ],
+      });
+      expect(() => validateExtensions([ext])).toThrow(/no core gate middleware/);
+    });
+
+    it("REJECTS a plain object carrying the tag as an own enumerable property", () => {
+      // The tag is only meaningful on a function core built. A data object
+      // that copies the symbol is not a middleware and must not pass.
+      const tag = Symbol.for("de-otio.trellis.coreGateMiddleware");
+      const fake = { [tag]: true };
+      const ext = makeExtension({
+        id: "dog",
+        routes: [
+          {
+            path: "/api/dogs",
+            handler: async () => new Response(""),
+            middleware: [fake as any],
+          },
+        ],
+      });
+      expect(() => validateExtensions([ext])).toThrow(/no core gate middleware/);
+    });
+
+    it("the error names the extension, the gates, and the preferred path", () => {
+      const ext = makeExtension({
+        id: "evilext",
+        routes: [
+          {
+            path: "/api/pwn",
+            handler: async () => new Response(""),
+            middleware: [authMiddleware as any],
+          },
+        ],
+      });
+      let message = "";
+      try {
+        validateExtensions([ext]);
+      } catch (err) {
+        message = (err as Error).message;
+      }
+      expect(message).toContain('"evilext"');
+      expect(message).toContain("requireSessionMiddleware()");
+      expect(message).toContain("extensionRoutes");
     });
 
     it("the first-party shape (routes: [], wrapped extensionRoutes) still loads", () => {
@@ -302,6 +421,76 @@ describe("validateExtensions", () => {
         ] as any,
       });
       expect(() => validateExtensions([ext])).not.toThrow();
+    });
+  });
+
+  // ── Sweep C8 — a configSchema may not name a core secret ─────────────────
+  //
+  // `createExtensionContext` fills `ctx.config` from `process.env` for every
+  // key the schema declares, so declaring the key WAS the exploit:
+  // `z.object({ SESSION_SECRET: z.string() })` handed over the session-signing
+  // key while the package docs promised core secrets are never exposed. The
+  // existing coverage only checked an *undeclared* key, which was never the
+  // hole. These fail on the old code.
+  describe("core secrets in configSchema (C8)", () => {
+    it("REJECTS a configSchema declaring SESSION_SECRET", () => {
+      const ext = makeExtension({
+        id: "dog",
+        configSchema: z.object({ SESSION_SECRET: z.string() }),
+      });
+      expect(() => validateExtensions([ext])).toThrow(
+        /declares core secret env key\(s\) in its configSchema: SESSION_SECRET/,
+      );
+    });
+
+    it("REJECTS every key on the core-secret list, one at a time", () => {
+      for (const key of CORE_SECRET_ENV_KEYS) {
+        const ext = makeExtension({
+          id: "dog",
+          configSchema: z.object({ [key]: z.string().optional() }),
+        });
+        expect(
+          () => validateExtensions([ext]),
+          `expected boot refusal for ${key}`,
+        ).toThrow(new RegExp(`configSchema: ${key}`));
+      }
+    });
+
+    it("names every denied key at once, not just the first", () => {
+      const ext = makeExtension({
+        id: "dog",
+        configSchema: z.object({
+          DOG_FEATURE_FLAG: z.string().optional(),
+          SESSION_SECRET: z.string().optional(),
+          DATABASE_URL: z.string().optional(),
+        }),
+      });
+      let message = "";
+      try {
+        validateExtensions([ext]);
+      } catch (err) {
+        message = (err as Error).message;
+      }
+      expect(message).toContain("SESSION_SECRET");
+      expect(message).toContain("DATABASE_URL");
+      expect(message).not.toContain("DOG_FEATURE_FLAG");
+    });
+
+    it("still accepts an extension's own config keys", () => {
+      const ext = makeExtension({
+        id: "dog",
+        configSchema: z.object({
+          DOG_REGISTRY_URL: z.string().optional(),
+          DOG_VISION_API_KEY: z.string().optional(),
+        }),
+      });
+      expect(() => validateExtensions([ext])).not.toThrow();
+    });
+
+    it("accepts an empty configSchema — the live first-party shape", () => {
+      expect(() =>
+        validateExtensions([makeExtension({ id: "dog", configSchema: z.object({}) })]),
+      ).not.toThrow();
     });
   });
 
