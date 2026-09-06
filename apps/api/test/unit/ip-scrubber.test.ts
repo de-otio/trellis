@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+
+// The `full` level is a keyed HMAC (DP-9); tests supply a fixed 32-byte key.
+const TEST_HMAC_KEY = Buffer.alloc(32, 7);
 import {
   scrubIPAddress,
   getIPAddress,
@@ -35,6 +38,7 @@ describe("IP Scrubber", () => {
           enabled: true,
           level: "full",
           preserveForRateLimit: false,
+          hmacKey: TEST_HMAC_KEY,
         };
 
         const result = scrubIPAddress("192.168.1.100", config);
@@ -70,6 +74,7 @@ describe("IP Scrubber", () => {
           enabled: true,
           level: "full",
           preserveForRateLimit: false,
+          hmacKey: TEST_HMAC_KEY,
         };
 
         const ipv6 = "2001:0db8:85a3:0000:0000:8a2e:0370:7334";
@@ -219,6 +224,7 @@ describe("IP Scrubber", () => {
       const env: IPScrubberEnv = {
         IP_SCRUBBING_ENABLED: "true",
         IP_SCRUBBING_LEVEL: "full",
+        SESSION_SECRET: "a-session-secret-of-at-least-32-characters!",
       };
 
       const result = getIPAddressWithEnvScrubbing(request, env);

@@ -58,6 +58,15 @@ export interface Env {
     DATABASE_POOL_MAX?: string;
     DATABASE_POOL_MIN?: string;
     DATABASE_CONNECTION_TIMEOUT_MS?: string;
+    /**
+     * CA certificate for the Postgres server, PEM text or base64 of the PEM.
+     * When set (or `DB_SSL_CA_PATH`), the pools verify the server certificate
+     * against it. Unset on a non-local host = legacy unverified TLS + a boot
+     * warning. Consumers must provision this; a follow-up makes it required.
+     */
+    DB_SSL_CA?: string;
+    /** Path to a mounted PEM file with the same meaning as `DB_SSL_CA`. */
+    DB_SSL_CA_PATH?: string;
     DATABASE_STATEMENT_TIMEOUT_MS?: string;
     DATABASE_IDLE_TIMEOUT_MS?: string;
     SESSION_SECRET: string;
@@ -112,7 +121,9 @@ export interface Env {
      * Parameter Store SecureString, fetched + KMS-decrypted + cached via AWS
      * Lambda Powertools (`@aws-lambda-powertools/parameters/ssm`). A dedicated,
      * separately-rotatable key — destroying it crypto-shreds prior tombstones.
-     * If unset, the tombstone key falls back to the resolved SESSION_SECRET.
+     * There is deliberately NO `SESSION_SECRET` fallback (DP-10): the tombstone
+     * key must be a dedicated, immutable secret — coupling it to the one secret
+     * the estate rotates as a kill-switch would re-key every tombstone.
      */
     REPORT_PSEUDONYM_SECRET_PARAM?: string;
     /** DynamoDB table holding refresh-jti dedup + agent-session metadata. */

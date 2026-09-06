@@ -3,6 +3,7 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
 import { Pool } from "pg";
 import { DatabaseCircuitBreaker } from "./database-circuit-breaker.js";
+import { buildDbSslOptions } from "./db-ssl.js";
 import { getLogger } from "./logger.js";
 
 interface DbSecret {
@@ -216,8 +217,9 @@ export async function withLambdaDbBreaker<T>(
  * RDS enforces `force_ssl`, so the connection MUST negotiate TLS — otherwise
  * Postgres rejects it with `28000 / no pg_hba.conf entry … no encryption`
  * (surfaced by Prisma as P1010). The request-path client gets this via
- * `DatabaseConnectionManager` (`ssl: { rejectUnauthorized: false }`); Lambda
- * handlers must do the same. Prisma 7 supplies the connection through a pg
+ * `DatabaseConnectionManager`; Lambda handlers must do the same. Both go
+ * through `buildDbSslOptions` (`db-ssl.ts`), so a configured `DB_SSL_CA`
+ * turns certificate verification on for every pool at once (DP-7). Prisma 7 supplies the connection through a pg
  * driver adapter (the old `datasources` constructor option is gone), so the
  * `ssl` option and the size cap go on the pool config.
  *
@@ -236,7 +238,9 @@ export async function getLambdaPrisma(): Promise<PrismaClient> {
 
   pool = new Pool({
     connectionString,
-    ssl: { rejectUnauthorized: false },
+    ssl: buildDbSslOptions(connectionString, process.env, (message, context) =>
+      getLogger().warn(message, context),
+    ),
     max: Number(process.env.LAMBDA_DATABASE_POOL_MAX ?? DEFAULT_POOL_MAX),
     connectionTimeoutMillis: Number(
       process.env.LAMBDA_DATABASE_CONNECT_TIMEOUT_MS ?? DEFAULT_CONNECT_TIMEOUT_MS,

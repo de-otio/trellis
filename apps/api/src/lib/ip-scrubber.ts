@@ -12,12 +12,30 @@
  *   storing them in security events and logs
  * - Helps protect user privacy by preventing full IP addresses from being stored
  * - Maintains rate limiting effectiveness by using partial IPs or user IDs
+ *
+ * ## The `full` level is a KEYED HMAC (security deep pass DP-9)
+ *
+ * The previous placeholder returned `hashed:` + truncated base64 of the raw
+ * address bytes — i.e. the address itself, re-encoded. A deployment selecting
+ * `full` for data minimisation would have stored reversible personal data
+ * under a label that claimed the opposite. It is now HMAC-SHA256 under a
+ * purpose-specific sub-key (HKDF, info `trellis-ip-scrub-v1`) derived from
+ * `IP_SCRUB_HMAC_SECRET` or, failing that, from `SESSION_SECRET` — never the
+ * raw secret bytes, and never an unkeyed hash (the IPv4 space is small enough
+ * to enumerate). A `full` scrub without a key is an error, not a downgrade.
  */
+
+import { deriveSubKey, hmacHex } from "./field-encryption.js";
+
+/** HKDF info label for the IP-scrub sub-key. Versioned so a change is visible. */
+export const IP_SCRUB_KEY_INFO = "trellis-ip-scrub-v1";
 
 export interface IPScrubberConfig {
   enabled: boolean;
-  level: "none" | "partial" | "full"; // none=no scrubbing, partial=3 octets, full=hash
+  level: "none" | "partial" | "full"; // none=no scrubbing, partial=3 octets, full=keyed hash
   preserveForRateLimit: boolean; // Keep full IP for rate limiting (if needed)
+  /** Required when `level` is `full`: the HMAC sub-key from {@link deriveIpScrubKey}. */
+  hmacKey?: Buffer;
 }
 
 /**
@@ -43,14 +61,14 @@ export function scrubIPAddress(
   }
 
   if (config.level === "full") {
-    // FUTURE USE: Hash IP address for maximum privacy
-    // This creates a one-way hash that cannot be reversed
-    // Use for maximum privacy when full IP scrubbing is required
-    const encoder = new TextEncoder();
-    const data = encoder.encode(ip);
-    // Note: In production, use crypto.subtle.digest for proper hashing
-    // This is a placeholder implementation
-    return `hashed:${btoa(String.fromCharCode(...data)).substring(0, 16)}`;
+    if (!config.hmacKey || config.hmacKey.length < 32) {
+      // Fail closed: storing the address in any recoverable form under a
+      // "hashed:" label is the defect this replaces.
+      throw new Error(
+        "ip-scrubber: level 'full' requires a 32-byte HMAC key (derive it with deriveIpScrubKey from IP_SCRUB_HMAC_SECRET or SESSION_SECRET)",
+      );
+    }
+    return `hashed:${hmacHex(config.hmacKey, ip).slice(0, 32)}`;
   }
 
   // Partial scrubbing (level === 'partial')
@@ -103,6 +121,41 @@ export function getIPAddress(
 export interface IPScrubberEnv {
   IP_SCRUBBING_ENABLED?: string; // 'true' to enable IP scrubbing
   IP_SCRUBBING_LEVEL?: string; // 'none', 'partial', or 'full'
+  /**
+   * Dedicated master secret for the `full` level (≥ 32 chars). Preferred over
+   * deriving from the session secret, so IP pseudonyms survive a
+   * `SESSION_SECRET` rotation and are not coupled to session security.
+   */
+  IP_SCRUB_HMAC_SECRET?: string;
+  /** Fallback master for the `full` level when no dedicated secret is set. */
+  SESSION_SECRET?: string;
+}
+
+// One-entry cache: HKDF is cheap, but the request path should not re-derive
+// the same key on every call. Keyed by the exact master string so a rotated
+// secret yields a fresh key.
+let cachedMaster: string | undefined;
+let cachedKey: Buffer | undefined;
+
+/**
+ * Derive the `full`-level HMAC sub-key from the environment.
+ *
+ * Uses `IP_SCRUB_HMAC_SECRET` when present, else `SESSION_SECRET`, always
+ * through HKDF with the {@link IP_SCRUB_KEY_INFO} label — the raw secret is
+ * never used as key material. Throws when neither is set.
+ */
+export function deriveIpScrubKey(env: IPScrubberEnv): Buffer {
+  const master = env.IP_SCRUB_HMAC_SECRET || env.SESSION_SECRET;
+  if (!master) {
+    throw new Error(
+      "ip-scrubber: IP_SCRUBBING_LEVEL=full needs IP_SCRUB_HMAC_SECRET (or SESSION_SECRET) to derive the HMAC key",
+    );
+  }
+  if (cachedMaster === master && cachedKey) return cachedKey;
+  const key = deriveSubKey(master, IP_SCRUB_KEY_INFO);
+  cachedMaster = master;
+  cachedKey = key;
+  return key;
 }
 
 /**
@@ -117,11 +170,14 @@ export function getIPAddressWithEnvScrubbing(
   request: Request,
   env?: IPScrubberEnv,
 ): string {
+  const level =
+    (env?.IP_SCRUBBING_LEVEL as "none" | "partial" | "full") || "partial";
+  const enabled = env?.IP_SCRUBBING_ENABLED === "true";
   const config: IPScrubberConfig = {
-    enabled: env?.IP_SCRUBBING_ENABLED === "true",
-    level:
-      (env?.IP_SCRUBBING_LEVEL as "none" | "partial" | "full") || "partial",
+    enabled,
+    level,
     preserveForRateLimit: false,
+    hmacKey: enabled && level === "full" && env ? deriveIpScrubKey(env) : undefined,
   };
 
   return getIPAddress(request, config);

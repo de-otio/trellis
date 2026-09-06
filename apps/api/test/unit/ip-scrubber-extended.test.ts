@@ -5,6 +5,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+
+// The `full` level is a keyed HMAC (DP-9); tests supply a fixed 32-byte key.
+const TEST_HMAC_KEY = Buffer.alloc(32, 7);
 import {
   getIPAddress,
   scrubIPAddress,
@@ -99,6 +102,7 @@ describe("IP Scrubber Extended", () => {
         enabled: true,
         level: "full",
         preserveForRateLimit: false,
+        hmacKey: TEST_HMAC_KEY,
       };
       const result = scrubIPAddress("192.168.1.1", config);
       expect(result).toContain("hashed:");
