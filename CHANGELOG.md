@@ -18,6 +18,17 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ### Fixed
 
+- **An IP-literal database endpoint is no longer sent as the TLS server name.**
+  `buildDbSslOptions` (`db-ssl.ts`) set `servername` to the connection-string
+  host unconditionally. On a Managed Postgres private endpoint that host is an
+  IP, which RFC 6066 forbids in SNI and Node deprecates (`DEP0123`) on the way
+  to refusing — every pool start logged the warning, and a future Node would
+  either fail the connection or drop the value. The IP now goes into a
+  `checkServerIdentity` that verifies it against the certificate's SAN, so the
+  identity check pins the dialled endpoint (`pg` supplies a socket and no
+  `host`, so without this Node compares the certificate against its
+  "localhost" fallback). DNS hosts keep `servername`. Chain verification against
+  the pinned `DB_SSL_CA` is unchanged.
 - **The feed cache key now carries every input that shapes the page.** The
   home-feed cache key (`feed-handler.ts`) said "EVERY input to the response
   body must appear in this key" and omitted three: `taxonomyTags`,
