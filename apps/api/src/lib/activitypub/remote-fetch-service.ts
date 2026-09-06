@@ -73,6 +73,68 @@ export class RemoteFetchService {
   private static cacheBytes = 0;
 
   /**
+   * Negative cache: URIs whose last dereference failed (non-2xx, invalid
+   * document, wrong location, network error). An inbox POST can name any
+   * public URL in its keyId and make us fetch it BEFORE the signature is
+   * checked, so a failed fetch must not be repeatable for free. Short TTL —
+   * a peer that was briefly down is retried within a minute.
+   */
+  private static negative = new Map<string, number>();
+  private static readonly NEGATIVE_TTL_MS = 60_000;
+  private static readonly MAX_NEGATIVE_ENTRIES = 5_000;
+
+  /**
+   * A document is authoritative for `id` only when it was served FROM `id`.
+   *
+   * Without this rule any server can publish a document whose `id` (and
+   * `publicKey.owner`) name an actor on another instance, and everything
+   * downstream that binds "who signed" to "who the activity claims to be"
+   * compares attacker-chosen strings with each other. The checks:
+   *
+   *   1. the final URL after redirects shares the requested URL's origin
+   *      (a redirect to another instance is not that instance speaking);
+   *   2. the document's `id` equals the requested URL or the final URL,
+   *      ignoring fragment and a trailing slash — Mastodon's rule.
+   *
+   * Pure, so it can be tested without a network.
+   */
+  static checkDocumentLocation(
+    requested: string,
+    final: string,
+    id: unknown,
+  ): { ok: true } | { ok: false; reason: string } {
+    if (typeof id !== "string" || id.length === 0) {
+      return { ok: false, reason: "document has no string id" };
+    }
+    let req: URL;
+    let fin: URL;
+    let doc: URL;
+    try {
+      req = new URL(requested);
+      fin = new URL(final);
+      doc = new URL(id);
+    } catch {
+      return { ok: false, reason: "unparseable url" };
+    }
+    if (fin.origin !== req.origin) {
+      return {
+        ok: false,
+        reason: `redirected off-origin: ${req.origin} -> ${fin.origin}`,
+      };
+    }
+    const norm = (u: URL) =>
+      `${u.origin}${u.pathname.replace(/\/$/, "")}${u.search}`;
+    const d = norm(doc);
+    if (d !== norm(req) && d !== norm(fin)) {
+      return {
+        ok: false,
+        reason: `document id ${id} is not the URL it was fetched from (${final})`,
+      };
+    }
+    return { ok: true };
+  }
+
+  /**
    * Fallback fetch options used when a caller passes none.
    *
    * TEST SEAM ONLY — production leaves this empty, so the real resolver and
@@ -133,6 +195,14 @@ export class RemoteFetchService {
       }
       return cached;
     }
+    if (this.isNegativelyCached(actorUri)) {
+      if (logger) {
+        logger.debug(
+          `[RemoteFetchService] Actor fetch recently failed, not retrying yet: ${actorUri}`,
+        );
+      }
+      return null;
+    }
 
     try {
       // Fetch through the SSRF-safe helper: https-only, DNS resolved and every
@@ -142,7 +212,11 @@ export class RemoteFetchService {
       // none of that — an inbound activity naming
       // `actor: "http://169.254.169.254/…"` made this a metadata reader, and
       // an unbounded `response.json()` made it an OOM primitive.
-      const { status, data } = await safeFetchJson<any>(actorUri, {
+      const {
+        status,
+        data,
+        url: finalUrl,
+      } = await safeFetchJson<any>(actorUri, {
         headers: {
           accept:
             'application/activity+json, application/ld+json; profile="https://www.w3.org/ns/activitystreams"',
@@ -162,6 +236,7 @@ export class RemoteFetchService {
             `[RemoteFetchService] Failed to fetch actor ${actorUri}: ${status}`,
           );
         }
+        this.setNegative(actorUri);
         return null;
       }
 
@@ -174,6 +249,25 @@ export class RemoteFetchService {
             `[RemoteFetchService] Invalid actor document: ${actorUri}`,
           );
         }
+        this.setNegative(actorUri);
+        return null;
+      }
+
+      // The document must be authoritative for the id it claims: served from
+      // that id, on the origin we asked. Never cache a document that fails
+      // this — a cached forgery would be served to every later verification.
+      const location = this.checkDocumentLocation(
+        actorUri,
+        finalUrl,
+        actor.id,
+      );
+      if (!location.ok) {
+        if (logger) {
+          logger.warn(
+            `[RemoteFetchService] Refusing actor document for ${actorUri}: ${location.reason}`,
+          );
+        }
+        this.setNegative(actorUri);
         return null;
       }
 
@@ -198,6 +292,7 @@ export class RemoteFetchService {
           );
         }
       }
+      this.setNegative(actorUri);
       return null;
     }
   }
@@ -254,10 +349,17 @@ export class RemoteFetchService {
       }
       return cached;
     }
+    if (this.isNegativelyCached(objectUri)) {
+      return null;
+    }
 
     try {
       // Same guarantees as fetchActor — see the comment there.
-      const { status, data } = await safeFetchJson<any>(objectUri, {
+      const {
+        status,
+        data,
+        url: finalUrl,
+      } = await safeFetchJson<any>(objectUri, {
         headers: {
           accept:
             'application/activity+json, application/ld+json; profile="https://www.w3.org/ns/activitystreams"',
@@ -277,6 +379,7 @@ export class RemoteFetchService {
             `[RemoteFetchService] Failed to fetch object ${objectUri}: ${status}`,
           );
         }
+        this.setNegative(objectUri);
         return null;
       }
 
@@ -289,6 +392,20 @@ export class RemoteFetchService {
             `[RemoteFetchService] Invalid object document: ${objectUri}`,
           );
         }
+        this.setNegative(objectUri);
+        return null;
+      }
+
+      // Same authority rule as actors: an object is only what its own origin
+      // says it is.
+      const location = this.checkDocumentLocation(objectUri, finalUrl, obj.id);
+      if (!location.ok) {
+        if (logger) {
+          logger.warn(
+            `[RemoteFetchService] Refusing object document for ${objectUri}: ${location.reason}`,
+          );
+        }
+        this.setNegative(objectUri);
         return null;
       }
 
@@ -313,6 +430,7 @@ export class RemoteFetchService {
           );
         }
       }
+      this.setNegative(objectUri);
       return null;
     }
   }
@@ -565,11 +683,40 @@ export class RemoteFetchService {
     }
   }
 
+  /** True while `uri` sits in the negative cache. */
+  private static isNegativelyCached(uri: string): boolean {
+    const until = this.negative.get(uri);
+    if (until === undefined) return false;
+    if (until <= Date.now()) {
+      this.negative.delete(uri);
+      return false;
+    }
+    return true;
+  }
+
+  /** Record a failed dereference. Bounded: oldest entries go first. */
+  private static setNegative(uri: string): void {
+    if (this.negative.size >= this.MAX_NEGATIVE_ENTRIES) {
+      const now = Date.now();
+      for (const [k, until] of this.negative) {
+        if (until <= now) this.negative.delete(k);
+      }
+      // Still full after the sweep: drop the oldest-inserted entry.
+      if (this.negative.size >= this.MAX_NEGATIVE_ENTRIES) {
+        const first = this.negative.keys().next();
+        if (!first.done) this.negative.delete(first.value);
+      }
+    }
+    this.negative.set(uri, Date.now() + this.NEGATIVE_TTL_MS);
+  }
+
   /**
-   * Invalidate cache entry
+   * Invalidate cache entry (positive and negative) — e.g. after a signature
+   * failed against a cached key, so the peer's rotated key is refetched.
    */
   static invalidateCache(uri: string): void {
     this.evict(uri);
+    this.negative.delete(uri);
   }
 
   /**
@@ -578,6 +725,7 @@ export class RemoteFetchService {
   static clearCache(): void {
     this.cache.clear();
     this.cacheBytes = 0;
+    this.negative.clear();
   }
 
   /** Current cache footprint in bytes — exposed for tests and diagnostics. */

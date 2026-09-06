@@ -267,6 +267,8 @@ describe("RemoteFetchService", () => {
         json: async () => ({ id: actorUri, inbox: `${actorUri}/inbox` }),
       });
 
+      // A refused document is negatively cached; clear it so this attempt fetches.
+      RemoteFetchService.clearCache();
       const result1 = await RemoteFetchService.fetchActor(
         actorUri,
         mockEnv,
@@ -280,6 +282,8 @@ describe("RemoteFetchService", () => {
         json: async () => ({ type: "Person", inbox: `${actorUri}/inbox` }),
       });
 
+      // A refused document is negatively cached; clear it so this attempt fetches.
+      RemoteFetchService.clearCache();
       const result2 = await RemoteFetchService.fetchActor(
         actorUri,
         mockEnv,
@@ -293,6 +297,8 @@ describe("RemoteFetchService", () => {
         json: async () => ({ id: actorUri, type: "Person" }),
       });
 
+      // A refused document is negatively cached; clear it so this attempt fetches.
+      RemoteFetchService.clearCache();
       const result3 = await RemoteFetchService.fetchActor(
         actorUri,
         mockEnv,
@@ -310,6 +316,8 @@ describe("RemoteFetchService", () => {
         }),
       });
 
+      // A refused document is negatively cached; clear it so this attempt fetches.
+      RemoteFetchService.clearCache();
       const result4 = await RemoteFetchService.fetchActor(
         actorUri,
         mockEnv,
@@ -353,6 +361,95 @@ describe("RemoteFetchService", () => {
         );
         expect(result).toEqual(mockActor);
       }
+    });
+  });
+
+  describe("document location — a document is authoritative only for the URL it came from", () => {
+    it("checkDocumentLocation accepts id == requested URL (fragment and trailing slash ignored)", () => {
+      const ok = RemoteFetchService.checkDocumentLocation(
+        "https://remote.example/users/alice",
+        "https://remote.example/users/alice",
+        "https://remote.example/users/alice/",
+      );
+      expect(ok).toEqual({ ok: true });
+    });
+
+    it("checkDocumentLocation accepts id == final URL after a same-origin redirect", () => {
+      const ok = RemoteFetchService.checkDocumentLocation(
+        "https://remote.example/@alice",
+        "https://remote.example/users/alice",
+        "https://remote.example/users/alice",
+      );
+      expect(ok).toEqual({ ok: true });
+    });
+
+    it("checkDocumentLocation rejects an off-origin redirect even when the id matches it", () => {
+      const r = RemoteFetchService.checkDocumentLocation(
+        "https://remote.example/users/alice",
+        "https://other.example/users/alice",
+        "https://other.example/users/alice",
+      );
+      expect(r.ok).toBe(false);
+    });
+
+    it("checkDocumentLocation rejects an id on another host, and a missing id", () => {
+      expect(
+        RemoteFetchService.checkDocumentLocation(
+          "https://attacker.example/users/evil",
+          "https://attacker.example/users/evil",
+          "https://victim.example/users/admin",
+        ).ok,
+      ).toBe(false);
+      expect(
+        RemoteFetchService.checkDocumentLocation(
+          "https://attacker.example/users/evil",
+          "https://attacker.example/users/evil",
+          undefined,
+        ).ok,
+      ).toBe(false);
+    });
+
+    it("fetchActor refuses — and does not cache — a document claiming another actor's id", async () => {
+      const actorUri = "https://attacker.example/users/evil";
+      (global.fetch as any).mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          id: "https://victim.example/users/admin",
+          type: "Person",
+          inbox: `${actorUri}/inbox`,
+        }),
+      });
+
+      const result = await RemoteFetchService.fetchActor(actorUri, mockEnv, getLogger());
+      expect(result).toBeNull();
+      expect(RemoteFetchService.getCacheBytes()).toBe(0);
+    });
+
+    it("fetchObject refuses a document claiming another origin's id", async () => {
+      const objectUri = "https://attacker.example/posts/1";
+      (global.fetch as any).mockResolvedValue({
+        ok: true,
+        json: async () => ({ id: "https://victim.example/posts/1", type: "Note" }),
+      });
+
+      const result = await RemoteFetchService.fetchObject(objectUri, mockEnv, getLogger());
+      expect(result).toBeNull();
+      expect(RemoteFetchService.getCacheBytes()).toBe(0);
+    });
+  });
+
+  describe("negative cache — a failed dereference is not repeatable for free", () => {
+    it("does not re-fetch a URI that just failed, until invalidated", async () => {
+      const actorUri = "https://down.example/users/alice";
+      (global.fetch as any).mockResolvedValue({ ok: false, status: 502 });
+
+      expect(await RemoteFetchService.fetchActor(actorUri, mockEnv, getLogger())).toBeNull();
+      expect(await RemoteFetchService.fetchActor(actorUri, mockEnv, getLogger())).toBeNull();
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+
+      RemoteFetchService.invalidateCache(actorUri);
+      expect(await RemoteFetchService.fetchActor(actorUri, mockEnv, getLogger())).toBeNull();
+      expect(global.fetch).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -523,6 +620,7 @@ describe("RemoteFetchService", () => {
         json: async () => ({ type: "Note" }),
       });
 
+      RemoteFetchService.clearCache(); // negative cache from the previous refusal
       const result1 = await RemoteFetchService.fetchObject(
         objectUri,
         mockEnv,
@@ -536,6 +634,7 @@ describe("RemoteFetchService", () => {
         json: async () => ({ id: objectUri }),
       });
 
+      RemoteFetchService.clearCache(); // negative cache from the previous refusal
       const result2 = await RemoteFetchService.fetchObject(
         objectUri,
         mockEnv,
@@ -549,6 +648,7 @@ describe("RemoteFetchService", () => {
         json: async () => ({ id: 123, type: "Note" }),
       });
 
+      RemoteFetchService.clearCache(); // negative cache from the previous refusal
       const result3 = await RemoteFetchService.fetchObject(
         objectUri,
         mockEnv,
