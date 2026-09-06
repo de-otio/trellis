@@ -499,3 +499,85 @@ jobs:
           AWS_REGION: us-east-1
           AWS_ACCESS_KEY_ID: test
           AWS_SECRET_ACCESS_KEY: test
+
+  # ===========================================================================
+  # D1 — the aggregating gate.
+  #
+  # This job exists so the repo's required-check list can stay STABLE while the
+  # CI matrix changes underneath it. Add a lane, rename a lane, split a lane —
+  # branch protection never has to be touched, and the "Expected — waiting for
+  # status" trap (a required context that nothing will ever report) never opens.
+  #
+  # Four rules, in descending order of how expensive they are to get wrong:
+  #
+  #   1. PATH FILTERS GO ON A JOB, NEVER ON `on:` / `paths:`. A skipped JOB
+  #      satisfies a required check. A skipped WORKFLOW reports nothing at all
+  #      and the pull request hangs forever with no error anywhere. This
+  #      workflow deliberately has no `paths:` filter under `on:`; keep it that
+  #      way for as long as `ci-required` is a required context.
+  #   2. `if: always()` — without it this job is skipped whenever a `needs:`
+  #      job fails, so the check never goes red, it just never arrives.
+  #   3. `needs:` every real CI job. Adding a lane and forgetting to add it
+  #      here is how a lane silently stops gating merges.
+  #   4. `success` and `skipped` pass; everything else fails, including the
+  #      empty result of a job that has been removed from the workflow but not
+  #      from this list.
+  #
+  # It runs no actions at all — it reads `needs.*.result` and exits. No
+  # checkout means no third-party code in the path of the one check that
+  # authorises every merge.
+  #
+  # NOT AGGREGATED HERE: `CodeQL`. It comes from GitHub's code-scanning default
+  # setup, which is a separate workflow, so it cannot be a `needs:` of a job in
+  # this file. It stays a separately required context.
+  # ===========================================================================
+  ci-required:
+    name: ci-required
+    if: always()
+    needs:
+      - lint-and-test
+      - standalone
+      - testkit
+      - graph
+      - schema-drift
+      - schema
+      - integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Verify every CI job succeeded or was skipped
+        env:
+          RESULTS: >-
+            lint-and-test=${{ needs.lint-and-test.result }}
+            standalone=${{ needs.standalone.result }}
+            testkit=${{ needs.testkit.result }}
+            graph=${{ needs.graph.result }}
+            schema-drift=${{ needs.schema-drift.result }}
+            schema=${{ needs.schema.result }}
+            integration=${{ needs.integration.result }}
+        run: |
+          set -euo pipefail
+          echo "results: $RESULTS"
+          failed=0
+          for pair in $RESULTS; do
+            job="${pair%%=*}"
+            result="${pair#*=}"
+            case "$result" in
+              success|skipped)
+                echo "ok       $job: $result"
+                ;;
+              *)
+                echo "FAILED   $job: ${result:-<no result — is it still in this workflow?>}"
+                failed=1
+                ;;
+            esac
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo
+            echo "ci-required: at least one CI job did not succeed. Fail closed."
+            exit 1
+          fi
+          echo
+          echo "ci-required: all CI jobs succeeded or were skipped."
