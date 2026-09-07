@@ -160,6 +160,7 @@ describe("Sentiments Routes", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
       expect(mockAddSecurityHeaders).toHaveBeenCalledWith(mockResponse);
       expect(response.status).toBe(200);
@@ -189,6 +190,28 @@ describe("Sentiments Routes", () => {
       expect(mockCreateSecureResponse).toHaveBeenCalledWith(
         JSON.stringify({ error: "Request context not available" }),
         { status: 500, headers: { "content-type": "application/json" } },
+      );
+      expect(mockAddPostSentiment).not.toHaveBeenCalled();
+    });
+
+    // V4 residual (b): the reaction WRITE needs the caller's ACTIVE tenant, not
+    // the tenant of the post it addresses. Without one the handler could only
+    // gate on existence.
+    it("should return 401 when the JWT carries no active tenant", async () => {
+      mockAuthMiddleware.mockResolvedValue({ activeTenantId: undefined });
+      mockValidateRequest.mockResolvedValue({
+        success: true,
+        data: { sentiment: "like" },
+      });
+
+      await route!.handler(mockRequest, mockEnv, {
+        pathname: "/api/posts/post-123/sentiment",
+        requestContext: mockRequestContext,
+      });
+
+      expect(mockCreateSecureResponse).toHaveBeenCalledWith(
+        JSON.stringify({ error: "Unauthorized" }),
+        { status: 401, headers: { "content-type": "application/json" } },
       );
       expect(mockAddPostSentiment).not.toHaveBeenCalled();
     });

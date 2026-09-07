@@ -39,7 +39,8 @@ const VALID_SENTIMENTS = [
 ];
 
 /**
- * The single refusal for `GET /api/posts/:id/sentiments` (H3).
+ * The single refusal for `GET /api/posts/:id/sentiments` (H3) and, since V4
+ * residual (b), for the `POST` that adds one.
  *
  * "No such post", "another tenant's post" and "not in that post's audience" are
  * byte-identical — the same rule the ActivityPub object routes adopted, for the
@@ -89,6 +90,16 @@ export class ReactionHandler {
    * Add or update sentiment reaction on a post
    *
    * PREPARATORY: Uses DataRouter for region-aware operations.
+   *
+   * V4 residual (b): this WRITE gated on bare existence. `DataRouter.getPost`
+   * is a `findUnique({ where: { id } })` with no tenant and no audience
+   * predicate, so any authenticated caller in any tenant could react to a post
+   * they cannot read — and because the upsert takes the tenant from the POST
+   * row, the reaction landed inside the target's tenant. A write is not a
+   * weaker permission than a read: the same `canReadPost` decision the
+   * sentiment READ makes now has to pass first, and it refuses with the same
+   * body the not-found branch returns, so it is not an oracle either.
+   * `activeTenantId` is therefore required, exactly as on `getPostSentiments`.
    */
   async addPostSentiment(
     postId: string,
@@ -96,6 +107,7 @@ export class ReactionHandler {
     session: Session,
     env: Env,
     requestContext: TrellisRequestContext,
+    activeTenantId: string,
   ): Promise<Response> {
     try {
       if (!VALID_SENTIMENTS.includes(sentiment)) {
@@ -109,7 +121,22 @@ export class ReactionHandler {
       const requestId = generateRequestId();
       const region = requestContext.region;
 
-      // Verify post exists in correct region using DataRouter
+      // AUTHORIZATION first — tenant, audience and blocks — before any read of
+      // the post row and before anything is written.
+      const { canReadPost } = await import("./post-read-authorizer.js");
+      const permitted = await canReadPost({
+        postId,
+        viewerUserId: session?.userId ?? "",
+        tenantId: activeTenantId,
+        region,
+        env: env as any,
+      });
+      if (!permitted) {
+        return postSentimentsDenyResponse();
+      }
+
+      // Verify post exists in correct region using DataRouter. After the gate,
+      // refusing with the identical body.
       const post = await DataRouter.getPost(
         postId,
         region,
@@ -120,10 +147,7 @@ export class ReactionHandler {
       );
 
       if (!post) {
-        return new Response(JSON.stringify({ error: "Post not found" }), {
-          status: 404,
-          headers: { "content-type": "application/json" },
-        });
+        return postSentimentsDenyResponse();
       }
 
       // Check if post is deleted - with timeout/retry

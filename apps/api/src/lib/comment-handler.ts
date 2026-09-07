@@ -50,7 +50,8 @@ export interface CreateCommentRequest {
 }
 
 /**
- * The single refusal for `GET /api/posts/:id/comments` (H3).
+ * The single refusal for `GET /api/posts/:id/comments` (H3) and, since V4
+ * residual (b), for the `POST` that creates one.
  *
  * "No such post", "another tenant's post" and "you are not in that post's
  * audience" must be byte-identical, for the same reason the ActivityPub object
@@ -77,6 +78,15 @@ export class CommentHandler {
    * Create a comment on a post
    *
    * PREPARATORY: Uses DataRouter for region-aware operations.
+   *
+   * V4 residual (b): this WRITE gated on bare existence via
+   * `DataRouter.getPost` — a `findUnique({ where: { id } })` with no tenant and
+   * no audience predicate — so any authenticated caller in any tenant could
+   * comment on a post they cannot read, and the comment landed under it. The
+   * block guard below was already here; tenancy and audience were not. A write
+   * is not a weaker permission than a read, so {@link canReadPost} — the same
+   * decision `getComments` makes — now has to pass first, refusing with the
+   * body the not-found branch already returned.
    */
   async createComment(
     postId: string,
@@ -146,7 +156,22 @@ export class CommentHandler {
       const requestId = generateRequestId();
       const region = requestContext.region;
 
-      // Verify post exists in correct region using DataRouter
+      // AUTHORIZATION first — tenant, audience and blocks — before any read of
+      // the post row and before anything is written (V4 residual (b)).
+      const { canReadPost } = await import("./post-read-authorizer.js");
+      const permitted = await canReadPost({
+        postId,
+        viewerUserId: session.userId,
+        tenantId: activeTenantId,
+        region,
+        env: env as any,
+      });
+      if (!permitted) {
+        return commentsDenyResponse();
+      }
+
+      // Verify post exists in correct region using DataRouter. After the gate,
+      // refusing with the identical body.
       const post = await DataRouter.getPost(
         postId,
         region,
@@ -157,10 +182,7 @@ export class CommentHandler {
       );
 
       if (!post) {
-        return new Response(JSON.stringify({ error: "Post not found" }), {
-          status: 404,
-          headers: { "content-type": "application/json" },
-        });
+        return commentsDenyResponse();
       }
 
       // Check if post is deleted (need to query database for deletedAt) - with timeout/retry

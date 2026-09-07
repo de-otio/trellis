@@ -140,6 +140,14 @@ vi.mock("../../src/lib/feed-handler", () => ({
   FeedHandler: { invalidateFeedCache: vi.fn() },
 }));
 
+// The shared read authorizer (V4 residual (b) put it in front of the comment
+// write). Default ALLOW: what is under test here is the moderation toggle, not
+// the authz gate — that has its own suites.
+const mockCanReadPost = vi.fn();
+vi.mock("../../src/lib/post-read-authorizer", () => ({
+  canReadPost: (...args: any[]) => mockCanReadPost(...args),
+}));
+
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
@@ -164,6 +172,7 @@ describe("moderation toggle is fail-closed on the moderated write path (F1)", ()
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockCanReadPost.mockResolvedValue(true);
 
     mockDb = {
       // M2: the block seam reads through this delegate. Default = no blocks.

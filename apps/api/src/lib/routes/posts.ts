@@ -9,6 +9,7 @@ import { EntityTaggingError } from "../entity-tagging-errors.js";
 import { getLogger, Logger } from "../logger.js";
 import { corsMiddleware, csrfMiddleware } from "../middleware.js";
 import { PostHandler } from "../post-handler.js";
+import { canReadPost } from "../post-read-authorizer.js";
 import { RateLimiter } from "../rate-limit.js";
 import { createRequestContext } from "../request-context.js";
 import { SecurityHeaders } from "../security-headers.js";
@@ -18,6 +19,26 @@ import { TaxonomyHandler } from "../taxonomy-handler.js";
 import { authMiddleware } from "../auth/auth-middleware.js";
 import { Validator } from "../validation.js";
 import type { Route } from "./types.js";
+
+/**
+ * The single refusal for the two post-scoped taxonomy GETs (V4 residual (a)).
+ *
+ * "No such post", "another tenant's post" and "you are not in that post's
+ * audience" must be byte-identical, for the same reason the comment-thread and
+ * sentiment reads adopted one body (`comment-handler.ts`,
+ * `reaction-handler.ts`): a distinguishable refusal is an existence oracle over
+ * exactly the private post ids an attacker is fishing for. This reuses the body
+ * the not-found branch already returned, so the refusal is not a new observable
+ * either.
+ *
+ * A new refusal branch on either route must call this, not describe itself.
+ */
+function taxonomyDenyResponse(securityHeaders: SecurityHeaders): Response {
+  return securityHeaders.createSecureResponse(
+    JSON.stringify({ error: "Post not found" }),
+    { status: 404, headers: { "content-type": "application/json" } },
+  );
+}
 
 export const postsRoutes: Route[] = [
   {
@@ -630,12 +651,7 @@ export const postsRoutes: Route[] = [
       const securityHeaders = new SecurityHeaders(env);
       const logger = getLogger();
       const validator = new Validator();
-      const session = await sessionManager.getSession(
-        request,
-        env.SESSION_SECRET,
-      );
 
-      // Note: GET is public (no auth required) but we check if user owns post for additional info
       if (!requestContext) {
         return securityHeaders.createSecureResponse(
           JSON.stringify({ error: "Request context not available" }),
@@ -643,37 +659,63 @@ export const postsRoutes: Route[] = [
         );
       }
 
+      // V4(a): AUTHENTICATE FIRST. This route used to call `DataRouter.getPost`
+      // — a bare `findUnique({ where: { id } })` — and return 404 BEFORE the
+      // 401 below, so an anonymous caller could probe any post id in any tenant
+      // and read "exists" or "does not exist" off the status code. The auth
+      // check has to come first or the refusal itself is the oracle.
+      const session = await sessionManager.getSession(
+        request,
+        env.SESSION_SECRET,
+      );
+      if (!session) {
+        return securityHeaders.createSecureResponse(
+          JSON.stringify({ error: "Unauthorized" }),
+          { status: 401, headers: { "content-type": "application/json" } },
+        );
+      }
+      const auth = await authMiddleware(request, env);
+      if (!auth || !auth.activeTenantId) {
+        return securityHeaders.createSecureResponse(
+          JSON.stringify({ error: "Unauthorized" }),
+          { status: 401, headers: { "content-type": "application/json" } },
+        );
+      }
+      const tenantId = auth.activeTenantId;
+
       try {
         const postId = pathname
           .split("/api/posts/")[1]
           .split("/taxonomy-tags")[0];
 
-        // Verify post exists
+        // AUTHORIZATION: the tags hanging off a post must not be more readable
+        // than the post. Same decision, same uniform 404, as the comment-thread
+        // and sentiment reads (`post-read-authorizer.ts`).
+        const permitted = await canReadPost({
+          postId,
+          viewerUserId: session.userId,
+          tenantId,
+          region: requestContext.region,
+          env: env as any,
+        });
+        if (!permitted) {
+          return taxonomyDenyResponse(securityHeaders);
+        }
+
+        // Cross-region check and data-access audit, AFTER the gate and refusing
+        // with the identical body so it adds no observable of its own.
         const post = await DataRouter.getPost(
           postId,
           requestContext.region,
           env as any,
           request,
           undefined,
-          session?.userId,
+          session.userId,
         );
 
         if (!post) {
-          return securityHeaders.createSecureResponse(
-            JSON.stringify({ error: "Post not found" }),
-            { status: 404, headers: { "content-type": "application/json" } },
-          );
+          return taxonomyDenyResponse(securityHeaders);
         }
-
-        // Get tenant ID from authenticated JWT
-        const auth = await authMiddleware(request, env);
-        if (!auth || !auth.activeTenantId) {
-          return securityHeaders.createSecureResponse(
-            JSON.stringify({ error: "Unauthorized" }),
-            { status: 401, headers: { "content-type": "application/json" } },
-          );
-        }
-        const tenantId = auth.activeTenantId;
 
         // Get database and taxonomy handler
         const region = requestContext.region || "US";
@@ -730,10 +772,6 @@ export const postsRoutes: Route[] = [
       const securityHeaders = new SecurityHeaders(env);
       const logger = getLogger();
       const validator = new Validator();
-      const session = await sessionManager.getSession(
-        request,
-        env.SESSION_SECRET,
-      );
 
       if (!requestContext) {
         return securityHeaders.createSecureResponse(
@@ -742,34 +780,70 @@ export const postsRoutes: Route[] = [
         );
       }
 
+      // V4(a): AUTHENTICATE FIRST — same defect as the taxonomy-tags GET above,
+      // one step worse: after the 404-before-401 existence probe this route read
+      // the post's `text` with a bare `findUnique` and returned tags DERIVED
+      // FROM IT, so the oracle leaked content and not just existence.
+      const session = await sessionManager.getSession(
+        request,
+        env.SESSION_SECRET,
+      );
+      if (!session) {
+        return securityHeaders.createSecureResponse(
+          JSON.stringify({ error: "Unauthorized" }),
+          { status: 401, headers: { "content-type": "application/json" } },
+        );
+      }
+      const auth = await authMiddleware(request, env);
+      if (!auth || !auth.activeTenantId) {
+        return securityHeaders.createSecureResponse(
+          JSON.stringify({ error: "Unauthorized" }),
+          { status: 401, headers: { "content-type": "application/json" } },
+        );
+      }
+      const tenantId = auth.activeTenantId;
+
       try {
         const postId = pathname
           .split("/api/posts/")[1]
           .split("/tags/suggestions")[0];
 
-        // Verify post exists
+        // AUTHORIZATION before any read of the post or anything derived from
+        // it. Suggestions are a projection of the post text; they cannot be
+        // more readable than the text.
+        const permitted = await canReadPost({
+          postId,
+          viewerUserId: session.userId,
+          tenantId,
+          region: requestContext.region,
+          env: env as any,
+        });
+        if (!permitted) {
+          return taxonomyDenyResponse(securityHeaders);
+        }
+
+        // Cross-region check and data-access audit, AFTER the gate and refusing
+        // with the identical body.
         const post = await DataRouter.getPost(
           postId,
           requestContext.region,
           env as any,
           request,
           undefined,
-          session?.userId,
+          session.userId,
         );
 
         if (!post) {
-          return securityHeaders.createSecureResponse(
-            JSON.stringify({ error: "Post not found" }),
-            { status: 404, headers: { "content-type": "application/json" } },
-          );
+          return taxonomyDenyResponse(securityHeaders);
         }
 
-        // Get post text (need to fetch full post)
+        // Get post text (need to fetch full post). Reached only for a post the
+        // gate above has already permitted this viewer to read.
         const db = DataRouter.getDatabaseForRegion(
           requestContext.region,
           env as any,
           request,
-          session?.userId,
+          session.userId,
         );
         const fullPost = await (db.post.findUnique({
           where: { id: postId },
@@ -777,21 +851,8 @@ export const postsRoutes: Route[] = [
         }) as unknown as Promise<{ text: string } | null>);
 
         if (!fullPost) {
-          return securityHeaders.createSecureResponse(
-            JSON.stringify({ error: "Post not found" }),
-            { status: 404, headers: { "content-type": "application/json" } },
-          );
+          return taxonomyDenyResponse(securityHeaders);
         }
-
-        // Get tenant ID from authenticated JWT
-        const auth = await authMiddleware(request, env);
-        if (!auth || !auth.activeTenantId) {
-          return securityHeaders.createSecureResponse(
-            JSON.stringify({ error: "Unauthorized" }),
-            { status: 401, headers: { "content-type": "application/json" } },
-          );
-        }
-        const tenantId = auth.activeTenantId;
 
         // Get database and handlers
         const wrappedDb = getWrappedDatabase(

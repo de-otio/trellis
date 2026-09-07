@@ -136,6 +136,72 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ### Security
 
+- **The two post-scoped taxonomy GETs are no longer an anonymous, cross-tenant
+  existence oracle.** `GET /posts/:postId/taxonomy-tags` and
+  `GET /api/posts/:postId/tags/suggestions` each called `DataRouter.getPost` —
+  a bare `findUnique({ where: { id } })` with no tenant and no audience
+  predicate — and returned **404 before** the 401. An unauthenticated caller
+  could therefore walk post ids and read "exists" / "does not exist" off the
+  status code, across every tenant at once; the suggestions route then read the
+  post's `text` with a second bare `findUnique` and returned tags derived from
+  it, which turns the oracle from existence into content. Nobody saw it because
+  the 401 *is* there — one comment above it even said the route was
+  deliberately public — and the ordering, not the presence, was the defect; the
+  H3 wave that put `canReadPost` in front of the comment-thread, sentiment and
+  who-reacted reads did not reach these two, which the 2026-08-03 call-site
+  survey had graded only "PLAUSIBLE per caller". Both routes now authenticate
+  first (401 for anonymous, whatever the id), then gate on the same
+  `canReadPost` decision the other post-attachment reads use, and refuse
+  through one `taxonomyDenyResponse` so "no such post", "another tenant's post"
+  and "not in the audience" stay byte-identical. Suggestions are derived only
+  from a post the viewer may read. Pinned by
+  `test/unit/routes/posts-taxonomy-authz.test.ts`, which fails on the old
+  ordering in ten places — including the discriminating one: an anonymous
+  request for an id that does not exist used to answer 404 while one for an id
+  that does answered 401.
+- **Reacting to and commenting on a post now require being able to READ it.**
+  `ReactionHandler.addPostSentiment` and `CommentHandler.createComment` gated on
+  bare existence — the same `DataRouter.getPost` primitive, the same missing
+  tenant and audience predicates — so an ordinary authenticated account in one
+  tenant could react to or comment on a post in another that it could not read.
+  The reaction is worse than it looks: the upsert takes `tenantId` from the
+  **post** row, so the row landed inside the target's tenant. This survived the
+  read-side fix because both writes already had a visible authorization check —
+  the M2 block guard — and a guard that is present reads as a guard that is
+  complete; blocks were enforced, tenancy and audience were not. Both writes
+  now call `canReadPost` before touching anything and refuse with the body their
+  own not-found branch already returned. `addPostSentiment` takes an
+  `activeTenantId` (as `getPostSentiments` already did): the decision has to be
+  made in the WRITER's tenant, and the only tenant the method previously had was
+  the post's. Pinned by `test/unit/write-path-post-authz.test.ts` — a refused
+  write reaches neither `postSentiment.upsert` nor `postComment.create`, and
+  does not read the post row at all — and, because a mocked Prisma resolves
+  canned rows regardless of the `where` and so cannot tell a right predicate
+  from an absent one, by eleven new cases in
+  `test/integration/post-attachment-read-authz.integration.test.ts` against real
+  Postgres, which assert that no row is left behind and pair every refusal with
+  a grant. `DataRouter.getPost` itself is deliberately unchanged; the reasoning
+  is in `post-read-authorizer.ts`.
+- **The internal-docs fetch no longer takes its host from a request header.**
+  `InternalDocsHandler.handleGetDoc` built its target as
+  `request.headers.get("Origin") || env.APP_DOMAIN || <a compiled-in host>`,
+  called bare `fetch()`, and read the answer with an unbounded
+  `await response.text()` — an authenticated SSRF read primitive with an OOM
+  tail. The `/docs/…` suffix contained nothing, because the named host can `302`
+  anywhere and node's `fetch` follows. It read as safe because the route is
+  genuinely well defended in the two places anyone looks: gated on
+  INTERNAL/SUPER_ADMIN and filename-allowlisted. Neither is about where the
+  bytes come from, and an `Origin` header looks like configuration until you ask
+  who sets it. Found by the SSRF-model sweep of the fetch call sites that bypass
+  the helper. The target now comes from `env.APP_DOMAIN` only — an unset
+  `APP_DOMAIN` fails CLOSED with a 503 rather than falling back to a header or
+  to a host baked into a public tarball — and the request goes through
+  `safeFetch` (per-hop redirect re-validation, socket pinned to the validated
+  address) with a 1 MiB streaming cap; an oversize body is refused 502 instead
+  of being buffered. Pinned by
+  `test/unit/internal-docs-fetch-target.test.ts`: an `Origin` naming another
+  host leaves the fetch target on the configured one and reaches no bare
+  `fetch` at all.
 - **A route that declares no scopes is now first-party only, as published.**
   `ExtensionRouteDefinition.scopes` is three-valued — absent means "first-party
   only; no third-party client reaches it", `[]` means "any authenticated

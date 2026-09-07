@@ -447,6 +447,7 @@ describe("ReactionHandler - Caching", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(mockKV.delete).toHaveBeenCalledWith("sentiments:post-123");
@@ -515,6 +516,7 @@ describe("ReactionHandler - Caching", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       // Should still succeed despite cache invalidation error
@@ -532,6 +534,7 @@ describe("ReactionHandler - Caching", () => {
         mockSession,
         envWithoutKV,
         mockRequestContext,
+        TENANT,
       );
 
       // Should NOT attempt to delete from KV
