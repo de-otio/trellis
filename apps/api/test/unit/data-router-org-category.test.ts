@@ -48,7 +48,7 @@ function createMockDatabase() {
     $transaction: vi.fn(async (callback: any) => {
       const tx = {
         post: { create: mockPostCreate },
-        postEntity: { createMany: vi.fn().mockResolvedValue({ count: 0 }) },
+        postSubject: { createMany: vi.fn().mockResolvedValue({ count: 0 }) },
         postMedia: { createMany: vi.fn().mockResolvedValue({ count: 0 }) },
         mediaFile: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
         // Outbox writer (plan 034 lane E) — `post.published` is emitted inside

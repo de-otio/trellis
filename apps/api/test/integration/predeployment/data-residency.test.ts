@@ -38,7 +38,7 @@ vi.mock("../../../src/db", () => ({
         create: mockPostCreate,
         findUnique: vi.fn().mockResolvedValue(null),
       },
-      postEntity: {
+      postSubject: {
         createMany: vi.fn().mockResolvedValue({ count: 0 }),
       },
       entity: {
@@ -49,7 +49,7 @@ vi.mock("../../../src/db", () => ({
           post: {
             create: mockPostCreate,
           },
-          postEntity: {
+          postSubject: {
             createMany: vi.fn().mockResolvedValue({ count: 0 }),
           },
           entity: {

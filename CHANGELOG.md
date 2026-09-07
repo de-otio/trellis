@@ -18,6 +18,24 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ### Fixed
 
+- **Tagging an entity on a new post no longer throws.** `DataRouter.createPost`'s
+  post-create transaction called `(tx as any).postEntity.createMany(...)` to
+  write the post/entity join — there is no `postEntity` Prisma model. The
+  join table is `PostSubject` (`postId`/`entityId`/`isPrimary`,
+  `@@unique([postId, entityId])`, `@@map("post_subjects")`). On a real Prisma
+  client `tx.postEntity` is `undefined`, so the transaction threw for every
+  post created with an `entityRefs` tag, aborting the create along with it —
+  a defect load-bearing enough that the call site carried its own
+  "PRE-EXISTING BUG" comment. Nobody saw it because the unit suite mocks a
+  `postEntity` delegate on the transaction client to match the broken code,
+  so the mock and the bug agreed; only a real Prisma client rejects a
+  delegate that doesn't exist. The transaction now calls
+  `tx.postSubject.createMany`, deduping the incoming entity ids first (same
+  as the graph layer's `syncPostSubjects`) to respect the unique constraint.
+  `test/integration/post-subject-write.integration.test.ts` (Phase-0
+  integration lane) drives `DataRouter.createPost` against real Postgres and
+  reads the `PostSubject` row back; reverting the fix reproduces the original
+  `TypeError: Cannot read properties of undefined (reading 'createMany')`.
 - **Creating an entity works again — the handler never survived the v0.7
   tenancy migration.** `EntityHandler.createEntityProfile` built its
   `entity.create` payload from a pre-v0.7 model: it set an `ownerId` scalar the

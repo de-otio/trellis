@@ -63,7 +63,7 @@ function createMockDatabase() {
       const staged: Written[] = [];
       const tx = {
         post: stage(staged, "post"),
-        postEntity: stage(staged, "postEntity"),
+        postSubject: stage(staged, "postSubject"),
         postMedia: stage(staged, "postMedia"),
         mediaFile: stage(staged, "mediaFile"),
         domainEvent: stage(staged, "domainEvent"),

@@ -1011,23 +1011,19 @@ export class DataRouter {
           },
         });
 
-        // Create PostEntity records if entities are tagged
-        //
-        // PRE-EXISTING BUG, found while removing `tx: any` for this cast-cleanup
-        // pass (not fixed here — that would be a behavior change, out of scope):
-        // there is no `postEntity` model. The schema's post/entity join table is
-        // `PostSubject` (`postId`/`entityId` columns, `@@map("post_subjects")`) —
-        // `tx.postEntity` is `undefined` on a real Prisma client, so this throws
-        // inside the transaction for every post created with tagged entities.
-        // The unit test mocking this call (`data-router.test.ts`) also mocks a
-        // `postEntity` delegate, which is why it doesn't catch this. Load-bearing
-        // `as any` kept here ONLY to preserve exact current (broken) behavior
-        // pending a dedicated fix.
+        // Create PostSubject records if entities are tagged. The post/entity
+        // join table is `PostSubject` (`postId`/`entityId` columns,
+        // `@@map("post_subjects")`) — not a `postEntity` model. Dedupe the
+        // incoming ids first to respect the `@@unique([postId, entityId])`
+        // constraint, matching `syncPostSubjects`
+        // (lib/graph/postgres/sync.ts).
         if (entityRefs.length > 0) {
-          await (tx as any).postEntity.createMany({
-            data: entityRefs.map((entityId) => ({
+          const uniqueEntityIds = [...new Set(entityRefs)];
+          await tx.postSubject.createMany({
+            data: uniqueEntityIds.map((entityId) => ({
               postId: post.id,
               entityId,
+              isPrimary: false,
             })),
             skipDuplicates: true, // Handle race conditions
           });
