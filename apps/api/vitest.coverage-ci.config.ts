@@ -51,10 +51,10 @@ const PHASE0_NEW_FILES = [
   // disclosure that silently stops being computed is the failure mode with legal
   // consequences rather than merely a broken feature.
   //
-  // `src/lib/routes/provenance-correction.ts` is deliberately NOT here: it is a
-  // route shell (auth preamble + Prisma writes + audit) with no route-level test
-  // yet, so adding it would fail the gate rather than protect anything. Its pure
-  // decision logic lives in provenance/correction.ts, which IS covered.
+  // `src/lib/routes/provenance-correction.ts` now has its own route-level
+  // suite too (test/unit/routes/provenance-correction.test.ts) — see the
+  // entry near the end of this list. Its pure decision logic lives in
+  // provenance/correction.ts, listed here since before.
   "src/lib/provenance/types.ts",
   "src/lib/provenance/resolve.ts",
   "src/lib/provenance/response.ts",
@@ -91,6 +91,20 @@ const PHASE0_NEW_FILES = [
   "src/lib/media/moderation-metrics.ts",
   "src/lib/media/media-bytes-access.ts",
   "src/lib/media/promote-staging.ts",
+  // Previously zero-reference modules (no test file imported them). Each now
+  // has a direct unit suite (100% branches locally; see the matching
+  // test/unit path) rather than only incidental coverage from callers' tests.
+  "src/lib/routes/provenance-correction.ts",
+  "src/lib/media/scaleway-vision-shared.ts",
+  "src/lib/events/extension-emitter.ts",
+  "src/lib/routes/admin-costs.ts",
+  "src/lib/routes/email-subscriptions.ts",
+  "src/lib/extension-read-delegate.ts",
+  // Zero-runtime-footprint compile-time contract (`export {}`) — the gate
+  // here is vacuous (0 executable statements), the real gate is `tsc
+  // --build`. Listed so a FUTURE accidental runtime export is caught by
+  // this gate too, not just by someone noticing.
+  "src/lib/extension-dto-contract.ts",
 ];
 
 /**
