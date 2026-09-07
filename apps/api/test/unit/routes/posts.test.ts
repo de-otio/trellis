@@ -115,6 +115,19 @@ vi.mock("../../../src/lib/auth/auth-middleware", () => ({
   authMiddleware: (...args: any[]) => mockAuthMiddleware(...args),
 }));
 
+// Mock the shared read authorizer (V4 residual (a)). Default ALLOW, so the
+// behaviour tests below still exercise the body of each route.
+//
+// What this mock does NOT prove: whether the predicate inside `canReadPost` is
+// correct — a mocked Prisma resolves canned rows regardless of the `where`, so
+// a unit test cannot tell a right predicate from a missing one. That is decided
+// against real Postgres in
+// test/integration/post-attachment-read-authz.integration.test.ts.
+const mockCanReadPost = vi.fn();
+vi.mock("../../../src/lib/post-read-authorizer", () => ({
+  canReadPost: (...args: any[]) => mockCanReadPost(...args),
+}));
+
 const TEST_TENANT_ID = "tenant-test-123";
 
 // Mock EntityTaggingError
@@ -181,6 +194,7 @@ describe("Posts Routes", () => {
     };
 
     mockGetSession.mockResolvedValue(mockSession);
+    mockCanReadPost.mockResolvedValue(true);
     mockAuthMiddleware.mockResolvedValue({
       userId: "user-123",
       activeTenantId: TEST_TENANT_ID,

@@ -37,6 +37,18 @@ export const sentimentsRoutes: Route[] = [
         );
       }
 
+      // V4 residual (b): the write needs the caller's ACTIVE tenant, not the
+      // tenant of the post it is addressed to. Without it the handler could
+      // only gate on existence, and a reaction from another tenant was written
+      // into the target's scope.
+      const auth = await authMiddleware(request, env);
+      if (!auth || !auth.activeTenantId) {
+        return securityHeaders.createSecureResponse(
+          JSON.stringify({ error: "Unauthorized" }),
+          { status: 401, headers: { "content-type": "application/json" } },
+        );
+      }
+
       try {
         if (!requestContext) {
           return securityHeaders.createSecureResponse(
@@ -58,6 +70,7 @@ export const sentimentsRoutes: Route[] = [
           session,
           env as any,
           requestContext,
+          auth.activeTenantId,
         );
         return securityHeaders.addSecurityHeaders(response);
       } catch (error) {

@@ -13,9 +13,24 @@ import {
 } from "./internal-docs-navigation.js";
 import navigationData from "./internal-docs-navigation.json" with { type: "json" };
 import { getLogger, Logger, type LoggerEnv } from "./logger.js";
+import {
+  ResponseTooLargeError,
+  safeFetch,
+  SsrfBlockedError,
+} from "./net/safe-fetch.js";
 import { SecurityHeaders } from "./security-headers.js";
 import type { Env } from "../env.js";
 import { Session, SessionManager, UserRole } from "./session-cookie.js";
+
+/**
+ * Hard ceiling on a documentation file, applied while the body streams (F8).
+ * The previous `await response.text()` had no ceiling at all, so the size of
+ * the allocation was chosen by whatever answered the request.
+ */
+const MAX_DOC_BYTES = 1024 * 1024; // 1 MiB
+
+/** Whole-exchange budget for the documentation fetch, redirects included. */
+const DOCS_FETCH_TIMEOUT_MS = 10_000;
 
 /**
  * Internal Documentation Handler class
@@ -548,36 +563,68 @@ export class InternalDocsHandler {
       // - Bundling files in Worker (if size allows)
       // - Using Cloudflare Assets API
       try {
-        // Construct the URL to fetch from the frontend's public folder
-        // Try multiple sources in order of preference
-        const origin = request.headers.get("Origin");
+        // F8 — the fetch target comes from CONFIGURATION ONLY.
+        //
+        // This used to read `request.headers.get("Origin")` first and fall back
+        // to `env.APP_DOMAIN`. A request header is not a trust input: any
+        // caller past the role gate could name their own host and have the
+        // server fetch it, and the `/docs/…` suffix contained nothing because
+        // the attacker's host could `302` anywhere and node's auto-following
+        // `fetch` would follow. `APP_DOMAIN` is the only source now, and an
+        // unset `APP_DOMAIN` fails CLOSED (503) rather than falling back to a
+        // compiled-in host — the same posture `magic-link-initiate.ts` takes.
         const appDomain = env.APP_DOMAIN;
-        const frontendUrl = origin || appDomain || "https://rkm1.de";
+        if (!appDomain) {
+          this.logger.error("[InternalDocsHandler] APP_DOMAIN is not set");
+          return this.securityHeaders.createSecureResponse(
+            JSON.stringify({
+              error: "Service temporarily unavailable",
+              message: "Documentation source is not configured",
+              status: 503,
+            }),
+            {
+              status: 503,
+              headers: { "content-type": "application/json" },
+            },
+          );
+        }
+        // APP_DOMAIN is deployed as a bare host in some estates and with a
+        // scheme in others (see `cors-handler.ts`); normalise to an https
+        // origin either way.
+        const frontendUrl = /^https?:\/\//.test(appDomain)
+          ? appDomain.replace(/\/+$/, "")
+          : `https://${appDomain.replace(/\/+$/, "")}`;
         const docsUrl = `${frontendUrl}/docs/${filePath}`;
 
         this.logger.info("[InternalDocsHandler] Fetching docs from:", docsUrl);
 
-        // Fetch with timeout and retry logic
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+        // Add cache-busting query parameter to prevent CDN from serving stale
+        // content. In dev we want fresh content on every request.
+        const cacheBust = Date.now();
+        const separator = docsUrl.includes("?") ? "&" : "?";
 
-        let fileResponse: Response;
-        try {
-          // Add cache-busting query parameter to prevent Cloudflare CDN from serving stale content
-          // In dev environment, we want fresh content on every request
-          const cacheBust = Date.now();
-          const separator = docsUrl.includes("?") ? "&" : "?";
-          fileResponse = await fetch(`${docsUrl}${separator}cb=${cacheBust}`, {
-            headers: {
-              "User-Agent": "Trellis-Internal-Docs-API/1.0",
-              "Cache-Control": "no-cache, no-store, must-revalidate",
-              Pragma: "no-cache",
-            },
-            signal: controller.signal,
-          });
-        } finally {
-          clearTimeout(timeoutId);
-        }
+        // `safeFetch`, not `fetch`: the body is capped while streaming (the old
+        // `await fileResponse.text()` was unbounded — an OOM tail on a response
+        // the caller chose the size of), every redirect hop is re-validated
+        // instead of auto-followed, and the socket is pinned to the address the
+        // guard checked.
+        const fetched = await safeFetch(`${docsUrl}${separator}cb=${cacheBust}`, {
+          headers: {
+            "User-Agent": "Trellis-Internal-Docs-API/1.0",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            Pragma: "no-cache",
+          },
+          timeoutMs: DOCS_FETCH_TIMEOUT_MS,
+          maxBytes: MAX_DOC_BYTES,
+        });
+        const fileResponse = {
+          ok: fetched.status >= 200 && fetched.status < 300,
+          status: fetched.status,
+          // `safeFetch` returns no reason phrase; the messages below only ever
+          // interpolated it alongside the status.
+          statusText: "",
+          text: () => fetched.body.toString("utf8"),
+        };
 
         if (!fileResponse.ok) {
           // Distinguish between different error types
@@ -701,6 +748,46 @@ export class InternalDocsHandler {
           },
         );
       } catch (error) {
+        // F8: the two refusals the SSRF-safe fetch adds. Both are 502 — the
+        // upstream did something we will not accept — and neither echoes the
+        // target or any part of the body.
+        if (error instanceof ResponseTooLargeError) {
+          this.logger.error(
+            `[InternalDocsHandler] Document exceeded the ${MAX_DOC_BYTES}-byte cap: ${filePath}`,
+          );
+          return this.securityHeaders.createSecureResponse(
+            JSON.stringify({
+              error: "Document too large",
+              message: "The documentation file exceeded the maximum size",
+              filename,
+              path: filePath,
+              status: 502,
+            }),
+            {
+              status: 502,
+              headers: { "content-type": "application/json" },
+            },
+          );
+        }
+        if (error instanceof SsrfBlockedError) {
+          this.logger.error(
+            `[InternalDocsHandler] Refused documentation fetch target for ${filePath}: ${error.reason}`,
+          );
+          return this.securityHeaders.createSecureResponse(
+            JSON.stringify({
+              error: "Failed to fetch file",
+              message: "The documentation source is not a permitted target",
+              filename,
+              path: filePath,
+              status: 502,
+            }),
+            {
+              status: 502,
+              headers: { "content-type": "application/json" },
+            },
+          );
+        }
+
         // Handle network errors, timeouts, etc.
         if (error instanceof Error && error.name === "AbortError") {
           this.logger.error(

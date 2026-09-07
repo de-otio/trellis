@@ -437,6 +437,7 @@ describe("block write guard", () => {
       sessionFor(BOB),
       mockEnv,
       requestContext,
+      TENANT,
     );
 
     expect(response.status).toBe(403);
@@ -466,6 +467,7 @@ describe("block write guard", () => {
       sessionFor(BOB),
       mockEnv,
       requestContext,
+      TENANT,
     );
 
     expect(response.status).toBe(200);

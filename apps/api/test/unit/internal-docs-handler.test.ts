@@ -65,6 +65,17 @@ vi.mock("../../src/lib/internal-docs-dashboard.json", () => ({
   },
 }));
 
+// The documentation fetch goes through the SSRF-safe helper (F8), not bare
+// `fetch`. Only `safeFetch` is replaced, so the handler's `instanceof` branches
+// still see the real error classes.
+const mockSafeFetch = vi.fn();
+vi.mock("../../src/lib/net/safe-fetch", async (importOriginal) => {
+  const actual = await importOriginal<
+    typeof import("../../src/lib/net/safe-fetch.js")
+  >();
+  return { ...actual, safeFetch: (...args: any[]) => mockSafeFetch(...args) };
+});
+
 describe("InternalDocsHandler", () => {
   let handler: InternalDocsHandler;
   let mockEnv: any;
@@ -75,6 +86,9 @@ describe("InternalDocsHandler", () => {
 
     mockEnv = {
       DATABASE_URL: "postgres://test",
+      // F8: the documentation host comes from configuration only. Without it
+      // the handler fails closed (503) instead of trusting a request header.
+      APP_DOMAIN: "app.example.com",
     };
 
     mockRequest = new Request("https://api.example.com/api/internal/docs", {
@@ -372,8 +386,13 @@ describe("InternalDocsHandler", () => {
 
   describe("handleGetDoc", () => {
     beforeEach(() => {
-      // Mock fetch for file retrieval
-      global.fetch = vi.fn();
+      mockSafeFetch.mockResolvedValue({
+        status: 200,
+        headers: {},
+        body: Buffer.from("# Test Document"),
+        url: "https://app.example.com/docs/internal/test.md",
+        redirectChain: [],
+      });
     });
 
     it("should return doc file for INTERNAL user", async () => {
@@ -388,12 +407,6 @@ describe("InternalDocsHandler", () => {
         role: "INTERNAL",
       });
 
-      // Mock fetch to return file content
-      vi.mocked(global.fetch).mockResolvedValue({
-        ok: true,
-        text: vi.fn().mockResolvedValue("# Test Document"),
-        headers: new Headers({ "content-type": "text/markdown" }),
-      } as any);
 
       const request = new Request(
         "https://api.example.com/api/internal/docs/test.md",
@@ -588,10 +601,6 @@ describe("InternalDocsHandler", () => {
 
       // Use the same file that's tested in the INTERNAL user test
       // This test verifies SUPER_ADMIN has the same access
-      global.fetch = vi.fn().mockResolvedValue({
-        ok: true,
-        text: vi.fn().mockResolvedValue("# Test Document\n\nContent here"),
-      });
 
       const request = new Request(
         "https://api.example.com/api/internal/docs/test.md",
@@ -621,9 +630,9 @@ describe("InternalDocsHandler", () => {
         role: "INTERNAL",
       });
 
-      // Mock fetch to fail - but file must be in allowedFiles first
-      // The file 'internal/test.md' should be in allowedFiles from navigation mock
-      vi.mocked(global.fetch).mockRejectedValue(new Error("Network error"));
+      // Make the fetch fail - but the file must be in allowedFiles first.
+      // 'test.md' maps to 'internal/test.md' via the navigation mock.
+      mockSafeFetch.mockRejectedValue(new Error("Network error"));
 
       const request = new Request(
         "https://api.example.com/api/internal/docs/internal/test.md",

@@ -24,6 +24,13 @@
  * against real Postgres, so removing the `canReadPost` call from any one of
  * them fails a test here.
  *
+ * **V4 residual (b) extends this to the WRITES** — `addPostSentiment` and
+ * `createComment` — for the same reason. They gated on the same bare existence
+ * check, so a caller in another tenant could react to or comment on a post it
+ * could not read, and the row inherited the POST's tenant. A write is not a
+ * weaker permission than a read; the last two describe blocks assert that,
+ * including that a refused write leaves no row behind.
+ *
  * Every deny assertion is paired with a grant assertion on the same endpoint
  * (non-vacuity): without that, the suite would pass just as happily if the
  * endpoint returned nothing to anyone.
@@ -176,6 +183,51 @@ async function shapeOf(response: Response) {
   };
 }
 
+/**
+ * Global feature-toggle helpers. Needed only for the WRITE assertions below:
+ * `createComment` runs the text-moderation gate AFTER the authorization gate,
+ * and that gate is fail-closed-to-ENABLED on a missing row — so without an
+ * explicit `false` the non-vacuity grants would depend on a moderation
+ * provider being reachable. The refusals do not reach it either way.
+ */
+async function setGlobalToggle(
+  key: string,
+  enabled: boolean,
+): Promise<boolean | undefined> {
+  const existing = await prisma.featureToggle.findFirst({
+    where: { key, tenantId: null },
+  });
+  if (existing) {
+    await prisma.featureToggle.update({
+      where: { id: existing.id },
+      data: { enabled },
+    });
+    return existing.enabled;
+  }
+  await prisma.featureToggle.create({ data: { key, enabled } });
+  return undefined;
+}
+
+async function restoreGlobalToggle(
+  key: string,
+  previous: boolean | undefined,
+): Promise<void> {
+  const existing = await prisma.featureToggle.findFirst({
+    where: { key, tenantId: null },
+  });
+  if (!existing) return;
+  if (previous === undefined) {
+    await prisma.featureToggle.delete({ where: { id: existing.id } });
+  } else {
+    await prisma.featureToggle.update({
+      where: { id: existing.id },
+      data: { enabled: previous },
+    });
+  }
+}
+
+let prevModerationToggle: boolean | undefined;
+
 let whisperPost: string;
 let normalPost: string;
 let shoutPost: string;
@@ -192,6 +244,11 @@ beforeAll(async () => {
       data: { id, slug: id, displayName: id, type: "ORGANIZATION" },
     });
   }
+
+  prevModerationToggle = await setGlobalToggle(
+    "content_moderation_enabled",
+    false,
+  );
 
   await makeUser(AUTHOR, `${RUN}-pt-author`);
   await makeUser(FRIEND, `${RUN}-pt-friend`);
@@ -252,6 +309,7 @@ afterAll(async () => {
   });
   await prisma.tenant.deleteMany({ where: { id: { in: [TENANT_A, TENANT_B] } } });
   await prisma.tenant.deleteMany({ where: { id: { startsWith: `${RUN}-pt-` } } });
+  await restoreGlobalToggle("content_moderation_enabled", prevModerationToggle);
   await prisma.$disconnect();
 });
 
@@ -455,5 +513,145 @@ describe("the who-reacted list is audience-gated (H3)", () => {
     delete a.traceId;
     delete f.traceId;
     expect(f).toEqual(a);
+  });
+});
+
+// ===========================================================================
+// POST /api/posts/:id/sentiment  and  POST /api/posts/:id/comments
+//
+// V4 residual (b). Both writes gated on bare existence — the same
+// `DataRouter.getPost` primitive, the same missing tenant and audience
+// predicates — so an ordinary account could react to or comment on a post it
+// could not read, and the row inherited the POST's tenant. The unit lane can
+// only assert that `canReadPost` is CALLED; whether the predicate it evaluates
+// actually refuses a WHISPER post or a foreign tenant is a question for
+// Postgres, which is why these belong here alongside the read assertions.
+// ===========================================================================
+
+function addSentiment(postId: string, writer: string, tenantId: string) {
+  return reactions.addPostSentiment(
+    postId,
+    "joy",
+    sessionFor(writer),
+    env as never,
+    requestContext,
+    tenantId,
+  );
+}
+
+function createComment(postId: string, writer: string, tenantId: string) {
+  return comments.createComment(
+    postId,
+    new Request(`https://api.test.example.com/api/posts/${postId}/comments`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: `comment by ${writer}` }),
+    }),
+    sessionFor(writer),
+    env as never,
+    requestContext,
+    tenantId,
+  );
+}
+
+const sentimentRowsFor = (postId: string, authorId: string) =>
+  prisma.postSentiment.count({ where: { postId, authorId } });
+
+const commentRowsFor = (postId: string, authorId: string) =>
+  prisma.postComment.count({ where: { postId, authorId } });
+
+describe("reacting to a post is audience-gated (V4 residual (b))", () => {
+  it("REFUSES a same-tenant stranger a reaction on a WHISPER post, and writes nothing", async () => {
+    const res = await addSentiment(whisperPost, STRANGER, TENANT_A);
+
+    expect(res.status).toBe(404);
+    expect(await res.text()).toBe(JSON.stringify({ error: "Post not found" }));
+    expect(await sentimentRowsFor(whisperPost, STRANGER)).toBe(0);
+  });
+
+  it("REFUSES a stranger a reaction on a NORMAL (friends-only) post", async () => {
+    const res = await addSentiment(normalPost, STRANGER, TENANT_A);
+
+    expect(res.status).toBe(404);
+    expect(await sentimentRowsFor(normalPost, STRANGER)).toBe(0);
+  });
+
+  it("REFUSES a cross-tenant writer — the row used to inherit the POST's tenant", async () => {
+    const res = await addSentiment(foreignPost, STRANGER, TENANT_A);
+
+    expect(res.status).toBe(404);
+    expect(await sentimentRowsFor(foreignPost, STRANGER)).toBe(0);
+
+    // Non-vacuity for the tenant clause specifically: the identical call, read
+    // as the post's own tenant by a user who is in its audience, is accepted.
+    const scoped = await addSentiment(foreignPost, AUTHOR, TENANT_B);
+    expect(scoped.status).toBe(200);
+    expect(await sentimentRowsFor(foreignPost, AUTHOR)).toBe(1);
+  });
+
+  it("still accepts a reaction from the author and from an in-audience friend (non-vacuity)", async () => {
+    const byAuthor = await addSentiment(whisperPost, AUTHOR, TENANT_A);
+    expect(byAuthor.status).toBe(200);
+    expect(await sentimentRowsFor(whisperPost, AUTHOR)).toBe(1);
+
+    const byFriend = await addSentiment(normalPost, FRIEND, TENANT_A);
+    expect(byFriend.status).toBe(200);
+    expect(await sentimentRowsFor(normalPost, FRIEND)).toBe(1);
+  });
+
+  it("refuses an absent post and a forbidden post IDENTICALLY", async () => {
+    const absent = await shapeOf(
+      await addSentiment(`${RUN}-no-such-post`, STRANGER, TENANT_A),
+    );
+    const forbidden = await shapeOf(
+      await addSentiment(whisperPost, STRANGER, TENANT_A),
+    );
+
+    expect(forbidden).toEqual(absent);
+  });
+});
+
+describe("commenting on a post is audience-gated (V4 residual (b))", () => {
+  it("REFUSES a same-tenant stranger a comment on a WHISPER post, and writes nothing", async () => {
+    const res = await createComment(whisperPost, STRANGER, TENANT_A);
+
+    expect(res.status).toBe(404);
+    expect(await res.text()).toBe(JSON.stringify({ error: "Post not found" }));
+    expect(await commentRowsFor(whisperPost, STRANGER)).toBe(0);
+  });
+
+  it("REFUSES a stranger a comment on a NORMAL (friends-only) post", async () => {
+    const res = await createComment(normalPost, STRANGER, TENANT_A);
+
+    expect(res.status).toBe(404);
+    expect(await commentRowsFor(normalPost, STRANGER)).toBe(0);
+  });
+
+  it("REFUSES a cross-tenant writer", async () => {
+    const res = await createComment(foreignPost, STRANGER, TENANT_A);
+
+    expect(res.status).toBe(404);
+    expect(await commentRowsFor(foreignPost, STRANGER)).toBe(0);
+  });
+
+  it("still accepts a comment from the author and from an in-audience friend (non-vacuity)", async () => {
+    const byAuthor = await createComment(whisperPost, AUTHOR, TENANT_A);
+    expect(byAuthor.status).toBe(201);
+    expect(await commentRowsFor(whisperPost, AUTHOR)).toBe(1);
+
+    const byFriend = await createComment(normalPost, FRIEND, TENANT_A);
+    expect(byFriend.status).toBe(201);
+    expect(await commentRowsFor(normalPost, FRIEND)).toBe(1);
+  });
+
+  it("refuses an absent post and a forbidden post IDENTICALLY", async () => {
+    const absent = await shapeOf(
+      await createComment(`${RUN}-no-such-post`, STRANGER, TENANT_A),
+    );
+    const forbidden = await shapeOf(
+      await createComment(whisperPost, STRANGER, TENANT_A),
+    );
+
+    expect(forbidden).toEqual(absent);
   });
 });

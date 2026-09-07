@@ -167,6 +167,7 @@ describe("ReactionHandler", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(200);
@@ -185,6 +186,7 @@ describe("ReactionHandler", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(400);
@@ -201,6 +203,7 @@ describe("ReactionHandler", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(404);
@@ -215,6 +218,7 @@ describe("ReactionHandler", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(404);
@@ -231,6 +235,7 @@ describe("ReactionHandler", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       // Verify withQueryTimeoutAndRetry was called with USER_FACING preset
@@ -263,6 +268,7 @@ describe("ReactionHandler", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
 
       expect(response.status).toBe(500);

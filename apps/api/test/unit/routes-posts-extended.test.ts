@@ -116,6 +116,14 @@ vi.mock("../../src/lib/auth/auth-middleware", () => ({
   authMiddleware: (...args: any[]) => mockAuthMiddleware(...args),
 }));
 
+// The shared read authorizer (V4 residual (a)). Default ALLOW, so the branch
+// coverage this file is for still reaches the bodies of the two taxonomy GETs;
+// the gate's own behaviour is pinned in routes/posts-taxonomy-authz.test.ts.
+const mockCanReadPost = vi.fn();
+vi.mock("../../src/lib/post-read-authorizer", () => ({
+  canReadPost: (...args: any[]) => mockCanReadPost(...args),
+}));
+
 const TEST_TENANT_ID = "tenant-test-123";
 
 vi.mock("../../src/lib/database-wrapper-helper", () => ({
@@ -165,6 +173,7 @@ describe("Posts Routes - Extended", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockGetSession.mockResolvedValue(mockSession);
+    mockCanReadPost.mockResolvedValue(true);
     mockCreateRequestContext.mockResolvedValue({ session: mockSession });
 
     mockAuthMiddleware.mockResolvedValue({
