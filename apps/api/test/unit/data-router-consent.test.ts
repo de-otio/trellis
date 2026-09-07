@@ -22,7 +22,7 @@ vi.mock("../../src/db", () => ({
         findUnique: vi.fn(),
         create: vi.fn(),
       },
-      postEntity: {
+      postSubject: {
         createMany: vi.fn(),
       },
       entity: {

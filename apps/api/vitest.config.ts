@@ -69,6 +69,10 @@ export default defineConfig({
       // docker-compose credentials, which don't exist in the CI lint lane) —
       // runs in the Phase0 integration lane instead (registered there).
       "test/integration/post-create-radius.integration.test.ts",
+      // Post-create PostSubject write needs a real DATABASE_URL, same reason
+      // as post-create-radius above. Runs in the Phase0 integration lane
+      // instead (registered in vitest.integration-ci.config.ts).
+      "test/integration/post-subject-write.integration.test.ts",
       // GDPR-erasure worker e2e needs the full docker-compose stack (Postgres
       // admin URL + localstack S3 + dynamodb-local) — no CI lane provides
       // localstack, so this is a LOCAL-ONLY suite. Run it with

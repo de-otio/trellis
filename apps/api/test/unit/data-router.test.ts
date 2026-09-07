@@ -67,7 +67,7 @@ function createMockDatabase() {
         return null;
       }),
     },
-    postEntity: {
+    postSubject: {
       createMany: vi.fn().mockResolvedValue({ count: 0 }),
     },
     entity: {
@@ -76,7 +76,7 @@ function createMockDatabase() {
     $transaction: vi.fn(async (callback: any) => {
       const tx = {
         post: { create: mockPostCreate },
-        postEntity: { createMany: vi.fn().mockResolvedValue({ count: 0 }) },
+        postSubject: { createMany: vi.fn().mockResolvedValue({ count: 0 }) },
         postMedia: { createMany: mockPostMediaCreateMany },
         mediaFile: { updateMany: mockMediaFileUpdateMany },
         // Outbox writer (plan 034 lane E) — `post.published` is emitted inside

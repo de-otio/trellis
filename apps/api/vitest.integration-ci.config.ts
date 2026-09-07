@@ -72,6 +72,13 @@ const PHASE0_INTEGRATION = [
   // a fake delegate, and the neighbouring fake compares with `===` — under
   // which the bug is invisible. Only real Postgres settles the premise.
   "test/integration/extension-tenant-binding.integration.test.ts",
+  // Post-create entity tagging must write the real `PostSubject` join table
+  // (`post_subjects`), not a nonexistent `postEntity` model. The unit lane
+  // mocks a `postEntity` delegate on the transaction client, which doesn't
+  // exist on a real Prisma client, so it can't catch the transaction throwing
+  // for every tagged post. Only a real Prisma client against real Postgres
+  // does.
+  "test/integration/post-subject-write.integration.test.ts",
 ];
 
 export default defineConfig({
