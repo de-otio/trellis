@@ -91,7 +91,7 @@ export class ContentDiscovery {
     const db = DataRouter.getDatabaseForRegion(region, env, request);
 
     // Get taxonomy tags for the post
-    const postTags = await (db.postTaxonomyTag.findMany({
+    const postTags = await db.postTaxonomyTag.findMany({
       where: { postId },
       include: {
         taxon: {
@@ -102,9 +102,7 @@ export class ContentDiscovery {
           },
         },
       },
-    }) as unknown as Promise<
-      Array<{ taxon: { id: string; taxonId: string; displayName: string } }>
-    >);
+    });
 
     if (postTags.length === 0) {
       return [];
@@ -114,10 +112,10 @@ export class ContentDiscovery {
     const taxonIdStrings = postTags.map((pt) => pt.taxon.taxonId);
 
     // Get post author to optionally exclude
-    const post = await (db.post.findUnique({
+    const post = await db.post.findUnique({
       where: { id: postId },
       select: { authorId: true },
-    }) as unknown as Promise<{ authorId: string } | null>);
+    });
 
     if (!post) {
       return [];
@@ -128,11 +126,11 @@ export class ContentDiscovery {
     // same bidirectional set the feed uses applies here too.
     const { resolveMutualBlockIds } = await import("./block-visibility.js");
     const blockedIds = options.viewerUserId
-      ? await resolveMutualBlockIds(db as any, tenantId, options.viewerUserId)
+      ? await resolveMutualBlockIds(db, tenantId, options.viewerUserId)
       : [];
 
     // Find posts with matching taxonomy tags
-    const relatedPosts = await (db.postTaxonomyTag.findMany({
+    const relatedPosts = await db.postTaxonomyTag.findMany({
       where: {
         taxonId: { in: taxonIds },
         postId: { not: postId },
@@ -160,12 +158,7 @@ export class ContentDiscovery {
           },
         },
       },
-    }) as unknown as Promise<
-      Array<{
-        post: { id: string; createdAt: Date };
-        taxon: { taxonId: string };
-      }>
-    >);
+    });
 
     // Group by post and count matching tags
     const postMatches = new Map<
@@ -258,7 +251,7 @@ export class ContentDiscovery {
     );
 
     // Count taxonomy tag usage in posts
-    const postTagCounts = await (db.postTaxonomyTag.groupBy({
+    const postTagCounts = await db.postTaxonomyTag.groupBy({
       by: ["taxonId"],
       where: {
         post: {
@@ -276,19 +269,15 @@ export class ContentDiscovery {
         },
       },
       take: limit * 2, // Get more to filter by tenant
-    }) as unknown as Promise<
-      Array<{ taxonId: string; _count: { postId: number } }>
-    >);
+    });
 
     // Count taxonomy tag usage in entities
-    const entityTagCounts = await (db.entityTaxonomyTag.groupBy({
+    const entityTagCounts = await db.entityTaxonomyTag.groupBy({
       by: ["taxonId"],
       _count: {
         entityId: true,
       },
-    }) as unknown as Promise<
-      Array<{ taxonId: string; _count: { entityId: number } }>
-    >);
+    });
 
     // Get taxon details and filter by tenant
     const taxonIds = postTagCounts.map((ptc) => ptc.taxonId);
@@ -404,14 +393,10 @@ export class ContentDiscovery {
     // covered by the same bidirectional set as the feed — otherwise blocking
     // someone hides them from the feed and hands them straight back here.
     const { resolveMutualBlockIds } = await import("./block-visibility.js");
-    const blockedIds = await resolveMutualBlockIds(
-      db as any,
-      tenantId,
-      userId,
-    );
+    const blockedIds = await resolveMutualBlockIds(db, tenantId, userId);
 
     // Find posts with matching taxonomy tags
-    const recommendedPosts = await (db.postTaxonomyTag.findMany({
+    const recommendedPosts = await db.postTaxonomyTag.findMany({
       where: {
         taxonId: { in: taxonIds },
         post: {
@@ -437,12 +422,7 @@ export class ContentDiscovery {
         },
       },
       take: limit * 3, // Get more to calculate relevance
-    }) as unknown as Promise<
-      Array<{
-        post: { id: string; createdAt: Date };
-        taxon: { taxonId: string };
-      }>
-    >);
+    });
 
     // Group by post and calculate relevance
     const postMatches = new Map<
@@ -573,14 +553,10 @@ export class ContentDiscovery {
     // missing block reads worst — the product would be suggesting, by name, the
     // account the user just blocked.
     const { resolveMutualBlockIds } = await import("./block-visibility.js");
-    const blockedIds = await resolveMutualBlockIds(
-      db as any,
-      tenantId,
-      userId,
-    );
+    const blockedIds = await resolveMutualBlockIds(db, tenantId, userId);
 
     // Find all posts with matching taxonomy tags (grouped by author)
-    const postsWithTags = await (db.postTaxonomyTag.findMany({
+    const postsWithTags = await db.postTaxonomyTag.findMany({
       where: {
         taxonId: { in: taxonIds },
         post: {
@@ -606,12 +582,7 @@ export class ContentDiscovery {
           },
         },
       },
-    }) as unknown as Promise<
-      Array<{
-        post: { id: string; authorId: string };
-        taxon: { id: string; taxonId: string };
-      }>
-    >);
+    });
 
     // Group by creator and collect their taxonomy tags
     const creatorStats = new Map<
@@ -651,7 +622,7 @@ export class ContentDiscovery {
 
     // Get all taxonomy tags for each creator's posts to build complete specialization
     for (const [authorId, stats] of creatorStats.entries()) {
-      const allPostTags = await (db.postTaxonomyTag.findMany({
+      const allPostTags = await db.postTaxonomyTag.findMany({
         where: {
           postId: { in: Array.from(stats.postIds) },
           post: {
@@ -667,7 +638,7 @@ export class ContentDiscovery {
             },
           },
         },
-      }) as unknown as Promise<Array<{ taxon: { taxonId: string } }>>);
+      });
 
       // Update specialization tags with all tags
       for (const pt of allPostTags) {
@@ -685,7 +656,7 @@ export class ContentDiscovery {
 
     // Get creator user details
     const creatorIds = validCreators.map(([id]) => id);
-    const creators = await (db.user.findMany({
+    const creators = await db.user.findMany({
       where: {
         id: { in: creatorIds },
         suspended: false,
@@ -695,9 +666,7 @@ export class ContentDiscovery {
         email: true,
         username: true,
       },
-    }) as unknown as Promise<
-      Array<{ id: string; email: string; username?: string }>
-    >);
+    });
 
     const creatorMap = new Map(creators.map((c) => [c.id, c]));
 
@@ -731,7 +700,7 @@ export class ContentDiscovery {
       recommendations.push({
         userId: creator.id,
         email: creator.email,
-        username: creator.username,
+        username: creator.username ?? undefined,
         relevanceScore,
         matchingTags: Array.from(stats.matchingTags),
         specializationTags,

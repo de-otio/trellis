@@ -7,7 +7,7 @@
  * end-state pass). Implements security best practices from review.
  */
 
-import type { PrismaClient } from "@prisma/client";
+import type { Prisma, PrismaClient } from "@prisma/client";
 import { getFriendUserIds, type RelationshipReader } from "./friend-ids.js";
 import {
   InvalidEntitiesError,
@@ -31,7 +31,7 @@ import {
 export async function validateEntityTagging(
   userId: string,
   entityRefs: string[],
-  db: PrismaClient,
+  db: PrismaClient | Prisma.TransactionClient,
   tenantId: string,
 ): Promise<void> {
   // Early return if no entities to tag
