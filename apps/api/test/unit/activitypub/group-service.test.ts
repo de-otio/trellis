@@ -125,9 +125,7 @@ describe("GroupService", () => {
   });
 
   describe("createGroup", () => {
-    // TRIAGE(AR14): fix — mock fixture predates the tenantId migration; not a
-    // dead skip, needs the group mock updated to carry tenantId.
-    it.skip("[T6] should create a new group with ActivityPub actor (mock needs tenantId)", async () => {
+    it("[T6] should create a new group with ActivityPub actor", async () => {
       const createdGroup = {
         ...mockGroup,
         id: "group-uuid-123",
@@ -461,9 +459,7 @@ describe("GroupService", () => {
   });
 
   describe("addMember", () => {
-    // TRIAGE(AR14): fix — mock fixture predates the tenantId migration; not a
-    // dead skip, needs the member mock updated to carry tenantId.
-    it.skip("[T6] should add member to group (mock needs tenantId)", async () => {
+    it("[T6] should add member to group", async () => {
       const newMember = {
         id: "member-1",
         groupId: "group-1",

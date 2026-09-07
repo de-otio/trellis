@@ -528,7 +528,7 @@ describe("EntityHandler - Extended", () => {
 
     it("should use fallback email when session email is missing", async () => {
       const sessionNoEmail = { ...mockSession, email: "" } as any;
-      mockDb.user.upsert.mockResolvedValue({ id: "user-123", email: "user-user-123@unknown.local" });
+      mockDb.user.upsert.mockResolvedValue({ id: "user-123", email: "user-user-123@unknown.local", personalTenantId: "tenant-123" });
       mockDb.entity.create.mockResolvedValue({
         id: "entity-123",
         name: "Test Dog",

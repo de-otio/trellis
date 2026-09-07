@@ -44,18 +44,14 @@ describe("standalone: entity CRUD (example extension)", () => {
   // `getExtension(entityType).metadataSchema.safeParse(...)` runs before the DB
   // write, so a registered extension's schema gating is fully exercised here.
   //
-  // The happy-path 201 create is BLOCKED by an in-flight bug the standalone lane
-  // surfaced: `EntityHandler.createEntityProfile` does not set `tenantId`, but the
-  // v0.7 tenancy migration made `Entity.tenant` a required relation (the POST-post
-  // path stamps tenantId; the entity path was not updated). Until the entity
-  // handler is made tenant-aware (identity-federation plan, Stage 3 — "all handlers
-  // updated to include tenantId"), create 500s with `Argument 'tenant' is missing`.
-  // Unskip once the handler stamps the active tenant. See
-  // doc/02-technical/identity-federation/09-implementation-plan.md.
-  // TRIAGE(AR14): fix — real bug in EntityHandler.createEntityProfile, not a
-  // dead skip. (Note: the doc path above does not currently resolve in this
-  // checkout; re-link or re-write it when this handler gets fixed.)
-  it.skip("creates an example entity with valid metadata (201) — BLOCKED: handler missing tenantId", async () => {
+  // This happy-path create was skipped for as long as
+  // `EntityHandler.createEntityProfile` predated the v0.7 tenancy migration:
+  // it sent an `ownerId` scalar the model no longer has and omitted the now
+  // required `tenantId`, so every create 500'd on `Argument 'tenant' is
+  // missing`. The handler now resolves a tenant (ambient → the creator's
+  // personal tenant) and writes the ownership row; this is the end-to-end
+  // proof of that.
+  it("creates an example entity with valid metadata (201)", async () => {
     const { res } = await postJson(sessionToken, "/api/entities", {
       name: "Test Widget",
       entityType: "example",
@@ -91,9 +87,7 @@ describe("standalone: entity CRUD (example extension)", () => {
     expect(body.error).toBe("UNKNOWN_ENTITY_TYPE");
   });
 
-  // Blocked by the same missing-tenantId bug as the 201 create above.
-  // TRIAGE(AR14): fix — same root cause as above, not a dead skip.
-  it.skip("create then read-back returns the entity — BLOCKED: handler missing tenantId", async () => {
+  it("create then read-back returns the entity", async () => {
     const { res: createRes } = await postJson(sessionToken, "/api/entities", {
       name: "Readable Widget",
       entityType: "example",

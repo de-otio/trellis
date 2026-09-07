@@ -18,6 +18,32 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ### Fixed
 
+- **Creating an entity works again — the handler never survived the v0.7
+  tenancy migration.** `EntityHandler.createEntityProfile` built its
+  `entity.create` payload from a pre-v0.7 model: it set an `ownerId` scalar the
+  `Entity` model has not had since ownership moved into `EntityOwnership`, and
+  it omitted `tenantId`, which that migration made a required relation. Every
+  create therefore failed — `Argument 'tenant' is missing` — and the handler's
+  `catch` turned it into a flat 500. Nothing caught it, because the payload is
+  typed `any` (so the compiler saw nothing) and every unit test asserts against
+  a `vi.fn()` that accepts any shape (so the mocks agreed with the bug); the
+  only lane that exercises a real `create` is the standalone one, and the two
+  tests there that would have failed were skipped *citing this bug*. The
+  handler now resolves a tenant by the same rule as the media write path
+  (`media/tenant-resolution.ts`): the ambient tenant from the auth seam wins,
+  and with `TENANT_SCOPE_MODE="off"` — the default — it falls back to the
+  creator's personal tenant. It fails CLOSED with a 403 `NO_ACTIVE_TENANT`
+  rather than guessing, because a guessed tenant files the entity into somebody
+  else's scope. The creator's `PRIMARY_OWNER` row is written in the same
+  statement, so an entity is never persisted without an owner (the graph
+  dual-write also upserts it, but only when an ambient tenant is set, which in
+  the default mode it is not). The two standalone tests are unskipped and are
+  now the end-to-end proof; three unit assertions that had frozen the old shape
+  were corrected, and a regression test covers all three counts plus the
+  fail-closed path. Users minted through the `/api/admin/test/users` seam now
+  get the personal tenant a real account receives at post-confirmation — that
+  seam bypasses the hook, so its users had no tenant at all and any
+  tenant-scoped write on their behalf failed closed.
 - **An IP-literal database endpoint is no longer sent as the TLS server name.**
   `buildDbSslOptions` (`db-ssl.ts`) set `servername` to the connection-string
   host unconditionally. On a Managed Postgres private endpoint that host is an
