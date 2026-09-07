@@ -3,6 +3,12 @@
  *
  * Main entry point that imports all followers test suites.
  *
+ * Thin-test audit (2026-09): this file is intentionally 0 `it()` / 0
+ * `expect()` of its own — it is a re-export shell whose only job is to pull
+ * the sibling suites below into one runnable entry point (each side-effect
+ * import registers that file's own `describe`/`it` blocks with the runner).
+ * The real assertions live in `follow.test.ts`, `unfollow.test.ts`, etc.
+ *
  * ⚠️ CRITICAL: This test MUST NEVER run on production.
  * It will abort immediately if environment is not 'dev'.
  *
