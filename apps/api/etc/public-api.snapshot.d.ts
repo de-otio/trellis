@@ -4784,6 +4784,29 @@ export interface MiddlewareContext {
 }
 export type Middleware = (context: MiddlewareContext, next: () => Promise<Response>) => Promise<Response>;
 /**
+ * Identity tag for a core-supplied middleware that actually gates a request —
+ * i.e. one that can refuse it before the handler runs.
+ *
+ * `extension-validator.ts` uses this to decide whether a raw `ext.routes`
+ * entry is defended. It used to decide that from `middleware.name`, which is a
+ * label anyone can write: a hand-written `function authMiddleware(_c, next) {
+ * return next(); }` passed, and core's own `csrfMiddleware()` — an anonymous
+ * arrow, `.name === ""` — did not. A tag the extension cannot mint is the
+ * cheapest thing that is actually an identity.
+ *
+ * `Symbol.for` (the cross-realm global registry) rather than `Symbol()`, so a
+ * deployment that ends up with two copies of `@de-otio/trellis` in one process
+ * still recognises the other copy's middleware instead of failing the boot
+ * with a mystery.
+ */
+export declare const CORE_GATE_MIDDLEWARE: unique symbol;
+/**
+ * True only for a middleware core itself built and tagged. Total for any input
+ * — an extension manifest is untrusted data, so this is called on values the
+ * types say are `Middleware` and reality says could be anything.
+ */
+export declare function isCoreGateMiddleware(value: unknown): boolean;
+/**
  * Compose multiple middleware functions
  */
 export declare function composeMiddleware(middlewares: Middleware[]): Middleware;
@@ -4864,6 +4887,21 @@ export declare function rateLimitMiddleware(options?: {
  * - CSRF token in session (or KV fallback if configured)
  */
 export declare function csrfMiddleware(): Middleware;
+/**
+ * Require an authenticated session, or answer 401 before the handler runs.
+ *
+ * Core's `authMiddleware` (`auth/auth-middleware.ts`) is *not* a `Middleware`
+ * — it is `(request, env) => AuthContext | null`, a resolver each handler
+ * calls itself. So until now there was no core middleware a raw `ext.routes`
+ * entry could attach to actually enforce authentication; the validator's
+ * name check advertised one that did not exist. This is it: the single
+ * supported gate for the raw-route escape hatch.
+ *
+ * Prefer `extensionRoutes`. A wrapped route gets this plus CORS, CSRF, the
+ * scope gate, security headers and a scoped `ExtensionContext` instead of the
+ * full core `Env`.
+ */
+export declare function requireSessionMiddleware(): Middleware;
 /**
  * MFA enforcement middleware (AUTH-1)
  *
@@ -6252,6 +6290,24 @@ export interface Route {
      * A first-party session (`"*"`) satisfies all three.
      */
     scopes?: string[];
+    /**
+     * Which mount actually checks this route's `scopes`.
+     *
+     * Absent (every hand-written core route) means "the `/api/v1` public mount,
+     * and nothing else" — which is why `assertPublicMountWiring` refuses
+     * non-empty `scopes` without `publicSpec: true`: such a route looks gated
+     * and is open.
+     *
+     * `"extension-wrapper"` is set by `wrapExtensionRoute` on every route it
+     * builds. For those the premise is false: the wrapper runs
+     * `requireScope(session, routeDef.scopes)` inside the handler it emits, on
+     * the unversioned `/api/ext/...` mount, whether or not the route is also
+     * published. Sweep C6 — without this marker a *private* extension route
+     * with scopes could not boot at all, so the published rule "non-empty —
+     * every listed scope required" was unexercisable as documented and a scope
+     * could only be attached to a route by also making it public.
+     */
+    scopesEnforcedBy?: "extension-wrapper";
     /** Grouping for the generated spec — becomes an OpenAPI tag. */
     tags?: string[];
     /**

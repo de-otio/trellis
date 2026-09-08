@@ -628,7 +628,20 @@ export function assertPublicMountWiring(source: readonly Route[]): void {
       );
     }
 
-    if (route.scopes !== undefined && route.scopes.length > 0 && route.publicSpec !== true) {
+    // Sweep C6 — the rule below rests on "only the public mount checks
+    // scopes", which is true of every hand-written core route and false of an
+    // extension route: `wrapExtensionRoute` runs `requireScope` inside the
+    // handler it emits, on the unversioned `/api/ext/...` path. Applying the
+    // rule to those made a *private* scoped extension route unbootable, so the
+    // published contract's "non-empty — every listed scope required" could
+    // only be exercised by also publishing the route. The exemption is the
+    // route's own declaration of where its gate lives, not a path-prefix guess.
+    if (
+      route.scopesEnforcedBy !== "extension-wrapper" &&
+      route.scopes !== undefined &&
+      route.scopes.length > 0 &&
+      route.publicSpec !== true
+    ) {
       throw new Error(
         `Route ${label} declares scopes [${route.scopes.join(", ")}] without ` +
           `publicSpec: true. Only the ${PUBLIC_API_PREFIX} mount checks a core ` +

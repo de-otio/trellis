@@ -383,7 +383,16 @@ describe("lane A's wrapper and lane G's dispatcher run the same pipeline", () =>
 
   it("refuses scopes on a route that can never have a principal, in both", () => {
     expect(wrapper).toMatch(/authLevel === "none" && routeDef\.scopes/);
-    expect(dispatcher).toMatch(/route\.scopes !== undefined && route\.scopes\.length > 0 && route\.publicSpec !== true/);
+    // Sweep C6 split this condition across lines and put an exemption in front
+    // of it: a route that declares `scopesEnforcedBy: "extension-wrapper"` has
+    // its gate on the `/api/ext` mount, so the dispatcher's premise ("only
+    // /api/v1 checks a core route's scopes") does not hold for it. The rule
+    // itself is unchanged for everything else, which is what these three
+    // clauses assert.
+    expect(dispatcher).toMatch(/route\.scopes !== undefined &&/);
+    expect(dispatcher).toMatch(/route\.scopes\.length > 0 &&/);
+    expect(dispatcher).toMatch(/route\.publicSpec !== true/);
+    expect(dispatcher).toMatch(/route\.scopesEnforcedBy !== "extension-wrapper" &&/);
   });
 });
 

@@ -21,6 +21,15 @@ export type { ShutdownResult } from "./shutdown.js";
 export { EXTENSION_API_VERSION } from "@de-otio/trellis-extension-api";
 export { classifyApiVersion, parseApiVersion } from "./lib/extension-validator.js";
 export type { ApiVersionVerdict, ParsedApiVersion } from "./lib/extension-validator.js";
+// NOT re-exported here, deliberately: `csrfMiddleware`, `requireSessionMiddleware`
+// and `isCoreGateMiddleware` (`lib/middleware.js`), and `CORE_SECRET_ENV_KEYS`
+// (`lib/extension-config-keys.js`). A vertical with raw `ext.routes` reaches the
+// two gates through the package's subpath export —
+// `@de-otio/trellis/dist/lib/middleware.js` — which is how every other core
+// internal is reached today. Promoting them to this module widens the top-level
+// `@de-otio/trellis` surface and moves `etc/public-api.snapshot.d.ts`, which is
+// a reviewed contract change rather than part of the sweep fix. Worth doing —
+// "attach a core gate" deserves a first-class import — but as its own decision.
 // Realtime transport seam: a consuming app (e.g. Skybber) injects a concrete
 // transport (AppSync Events) before serving; core ships the poll/noop default.
 export { setRealtimeProvider } from "./lib/realtime/index.js";
