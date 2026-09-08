@@ -2,7 +2,7 @@
  * Regression: V4 residual (a) — the post-scoped taxonomy GETs were an
  * anonymous, cross-tenant existence oracle.
  *
- * `GET /posts/:postId/taxonomy-tags` and `GET /api/posts/:postId/tags/
+ * `GET /api/posts/:postId/taxonomy-tags` and `GET /api/posts/:postId/tags/
  * suggestions` each called `DataRouter.getPost` — a bare
  * `findUnique({ where: { id } })` with no tenant and no audience predicate —
  * and returned **404 before** the 401. So an unauthenticated caller could walk
@@ -121,9 +121,18 @@ const VIEWER_TENANT = "tenant-viewer";
 const EXISTING_POST = "post-exists";
 const ABSENT_POST = "post-does-not-exist";
 
+// `/api/posts/...`, matching the pathname the cases below hand the handler.
+// This lookup used to probe `/posts/post-123/taxonomy-tags` — the route's old,
+// prefix-less pattern — while passing `pathname: "/api/posts/..."`. The two
+// halves cancelled: the lookup succeeded because the pattern lacked `/api`,
+// and the handler's `pathname.split("/api/posts/")` succeeded because the
+// pathname had it. So every case below passed against a route that, in the
+// real router, no request could reach at all.
 const taxonomyRoute = postsRoutes.find(
   (r) =>
-    r.path instanceof RegExp && r.path.test("/posts/post-123/taxonomy-tags") && r.method === "GET",
+    r.path instanceof RegExp &&
+    r.path.test("/api/posts/post-123/taxonomy-tags") &&
+    r.method === "GET",
 )!;
 
 const suggestionsRoute = postsRoutes.find(
@@ -203,7 +212,7 @@ describe("post taxonomy GETs — V4 residual (a)", () => {
   });
 
   const taxonomyCall = (postId: string) =>
-    taxonomyRoute.handler(new Request(`http://test.com/posts/${postId}/taxonomy-tags`), mockEnv, {
+    taxonomyRoute.handler(new Request(`http://test.com/api/posts/${postId}/taxonomy-tags`), mockEnv, {
       pathname: `/api/posts/${postId}/taxonomy-tags`,
       requestContext: mockRequestContext,
     } as any);

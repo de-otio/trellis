@@ -535,6 +535,101 @@ describe("Posts Routes - Extended", () => {
     });
   });
 
+  // GET and DELETE had no cover at all, which is why their route patterns
+  // could omit the `/api` prefix that the POST sibling above, the
+  // `/api/posts/:postId/tags/suggestions` route, and `test/e2e/
+  // taxonomy-tagging.test.ts` all use — and stay that way. The e2e suite does
+  // exercise the real paths, but it needs a live API_URL and does not run in
+  // the PR gate, so nothing here failed.
+  //
+  // Two ways it was broken, either of which makes the endpoints unusable:
+  // a GET to `/api/posts/:id/taxonomy-tags` matched NO route (404), and one to
+  // the pattern's own `/posts/:id/taxonomy-tags` reached the handler, whose
+  // `pathname.split("/api/posts/")[1]` is `undefined` — so `.split()` on it
+  // threw a TypeError into the catch, and the documented answer became 500.
+  describe("GET+DELETE /api/posts/:postId/taxonomy-tags", () => {
+    // findRoute() tests each pattern against the path, so this asserts
+    // ROUTABILITY, not just that a route object exists somewhere.
+    it("are routable at the /api path their POST sibling and the e2e suite use", () => {
+      expect(findRoute("GET", "/api/posts/post-1/taxonomy-tags")).toBeDefined();
+      expect(findRoute("DELETE", "/api/posts/post-1/taxonomy-tags")).toBeDefined();
+    });
+
+    it("parses the postId out of the /api path rather than throwing on undefined", async () => {
+      mockGetPostTaxonomyTags.mockResolvedValue([]);
+      const route = findRoute("GET", "/api/posts/post-1/taxonomy-tags");
+      const req = makeRequest("https://example.com/api/posts/post-1/taxonomy-tags", "GET");
+
+      await route.handler(req, mockEnv, {
+        pathname: "/api/posts/post-1/taxonomy-tags",
+        requestContext: mockRequestContext,
+      });
+
+      // The id actually reaching the authorizer is the assertion that matters:
+      // an `undefined` postId is what the old parse produced.
+      expect(mockCanReadPost).toHaveBeenCalledWith(
+        expect.objectContaining({ postId: "post-1" }),
+      );
+      expect(mockCreateSecureResponse).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ status: 200 }),
+      );
+      // Explicit: a 500 here is the exact failure this route had.
+      expect(mockCreateSecureResponse).not.toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ status: 500 }),
+      );
+    });
+
+    // V4(a), from the same handler's own comment: authenticate BEFORE the
+    // existence check, or the refusal is itself an existence oracle. Pinned
+    // here because the fix above is in a handler that previously could not
+    // complete, so nothing was holding this property down.
+    it("answers 401 without consulting the post, for an anonymous caller", async () => {
+      mockGetSession.mockResolvedValue(null);
+      const route = findRoute("GET", "/api/posts/post-1/taxonomy-tags");
+      const req = makeRequest("https://example.com/api/posts/post-1/taxonomy-tags", "GET");
+
+      await route.handler(req, mockEnv, {
+        pathname: "/api/posts/post-1/taxonomy-tags",
+        requestContext: mockRequestContext,
+      });
+
+      expect(mockCreateSecureResponse).toHaveBeenCalledWith(
+        expect.stringContaining("Unauthorized"),
+        expect.objectContaining({ status: 401 }),
+      );
+      expect(mockDataRouterGetPost).not.toHaveBeenCalled();
+      expect(mockCanReadPost).not.toHaveBeenCalled();
+    });
+
+    it("DELETE parses the postId out of the /api path too", async () => {
+      mockDataRouterGetPost.mockResolvedValue({ id: "post-1", authorId: "user-1" });
+      mockRemovePostTaxonomyTags.mockResolvedValue(undefined);
+      const route = findRoute("DELETE", "/api/posts/post-1/taxonomy-tags");
+      const req = makeRequest("https://example.com/api/posts/post-1/taxonomy-tags", "DELETE", {
+        taxonIds: ["breed:dog:labrador"],
+      });
+
+      await route.handler(req, mockEnv, {
+        pathname: "/api/posts/post-1/taxonomy-tags",
+        requestContext: mockRequestContext,
+      });
+
+      expect(mockDataRouterGetPost).toHaveBeenCalledWith(
+        "post-1",
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+        undefined,
+        "user-1",
+      );
+      expect(mockRemovePostTaxonomyTags).toHaveBeenCalledWith("post-1", [
+        "breed:dog:labrador",
+      ]);
+    });
+  });
+
   describe("GET /api/posts/:postId - Get single post", () => {
     it("should return 401 when not authenticated", async () => {
       mockGetSession.mockResolvedValue(null);

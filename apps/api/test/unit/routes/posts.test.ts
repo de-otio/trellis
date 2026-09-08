@@ -770,11 +770,11 @@ describe("Posts Routes", () => {
     });
   });
 
-  describe("DELETE /posts/:id/taxonomy-tags", () => {
+  describe("DELETE /api/posts/:id/taxonomy-tags", () => {
     const route = postsRoutes.find(
       (r) =>
         r.path instanceof RegExp &&
-        r.path.test("/posts/post-123/taxonomy-tags") &&
+        r.path.test("/api/posts/post-123/taxonomy-tags") &&
         r.method === "DELETE",
     )!;
 
@@ -782,7 +782,7 @@ describe("Posts Routes", () => {
       mockGetSession.mockResolvedValue(null);
 
       const request = new Request(
-        "http://test.com/posts/post-123/taxonomy-tags",
+        "http://test.com/api/posts/post-123/taxonomy-tags",
         {
           method: "DELETE",
           body: JSON.stringify({ taxonIds: ["behavior:training:recall"] }),
@@ -790,7 +790,7 @@ describe("Posts Routes", () => {
         },
       );
       const response = await route.handler(request, mockEnv, {
-        pathname: "/api/posts/post-123/taxonomy-tags", // Router may normalize to include /api
+        pathname: "/api/posts/post-123/taxonomy-tags",
         requestContext: mockRequestContext,
       });
 
@@ -804,7 +804,7 @@ describe("Posts Routes", () => {
       });
 
       const request = new Request(
-        "http://test.com/posts/post-123/taxonomy-tags",
+        "http://test.com/api/posts/post-123/taxonomy-tags",
         {
           method: "DELETE",
           body: JSON.stringify({
@@ -814,7 +814,7 @@ describe("Posts Routes", () => {
         },
       );
       const response = await route.handler(request, mockEnv, {
-        pathname: "/api/posts/post-123/taxonomy-tags", // Router may normalize to include /api
+        pathname: "/api/posts/post-123/taxonomy-tags",
         requestContext: mockRequestContext,
       });
 
@@ -834,7 +834,7 @@ describe("Posts Routes", () => {
       mockRemovePostTaxonomyTags.mockRejectedValue(new Error("Database error"));
 
       const request = new Request(
-        "http://test.com/posts/post-123/taxonomy-tags",
+        "http://test.com/api/posts/post-123/taxonomy-tags",
         {
           method: "DELETE",
           body: JSON.stringify({
@@ -844,7 +844,7 @@ describe("Posts Routes", () => {
         },
       );
       const response = await route.handler(request, mockEnv, {
-        pathname: "/api/posts/post-123/taxonomy-tags", // Router may normalize to include /api
+        pathname: "/api/posts/post-123/taxonomy-tags",
         requestContext: mockRequestContext,
       });
 
@@ -852,20 +852,20 @@ describe("Posts Routes", () => {
     });
   });
 
-  describe("GET /posts/:id/taxonomy-tags", () => {
+  describe("GET /api/posts/:id/taxonomy-tags", () => {
     const route = postsRoutes.find(
       (r) =>
         r.path instanceof RegExp &&
-        r.path.test("/posts/post-123/taxonomy-tags") &&
+        r.path.test("/api/posts/post-123/taxonomy-tags") &&
         r.method === "GET",
     )!;
 
     it("should return 500 when requestContext is missing", async () => {
       const request = new Request(
-        "http://test.com/posts/post-123/taxonomy-tags",
+        "http://test.com/api/posts/post-123/taxonomy-tags",
       );
       const response = await route.handler(request, mockEnv, {
-        pathname: "/api/posts/post-123/taxonomy-tags", // Router may normalize to include /api
+        pathname: "/api/posts/post-123/taxonomy-tags",
       });
 
       expect(response.status).toBe(500);
@@ -875,10 +875,10 @@ describe("Posts Routes", () => {
       mockGetPost.mockResolvedValue(null);
 
       const request = new Request(
-        "http://test.com/posts/post-123/taxonomy-tags",
+        "http://test.com/api/posts/post-123/taxonomy-tags",
       );
       const response = await route.handler(request, mockEnv, {
-        pathname: "/api/posts/post-123/taxonomy-tags", // Router may normalize to include /api
+        pathname: "/api/posts/post-123/taxonomy-tags",
         requestContext: mockRequestContext,
       });
 
@@ -900,10 +900,10 @@ describe("Posts Routes", () => {
       ]);
 
       const request = new Request(
-        "http://test.com/posts/post-123/taxonomy-tags",
+        "http://test.com/api/posts/post-123/taxonomy-tags",
       );
       const response = await route.handler(request, mockEnv, {
-        pathname: "/api/posts/post-123/taxonomy-tags", // Router may normalize to include /api
+        pathname: "/api/posts/post-123/taxonomy-tags",
         requestContext: mockRequestContext,
       });
 
@@ -921,10 +921,10 @@ describe("Posts Routes", () => {
       mockGetPostTaxonomyTags.mockRejectedValue(new Error("Database error"));
 
       const request = new Request(
-        "http://test.com/posts/post-123/taxonomy-tags",
+        "http://test.com/api/posts/post-123/taxonomy-tags",
       );
       const response = await route.handler(request, mockEnv, {
-        pathname: "/api/posts/post-123/taxonomy-tags", // Router may normalize to include /api
+        pathname: "/api/posts/post-123/taxonomy-tags",
         requestContext: mockRequestContext,
       });
 
