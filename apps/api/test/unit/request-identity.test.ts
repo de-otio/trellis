@@ -36,6 +36,7 @@ import {
   csrfMiddleware,
   mfaMiddleware,
   rateLimitMiddleware,
+  requireSessionMiddleware,
   type MiddlewareContext,
 } from "../../src/lib/middleware.js";
 import { RateLimiter } from "../../src/lib/rate-limit.js";
@@ -219,9 +220,12 @@ describe("T2 — the memo memoizes", () => {
     expect(authCalls).toBe(1);
   });
 
-  it("resolves once across csrf, rate-limit and mfa middleware sharing one context", async () => {
+  it("resolves once across the session gate, csrf, rate-limit and mfa sharing one context", async () => {
     // The regression guard for the conversion: reintroducing a direct
-    // getSession() in any of these three makes this count climb.
+    // getSession() in any of these four makes this count climb.
+    // `requireSessionMiddleware` is in the list because it was written
+    // before the memo landed and merged textually clean over it — it
+    // resolved the session itself, and only this count said so.
     // The limiter is forced to fail so the middleware takes its documented
     // fail-open path on a non-sensitive route without touching any store.
     vi.spyOn(RateLimiter.prototype, "checkRateLimitKVStrict").mockRejectedValue(
@@ -246,6 +250,7 @@ describe("T2 — the memo memoizes", () => {
     };
 
     const composed = composeMiddleware([
+      requireSessionMiddleware(),
       csrfMiddleware(),
       rateLimitMiddleware(),
       mfaMiddleware(),
@@ -256,7 +261,7 @@ describe("T2 — the memo memoizes", () => {
     expect(sessionCalls).toBe(1);
   });
 
-  it("still resolves once per middleware chain when there is no context to share", async () => {
+  it("still resolves once per middleware in the chain when there is no context to share", async () => {
     // Same chain, no identity slot: proves the count above is the memo doing
     // the work and not the middleware having stopped asking.
     vi.spyOn(RateLimiter.prototype, "checkRateLimitKVStrict").mockRejectedValue(
@@ -281,6 +286,7 @@ describe("T2 — the memo memoizes", () => {
     };
 
     const composed = composeMiddleware([
+      requireSessionMiddleware(),
       csrfMiddleware(),
       rateLimitMiddleware(),
       mfaMiddleware(),
@@ -288,7 +294,87 @@ describe("T2 — the memo memoizes", () => {
     const response = await composed(context, async () => new Response("ok"));
 
     expect(response.status).toBe(200);
-    expect(sessionCalls).toBe(3);
+    expect(sessionCalls).toBe(4);
+  });
+
+  it("lets the raw-route gate reuse a resolution the request already paid for", async () => {
+    const request = makeRequest("user-a");
+    const requestContext = makeRequestContext(request);
+
+    // Something earlier in the request has already resolved the session.
+    await resolveSession(request, env, requestContext);
+    expect(sessionCalls).toBe(1);
+
+    const response = await requireSessionMiddleware()(
+      {
+        request,
+        env,
+        requestContext,
+        url: new URL(request.url),
+        pathname: "/ext/thing",
+        method: "GET",
+      },
+      async () => new Response("ok"),
+    );
+
+    expect(response.status).toBe(200);
+    // Still 1. A gate that resolves for itself makes this 2, and pays an
+    // asymmetric verify plus the blocklist and epoch reads to learn what the
+    // request already knew.
+    expect(sessionCalls).toBe(1);
+  });
+
+  it("gives the gate and the handler behind it one shared answer, not two", async () => {
+    // Two independent resolutions can disagree: a revocation landing between
+    // them passes the gate and fails the handler, or the reverse. Under the
+    // memo they are the same object, so they cannot.
+    const request = makeRequest("user-a");
+    const requestContext = makeRequestContext(request);
+    const context: MiddlewareContext = {
+      request,
+      env,
+      requestContext,
+      url: new URL(request.url),
+      pathname: "/ext/thing",
+      method: "GET",
+    };
+
+    // Declared without an initializer: assignments inside a callback are not
+    // tracked by control-flow analysis, and `= null` would narrow the type to
+    // `null` at every read below.
+    let seenByHandler: Session | null | undefined;
+    const response = await requireSessionMiddleware()(context, async () => {
+      seenByHandler = await resolveSession(request, env, requestContext);
+      return new Response("ok");
+    });
+
+    expect(response.status).toBe(200);
+    // Truthy, not just non-null: the handler not having run at all would
+    // leave this `undefined` and slip past a null check.
+    expect(seenByHandler).toBeTruthy();
+    expect(sessionCalls).toBe(1);
+    // The handler's session is the frozen, memoized one — the object the gate
+    // made its decision on, not a second look at the same token.
+    expect(Object.isFrozen(seenByHandler)).toBe(true);
+    expect(seenByHandler).toBe(await requestContext.identity?.session());
+  });
+
+  it("still refuses an unauthenticated request when it resolves for itself", async () => {
+    // The fallback path must stay closed, not merely slower.
+    const response = await requireSessionMiddleware()(
+      {
+        request: makeRequest(null),
+        env,
+        requestContext: undefined,
+        url: new URL("https://api.example.com/ext/thing"),
+        pathname: "/ext/thing",
+        method: "GET",
+      },
+      async () => new Response("SECRET"),
+    );
+
+    expect(response.status).toBe(401);
+    expect(sessionCalls).toBe(1);
   });
 });
 
