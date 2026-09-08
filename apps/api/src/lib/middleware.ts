@@ -470,12 +470,26 @@ export function requireSessionMiddleware(): Middleware {
     // rateLimitMiddleware and mfaMiddleware. Resolving the session here
     // directly would repeat an asymmetric verify plus the revocation and
     // epoch reads for a request that has already paid for them, and would
-    // hand the handler an unfrozen copy.
+    // let this gate and the handler behind it answer from two independent
+    // resolutions — a revocation landing between the two decides the gate
+    // one way and the handler the other.
     //
     // A missing SESSION_SECRET is a boot misconfiguration, not an
-    // authorization decision — it resolves to null, and this gate exists to
-    // fail closed, so that answers 401 rather than falling through.
-    const session = await resolveSession(request, env, context.requestContext);
+    // authorization decision — but this gate exists to fail closed, so it
+    // answers 401 rather than falling through. The read is defensive because
+    // some deployments expose `env` as a proxy whose getter THROWS for an
+    // unbound key: on a route whose documented answer is 401, that must not
+    // surface as a 500.
+    let sessionSecret: string | undefined;
+    try {
+      sessionSecret = env.SESSION_SECRET;
+    } catch {
+      sessionSecret = undefined;
+    }
+
+    const session = sessionSecret
+      ? await resolveSession(request, env, context.requestContext)
+      : null;
 
     if (!session) {
       return new Response(JSON.stringify({ error: "Unauthorized" }), {

@@ -9,6 +9,7 @@ import {
   composeMiddleware,
   corsMiddleware,
   csrfMiddleware,
+  requireSessionMiddleware,
   securityHeadersMiddleware,
   type Middleware,
   type MiddlewareContext,
@@ -809,6 +810,127 @@ describe("Middleware", () => {
         // NOT take the Bearer shortcut before the session lookup.
         expect(response.status).toBe(200);
       });
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // The single supported gate for the raw `ext.routes` escape hatch. Until
+  // it existed the validator's name check advertised a core auth middleware
+  // that did not exist, so what this refuses is the whole reason it is here.
+  // Every other core middleware in this file treats "no session" as someone
+  // else's problem and calls next(); this one is the one that must not.
+  // -----------------------------------------------------------------------
+  describe("requireSessionMiddleware", () => {
+    beforeEach(() => {
+      mockEnv = { ...mockEnv, SESSION_SECRET: "test-secret" } as Env;
+      mockContext = { ...mockContext, env: mockEnv };
+    });
+
+    /** A context for `method` on a raw extension route, with these headers. */
+    function routeRequest(
+      method: string,
+      headers: Record<string, string> = {},
+    ): MiddlewareContext {
+      return {
+        ...mockContext,
+        request: new Request("https://api.example.com/ext/thing", {
+          method,
+          headers,
+        }),
+        url: new URL("https://api.example.com/ext/thing"),
+        pathname: "/ext/thing",
+        method,
+      };
+    }
+
+    it("answers 401 and does not run the handler when there is no session", async () => {
+      const handler = vi.fn(async () => new Response("SECRET"));
+
+      const response = await requireSessionMiddleware()(
+        routeRequest("POST"),
+        handler,
+      );
+
+      expect(response.status).toBe(401);
+      expect(await response.json()).toEqual({ error: "Unauthorized" });
+      expect(response.headers.get("content-type")).toBe("application/json");
+      // The point of a gate: the handler never ran, so it cannot have read or
+      // written anything on behalf of an unauthenticated caller.
+      expect(handler).not.toHaveBeenCalled();
+    });
+
+    it("runs the handler and returns its response for a session", async () => {
+      const handler = vi.fn(async () => new Response("OK"));
+
+      const response = await requireSessionMiddleware()(
+        routeRequest("POST", { Cookie: "trellis_session=encrypted-session" }),
+        handler,
+      );
+
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("OK");
+      expect(handler).toHaveBeenCalledTimes(1);
+    });
+
+    it("gates a GET too, unlike the CSRF middleware's safe-method skip", async () => {
+      // csrfMiddleware returns next() for GET/HEAD/OPTIONS because a safe
+      // method needs no CSRF token. Authentication is not a method-dependent
+      // question, and a raw route's GET can leak just as much as its POST.
+      const handler = vi.fn(async () => new Response("SECRET"));
+
+      for (const method of ["GET", "HEAD", "OPTIONS"]) {
+        const response = await requireSessionMiddleware()(
+          routeRequest(method),
+          handler,
+        );
+        expect(response.status).toBe(401);
+      }
+
+      expect(handler).not.toHaveBeenCalled();
+    });
+
+    it("fails closed with 401 when the deployment has no SESSION_SECRET", async () => {
+      // A boot misconfiguration, not an authorization decision — but the
+      // alternative to 401 here is serving a raw extension route with no
+      // authentication at all, so it must not degrade to next().
+      const { SESSION_SECRET: _dropped, ...envWithoutSecret } =
+        mockEnv as Env & { SESSION_SECRET?: string };
+      const handler = vi.fn(async () => new Response("SECRET"));
+
+      const response = await requireSessionMiddleware()(
+        {
+          ...routeRequest("POST", { Cookie: "trellis_session=encrypted-session" }),
+          env: envWithoutSecret as Env,
+        },
+        handler,
+      );
+
+      expect(response.status).toBe(401);
+      expect(handler).not.toHaveBeenCalled();
+    });
+
+    it("answers 401, not 500, when reading SESSION_SECRET throws", async () => {
+      // Some deployments expose `env` as a proxy whose getter throws for an
+      // unbound key. The gate's answer for "no usable secret" is 401 either
+      // way; an escaping TypeError would make it a 500 instead.
+      const handler = vi.fn(async () => new Response("SECRET"));
+      const hostileEnv = Object.create(null) as Env;
+      Object.defineProperty(hostileEnv, "SESSION_SECRET", {
+        get() {
+          throw new TypeError("binding SESSION_SECRET is not available");
+        },
+      });
+
+      const response = await requireSessionMiddleware()(
+        {
+          ...routeRequest("POST", { Cookie: "trellis_session=encrypted-session" }),
+          env: hostileEnv,
+        },
+        handler,
+      );
+
+      expect(response.status).toBe(401);
+      expect(handler).not.toHaveBeenCalled();
     });
   });
 });
