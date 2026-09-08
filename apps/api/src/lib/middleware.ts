@@ -465,21 +465,17 @@ export function requireSessionMiddleware(): Middleware {
   return asCoreGate(async (context, next) => {
     const { request, env } = context;
 
-    const { SessionManager } = await import("./session-cookie.js");
-
+    // Resolution A for this request, through the per-request memo when there
+    // is one (lib/request-identity.ts) — same as csrfMiddleware,
+    // rateLimitMiddleware and mfaMiddleware. Resolving the session here
+    // directly would repeat an asymmetric verify plus the revocation and
+    // epoch reads for a request that has already paid for them, and would
+    // hand the handler an unfrozen copy.
+    //
     // A missing SESSION_SECRET is a boot misconfiguration, not an
-    // authorization decision — but this middleware exists to fail closed, so
-    // it answers 401 rather than falling through to the handler.
-    let sessionSecret: string | undefined;
-    try {
-      sessionSecret = env.SESSION_SECRET;
-    } catch {
-      sessionSecret = undefined;
-    }
-
-    const session = sessionSecret
-      ? await new SessionManager().getSession(request, sessionSecret, env)
-      : null;
+    // authorization decision — it resolves to null, and this gate exists to
+    // fail closed, so that answers 401 rather than falling through.
+    const session = await resolveSession(request, env, context.requestContext);
 
     if (!session) {
       return new Response(JSON.stringify({ error: "Unauthorized" }), {
