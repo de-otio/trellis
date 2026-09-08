@@ -512,7 +512,14 @@ export const postsRoutes: Route[] = [
   },
 
   {
-    path: /^\/posts\/([^/]+)\/taxonomy-tags$/,
+    // `/api` prefix, like the POST sibling above and `tags/suggestions` below.
+    // It was missing, and the handler parses the id with
+    // `pathname.split("/api/posts/")` — so this route was unusable both ways: a
+    // request to `/api/posts/:id/taxonomy-tags` matched nothing (404), and one
+    // to `/posts/:id/taxonomy-tags` reached the handler with `[1]` undefined
+    // and threw into the catch (500). `test/e2e/taxonomy-tagging.test.ts` calls
+    // the `/api` path; it needs a live API_URL, so the PR gate never saw it.
+    path: /^\/api\/posts\/([^/]+)\/taxonomy-tags$/,
     method: "DELETE",
     handler: async (request, env, { pathname, requestContext }) => {
       const sessionManager = new SessionManager();
@@ -644,7 +651,10 @@ export const postsRoutes: Route[] = [
   },
 
   {
-    path: /^\/posts\/([^/]+)\/taxonomy-tags$/,
+    // `/api` prefix — same defect and same reasoning as the DELETE above.
+    // Note this handler carries the V4(a) authenticate-before-existence fix,
+    // which could never actually run while the route was unreachable.
+    path: /^\/api\/posts\/([^/]+)\/taxonomy-tags$/,
     method: "GET",
     handler: async (request, env, { pathname, requestContext }) => {
       const sessionManager = new SessionManager();
