@@ -3,6 +3,7 @@
  */
 
 import { describe, expect, it } from "vitest";
+import * as fc from "fast-check";
 import {
   requireRole,
   requireCapability,
@@ -123,6 +124,12 @@ describe("requireScope", () => {
       expect(() => requireScope({}, ["posts:write"])).not.toThrow();
     });
 
+    it("still treats an absent scopes field on an explicitly client-less principal as first-party", () => {
+      expect(() =>
+        requireScope({ clientId: undefined }, ["posts:write"]),
+      ).not.toThrow();
+    });
+
     it("passes an empty requirement for any principal, including the empty set", () => {
       expect(() => requireScope(granted(), [])).not.toThrow();
       expect(() => requireScope(granted("profile:read"), [])).not.toThrow();
@@ -166,6 +173,48 @@ describe("requireScope", () => {
       );
       expect(() => requireScope(granted("posts"), ["posts:write"])).toThrow(
         InsufficientScopeError,
+      );
+    });
+
+    /**
+     * The failure path the `?? "*"` default used to swallow.
+     *
+     * A third-party principal is identified by `clientId` — the same signal
+     * `requireFirstParty` trusts. Before this, an absent `scopes` on such a
+     * principal resolved to `"*"`, so the one way to mint a delegated
+     * credential wrong (forget to stamp `scopes` on a branch) produced FULL
+     * access and no error. The invariant was a comment; now it is checked.
+     */
+    it("throws for a third-party principal whose scopes were never stamped", () => {
+      expect(() => requireScope({ clientId: "client-a" }, ["posts:write"])).toThrow(
+        InsufficientScopeError,
+      );
+    });
+
+    it("reports the whole requirement as missing for an unstamped third-party principal", () => {
+      try {
+        requireScope({ clientId: "client-a" }, ["posts:read", "posts:write"]);
+        throw new Error("requireScope did not throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(InsufficientScopeError);
+        expect((error as InsufficientScopeError).missing).toEqual([
+          "posts:read",
+          "posts:write",
+        ]);
+      }
+    });
+
+    it("does not let an unstamped third-party principal through for ANY requirement", () => {
+      fc.assert(
+        fc.property(
+          fc.array(fc.string({ minLength: 1 }), { minLength: 1, maxLength: 5 }),
+          (needed) => {
+            expect(() => requireScope({ clientId: "client-a" }, needed)).toThrow(
+              InsufficientScopeError,
+            );
+          },
+        ),
+        { seed: 20260909, numRuns: 200 },
       );
     });
 

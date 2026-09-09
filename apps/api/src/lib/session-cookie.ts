@@ -25,6 +25,7 @@ import {
   serializeSetCookie,
 } from "@de-otio/saas-foundation/session";
 import { getLogger } from "./logger.js";
+import { isKnownAgeTier } from "./age-gate.js";
 import { CUID_RE } from "./auth/cuid.js";
 import type { ScopeSet } from "./auth/scopes.js";
 import type { Env } from "../env.js";
@@ -617,8 +618,16 @@ export class SessionManager {
             dataRegion:
               (claimsRecord["custom:dataRegion"] as string) || "EU",
             profileContext: "primary",
-            ageTier:
-              (claimsRecord["custom:ageTier"] as AgeTier) || "ADULT",
+            // The claim is carried only when the IdP actually sent a
+            // recognised tier. It used to read `|| "ADULT"`, which minted the
+            // most permissive tier out of a missing or unparseable claim — and
+            // `Session.ageTier` is optional, so there was never a need to
+            // invent one. Absence now stays absence and
+            // `resolveSessionAgeTier` (the quarantine choke point) decides,
+            // failing closed to the strictest tier.
+            ...(isKnownAgeTier(claimsRecord["custom:ageTier"])
+              ? { ageTier: claimsRecord["custom:ageTier"] }
+              : {}),
             ...(activeTenantId ? { activeTenantId } : {}),
             // Plan 034 lane A: a verified Bearer JWT on this path is the
             // human's own token — first-party, unscoped. No `scope`/`scp`/

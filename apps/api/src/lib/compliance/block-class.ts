@@ -61,5 +61,13 @@ export function deriveBlockClass(verdict: ModerationVerdict): BlockClass {
  * the domain boundary (spec 07 §4.1).
  */
 export function isAppealable(blockClass: BlockClass | null | undefined): boolean {
+  // Absence is appealable BY DESIGN (quality sweep A3). Media illegal-class
+  // detection is a known gap, so failing closed here would remove the appeal
+  // path from every blocked media item rather than from suspected-illegal
+  // ones. The partial-failure window in which an illegal item has no class yet
+  // is covered instead by `computeDisposition`, which requires
+  // `evidenceHold !== true` alongside this predicate.
+  //
+  // gate-polarity-ok: deny-on-unknown would remove the appeal path from every blocked media item; the evidence hold in `computeDisposition` is the fail-closed backstop (sweep A3).
   return blockClass !== "illegal-suspected";
 }

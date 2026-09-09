@@ -31,6 +31,30 @@ describe("getPaginationConfig", () => {
       postsPerPage: 20,
     });
   });
+
+  it("fails closed to CHILD limits for an ageTier outside the known enum", () => {
+    // The switch is exhaustive at the type level, but the runtime argument is
+    // a session claim (`session-cookie.ts`'s `custom:ageTier`). Falling
+    // through returned `undefined`, and `undefined.maxPages` is the most
+    // permissive answer this table can give: `computePaginationMetadata`
+    // compares `maxPages !== null`, so "no config" read as "no page cap".
+    for (const unknown of ["SUPERADULT", "adult", ""]) {
+      const config = getPaginationConfig(
+        unknown as unknown as Parameters<typeof getPaginationConfig>[0],
+      );
+      expect(config).toEqual(getPaginationConfig("CHILD"));
+      expect(config.maxPages).toBe(5);
+    }
+  });
+
+  it("caps an unknown tier's feed the way CHILD's is capped", () => {
+    const { maxPages, postsPerPage } = getPaginationConfig(
+      "SUPERADULT" as unknown as Parameters<typeof getPaginationConfig>[0],
+    );
+    expect(
+      computePaginationMetadata(5, postsPerPage, maxPages).hasReachedLimit,
+    ).toBe(true);
+  });
 });
 
 describe("computePaginationMetadata", () => {

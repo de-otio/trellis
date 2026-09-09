@@ -47,6 +47,15 @@ import type { Env } from "../env.js";
 import type { PrismaClient } from "@prisma/client";
 
 /**
+ * The `auth` values core recognises, as runtime data.
+ *
+ * `ExtensionRouteDefinition.auth` is a compile-time union, which says nothing
+ * about the value an extension actually ships. This is what
+ * {@link wrapExtensionRoute} checks a manifest against at wiring time.
+ */
+const AUTH_LEVELS: readonly string[] = ["required", "optional", "none"];
+
+/**
  * Resolve the caller's verified active tenant for an extension route handler.
  *
  * The tenant id must be *verified* — from a Cognito-signed claim or a
@@ -164,6 +173,24 @@ export function wrapExtensionRoute(
 ): Route {
   const authLevel = routeDef.auth ?? "required";
 
+  // Fail closed at wiring time on an `auth` value core does not recognise.
+  //
+  // `ExtensionRouteDefinition.auth` is a three-valued union in the published
+  // types, but an extension is third-party code that may be plain JS, or
+  // TypeScript compiled against a different extension-api version, so the
+  // runtime value is unvalidated input. An unrecognised string used to behave
+  // exactly like `"optional"`: the request-time guard below only refused an
+  // absent session when the value was the literal `"required"`, so a typo
+  // ("Required", "require") served the route to unauthenticated callers while
+  // reading, in the manifest, as if it were gated. Boot must not get past it.
+  if (!AUTH_LEVELS.includes(authLevel)) {
+    throw new Error(
+      `Extension "${ext.id}" route "${routeDef.path}" declares auth: ` +
+        `"${String(authLevel)}", which core does not recognise. Use one of ` +
+        `${AUTH_LEVELS.map((level) => `"${level}"`).join(", ")}.`,
+    );
+  }
+
   // Fail closed at wiring time, not at request time. A route that can never
   // have a principal (`auth: "none"`) but declares scopes it needs held is a
   // declaration that can never be enforced — served, it would look gated and
@@ -207,7 +234,12 @@ export function wrapExtensionRoute(
         const sessionManager = new SessionManager();
         const secret = env.SESSION_SECRET;
         session = await sessionManager.getSession(request, secret, env);
-        if (!session && authLevel === "required") {
+        // Written as "anything that is not explicitly optional", not as
+        // `=== "required"`. The wiring-time check above already rejects a
+        // value outside the union, so this is the second half of the same
+        // decision rather than a new one: if a future third value ever
+        // reaches here, it is refused instead of admitted.
+        if (!session && authLevel !== "optional") {
           return securityHeaders.createSecureResponse(
             JSON.stringify({ error: "Unauthorized" }),
             { status: 401, headers: { "content-type": "application/json" } },
