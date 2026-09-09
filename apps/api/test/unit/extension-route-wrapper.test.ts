@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import * as fc from "fast-check";
 import { z } from "zod";
 
 // Mock extensions to avoid import chain
@@ -558,6 +559,105 @@ describe("wrapExtensionRoute — scopes and request schemas", () => {
           handle: async () => ({ status: 200, body: {} }),
         }),
       ).not.toThrow();
+    });
+
+    /**
+     * The failure path `authLevel === "required"` used to let through.
+     *
+     * `auth` is a compile-time union, but an extension is third-party code
+     * that may be plain JS or built against another extension-api version, so
+     * the runtime value is unvalidated. Any string that was not exactly
+     * `"required"` behaved as `"optional"`: the route served unauthenticated
+     * callers while its manifest read as gated.
+     */
+    describe("an unrecognised auth value", () => {
+      const wireWithAuth = (auth: unknown) =>
+        wrapExtensionRoute(makeExt(), {
+          path: "walks",
+          method: "GET",
+          auth: auth as ExtensionRouteDefinition["auth"],
+          handle: async () => ({ status: 200, body: {} }),
+        });
+
+      it.each(["Required", "require", "REQUIRED", "", "optionaal", "yes"])(
+        "refuses to wire auth: %o",
+        (auth) => {
+          expect(() => wireWithAuth(auth)).toThrow(/does not recognise/);
+        },
+      );
+
+      it("refuses non-string auth values a JS manifest can carry", () => {
+        for (const auth of [true, 1, 0, {}, []]) {
+          expect(() => wireWithAuth(auth)).toThrow(/does not recognise/);
+        }
+      });
+
+      it("still wires each of the three values core does recognise", () => {
+        for (const auth of ["required", "optional", "none"] as const) {
+          expect(() => wireWithAuth(auth)).not.toThrow();
+        }
+      });
+
+      it("treats a nullish auth as absent — the fail-closed default", async () => {
+        // `?? "required"` catches both `undefined` and `null`, so neither is
+        // an unrecognised value: they resolve to the strictest level. Asserted
+        // behaviourally, not just by "it wired", because "wired" alone would
+        // also be true if they had resolved to `"none"`.
+        for (const auth of [undefined, null]) {
+          expect(() => wireWithAuth(auth)).not.toThrow();
+          mockGetSession.mockResolvedValue(null);
+          const handler = vi.fn(async () => ({ status: 200, body: {} }));
+          const route = wrapExtensionRoute(makeExt(), {
+            path: "walks",
+            method: "POST",
+            auth: auth as ExtensionRouteDefinition["auth"],
+            handle: handler,
+          });
+          expect((await call(route, post('{"name":"Rex"}'))).status).toBe(401);
+          expect(handler).not.toHaveBeenCalled();
+        }
+      });
+
+      it("never wires an auth value outside the union", () => {
+        fc.assert(
+          fc.property(fc.string(), (auth) => {
+            fc.pre(!["required", "optional", "none"].includes(auth));
+            expect(() => wireWithAuth(auth)).toThrow(/does not recognise/);
+          }),
+          { seed: 20260909, numRuns: 300 },
+        );
+      });
+    });
+
+    /**
+     * The request-time half of the same decision: the 401 guard is written as
+     * "not explicitly optional" rather than "exactly required", so a value
+     * that ever reaches it unrecognised is refused rather than admitted.
+     */
+    it("401s an unauthenticated caller on an auth-absent route", async () => {
+      mockGetSession.mockResolvedValue(null);
+      const handler = vi.fn(async () => ({ status: 200, body: {} }));
+      const route = wrapExtensionRoute(makeExt(), {
+        path: "walks", method: "POST", handle: handler,
+      });
+
+      const response = await call(route, post('{"name":"Rex"}'));
+
+      expect(response.status).toBe(401);
+      expect(handler).not.toHaveBeenCalled();
+    });
+
+    it('serves an unauthenticated caller on an auth: "optional" route', async () => {
+      mockGetSession.mockResolvedValue(null);
+      const handler = vi.fn(async () => ({ status: 200, body: { ok: true } }));
+      const route = wrapExtensionRoute(makeExt(), {
+        path: "walks", method: "POST", auth: "optional", handle: handler,
+      });
+
+      const response = await call(route, post('{"name":"Rex"}'));
+
+      expect(response.status).toBe(200);
+      expect(handler).toHaveBeenCalled();
     });
   });
 
