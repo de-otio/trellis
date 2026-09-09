@@ -40,6 +40,40 @@ import {
 
 import { _resetKekCacheForTest } from "../../../src/lib/oauth/envelope-crypto.js";
 
+/**
+ * Deterministic RNG for the uniqueness test below (pins the nondeterminism
+ * instead of gambling on it). `generateUserCode` already takes its entropy
+ * source as a dependency (defaulting to `randomBytes` for production); this
+ * substitutes a counter-driven source so the "no dupes" assertion is a
+ * mathematical guarantee, not a birthday-paradox roll against real crypto
+ * randomness.
+ *
+ * The k-th call returns the base-`ALPHABET_LEN` digit expansion of k, one
+ * digit per byte. Every digit is < the alphabet length (well under the
+ * generator's modulo-bias rejection cutoff of 240), so each byte is accepted
+ * verbatim on the first pass — the produced code is exactly the alphabet
+ * characters at those digit indices. Because base-N digit tuples are unique
+ * for k in [0, ALPHABET_LEN^USER_CODE_LEN), and that space is ~2.56e10 here,
+ * calling this for any run size we'd plausibly use in a test is guaranteed
+ * collision-free BY CONSTRUCTION — it deterministically exercises the real
+ * alphabet-mapping logic in `generateUserCode` for distinct inputs, rather
+ * than asserting that sampling real randomness never collides (which it
+ * occasionally will, at the birthday-bound rate for the sample size).
+ */
+function makeInjectiveUserCodeRng(): (n: number) => Buffer {
+  const alphaLen = USER_CODE_ALPHABET.length;
+  let counter = 0;
+  return (n: number) => {
+    let k = counter++;
+    const buf = Buffer.alloc(n, 0);
+    for (let i = 0; i < USER_CODE_LEN; i++) {
+      buf[i] = k % alphaLen;
+      k = Math.floor(k / alphaLen);
+    }
+    return buf;
+  };
+}
+
 let deviceStore: MemoryKvStore;
 let indexStore: MemoryKvStore;
 
@@ -72,10 +106,17 @@ describe("user_code helpers", () => {
     }
   });
 
-  it("generates highly unique codes — no dupes in 10K samples", () => {
+  it("generates highly unique codes — deterministic injectivity proof, 10K samples", () => {
+    // A prior version of this test called generateUserCode() with the real
+    // CSPRNG for 10K samples and asserted no collision — a birthday-paradox
+    // bet (~0.2% collision chance for 10K draws over a 20^8 keyspace) that
+    // flaked in CI. Injecting a deterministic, collision-free-by-construction
+    // source (see makeInjectiveUserCodeRng above) keeps the assertion but
+    // removes the gamble; production callers still default to randomBytes.
+    const rng = makeInjectiveUserCodeRng();
     const seen = new Set<string>();
     for (let i = 0; i < 10_000; i++) {
-      const code = generateUserCode();
+      const code = generateUserCode(rng);
       expect(seen.has(code)).toBe(false);
       seen.add(code);
     }
