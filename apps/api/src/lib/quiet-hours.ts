@@ -7,6 +7,8 @@
 
 import type { AgeTier } from "@prisma/client";
 
+import { getLogger } from "./logger.js";
+
 export interface QuietHoursConfig {
   quietHoursEnabled: boolean;
   quietHoursStart: number | null; // minutes from midnight
@@ -50,6 +52,12 @@ export function isInQuietHours(
  * CHILD: 20:00-07:00, enabled by default
  * TEEN: 22:00-07:00, enabled by default
  * ADULT: 23:00-06:00, disabled by default
+ *
+ * Fail-closed on anything outside the known `AgeTier` values (see
+ * `age-gate.ts`'s `getFeatureAccess`): the switch is exhaustive at the type
+ * level, but the runtime input is a session claim. Falling through returned
+ * `undefined`, whose `enabled` reads as falsy — quiet hours silently off, the
+ * permissive end of the only axis this table controls.
  */
 export function getDefaultQuietHours(ageTier: AgeTier): {
   start: number;
@@ -63,5 +71,11 @@ export function getDefaultQuietHours(ageTier: AgeTier): {
       return { start: 1320, end: 420, enabled: true };
     case "ADULT":
       return { start: 1380, end: 360, enabled: false };
+    default:
+      getLogger().error(
+        "[quiet-hours] getDefaultQuietHours received an unrecognised ageTier; failing closed to CHILD defaults",
+        { ageTier },
+      );
+      return getDefaultQuietHours("CHILD" as AgeTier);
   }
 }

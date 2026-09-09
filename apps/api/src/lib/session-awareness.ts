@@ -7,6 +7,8 @@
 
 import type { AgeTier } from "@prisma/client";
 
+import { getLogger } from "./logger.js";
+
 export interface Nudge {
   type: "time_reminder" | "session_limit";
   message: string;
@@ -25,6 +27,13 @@ export interface SessionThresholds {
  * CHILD: first=15, second=25, hard=30
  * TEEN: first=30, second=50, hard=null
  * ADULT: first=60, second=null, hard=null
+ *
+ * Fail-closed on anything outside the known `AgeTier` values (see
+ * `age-gate.ts`'s `getFeatureAccess`): the switch is exhaustive at the type
+ * level, but the runtime input is a session claim. Falling through returned
+ * `undefined`, and `getSessionNudge` then threw on reading `.hardLimitMinutes`
+ * off it — a 500 in place of a screen-time limit, which is the permissive
+ * outcome for a table whose whole job is to interrupt a long session.
  */
 export function getSessionThresholds(ageTier: AgeTier): SessionThresholds {
   switch (ageTier) {
@@ -46,6 +55,12 @@ export function getSessionThresholds(ageTier: AgeTier): SessionThresholds {
         secondNudgeMinutes: null,
         hardLimitMinutes: null,
       };
+    default:
+      getLogger().error(
+        "[session-awareness] getSessionThresholds received an unrecognised ageTier; failing closed to CHILD thresholds",
+        { ageTier },
+      );
+      return getSessionThresholds("CHILD" as AgeTier);
   }
 }
 

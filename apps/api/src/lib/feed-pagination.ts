@@ -7,6 +7,8 @@
 
 import type { AgeTier } from "@prisma/client";
 
+import { getLogger } from "./logger.js";
+
 export interface PaginationMetadata {
   pageNumber: number;
   sessionPostCount: number;
@@ -24,6 +26,12 @@ export interface PaginationConfig {
  * CHILD: maxPages=5, postsPerPage=10
  * TEEN: maxPages=20, postsPerPage=15
  * ADULT: maxPages=null (unlimited), postsPerPage=20
+ *
+ * Fail-closed on anything outside the known `AgeTier` values, for the reason
+ * spelled out on `age-gate.ts`'s `getFeatureAccess`: the switch is exhaustive
+ * at the type level, but the runtime input is a session claim, so falling
+ * through to `undefined` was reachable — and `undefined` here is the *most*
+ * permissive answer available, because `maxPages` then reads as no cap at all.
  */
 export function getPaginationConfig(ageTier: AgeTier): PaginationConfig {
   switch (ageTier) {
@@ -33,6 +41,12 @@ export function getPaginationConfig(ageTier: AgeTier): PaginationConfig {
       return { maxPages: 20, postsPerPage: 15 };
     case "ADULT":
       return { maxPages: null, postsPerPage: 20 };
+    default:
+      getLogger().error(
+        "[feed-pagination] getPaginationConfig received an unrecognised ageTier; failing closed to CHILD limits",
+        { ageTier },
+      );
+      return getPaginationConfig("CHILD" as AgeTier);
   }
 }
 

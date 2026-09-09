@@ -29,6 +29,29 @@ describe("getSessionThresholds", () => {
       hardLimitMinutes: null,
     });
   });
+
+  it("fails closed to CHILD thresholds for an ageTier outside the known enum", () => {
+    // Runtime input is a session claim, so the type-level exhaustiveness of
+    // the switch is not a runtime guarantee. Falling through returned
+    // `undefined`, which made `getSessionNudge` throw on `.hardLimitMinutes`
+    // — a 500 where a screen-time limit belonged.
+    for (const unknown of ["SUPERADULT", "adult", ""]) {
+      expect(
+        getSessionThresholds(
+          unknown as unknown as Parameters<typeof getSessionThresholds>[0],
+        ),
+      ).toEqual(getSessionThresholds("CHILD"));
+    }
+  });
+
+  it("still nudges an unknown tier instead of throwing", () => {
+    const nudge = getSessionNudge(
+      45,
+      "SUPERADULT" as unknown as Parameters<typeof getSessionNudge>[1],
+    );
+    expect(nudge).not.toBeNull();
+    expect(nudge?.type).toBe("session_limit");
+  });
 });
 
 describe("getSessionNudge", () => {

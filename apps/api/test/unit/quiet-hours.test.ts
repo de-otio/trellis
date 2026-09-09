@@ -110,4 +110,18 @@ describe("getDefaultQuietHours", () => {
     const result = getDefaultQuietHours("ADULT");
     expect(result).toEqual({ start: 1380, end: 360, enabled: false });
   });
+
+  it("fails closed to CHILD defaults for an ageTier outside the known enum", () => {
+    // Runtime input is a session claim, so type-level exhaustiveness is not a
+    // runtime guarantee. Falling through returned `undefined`, whose
+    // `enabled` reads as falsy — quiet hours silently off, which is the
+    // permissive end of the one axis this table controls.
+    for (const unknown of ["SUPERADULT", "adult", ""]) {
+      const result = getDefaultQuietHours(
+        unknown as unknown as Parameters<typeof getDefaultQuietHours>[0],
+      );
+      expect(result).toEqual(getDefaultQuietHours("CHILD"));
+      expect(result.enabled).toBe(true);
+    }
+  });
 });
