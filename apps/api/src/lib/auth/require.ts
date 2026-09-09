@@ -243,15 +243,21 @@ export class InsufficientScopeError extends Error {
  *
  * The permissive default is written here, once, and visibly: an absent
  * `scopes` means the context predates the field, which can only be a
- * first-party session. Any path that can mint a *non*-first-party principal
- * must set `scopes` on every branch — an unset value on such a path reads as
- * full access.
+ * first-party session — and that is now *checked* rather than assumed. It used
+ * to be a comment asking every future author to set `scopes` on every branch
+ * that mints a non-first-party principal; a missed branch read as full access,
+ * and nothing failed. `clientId` is the same signal {@link requireFirstParty}
+ * already trusts to mean "a third-party client is acting for the user", so a
+ * principal that names a client but carries no grant is what it looks like: a
+ * delegated credential with nothing delegated to it. That denies.
  */
 export function requireScope(
   ctx: ScopedPrincipal,
   needed: readonly string[],
 ): void {
-  const granted: ScopeSet = ctx.scopes ?? "*";
+  // Absence is the first-party default ONLY for a principal with no client.
+  const granted: ScopeSet =
+    ctx.scopes ?? (ctx.clientId === undefined ? "*" : new Set<string>());
   if (hasScope(granted, needed)) return;
   // `hasScope` already returned false, so `granted` is a real set here — "*"
   // and an empty `needed` both pass. Report every absent scope, not just the
