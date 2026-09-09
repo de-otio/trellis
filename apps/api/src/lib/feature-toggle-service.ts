@@ -215,6 +215,7 @@ export class FeatureToggleService {
       // / resolveScoped) a read ERROR both to `null`; only a real row carries
       // an explicit boolean. `?? true` turns "couldn't confirm" into "moderate".
       const toggle = await this.getToggle(key, tenantId);
+      // gate-polarity-ok: safety gate, `true` means MODERATE — enabled-on-absence is the restrictive answer here, not the permissive one (AR-SEC T4).
       return toggle?.enabled ?? true;
     } catch (err) {
       // Belt-and-suspenders: even if the read path ever throws instead of
