@@ -58,6 +58,31 @@ export const MINIMUM_SIGNUP_AGE_YEARS = 18;
 export const MINOR_TIERS_SUPPORTED: boolean = false;
 
 /**
+ * The `AgeTier` enum as runtime values, ordered most restrictive first.
+ *
+ * `AgeTier` is a Prisma *type*, so nothing in the type system can check a
+ * session claim or a database string against it at runtime. Every tier-keyed
+ * policy table in this module and its neighbours needs that check to fail
+ * closed rather than fall through, so the vocabulary is stated once here.
+ */
+export const AGE_TIERS = ["CHILD", "TEEN", "ADULT"] as const satisfies readonly AgeTier[];
+
+/**
+ * The tier an unproven, absent or unrecognised tier is treated as.
+ *
+ * Every tier-keyed table in the request path restricts *more* as the tier gets
+ * younger, so the most restrictive known tier is the only safe answer when the
+ * real one cannot be established. Named rather than inlined so "which way does
+ * this fail" is one fact with one definition.
+ */
+export const STRICTEST_AGE_TIER: AgeTier = AGE_TIERS[0];
+
+/** Whether `value` is one of the {@link AGE_TIERS}. Narrows for the caller. */
+export function isKnownAgeTier(value: unknown): value is AgeTier {
+  return (AGE_TIERS as readonly unknown[]).includes(value);
+}
+
+/**
  * The structured 4xx envelope returned when a date of birth is below the
  * minimum age. Shared by every enforcement point so the client sees one shape
  * and one code regardless of which provider it registered through.
@@ -250,10 +275,33 @@ export function isUnderMinimumAge(dateOfBirth: Date, now: Date = new Date()): bo
  * Note what this does NOT cover: tiers read from `User.ageTier` in the
  * database (notification delivery floors, recap, the nightly transition job).
  * Those are a genuine defence-in-depth floor over stored data and stay live.
+ *
+ * **Absence resolves to {@link STRICTEST_AGE_TIER}, not to ADULT.** The input is
+ * a session claim: a token that never carried `ageTier`, an IdP that dropped it,
+ * or a claim narrowing that filtered it out all arrive here as `undefined`, and
+ * so does any value outside the enum. Manufacturing ADULT out of that made the
+ * minor gating fail open the moment the flag below is flipped — the one thing
+ * this choke point exists to prevent. An unproven tier is now treated at least
+ * as restrictively as the most restrictive known tier, matching
+ * {@link getFeatureAccess}'s `default:`.
+ *
+ * `minorTiersSupported` is injectable for the same reason `now` is on
+ * {@link computeAgeTier}: the post-quarantine branch is otherwise dead code
+ * behind a constant and cannot be tested. Passing `true` can only make the
+ * answer *more* restrictive than the default — never less — so the parameter
+ * cannot be used to widen access.
  */
-export function resolveSessionAgeTier(sessionAgeTier?: AgeTier | undefined): AgeTier {
-  if (!MINOR_TIERS_SUPPORTED) return "ADULT";
-  return sessionAgeTier ?? "ADULT";
+export function resolveSessionAgeTier(
+  sessionAgeTier?: AgeTier | undefined,
+  minorTiersSupported: boolean = MINOR_TIERS_SUPPORTED,
+): AgeTier {
+  if (!minorTiersSupported) return "ADULT";
+  if (isKnownAgeTier(sessionAgeTier)) return sessionAgeTier;
+  getLogger().error(
+    "[age-gate] session carried no recognised ageTier; failing closed to the strictest tier",
+    { sessionAgeTier, strictest: STRICTEST_AGE_TIER },
+  );
+  return STRICTEST_AGE_TIER;
 }
 
 /**

@@ -5,15 +5,20 @@
  */
 
 import { afterEach, describe, expect, it } from "vitest";
+import * as fc from "fast-check";
+import type { AgeTier } from "@prisma/client";
 import {
+  AGE_TIERS,
   computeAgeTier,
   computeAgeYears,
   getFeatureAccess,
+  isKnownAgeTier,
   isUnderMinimumAge,
   MINIMUM_SIGNUP_AGE_YEARS,
   MINOR_TIERS_SUPPORTED,
   requiresParentalConsent,
   resolveSessionAgeTier,
+  STRICTEST_AGE_TIER,
   UnderMinimumAgeError,
   UNDER_MINIMUM_AGE_ERROR,
 } from "../../src/lib/age-gate.js";
@@ -243,6 +248,75 @@ describe("resolveSessionAgeTier (quarantine choke point)", () => {
   it("resolves an absent tier to ADULT", () => {
     expect(resolveSessionAgeTier(undefined)).toBe("ADULT");
     expect(resolveSessionAgeTier()).toBe("ADULT");
+  });
+
+  /**
+   * The failure path, exercised with the quarantine lifted.
+   *
+   * These assertions are the whole point of the second parameter: while
+   * `MINOR_TIERS_SUPPORTED` is `false` the branch below is unreachable, so a
+   * test that only called the one-argument form would pass no matter which way
+   * the absent-tier default pointed. Lifting the quarantine in the test is the
+   * only way to make the polarity assertable before the flag is flipped for
+   * real — which is exactly when getting it wrong stops being theoretical.
+   */
+  describe("with minor tiers supported (the failure path)", () => {
+    it.each(["CHILD", "TEEN", "ADULT"] as const)(
+      "honours a session that does claim %s",
+      (claimed) => {
+        expect(resolveSessionAgeTier(claimed, true)).toBe(claimed);
+      },
+    );
+
+    it("fails closed to the strictest tier when the session claims nothing", () => {
+      expect(resolveSessionAgeTier(undefined, true)).toBe(STRICTEST_AGE_TIER);
+      expect(resolveSessionAgeTier(undefined, true)).toBe("CHILD");
+    });
+
+    it("fails closed for a tier outside the known enum", () => {
+      // The runtime input is a session claim cast to `AgeTier`; an IdP that
+      // sends `"adult"`, an empty string, or a tier this build has not been
+      // taught about must not resolve to the most permissive answer.
+      for (const claim of ["ADULTS", "adult", "", "SUPERADULT", "null"]) {
+        expect(
+          resolveSessionAgeTier(claim as unknown as AgeTier, true),
+        ).toBe("CHILD");
+      }
+    });
+
+    it("fails closed for non-string claims a JSON token can carry", () => {
+      for (const claim of [null, 0, false, [], {}]) {
+        expect(
+          resolveSessionAgeTier(claim as unknown as AgeTier, true),
+        ).toBe("CHILD");
+      }
+    });
+
+    it("never resolves an unknown claim to a tier more permissive than CHILD", () => {
+      fc.assert(
+        fc.property(fc.string(), (claim) => {
+          fc.pre(!AGE_TIERS.includes(claim as (typeof AGE_TIERS)[number]));
+          expect(resolveSessionAgeTier(claim as unknown as AgeTier, true)).toBe(
+            STRICTEST_AGE_TIER,
+          );
+        }),
+        { seed: 20260909, numRuns: 500 },
+      );
+    });
+  });
+});
+
+describe("the age-tier vocabulary", () => {
+  it("lists the tiers most restrictive first, with CHILD as the strictest", () => {
+    expect(AGE_TIERS).toEqual(["CHILD", "TEEN", "ADULT"]);
+    expect(STRICTEST_AGE_TIER).toBe(AGE_TIERS[0]);
+  });
+
+  it("recognises exactly the three tiers and nothing else", () => {
+    for (const tier of AGE_TIERS) expect(isKnownAgeTier(tier)).toBe(true);
+    for (const other of ["", "child", "ADULTS", null, undefined, 0, {}]) {
+      expect(isKnownAgeTier(other)).toBe(false);
+    }
   });
 });
 

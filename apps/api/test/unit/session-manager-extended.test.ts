@@ -8,6 +8,7 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionManager, type Session } from "../../src/lib/session-cookie.js";
+import { resolveSessionAgeTier } from "../../src/lib/age-gate.js";
 
 // Mock session-config
 vi.mock("../../src/lib/session-config", () => ({
@@ -98,6 +99,59 @@ describe("SessionManager - Extended", () => {
       expect(session).not.toBeNull();
       expect(session?.dataRegion).toBe("EU");
       expect(session?.role).toBe("END_USER");
+    });
+
+    /**
+     * The `custom:ageTier` claim used to read `|| "ADULT"`, so a token that
+     * never carried the claim — or carried something unparseable — produced a
+     * session asserting the most permissive tier. `Session.ageTier` is
+     * optional, so there was never a need to invent one: absence now stays
+     * absence and `resolveSessionAgeTier` decides, failing closed.
+     */
+    describe("the custom:ageTier claim", () => {
+      const claimsWith = (ageTier?: unknown) => ({
+        sub: "cognito-user-tier",
+        "custom:userId": "cmqurmq7x000002i80nqmgfd4",
+        email: "user@example.com",
+        username: "tieruser",
+        ...(ageTier === undefined ? {} : { "custom:ageTier": ageTier }),
+      });
+
+      const sessionFor = async (ageTier?: unknown) => {
+        mockVerifyCognitoJwt.mockResolvedValue(claimsWith(ageTier));
+        const request = new Request("https://example.com/api/test", {
+          method: "GET",
+          headers: { Authorization: "Bearer header.payload.signature" },
+        });
+        return sessionManager.getSession(request, testSecret, testEnv);
+      };
+
+      it("does NOT manufacture ADULT when the claim is absent", async () => {
+        const session = await sessionFor(undefined);
+        expect(session).not.toBeNull();
+        expect(session?.ageTier).toBeUndefined();
+        // And the choke point then fails closed rather than open.
+        expect(resolveSessionAgeTier(session?.ageTier, true)).toBe("CHILD");
+      });
+
+      it.each(["", "adult", "ADULTS", "SUPERADULT", 18, null, {}])(
+        "does NOT manufacture ADULT from the unrecognised claim %o",
+        async (claim) => {
+          const session = await sessionFor(claim);
+          expect(session).not.toBeNull();
+          expect(session?.ageTier).toBeUndefined();
+          expect(resolveSessionAgeTier(session?.ageTier, true)).toBe("CHILD");
+        },
+      );
+
+      it.each(["CHILD", "TEEN", "ADULT"] as const)(
+        "carries a recognised %s claim through unchanged",
+        async (claim) => {
+          const session = await sessionFor(claim);
+          expect(session?.ageTier).toBe(claim);
+          expect(resolveSessionAgeTier(session?.ageTier, true)).toBe(claim);
+        },
+      );
     });
 
     it("should use username as email fallback when email is not in JWT", async () => {
