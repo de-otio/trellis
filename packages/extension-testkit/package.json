@@ -37,7 +37,7 @@
     "README.md"
   ],
   "dependencies": {
-    "@aws-sdk/client-dynamodb": "^3.1121.0",
+    "@aws-sdk/client-dynamodb": "^3.1127.0",
     "@de-otio/trellis-extension-api": "^0.10.0",
     "pg": "^8.23.0",
     "prisma": "^7.10.0",
