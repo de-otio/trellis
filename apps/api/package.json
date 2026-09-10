@@ -111,26 +111,26 @@
     "node": ">=22"
   },
   "devDependencies": {
-    "@aws-sdk/client-lambda": "^3.1121.0",
+    "@aws-sdk/client-lambda": "^3.1127.0",
     "@de-otio/trellis-extension-testkit": "^0.1.0",
     "@prisma/client": "^7.10.0",
-    "@types/aws-lambda": "^8.10.162",
+    "@types/aws-lambda": "^8.10.163",
     "@types/js-yaml": "^4.0.9",
-    "@types/node": "^26.4.0",
+    "@types/node": "^26.4.1",
     "@types/pg": "^8.23.1",
-    "@vitest/coverage-v8": "^4.1.11",
-    "@vitest/ui": "^4.1.11",
+    "@vitest/coverage-v8": "^5.0.0",
+    "@vitest/ui": "^5.0.0",
     "aws-sdk-client-mock": "^4.1.0",
     "esbuild": "^0.28.2",
     "fast-check": "^4.9.0",
     "form-data": "^4.0.1",
     "js-yaml": "^5.4.1",
-    "mailparser": "^3.9.17",
+    "mailparser": "^3.9.20",
     "prettier": "^3.9.6",
     "prisma": "^7.10.0",
     "tsx": "^4.23.13",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.11"
+    "vitest": "^5.0.0"
   },
   "repository": {
     "type": "git",
