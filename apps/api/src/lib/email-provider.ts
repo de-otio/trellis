@@ -1023,11 +1023,32 @@ export function emailProviderConfigFromEnv(
  *
  * Callers gate this on `EMAIL_SERVICE` being set, so a deployment that never
  * selects a provider is never penalised.
+ *
+ * The two China providers are rejected outright. Their `sendEmail` throws
+ * (neither has the signed-SDK integration the APIs require), so selecting one
+ * produced a deployment that booted clean and then failed every send — the
+ * failure surfaced per-message, at the worst possible moment, rather than at
+ * startup. They stay in the accepted type because `EMAIL_SERVICE` is a
+ * published surface; what changes is that a deployment can no longer *start*
+ * with one selected.
  */
+const UNIMPLEMENTED_EMAIL_PROVIDERS: Readonly<Record<string, string>> = {
+  "alibaba-directmail": "a signed Alibaba Cloud SDK integration",
+  "tencent-ses": "a signed Tencent Cloud SDK integration",
+};
+
 export function validateEmailEnv(src: EmailEnvSource): string[] {
   const errors: string[] = [];
   const provider = src.EMAIL_SERVICE;
-  if (provider === "resend") {
+  const missingIntegration =
+    provider === undefined
+      ? undefined
+      : UNIMPLEMENTED_EMAIL_PROVIDERS[provider];
+  if (missingIntegration) {
+    errors.push(
+      `EMAIL_SERVICE=${provider} is not implemented (requires ${missingIntegration}) — every send would throw. Select a working provider: resend, aws-ses, scaleway-tem, or smtp.`,
+    );
+  } else if (provider === "resend") {
     if (!src.RESEND_API_KEY) {
       errors.push("RESEND_API_KEY is required when EMAIL_SERVICE=resend");
     }
@@ -1067,13 +1088,17 @@ export function validateEmailEnv(src: EmailEnvSource): string[] {
 export function createEmailProvider(
   config: EmailProviderConfig,
 ): EmailProvider {
-  // If region is China, prefer China-compatible providers
+  // If region is China, prefer China-compatible providers.
+  //
+  // These branches used to reroute an EXPLICIT `resend` selection to Alibaba or
+  // Tencent whenever the corresponding credentials happened to be present. Both
+  // of those providers throw on every send, so a deployment that configured
+  // resend correctly — and passed validateEmailEnv — silently became one that
+  // could not send at all, on the strength of a stray ALIBABA_ACCESS_KEY_ID.
+  // An explicit provider selection is now honoured: only `provider` chooses.
   if (config.region === "CN" || config.region === "cn") {
     // Priority: Alibaba DirectMail > Tencent SES > AWS SES (China regions)
-    if (
-      config.provider === "alibaba-directmail" ||
-      (config.provider === "resend" && config.alibabaAccessKeyId)
-    ) {
+    if (config.provider === "alibaba-directmail") {
       if (
         !config.alibabaAccessKeyId ||
         !config.alibabaAccessKeySecret ||
@@ -1091,10 +1116,7 @@ export function createEmailProvider(
       );
     }
 
-    if (
-      config.provider === "tencent-ses" ||
-      (config.provider === "resend" && config.tencentSecretId)
-    ) {
+    if (config.provider === "tencent-ses") {
       if (
         !config.tencentSecretId ||
         !config.tencentSecretKey ||
