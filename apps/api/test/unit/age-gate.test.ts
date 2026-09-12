@@ -11,6 +11,7 @@ import {
   AGE_TIERS,
   computeAgeTier,
   computeAgeYears,
+  effectiveMinorTiersSupported,
   getFeatureAccess,
   isKnownAgeTier,
   isUnderMinimumAge,
@@ -248,6 +249,45 @@ describe("resolveSessionAgeTier (quarantine choke point)", () => {
   it("resolves an absent tier to ADULT", () => {
     expect(resolveSessionAgeTier(undefined)).toBe("ADULT");
     expect(resolveSessionAgeTier()).toBe("ADULT");
+  });
+
+  /**
+   * The second parameter is a TEST SEAM, and a test seam that can widen access
+   * is a fail-open vector. These assertions pin the direction it may move.
+   *
+   * This is deliberately tested against `effectiveMinorTiersSupported` rather
+   * than through `resolveSessionAgeTier`: the dangerous case needs the
+   * CONFIGURED flag to be `true`, and that is a module constant which is
+   * `false` today — which is precisely why the hazard is invisible from the
+   * outside and why taking the override directly looks safe.
+   */
+  describe("the override may only tighten", () => {
+    it("cannot switch minor tiers off once they are configured on", () => {
+      // The regression that matters: when the 18+ floor lifts, a caller
+      // passing `false` must NOT get unconditional ADULT.
+      expect(effectiveMinorTiersSupported(false, true)).toBe(true);
+    });
+
+    it("can switch minor tiers on while they are configured off", () => {
+      expect(effectiveMinorTiersSupported(true, false)).toBe(true);
+    });
+
+    it("leaves both agreeing values alone", () => {
+      expect(effectiveMinorTiersSupported(false, false)).toBe(false);
+      expect(effectiveMinorTiersSupported(true, true)).toBe(true);
+    });
+
+    it("is never false when either input is true", () => {
+      fc.assert(
+        fc.property(fc.boolean(), fc.boolean(), (override, configured) => {
+          const effective = effectiveMinorTiersSupported(override, configured);
+          // Monotonic: the effective flag is at least as "on" as either input,
+          // so no combination of arguments can relax the gate.
+          expect(effective).toBe(override || configured);
+          if (override || configured) expect(effective).toBe(true);
+        }),
+      );
+    });
   });
 
   /**
