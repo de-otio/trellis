@@ -115,10 +115,28 @@ describe("buildDispatchTable", () => {
     });
   });
 
-  it("stub workers throw through the table (→ dispatcher fail)", async () => {
+  it("un-wired workers throw through the table (→ dispatcher fail)", async () => {
     const table = buildDispatchTable(baseInput());
-    await expect(table["link-check"]({}, raw("{}"))).rejects.toThrow(/failing closed/);
+    // followers-events is still a stub (no producer enqueues to it).
     await expect(table["followers-events"]({}, raw("{}"))).rejects.toThrow(/failing closed/);
+    // link-check is implemented, but the base input injects neither a Prisma
+    // client nor a threat-intel port — so it must still refuse to ack rather
+    // than resolve a pending link without having checked it.
+    await expect(table["link-check"]({}, raw("{}"))).rejects.toThrow(
+      /no Prisma client injected/,
+    );
+  });
+
+  it("link-check fails closed when the DB is wired but the threat-intel port is not", async () => {
+    const table = buildDispatchTable(
+      baseInput({ db: { linkCheck: { update: vi.fn() } } as never }),
+    );
+    await expect(
+      table["link-check"](
+        { linkCheckId: "lc_1", url: "https://example.com", domain: "example.com" },
+        raw("{}"),
+      ),
+    ).rejects.toThrow(/failing closed/);
   });
 
   it("federation-outbox: OFF returns (ack), ON throws (fail)", async () => {

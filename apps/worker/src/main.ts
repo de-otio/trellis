@@ -31,6 +31,7 @@ import {
   resolveKvProvider,
 } from "../../api/src/lib/kv/kv-provider.js";
 import { makeKvCronLock } from "../../api/src/lib/workers/cron-lock.js";
+import { makeLinkThreatIntelPort } from "../../api/src/lib/workers/link-threat-intel-adapter.js";
 import { noopMetrics } from "../../api/src/lib/workers/metrics-port.js";
 import { makeIdentityAdminPort } from "../../api/src/lib/identity/identity-provider.js";
 import { makeEmailPortFromEnv } from "../../api/src/lib/workers/deletion-email-port.js";
@@ -154,6 +155,19 @@ async function main(): Promise<void> {
     // the PRIVATE consuming package; un-wired ⇒ the queue fails closed.
     exportWorker: undefined,
     federationEnabled,
+    // link-check is a live security control: the API key and the KV cache are
+    // bound HERE, at the composition root, so the worker core never reads a
+    // secret (finding 7). LAZY like `getAppEnv` below — the key is resolved at
+    // use, and the KV namespaces do not exist yet at this point in startup.
+    //
+    // Absent API KEY ⇒ the port still answers, and the core records WARNING
+    // rather than dead-lettering every link. Absent PORT ⇒ the core fails
+    // closed. Those are deliberately different cases.
+    linkThreatIntel: makeLinkThreatIntelPort(async () => {
+      const { buildEnv } = await import("../../api/src/env.js");
+      return buildEnv();
+    }),
+    db: await getLambdaPrisma(),
   });
 
   const sqsClient = makeDefaultSqsClient();

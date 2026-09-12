@@ -16,17 +16,49 @@ function makeLogger(): Logger {
   return { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn(), trace: vi.fn() };
 }
 
-describe("runLinkCheck (LIVE SECURITY CONTROL)", () => {
-  it("throws (fail-closed) on any payload", async () => {
-    await expect(runLinkCheck({ any: "payload" }, { logger: makeLogger() })).rejects.toThrow(
-      /failing closed/,
-    );
+// link-check is no longer a stub — it resolves a pending LinkCheck row via the
+// injected threat-intel port. What survives from the stub era is the
+// fail-closed rule: every path that cannot obtain a verdict must throw rather
+// than ack, so an unchecked link never looks like a cleared one. Those cases
+// are exercised here; the verdict-recording behaviour lives in
+// test/unit/workers/link-check.test.ts.
+describe("runLinkCheck (LIVE SECURITY CONTROL) — fail-closed paths", () => {
+  const message = { linkCheckId: "lc_1", url: "https://example.com", domain: "example.com" };
+
+  function makeDb() {
+    return { linkCheck: { update: vi.fn() } } as never;
+  }
+
+  it("throws when no threat-intel port is injected", async () => {
+    await expect(
+      runLinkCheck(message, { logger: makeLogger(), db: makeDb() }),
+    ).rejects.toThrow(/failing closed/);
   });
 
-  it("throws even on an empty payload — there is no acking path at all", async () => {
-    await expect(runLinkCheck(undefined, { logger: makeLogger() })).rejects.toThrow(
-      /not implemented/,
-    );
+  it("throws on a payload with no linkCheckId — there is no acking path", async () => {
+    await expect(
+      runLinkCheck(undefined, { logger: makeLogger(), db: makeDb() }),
+    ).rejects.toThrow(/not an object/);
+  });
+
+  it("throws rather than recording a verdict when the lookup fails transiently", async () => {
+    const db = makeDb();
+    await expect(
+      runLinkCheck(message, {
+        logger: makeLogger(),
+        db,
+        linkThreatIntel: {
+          check: async () => ({
+            status: "unknown" as const,
+            failOpenReason: "api-error",
+            retryable: true,
+          }),
+        },
+      }),
+    ).rejects.toThrow(/api-error/);
+    // The row must stay `pending` — a retry may yet produce a real verdict.
+    expect((db as never as { linkCheck: { update: ReturnType<typeof vi.fn> } }).linkCheck.update)
+      .not.toHaveBeenCalled();
   });
 });
 

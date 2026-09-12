@@ -23,6 +23,7 @@ import type { PrismaClient } from "@prisma/client";
 import type { Logger } from "../../api/src/lib/logger.js";
 import type { StagingCleanupResult } from "../../api/src/lib/media/staging-object-cleanup.js";
 import type { IdentityAdminPort } from "../../api/src/lib/workers/identity-admin-port.js";
+import type { LinkThreatIntelPort } from "../../api/src/lib/workers/context.js";
 import { runDeleteAccount, type DeleteAccountPayload } from "../../api/src/lib/workers/delete-account.js";
 import { runLinkCheck } from "../../api/src/lib/workers/link-check.js";
 import { runFollowersEvents } from "../../api/src/lib/workers/followers-events.js";
@@ -89,10 +90,25 @@ export interface DispatchTableInput {
    * T11 (finding 9): the PII-schema-bearing export worker, injected from the
    * PRIVATE consuming package. Absent ⇒ the user-export queue fails closed
    * (throw → no-ack) — export requests are never silently dropped.
+   *
+   * IMPLEMENT-OR-STOP, reviewed 2026-09-12: **keep as-is**. The producer is
+   * live (`user-export-handler.ts` enqueues DSAR export requests), and the
+   * consumer deliberately lives outside this repo because it carries the PII
+   * schema. Un-wired in bare trellis is therefore the correct state, not a gap:
+   * a DSAR that cannot be fulfilled must dead-letter, never ack.
    */
   readonly exportWorker?: ExportWorkerPort;
   /** Resolved by the composition root (ACTIVITYPUB_ENABLED === "true"). */
   readonly federationEnabled: boolean;
+  /**
+   * Threat-intel lookup for the link-check queue, bound to the API key and KV
+   * cache at the composition root. Absent ⇒ the queue fails closed (throw →
+   * no-ack), exactly as it did while the core was a stub: an un-wired
+   * deployment must never resolve a pending link to "safe".
+   */
+  readonly linkThreatIntel?: LinkThreatIntelPort;
+  /** Prisma client for the link-check worker's verdict write. */
+  readonly db?: PrismaClient;
 }
 
 export function buildDispatchTable(
@@ -166,7 +182,16 @@ export function buildDispatchTable(
     },
 
     "link-check": async (payload) => {
-      await runLinkCheck(payload, { logger });
+      if (input.db === undefined) {
+        // Fail closed: without a DB there is nowhere to record the verdict,
+        // and acking would lose the check entirely.
+        throw new Error("link-check: no Prisma client injected");
+      }
+      await runLinkCheck(payload, {
+        logger,
+        db: input.db,
+        linkThreatIntel: input.linkThreatIntel,
+      });
     },
 
     "followers-events": async (payload) => {

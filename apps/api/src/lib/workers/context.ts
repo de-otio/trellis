@@ -38,6 +38,27 @@ export interface QueueProducer {
   send(message: unknown): Promise<void>;
 }
 
+/**
+ * Provider-neutral link threat-intel lookup (Google Safe Browsing today).
+ *
+ * A PORT rather than the service's env, because `checkSafeBrowsing` needs
+ * `GOOGLE_SAFE_BROWSING_API_KEY` and a worker core may not read secrets or
+ * `process.env` transitively (finding 7). The adapter binds the key and the KV
+ * cache at the composition root; the core sees only a URL in and a verdict out.
+ *
+ * `status` mirrors `ThreatIntelResult`: "unknown" means the lookup could not
+ * produce a verdict, and `retryable` says whether trying again could. A
+ * transient API failure is retryable; a missing API key is not.
+ */
+export interface LinkThreatIntelPort {
+  check(url: string): Promise<{
+    status: "safe" | "unsafe" | "unknown";
+    threats?: string[];
+    failOpenReason?: string;
+    retryable: boolean;
+  }>;
+}
+
 export interface WorkerContext {
   /** Prisma client (Lambda: `getLambdaPrisma()`; container: pooled). */
   readonly db: PrismaClient;
@@ -88,4 +109,11 @@ export interface WorkerContext {
   readonly queues?: {
     readonly deleteAccount?: QueueProducer;
   };
+  /**
+   * Link threat-intel lookup for the `link-check` queue. Absent ⇒ the core
+   * fails closed exactly as it did when it was a stub: it throws, nothing is
+   * acked, and the message dead-letters rather than recording a verdict the
+   * deployment never actually obtained.
+   */
+  readonly linkThreatIntel?: LinkThreatIntelPort;
 }

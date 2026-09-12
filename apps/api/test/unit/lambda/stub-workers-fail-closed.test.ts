@@ -53,8 +53,31 @@ describe("stub workers fail closed (AR6)", () => {
     delete process.env.ACTIVITYPUB_ENABLED;
   });
 
+  // link-check is no longer a stub: it resolves the pending LinkCheck row via
+  // the Safe Browsing port. The AR6 property that must survive is narrower but
+  // unchanged — a batch the worker could not CHECK is never acked. Here that is
+  // exercised against a transient lookup failure, the case where acking would
+  // silently clear an unchecked link.
   describe("link-check-worker (live security control — Safe Browsing)", () => {
-    it("throws on a representative link-check message instead of silently acking", async () => {
+    const update = vi.fn();
+
+    beforeEach(() => {
+      update.mockReset().mockResolvedValue({});
+      vi.doMock("../../../src/lib/lambda-prisma.js", () => ({
+        getLambdaPrisma: async () => ({ linkCheck: { update } }),
+      }));
+      vi.doMock("../../../src/env.js", () => ({
+        buildEnv: () => ({
+          // No API key and no KV: checkSafeBrowsing fails open to "unknown"
+          // with reason "api-key-missing", which is NOT retryable.
+          GOOGLE_SAFE_BROWSING_API_KEY: undefined,
+          THREAT_INTEL_CACHE_KV: undefined,
+          NODE_ENV: "test",
+        }),
+      }));
+    });
+
+    it("records a non-retryable unknown as warning rather than acking it as safe", async () => {
       const { handler } = await import("../../../src/lambda/link-check-worker.js");
       // Representative producer message (post-handler.ts / comment-handler.ts):
       const event = sqsEvent(
@@ -62,12 +85,22 @@ describe("stub workers fail closed (AR6)", () => {
         "dev-link-check",
       );
 
-      await expect(handler(event, lambdaContext, noopCallback)).rejects.toThrow(
-        /link-check-worker: not implemented/,
-      );
+      await handler(event, lambdaContext, noopCallback);
+
+      expect(update).toHaveBeenCalledTimes(1);
+      expect(update.mock.calls[0]![0].data.status).toBe("warning");
     });
 
-    it("throws for multi-record batches too (whole batch must retry)", async () => {
+    it("abandons the whole batch when a lookup fails transiently", async () => {
+      vi.doMock("../../../src/lib/workers/link-threat-intel-adapter.js", () => ({
+        makeLinkThreatIntelPort: () => ({
+          check: async () => ({
+            status: "unknown",
+            failOpenReason: "api-error",
+            retryable: true,
+          }),
+        }),
+      }));
       const { handler } = await import("../../../src/lambda/link-check-worker.js");
       const event = sqsEvent(
         [
@@ -77,7 +110,9 @@ describe("stub workers fail closed (AR6)", () => {
         "dev-link-check",
       );
 
-      await expect(handler(event, lambdaContext, noopCallback)).rejects.toThrow();
+      await expect(handler(event, lambdaContext, noopCallback)).rejects.toThrow(/api-error/);
+      // Nothing recorded: the batch retries and may yet get a real verdict.
+      expect(update).not.toHaveBeenCalled();
     });
   });
 

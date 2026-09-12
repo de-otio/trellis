@@ -9,6 +9,16 @@
  * container: throw-is-always-fail, finding 3).
  *
  * Do NOT replace the throw with a silent return.
+ *
+ * IMPLEMENT-OR-STOP, reviewed 2026-09-12: **keep as-is**. Verified by grep that
+ * the only reference to FOLLOWERS_EVENTS_QUEUE outside `env.ts` is this
+ * comment — there is genuinely no producer, so the queue carries no traffic and
+ * the stub costs nothing. It is kept rather than deleted because the binding
+ * and queue already exist in the estate; the fail-closed throw is what makes
+ * adding a producer before a consumer a loud error instead of silent data loss.
+ *
+ * Re-check the producer claim before acting on this note — it is the whole
+ * reason the queue is safe to leave unimplemented.
  */
 
 import type { WorkerContext } from "./context.js";
