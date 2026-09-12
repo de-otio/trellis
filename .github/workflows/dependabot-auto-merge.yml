@@ -1,10 +1,24 @@
-# Auto-merge Dependabot PRs once CI is green.
+# Auto-merge Dependabot PRs once CI is green — except semver-majors.
 #
-# Green CI is the only gate — there is no manual review of dependency bumps
-# (see CONTRIBUTING.md). This enables GitHub's native auto-merge on each
-# Dependabot PR; the merge happens only after the required status checks
+# Green CI is the gate for patch and minor bumps: there is no manual review of
+# routine dependency updates (see CONTRIBUTING.md). This enables GitHub's native
+# auto-merge on those; the merge happens only after the required status checks
 # (the CI workflow's lanes) pass. Branch protection on `main` defines those
 # required checks, and "Allow auto-merge" must be enabled on the repo.
+#
+# Majors are different, and 2026-09-10 showed why. Dependabot grouped four
+# routine bumps with a vitest 4 → 5 major into one "dev-dependencies" PR (#252).
+# Vitest 5 requires Node 22 + Vite 6.4, drops `sequential` in favour of
+# `concurrent`, inlines `@vitest/runner`, makes `toHaveTextContent` strict, and
+# throws when hoistable methods sit outside the top-level scope — a migration,
+# not a bump. Green CI is not a sufficient gate for a change like that, and in
+# that instance CI was red anyway for an unrelated workspace-hoisting reason,
+# which is exactly the kind of noise that hides the real question.
+#
+# So: patch/minor auto-merge as before; majors get labelled and left for a
+# human. `update-type` is the HIGHEST semver change in the PR, so a grouped PR
+# containing a single major is flagged even when everything else in it is
+# routine — which is what #252 needed.
 #
 # Note: enabling auto-merge with the default GITHUB_TOKEN is intentional. The
 # subsequent merge to `main` is what dependabot-release.yml keys off; if the
@@ -20,6 +34,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  issues: write
 
 # Scoped by PR number, not github.ref: for pull_request_target, github.ref
 # resolves to the BASE branch for every PR against it, not the PR's head —
@@ -38,8 +53,40 @@ jobs:
     timeout-minutes: 10
     if: github.event.pull_request.user.login == 'dependabot[bot]'
     steps:
+      # v3 is the first major whose runs.using is node24; v2 is still node20.
+      - name: Fetch Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@v3
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Enable auto-merge (squash)
+        if: steps.meta.outputs.update-type != 'version-update:semver-major'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_URL: ${{ github.event.pull_request.html_url }}
         run: gh pr merge --auto --squash "$PR_URL"
+
+      # `gh pr edit --add-label` fails on a label that does not exist, so
+      # `needs-human-review` and `major-bump` must stay present on the repo.
+      - name: Flag semver-majors for a human
+        if: steps.meta.outputs.update-type == 'version-update:semver-major'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          DEPS: ${{ steps.meta.outputs.dependency-names }}
+          # A block scalar so the comment body carries no leading indentation:
+          # four leading spaces would render the whole thing as a code block.
+          BODY: |
+            Not auto-merging: this PR carries a **semver-major** update.
+
+            Majors are migrations rather than bumps, so green CI is not a
+            sufficient gate — review the upstream breaking changes and merge by
+            hand. If the major is bundled with routine updates, closing this PR
+            lets Dependabot regenerate the group without it.
+        run: |
+          gh pr edit "$PR_URL" --add-label needs-human-review --add-label major-bump
+          {
+            printf '%s\n' "$BODY"
+            printf 'Updated: %s\n' "$DEPS"
+          } | gh pr comment "$PR_URL" --body-file -
