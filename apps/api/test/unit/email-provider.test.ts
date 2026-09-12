@@ -604,7 +604,12 @@ describe("Email Providers", () => {
       expect(provider.getName()).toBe("resend");
     });
 
-    it("should prefer Alibaba for China region", () => {
+    // These two used to assert the opposite — that stray Alibaba/Tencent
+    // credentials in a CN-region deployment silently overrode an explicit
+    // `resend` selection. Both of those providers throw on every send, so the
+    // old behaviour turned a working configuration into one that could not
+    // send at all, and the tests certified it as intended.
+    it("keeps an explicit resend selection in CN even with Alibaba credentials present", () => {
       const provider = createEmailProvider({
         provider: "resend",
         region: "CN",
@@ -614,10 +619,10 @@ describe("Email Providers", () => {
         alibabaAccountName: "sender@example.com",
       });
 
-      expect(provider.getName()).toBe("alibaba-directmail");
+      expect(provider.getName()).toBe("resend");
     });
 
-    it("should prefer Tencent for China region when Alibaba not available", () => {
+    it("keeps an explicit resend selection in CN even with Tencent credentials present", () => {
       const provider = createEmailProvider({
         provider: "resend",
         region: "CN",
@@ -627,7 +632,19 @@ describe("Email Providers", () => {
         tencentFromEmail: "sender@example.com",
       });
 
-      expect(provider.getName()).toBe("tencent-ses");
+      expect(provider.getName()).toBe("resend");
+    });
+
+    it("still honours an explicit Alibaba selection in CN", () => {
+      const provider = createEmailProvider({
+        provider: "alibaba-directmail",
+        region: "CN",
+        alibabaAccessKeyId: "key-id",
+        alibabaAccessKeySecret: "key-secret",
+        alibabaAccountName: "sender@example.com",
+      });
+
+      expect(provider.getName()).toBe("alibaba-directmail");
     });
 
     it("should use AWS SES for China region when others not available", () => {
@@ -737,6 +754,45 @@ describe("Email Providers", () => {
 
     it("should not validate when no provider is selected", () => {
       expect(validateEmailEnv({})).toEqual([]);
+    });
+
+    // Selecting either of these used to pass validation and then throw on
+    // every send, so the deployment booted clean and failed per-message.
+    it.each(["alibaba-directmail", "tencent-ses"])(
+      "rejects %s at validation, because its sendEmail throws",
+      (provider) => {
+        const errors = validateEmailEnv({ EMAIL_SERVICE: provider });
+
+        expect(errors).toHaveLength(1);
+        expect(errors[0]).toContain(`EMAIL_SERVICE=${provider}`);
+        expect(errors[0]).toContain("not implemented");
+      },
+    );
+
+    it("rejects an unimplemented provider even when every credential is supplied", () => {
+      // Completeness of config is not the question: there is no code path that
+      // can send, so no amount of correct credentials makes this valid.
+      const errors = validateEmailEnv({
+        EMAIL_SERVICE: "alibaba-directmail",
+        ALIBABA_ACCESS_KEY_ID: "key-id",
+        ALIBABA_ACCESS_KEY_SECRET: "key-secret",
+        ALIBABA_ACCOUNT_NAME: "sender@example.com",
+        FROM_EMAIL: "noreply@example.com",
+      });
+
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toContain("not implemented");
+    });
+
+    it("still accepts the providers that work", () => {
+      expect(
+        validateEmailEnv({
+          EMAIL_SERVICE: "scaleway-tem",
+          TEM_PROJECT_ID: "project",
+          TEM_SECRET_KEY: "secret",
+          FROM_EMAIL: "noreply@example.com",
+        }),
+      ).toEqual([]);
     });
   });
 });
