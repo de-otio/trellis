@@ -4,7 +4,7 @@
  * Tests distributed rate limiting for comment creation using Cloudflare KV.
  */
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   commentRateLimit,
   type CommentRateLimitEnv,
@@ -386,6 +386,31 @@ describe("Comment Rate Limiting", () => {
   });
 
   describe("edge cases", () => {
+    /**
+     * These two tests assert behaviour AT a window boundary, which means the
+     * clock has to be frozen.
+     *
+     * Both compute an offset from `Date.now()`, write it to the mock KV, and
+     * then call `commentRateLimit`, which reads `Date.now()` AGAIN. With a real
+     * clock the two reads are different instants, so the elapsed time is
+     * `offset + δ` for some δ ≥ 0 rather than exactly `offset`. The 60-second
+     * case flips on δ ≥ 1: `comment-rate-limit.ts` expires a window on
+     * `windowAge > 60000`, so a single millisecond between the reads resets the
+     * window and the request is allowed instead of blocked — the test passes
+     * only when both reads land in the same millisecond. That is a coin toss on
+     * a loaded CI runner, and it ejected PRs from the merge queue.
+     *
+     * Freezing makes δ zero by construction, so each test asserts the boundary
+     * it claims to.
+     */
+    beforeEach(() => {
+      vi.useFakeTimers({ now: new Date("2026-01-01T00:00:00.000Z") });
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
     it("should handle exactly 30 seconds elapsed for per-post limit", async () => {
       const userId = "user123";
       const postId = "post456";
