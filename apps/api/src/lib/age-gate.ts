@@ -58,6 +58,29 @@ export const MINIMUM_SIGNUP_AGE_YEARS = 18;
 export const MINOR_TIERS_SUPPORTED: boolean = false;
 
 /**
+ * The effective minor-tiers flag for one call: a per-call override may only
+ * turn minor tiers **on**, never off.
+ *
+ * Taking `override` directly would be safe only while {@link
+ * MINOR_TIERS_SUPPORTED} is `false` — and it is `false` today, which is exactly
+ * what makes the hazard invisible. When the flag flips (the 18+ floor is
+ * staging, not the goal), `resolveSessionAgeTier(tier, false)` would return
+ * ADULT unconditionally and skip the quarantine choke point: a fail-open
+ * introduced through a test seam. OR-ing makes "can only tighten, never widen"
+ * a property that holds at every value of the flag.
+ *
+ * Kept separate and exported so that property is directly testable. Testing it
+ * through {@link resolveSessionAgeTier} alone cannot work: the dangerous case
+ * needs `configured === true`, and that is a module constant.
+ */
+export function effectiveMinorTiersSupported(
+  override: boolean,
+  configured: boolean,
+): boolean {
+  return override || configured;
+}
+
+/**
  * The `AgeTier` enum as runtime values, ordered most restrictive first.
  *
  * `AgeTier` is a Prisma *type*, so nothing in the type system can check a
@@ -287,15 +310,25 @@ export function isUnderMinimumAge(dateOfBirth: Date, now: Date = new Date()): bo
  *
  * `minorTiersSupported` is injectable for the same reason `now` is on
  * {@link computeAgeTier}: the post-quarantine branch is otherwise dead code
- * behind a constant and cannot be tested. Passing `true` can only make the
- * answer *more* restrictive than the default — never less — so the parameter
- * cannot be used to widen access.
+ * behind a constant and cannot be tested.
+ *
+ * **The parameter can only ever turn minor tiers ON, never off** — it is OR-ed
+ * with {@link MINOR_TIERS_SUPPORTED} rather than replacing it. That matters
+ * because the obvious spelling (`minorTiersSupported = MINOR_TIERS_SUPPORTED`,
+ * used directly) is only safe while the constant is `false`. The moment the
+ * flag flips — which is the plan, the 18+ floor being staging rather than the
+ * goal — a caller passing `false` would get unconditional ADULT and bypass this
+ * choke point completely: precisely the fail-open shape the function exists to
+ * prevent, smuggled in through its own test seam. OR-ing makes "can only
+ * tighten, never widen" a property of the code at any value of the flag,
+ * instead of a comment that quietly stops being true.
  */
 export function resolveSessionAgeTier(
   sessionAgeTier?: AgeTier | undefined,
   minorTiersSupported: boolean = MINOR_TIERS_SUPPORTED,
 ): AgeTier {
-  if (!minorTiersSupported) return "ADULT";
+  if (!effectiveMinorTiersSupported(minorTiersSupported, MINOR_TIERS_SUPPORTED))
+    return "ADULT";
   if (isKnownAgeTier(sessionAgeTier)) return sessionAgeTier;
   getLogger().error(
     "[age-gate] session carried no recognised ageTier; failing closed to the strictest tier",
