@@ -1,6 +1,6 @@
 ---
 title: Operations Guide
-description: How Trellis fits into a consuming application's runtime, and the operational conventions it expects.
+description: How Trellis fits into a consuming application's runtime — the ports it needs served, the two deployment shapes, and the operational conventions it expects.
 sidebar: For Operations
 order: 30
 ---
@@ -14,42 +14,132 @@ application embeds Trellis as a dependency and owns the deployment, the cloud
 account, and day-to-day operations.
 
 This means **end-to-end and infrastructure verification happens in the
-consuming application's environment, not here.** This guide documents the
-runtime conventions Trellis expects so that a consuming application can satisfy
-them consistently.
+consuming application's environment, not here.** This guide documents what a
+consuming application has to provision and the runtime conventions Trellis
+expects, so that it can satisfy them consistently whichever provider it runs
+on.
 
-## Where Trellis runs
+## Two processes
 
-The API is a Node.js HTTP server (Hono, served over `node:http`) that listens on port 3000 and is
-designed to run as a long-lived service container. The consuming application is
-responsible for provisioning everything around it:
+A Trellis deployment is two long-lived Node.js processes plus the services
+they talk to:
 
-- a PostgreSQL database (accessed via Prisma),
-- a DynamoDB table for key-value and cache data,
-- SQS queues for background work,
-- an identity provider for authentication (Cognito JWTs are validated at the
-  edge),
-- object storage and a CDN for media.
+- **The API** — a Hono app served over `node:http`, listening on `PORT`
+  (default 3000). Stateless; scale it horizontally behind whatever load
+  balancer or ingress the platform provides.
+- **The worker** — `apps/worker`, a long-running container that consumes the
+  background queues and runs the cron cadences in-process, with single-fire
+  guaranteed through the key-value port. On AWS the same worker cores run as
+  per-queue Lambda functions and EventBridge schedules instead; the
+  extracted cores in `apps/api/src/lib/workers/*` are shared by both shapes.
+  The worker's full environment contract is in
+  [`apps/worker/README.md`](https://github.com/de-otio/trellis/blob/main/apps/worker/README.md).
 
-Trellis reads all of its configuration from environment variables at startup.
+Both read all of their configuration from environment variables at startup.
 The consuming application supplies those variables; how they are sourced
-(parameter store, secrets manager, plain env) is the application's choice.
+(parameter store, secrets manager, a Kubernetes Secret, plain env) is the
+application's choice. Secrets (database credentials, the session secret,
+third-party API keys) are never read from the repository or compiled in — they
+arrive through the environment at runtime.
+
+## What a consuming application provisions — the ports
+
+The core reaches every piece of infrastructure through a provider-neutral
+port (the `@de-otio/saas-foundation` packages), and each port has more than
+one adapter. The consuming application picks an adapter per port by setting
+environment variables; Trellis never hard-codes an endpoint. This is the
+layered view in the
+[Architecture overview](../concepts/architecture-overview.md#layered-view),
+read as a provisioning checklist:
+
+| Port | What it must be | Selected by | Adapters |
+|---|---|---|---|
+| **Database** | PostgreSQL 16 **with PostGIS** (the `entity_location` migration needs the extension) | one of `DATABASE_URL` · `DB_SECRET_ARN` · `DB_SECRET_USERNAME`/`DB_SECRET_PASSWORD`/`DB_SECRET_HOST`[/`DB_SECRET_PORT`] + `DB_NAME` | any managed or self-hosted Postgres; accessed through Prisma with an in-process pool (`DATABASE_POOL_MAX`, default 10 — see [Database Connections](../guides/database-connections.md)) |
+| **Key-value** | atomic primitives (put-if-absent, compare-and-set, increment, TTL) for rate limits, caches, CSRF tokens, the session blocklist, invitation state and cron locks | `KV_PROVIDER` — unset/`dynamodb` (default) or `postgres` | DynamoDB single table (`DYNAMODB_TABLE`, default `{stage}-trellis`) · the `kv_entries` table in the same Postgres. Only the exact string `postgres` selects Postgres; anything else is DynamoDB. Details: [`doc/02-technical/operations/kv-provider.md`](https://github.com/de-otio/trellis/blob/main/doc/02-technical/operations/kv-provider.md) |
+| **Queue** | an SQS-compatible queue service with a dead-letter queue per queue | `SQS_QUEUE_URL_PREFIX` (a full prefix including the account segment and any name prefix), else `SQS_ENDPOINT` + `AWS_ACCOUNT_ID` with the `{stage}-{queue}` naming | AWS SQS · Scaleway MNQ (SQS API) · LocalStack in development |
+| **Object storage** | an S3-API store, one bucket for media and one for exports | `MEDIA_BUCKET_NAME` (default `{stage}-{APP_NAME}-media`), `EXPORTS_BUCKET_NAME`; non-AWS endpoint via the SDK's own `AWS_ENDPOINT_URL_S3`; `S3_FORCE_PATH_STYLE=true` only where the provider needs it; an optional storage-specific credential pair `S3_ACCESS_KEY_ID`/`S3_SECRET_ACCESS_KEY` for platforms whose storage and queue credentials differ (set both or neither) | AWS S3 · any S3-compatible store (Scaleway Object Storage, Cloudflare R2, MinIO) |
+| **Email** | a transactional sender | `EMAIL_SERVICE` — `aws-ses` (default), `smtp`, `scaleway-tem`, `resend`, `alibaba-directmail`, `tencent-ses`; plus `FROM_EMAIL` and the optional `EMAIL_BRAND_NAME` | SES · generic SMTP (`SMTP_HOST` required, `SMTP_PORT` default 587, `SMTP_SECURE`/`SMTP_STARTTLS`, `SMTP_USERNAME`/`SMTP_PASSWORD` both or neither) · Scaleway TEM (`TEM_PROJECT_ID`, `TEM_SECRET_KEY` or `SCW_SECRET_KEY`, `TEM_REGION`) · the provider APIs |
+| **Identity** | an OIDC issuer whose tokens the API verifies at the edge | `OIDC_ISSUER_URL`, `OIDC_APP_CLIENT_ID`, and — for any non-Cognito issuer — `OIDC_JWKS_URL` (take `jwks_uri` from the issuer's `/.well-known/openid-configuration`); `IDENTITY_PROVIDER` = `cognito` (default) or `keycloak` selects the admin adapter | Amazon Cognito (the legacy `COGNITO_*` variables still derive the `OIDC_*` values byte-identically) · Keycloak (self-hosted) · any standards-compliant OIDC provider for verification |
+
+Boot fails closed when a port is half-configured: a missing session secret, a
+missing issuer or audience, a non-Cognito issuer without `OIDC_JWKS_URL`, a
+half-set S3 credential pair, or `ACTIVITYPUB_ENABLED` without a shared
+rate-limiter backend (`KV_PROVIDER=postgres` or `RATE_LIMIT_TABLE`) all refuse
+to start with a message naming the variable. See
+[`apps/api/src/env.ts`](https://github.com/de-otio/trellis/blob/main/apps/api/src/env.ts)
+for the full environment schema and
+[`apps/api/src/lib/auth/auth-config.ts`](https://github.com/de-otio/trellis/blob/main/apps/api/src/lib/auth/auth-config.ts)
+for the identity resolution rules.
+
+### The queues
+
+The API produces to `user-export`, `delete-account`, `followers-events`,
+`link-check` and `media-processing`. The worker consumes `delete-account`,
+`media-processing`, `media-completion`, `link-check`, `followers-events` and
+`federation-outbox` (the last is feature-gated and idle while federation is
+off). Visibility timeouts must exceed the longest handler runtime — the
+per-queue minimums are in the worker README — and dead-letter redrive is a
+queue property the consuming application configures, not something Trellis
+owns. Which of these queues have a real consumer and which are fail-closed
+stubs is recorded in [Async processing](../concepts/async-processing.md).
+
+### Two deployment shapes, one codebase
+
+- **Managed cloud services (the AWS-shaped profile).** API container on a
+  container service, per-queue Lambda workers and EventBridge schedules,
+  DynamoDB for key-value, SQS, S3, SES, Cognito. This is the shape the
+  [Compute](../concepts/compute.md), [Async processing](../concepts/async-processing.md)
+  and [Storage and CDN](../concepts/storage-and-cdn.md) concept pages
+  describe in detail.
+- **A single node or a Kubernetes cluster (the ports profile).** API and
+  worker containers, Postgres carrying both the application database and the
+  key-value port (`KV_PROVIDER=postgres`), an SQS-compatible queue service,
+  any S3-compatible store, SMTP or a provider API for email, and a
+  self-hosted Keycloak (or another OIDC issuer) for identity. Nothing in this
+  shape requires an AWS account.
+
+Every adapter sits behind its port's contract, so moving a deployment
+between the two shapes is a change of environment variables and
+infrastructure, not of application code.
+
+### The compose files are scaffolding, not a node
+
+The repository ships three Docker Compose files. They exist for development
+and CI; **none of them boots a complete Trellis deployment** — the API and
+worker are started separately (`npm run dev`), and there is no
+production-grade compose file.
+
+| File | What it brings up | Purpose |
+|---|---|---|
+| `docker-compose.yml` | PostGIS-enabled Postgres (5432), DynamoDB Local (8000), LocalStack with S3/SQS/SES (4566) | the AWS-shaped development and test stack; what `npm test` and the CI lanes run against |
+| `docker-compose.scaleway.yml` | PostGIS-enabled Postgres (5433), Keycloak with the magic-link provider (8081), Mailpit as the SMTP sink (1025, UI 8025); every image digest-pinned | the ports-profile substitute stack for local and CI end-to-end runs; host ports are offset so both stacks can run side by side. Run `scripts/scaleway-profile/fetch-keycloak-provider.sh` before the first `up` |
+| `docker-compose.hatchet.yml` | a local Hatchet Lite workflow engine with its own Postgres | an evaluation, opt-in, explicitly not a deployment target |
+
+See [Local Development Setup](local-setup.md) for the day-to-day use of the
+first one.
 
 ## Configuration through environment
 
-Trellis resolves the resources it needs from environment variables rather than
-hard-coded endpoints. The consuming application populates these — typically
-from its own parameter or secret store — before starting the process.
+Beyond the ports above, a deployment sets:
 
-The values Trellis expects include a database connection string, the
-DynamoDB table name, queue endpoints, the identity provider settings used to
-validate sessions, and the media/CDN origin. See
-[`apps/api/src/env.ts`](https://github.com/de-otio/trellis/blob/main/apps/api/src/env.ts) for the full environment
-schema and which variables are required.
-
-Secrets (database credentials, session secret, third-party API keys) are never
-read from the repository or compiled in — they arrive through the environment
-at runtime.
+- **`STAGE`** (`dev`, `prod`, …) and **`APP_NAME`** — they name the default
+  bucket, table and queue prefixes.
+- **`SESSION_SECRET`** (or `SESSION_SECRET_ARN` on AWS) — the session-sealing
+  key; boot refuses to start without it. `SESSION_SECRET_FALLBACK` lets a
+  rotation accept sessions sealed under the previous value. Where a
+  `SESSION_BLOCKLIST_KV` binding is guaranteed, `SESSION_BLOCKLIST_REQUIRED=true`
+  makes a *missing* binding deny rather than pass.
+- **`APP_DOMAIN`** and/or **`ALLOWED_ORIGINS`** — the browser origins allowed
+  to call the API with credentials. With neither set, only loopback origins
+  are reflected and every remote origin is denied (see
+  [Upgrading to 0.25](#upgrading-to-025)). `APP_DOMAIN` also seeds the
+  absolute media URLs the API writes into its own responses; with it unset
+  those URLs are relative to the API origin. The published core carries no
+  deployment's hostname as a default.
+- **Feature toggles and thresholds** — every rate limit, retention window
+  and cap is runtime configuration with a conservative default; none is
+  compiled into the published package (the threshold-secrecy rule). The
+  sections below list the ones that need an operator's attention.
 
 ## Opt-in capability features (Open Social Web)
 
@@ -81,24 +171,26 @@ rather than silently degrading:
 
 ### Storing the secrets
 
-Store both as **encrypted secrets**, following the same convention as
-`session-secret` and the RDS `db-secret-arn` (`/{appName}/{stage}/…`):
+Store both as **encrypted secrets** in the platform's secret store and inject
+them as environment variables at container start, the same way as
+`SESSION_SECRET`. Trellis itself has no secret-store client — it is
+provider-agnostic and reads `process.env`.
 
-- Use **SSM Parameter Store `SecureString`** (simplest, and parity with
-  `session-secret`) or **AWS Secrets Manager** if you want its rotation tooling.
-  Never store them plaintext in a task definition, a config file, or the repo.
-- **Inject them via the ECS task definition's `secrets:` block**, which resolves
-  the SSM/Secrets Manager value at container start and exposes it as the env var
-  Trellis reads. The value originates in the secret store; it only becomes an env
-  var inside the running task. (Trellis itself has no secret-store client — it is
-  cloud-agnostic and reads `process.env`, exactly like `SESSION_SECRET`.)
+- **On AWS:** SSM Parameter Store `SecureString` (parity with
+  `session-secret`) or Secrets Manager if you want its rotation tooling,
+  resolved through the ECS task definition's `secrets:` block.
+- **On Kubernetes:** a `Secret` populated by an external-secrets operator
+  from the provider's secret manager, exposed to the container as env.
+- Never store them plaintext in a task definition, a manifest, a config file,
+  or the repo.
 - For **`EMAIL_SUB_ENC_KEY`** specifically — the key that decrypts the entire
-  stored-email table — consider **KMS-backing it** rather than a plaintext
-  `SecureString`. The bundled `oauth/envelope-crypto.ts` already supports a KMS
-  KEK fetcher (`…_KMS_KEY_ID` → `KMS:Decrypt`, key held only in a memory buffer),
-  so the raw 256-bit key need never sit recoverable in the environment or a
-  memory dump. A `SecureString` is acceptable MVP parity with `SESSION_SECRET`;
-  KMS is the stronger option for an at-rest decryption key.
+  stored-email table — consider a KMS-backed key rather than a plaintext
+  secret where the platform offers one. The bundled `oauth/envelope-crypto.ts`
+  supports a KMS KEK fetcher on AWS (`…_KMS_KEY_ID` → `KMS:Decrypt`, key held
+  only in a memory buffer), so the raw 256-bit key need never sit recoverable
+  in the environment or a memory dump. A plain encrypted secret is acceptable
+  parity with `SESSION_SECRET`; a managed key is the stronger option for an
+  at-rest decryption key.
 
 Rotation is a **deliberate operation, not auto-rotate**: rotating
 `EMAIL_SUB_HMAC_SECRET` invalidates in-flight confirm/unsubscribe links, and
@@ -197,8 +289,9 @@ this is the checklist.
   `127.0.0.0/8`, `[::1]`, hostname-exact) are reflected; every remote origin is
   denied. Set `APP_DOMAIN` (a bare host; the `www.`/non-`www.` variant is
   derived) and/or a comma-separated `ALLOWED_ORIGINS` covering every browser
-  origin that calls the API. `example.com` was also removed from the shipped
-  allow-list.
+  origin that calls the API. The shipped allow-list of fixed domains was
+  removed along with it — the only origins ever allowed are the ones the
+  deployment configures.
 - **`/api/admin/test/*` is off unless opted in.** The test-user seam is
   enabled only by a genuinely set `STAGE=dev`, a CI flag, or
   `ENABLE_TEST_ROUTES=true`, and never under `STAGE=prod`/`production`. When
@@ -221,8 +314,12 @@ alerting. Trellis is built to support standard observability practices:
 - structured logs emitted to stdout for collection by the platform's log
   pipeline,
 - background-queue failures routed to dead-letter queues so they can be
-  alerted on,
-- request tracing when the platform enables it.
+  alerted on — the worker acks a message only on an explicit disposition, so
+  any thrown error advances the receive count toward the DLQ,
+- a worker liveness endpoint on `WORKER_HEALTH_HOST`/`WORKER_HEALTH_PORT`
+  (default `127.0.0.1:8081`) that must never be attached to a public ingress,
+- request tracing when the platform enables it (see the
+  [Observability guide](../guides/observability.md)).
 
 The naming, retention, and alarm thresholds for these are operational policy
 and belong to the consuming application, not to Trellis.
@@ -232,7 +329,9 @@ and belong to the consuming application, not to Trellis.
 Trellis starts as a normal process and exits cleanly on shutdown signals,
 running any registered extension shutdown hooks first. Treat it like any other
 stateless service container: scale horizontally, drain on deploy, and rely on
-the database and queues for durable state.
+the database, the key-value port and the queues for durable state. The worker
+drains in-flight handlers for `WORKER_DRAIN_TIMEOUT_MS` (default 25 s); keep
+that below the orchestrator's grace period.
 
 Schema changes are applied with Prisma migrations as part of the consuming
 application's release process. For zero-downtime changes, use an
