@@ -17,6 +17,7 @@
 import prismaPkg from "@prisma/client";
 const { PostRadius } = prismaPkg;
 import { getLogger } from "./logger.js";
+import { resolveApiOrigin } from "./api-origin.js";
 
 import { resolveMutualBlockIds } from "./block-visibility.js";
 import { DataRouter } from "./data-router.js";
@@ -268,34 +269,12 @@ export class FeedHandler {
   }
 
   /**
-   * Get API domain consistently across all feed operations
-   * Respects APP_DOMAIN environment variable, converts www. to api., or uses default
+   * Get API domain consistently across all feed operations.
+   * Delegates to `resolveApiOrigin` (`lib/api-origin.ts`): APP_DOMAIN, else
+   * relative URLs — no compiled-in hostname.
    */
   private static getApiDomain(env: Env): string {
-    if (env.APP_DOMAIN) {
-      try {
-        const url = new URL(env.APP_DOMAIN);
-        let hostname = url.hostname;
-
-        // Convert www. to api.
-        if (hostname.startsWith("www.")) {
-          hostname = hostname.replace("www.", "api.");
-        } else if (!hostname.includes("api.")) {
-          // If no api. subdomain, add it
-          const parts = hostname.split(".");
-          if (parts.length >= 2) {
-            hostname = `api.${parts.slice(-2).join(".")}`;
-          }
-        }
-
-        return `${url.protocol}//${hostname}`;
-      } catch {
-        // Invalid URL, fall through to default
-      }
-    }
-
-    // Default fallback
-    return "https://api.rkm1.de";
+    return resolveApiOrigin(env);
   }
 
   /**

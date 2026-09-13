@@ -65,7 +65,7 @@ describe("Orphaned Media Routes", () => {
     vi.clearAllMocks();
 
     mockEnv = {
-      APP_DOMAIN: "https://api.rkm1.de",
+      APP_DOMAIN: "https://api.example.com",
       SESSION_SECRET: "test-secret",
       ENVIRONMENT: "dev",
     };
@@ -96,13 +96,13 @@ describe("Orphaned Media Routes", () => {
       mockGetSession.mockResolvedValue(null);
 
       mockRequest = new Request(
-        "https://api.rkm1.de/api/media/media-123/mark-orphaned",
+        "https://api.example.com/api/media/media-123/mark-orphaned",
         { method: "POST" },
       );
 
       const response = await markOrphanedRoute!.handler(mockRequest, mockEnv, {
         url: new URL(
-          "https://api.rkm1.de/api/media/media-123/mark-orphaned",
+          "https://api.example.com/api/media/media-123/mark-orphaned",
         ),
         pathname: "/api/media/media-123/mark-orphaned",
         params: { id: "media-123" },
@@ -117,13 +117,13 @@ describe("Orphaned Media Routes", () => {
       mockGetSession.mockResolvedValue({ userId: null });
 
       mockRequest = new Request(
-        "https://api.rkm1.de/api/media/media-123/mark-orphaned",
+        "https://api.example.com/api/media/media-123/mark-orphaned",
         { method: "POST" },
       );
 
       const response = await markOrphanedRoute!.handler(mockRequest, mockEnv, {
         url: new URL(
-          "https://api.rkm1.de/api/media/media-123/mark-orphaned",
+          "https://api.example.com/api/media/media-123/mark-orphaned",
         ),
         pathname: "/api/media/media-123/mark-orphaned",
         params: { id: "media-123" },
@@ -134,12 +134,12 @@ describe("Orphaned Media Routes", () => {
 
     it("should return 400 if mediaId is missing", async () => {
       mockRequest = new Request(
-        "https://api.rkm1.de/api/media//mark-orphaned",
+        "https://api.example.com/api/media//mark-orphaned",
         { method: "POST" },
       );
 
       const response = await markOrphanedRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media//mark-orphaned"),
+        url: new URL("https://api.example.com/api/media//mark-orphaned"),
         pathname: "/api/media//mark-orphaned",
         params: {},
       });
@@ -151,13 +151,13 @@ describe("Orphaned Media Routes", () => {
 
     it("should call OrphanedMediaHandler.markMediaAsOrphaned", async () => {
       mockRequest = new Request(
-        "https://api.rkm1.de/api/media/media-456/mark-orphaned",
+        "https://api.example.com/api/media/media-456/mark-orphaned",
         { method: "POST" },
       );
 
       await markOrphanedRoute!.handler(mockRequest, mockEnv, {
         url: new URL(
-          "https://api.rkm1.de/api/media/media-456/mark-orphaned",
+          "https://api.example.com/api/media/media-456/mark-orphaned",
         ),
         pathname: "/api/media/media-456/mark-orphaned",
         params: { id: "media-456" },
@@ -178,13 +178,13 @@ describe("Orphaned Media Routes", () => {
       });
 
       mockRequest = new Request(
-        "https://api.rkm1.de/api/media/media-456/mark-orphaned",
+        "https://api.example.com/api/media/media-456/mark-orphaned",
         { method: "POST" },
       );
 
       const response = await markOrphanedRoute!.handler(mockRequest, mockEnv, {
         url: new URL(
-          "https://api.rkm1.de/api/media/media-456/mark-orphaned",
+          "https://api.example.com/api/media/media-456/mark-orphaned",
         ),
         pathname: "/api/media/media-456/mark-orphaned",
         params: { id: "media-456" },
@@ -202,13 +202,13 @@ describe("Orphaned Media Routes", () => {
       });
 
       mockRequest = new Request(
-        "https://api.rkm1.de/api/media/media-456/mark-orphaned",
+        "https://api.example.com/api/media/media-456/mark-orphaned",
         { method: "POST" },
       );
 
       const response = await markOrphanedRoute!.handler(mockRequest, mockEnv, {
         url: new URL(
-          "https://api.rkm1.de/api/media/media-456/mark-orphaned",
+          "https://api.example.com/api/media/media-456/mark-orphaned",
         ),
         pathname: "/api/media/media-456/mark-orphaned",
         params: { id: "media-456" },
@@ -228,7 +228,7 @@ describe("Orphaned Media Routes", () => {
       );
 
       mockRequest = new Request(
-        "https://api.rkm1.de/api/media/media-456/mark-orphaned",
+        "https://api.example.com/api/media/media-456/mark-orphaned",
         { method: "POST" },
       );
 
@@ -237,7 +237,7 @@ describe("Orphaned Media Routes", () => {
         mockEnv,
         {
           url: new URL(
-            "https://api.rkm1.de/api/media/media-456/mark-orphaned",
+            "https://api.example.com/api/media/media-456/mark-orphaned",
           ),
           pathname: "/api/media/media-456/mark-orphaned",
           params: { id: "media-456" },
@@ -258,13 +258,13 @@ describe("Orphaned Media Routes", () => {
 
     it("should detect region from request", async () => {
       mockRequest = new Request(
-        "https://api.rkm1.de/api/media/media-456/mark-orphaned",
+        "https://api.example.com/api/media/media-456/mark-orphaned",
         { method: "POST" },
       );
 
       await markOrphanedRoute!.handler(mockRequest, mockEnv, {
         url: new URL(
-          "https://api.rkm1.de/api/media/media-456/mark-orphaned",
+          "https://api.example.com/api/media/media-456/mark-orphaned",
         ),
         pathname: "/api/media/media-456/mark-orphaned",
         params: { id: "media-456" },
@@ -283,13 +283,13 @@ describe("Orphaned Media Routes", () => {
       );
 
       mockRequest = new Request(
-        "https://api.rkm1.de/api/media/media-456/mark-orphaned",
+        "https://api.example.com/api/media/media-456/mark-orphaned",
         { method: "POST" },
       );
 
       const response = await markOrphanedRoute!.handler(mockRequest, mockEnv, {
         url: new URL(
-          "https://api.rkm1.de/api/media/media-456/mark-orphaned",
+          "https://api.example.com/api/media/media-456/mark-orphaned",
         ),
         pathname: "/api/media/media-456/mark-orphaned",
         params: { id: "media-456" },

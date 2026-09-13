@@ -13,7 +13,7 @@ The test is failing with **Error 522** (Cloudflare timeout) after only **2.74 se
 ## Error Flow
 
 ```
-1. Test → Cloudflare → Worker (api.rkm1.de/api/followers/follow)
+1. Test → Cloudflare → Worker (api.example.com/api/followers/follow)
    ↓
 2. Worker receives request
    ↓

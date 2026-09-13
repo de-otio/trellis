@@ -5,6 +5,7 @@
  * Implements content-addressed storage (CAS) with SHA-256 hashing for deduplication.
  */
 
+import { resolveApiOrigin } from "../api-origin.js";
 import { CorsHandler } from "../cors-handler.js";
 import { sharedDatabaseConnectionManager } from "../database-connection-manager.js";
 import {
@@ -1507,10 +1508,7 @@ export const mediaRoutes: Route[] = [
         // client GETs by hash — NOT a storage key (the serve gate resolves the
         // storage key from the DB row, never by interpolating the hash; see
         // serve-maze-removed.test.ts).
-        const apiDomain =
-          env.ENVIRONMENT === "prod"
-            ? "https://api.example.com"
-            : "https://api.rkm1.de";
+        const apiDomain = resolveApiOrigin(env, request);
         const serveUrl = `${apiDomain}/api/media/${encodeURIComponent(contentHash)}`;
         const response = securityHeaders.createSecureResponse(
           JSON.stringify({

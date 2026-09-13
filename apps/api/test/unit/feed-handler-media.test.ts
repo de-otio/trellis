@@ -102,6 +102,7 @@ describe("FeedHandler - Media Support", () => {
     mockGetDatabaseForRegion.mockReturnValue(mockDb);
 
     mockEnv = {
+      APP_DOMAIN: "https://api.example.com",
       DATABASE_URL: "postgres://test",
       US_DATABASE_URL: "postgres://us-test",
       FEED_CACHE_KV: {
@@ -297,11 +298,11 @@ describe("FeedHandler - Media Support", () => {
           id: "media-1",
           contentHash: "abc123",
           mimeType: "image/jpeg",
-          originalKey: "https://api.rkm1.de/api/media/abc123?variant=original",
+          originalKey: "https://api.example.com/api/media/abc123?variant=original",
           thumbnailKey:
-            "https://api.rkm1.de/api/media/abc123?variant=thumbnail",
+            "https://api.example.com/api/media/abc123?variant=thumbnail",
           optimizedKey:
-            "https://api.rkm1.de/api/media/abc123?variant=optimized",
+            "https://api.example.com/api/media/abc123?variant=optimized",
           width: 1920,
           height: 1080,
         },
@@ -684,13 +685,13 @@ describe("FeedHandler - Media Support", () => {
               // URLs should be full media endpoint URLs, not R2 storage keys
               const contentHash = mediaItem.file.contentHash;
               expect(mediaItem.file.originalKey).toBe(
-                `https://api.rkm1.de/api/media/${contentHash}?variant=original`,
+                `https://api.example.com/api/media/${contentHash}?variant=original`,
               );
 
               // Verify optional keys
               if (mediaProps.hasThumbnail) {
                 expect(mediaItem.file.thumbnailKey).toBe(
-                  `https://api.rkm1.de/api/media/${contentHash}?variant=thumbnail`,
+                  `https://api.example.com/api/media/${contentHash}?variant=thumbnail`,
                 );
               } else {
                 expect(mediaItem.file.thumbnailKey).toBeNull();
@@ -698,7 +699,7 @@ describe("FeedHandler - Media Support", () => {
 
               if (mediaProps.hasOptimized) {
                 expect(mediaItem.file.optimizedKey).toBe(
-                  `https://api.rkm1.de/api/media/${contentHash}?variant=optimized`,
+                  `https://api.example.com/api/media/${contentHash}?variant=optimized`,
                 );
               } else {
                 expect(mediaItem.file.optimizedKey).toBeNull();
@@ -830,13 +831,13 @@ describe("FeedHandler - Media Support", () => {
               // URLs should be full media endpoint URLs, not R2 storage keys
               const contentHash = mediaItem.file.contentHash;
               expect(mediaItem.file.originalKey).toBe(
-                `https://api.rkm1.de/api/media/${contentHash}?variant=original`,
+                `https://api.example.com/api/media/${contentHash}?variant=original`,
               );
 
               // Verify optional keys match expected presence
               if (keyPresence.hasThumbnail) {
                 expect(mediaItem.file.thumbnailKey).toBe(
-                  `https://api.rkm1.de/api/media/${contentHash}?variant=thumbnail`,
+                  `https://api.example.com/api/media/${contentHash}?variant=thumbnail`,
                 );
               } else {
                 expect(mediaItem.file.thumbnailKey).toBeNull();
@@ -844,7 +845,7 @@ describe("FeedHandler - Media Support", () => {
 
               if (keyPresence.hasOptimized) {
                 expect(mediaItem.file.optimizedKey).toBe(
-                  `https://api.rkm1.de/api/media/${contentHash}?variant=optimized`,
+                  `https://api.example.com/api/media/${contentHash}?variant=optimized`,
                 );
               } else {
                 expect(mediaItem.file.optimizedKey).toBeNull();
@@ -1302,13 +1303,13 @@ describe("FeedHandler - Media Support", () => {
                   // URLs should be full media endpoint URLs, not R2 storage keys
                   const contentHash = mediaItem.file.contentHash;
                   expect(mediaItem.file.originalKey).toBe(
-                    `https://api.rkm1.de/api/media/${contentHash}?variant=original`,
+                    `https://api.example.com/api/media/${contentHash}?variant=original`,
                   );
 
                   // Verify optional keys
                   if (mediaProps.hasThumbnail) {
                     expect(mediaItem.file.thumbnailKey).toBe(
-                      `https://api.rkm1.de/api/media/${contentHash}?variant=thumbnail`,
+                      `https://api.example.com/api/media/${contentHash}?variant=thumbnail`,
                     );
                   } else {
                     expect(mediaItem.file.thumbnailKey).toBeNull();
@@ -1316,7 +1317,7 @@ describe("FeedHandler - Media Support", () => {
 
                   if (mediaProps.hasOptimized) {
                     expect(mediaItem.file.optimizedKey).toBe(
-                      `https://api.rkm1.de/api/media/${contentHash}?variant=optimized`,
+                      `https://api.example.com/api/media/${contentHash}?variant=optimized`,
                     );
                   } else {
                     expect(mediaItem.file.optimizedKey).toBeNull();
@@ -1389,7 +1390,7 @@ describe("FeedHandler - Media Support", () => {
                   // URLs should be full media endpoint URLs, not R2 storage keys
                   const contentHash = mediaItem.file.contentHash;
                   expect(mediaItem.file.originalKey).toBe(
-                    `https://api.rkm1.de/api/media/${contentHash}?variant=original`,
+                    `https://api.example.com/api/media/${contentHash}?variant=original`,
                   );
                   expect(mediaItem.file.width).toBe(mediaProps.width);
                   expect(mediaItem.file.height).toBe(mediaProps.height);
@@ -1473,11 +1474,11 @@ describe("FeedHandler - Media Support", () => {
           id: "media-1",
           contentHash: "abc123",
           mimeType: "image/jpeg",
-          originalKey: "https://api.rkm1.de/api/media/abc123?variant=original",
+          originalKey: "https://api.example.com/api/media/abc123?variant=original",
           thumbnailKey:
-            "https://api.rkm1.de/api/media/abc123?variant=thumbnail",
+            "https://api.example.com/api/media/abc123?variant=thumbnail",
           optimizedKey:
-            "https://api.rkm1.de/api/media/abc123?variant=optimized",
+            "https://api.example.com/api/media/abc123?variant=optimized",
           width: 1920,
           height: 1080,
         },

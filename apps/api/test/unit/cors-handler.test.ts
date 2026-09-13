@@ -251,7 +251,7 @@ describe("CorsHandler", () => {
     });
 
     it("SEC M4: example.com is no longer a shipped known-domain allow-list entry", () => {
-      // The published core carried `knownDomains = ["rkm1.de", "example.com"]`.
+      // The published core carried a fixed `knownDomains` list that included `example.com`.
       const env = { APP_DOMAIN: "https://app.example.org" } as Env;
       for (const origin of [
         "https://example.com",
@@ -290,16 +290,22 @@ describe("CorsHandler", () => {
       expect(origin).toBeNull();
           });
 
-    it("should allow known production domains (rkm1.de)", () => {
+    it("ships no known-domains list: an origin the deployment did not configure is denied", () => {
       mockRequest = new Request("https://api.example.com/test", {
         method: "GET",
         headers: {
-          Origin: "https://rkm1.de",
+          Origin: "https://other.example.net",
         },
       });
       const origin = CorsHandler.getAllowedOrigin(mockRequest, mockEnv);
-      expect(origin).toBe("https://rkm1.de");
-          });
+      expect(origin).toBeNull();
+    });
+
+    it("the source carries no knownDomains allow-list", async () => {
+      const { readFileSync } = await import("node:fs");
+      const src = readFileSync(new URL("../../src/lib/cors-handler.ts", import.meta.url), "utf8");
+      expect(src).not.toMatch(/knownDomains/);
+    });
 
     it("should allow known production domains (example.com)", () => {
       mockRequest = new Request("https://api.example.com/test", {

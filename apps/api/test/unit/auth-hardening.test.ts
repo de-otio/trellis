@@ -616,18 +616,14 @@ describe("S1.6 — CORS strict domain matching", () => {
     ALLOWED_ORIGINS: "https://app.example.com",
   } as any;
 
-  it("should allow exact domain match (rkm1.de)", () => {
-    const request = new Request("https://api.example.com/test", {
-      headers: { Origin: "https://rkm1.de" },
-    });
-    expect(CorsHandler.getAllowedOrigin(request, mockEnv)).toBe("https://rkm1.de");
-  });
-
-  it("should allow subdomain of known domain (sub.rkm1.de)", () => {
-    const request = new Request("https://api.example.com/test", {
-      headers: { Origin: "https://sub.rkm1.de" },
-    });
-    expect(CorsHandler.getAllowedOrigin(request, mockEnv)).toBe("https://sub.rkm1.de");
+  it("no compiled-in domain is allowed: an origin outside APP_DOMAIN/ALLOWED_ORIGINS is denied", () => {
+    // S1.6 used to ship a fixed known-domains list in the core; it is gone.
+    for (const origin of ["https://other.example.net", "https://sub.other.example.net"]) {
+      const request = new Request("https://api.example.com/test", {
+        headers: { Origin: origin },
+      });
+      expect(CorsHandler.getAllowedOrigin(request, mockEnv), origin).toBeNull();
+    }
   });
 
   it("should allow example.com", () => {
@@ -639,14 +635,14 @@ describe("S1.6 — CORS strict domain matching", () => {
 
   it("should reject domains that contain known domain as substring but are not subdomains", () => {
     const request = new Request("https://api.example.com/test", {
-      headers: { Origin: "https://evilrkm1.de" },
+      headers: { Origin: "https://evilexample.com" },
     });
     expect(CorsHandler.getAllowedOrigin(request, mockEnv)).toBeNull();
   });
 
-  it("should reject domain that looks like a subdomain but has a prefix (notrkm1.de)", () => {
+  it("should reject domain that looks like a subdomain but has a prefix (notexample.com)", () => {
     const request = new Request("https://api.example.com/test", {
-      headers: { Origin: "https://notrkm1.de" },
+      headers: { Origin: "https://notexample.com" },
     });
     expect(CorsHandler.getAllowedOrigin(request, mockEnv)).toBeNull();
   });

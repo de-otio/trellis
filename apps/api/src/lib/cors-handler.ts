@@ -170,27 +170,13 @@ export class CorsHandler {
       return null;
     }
 
-    // S1.6 — Allow known production domains with strict suffix matching
-    try {
-      const originUrl = new URL(normalizedRequestOrigin);
-      const host = originUrl.hostname;
-      // SEC M4: `example.com` removed — it is the IANA reserved example
-      // domain, it shipped in the published core's allow-list, and anyone can
-      // stand up a subdomain of a domain they control that ends in it only by
-      // owning it. Nothing legitimate needed it.
-      const knownDomains = ["rkm1.de"];
-      const isKnownDomain = knownDomains.some(
-        (domain) => host === domain || host.endsWith(`.${domain}`),
-      );
-      if (isKnownDomain) {
-        getLogger().info(
-          `[CORS] Allowing known domain origin: ${normalizedRequestOrigin}`,
-        );
-        return normalizedRequestOrigin;
-      }
-    } catch {
-      // Invalid URL, fall through to rejection
-    }
+    // No compiled-in allow-list. S1.6 used to keep a fixed "known domains"
+    // list here (suffix-matched, credentialed) — the author's own domain at
+    // the time, shipped to every deployment of the core, so any subdomain of
+    // it could make credentialed cross-origin requests to every Trellis
+    // install. SEC M4 removed `example.com` from that list; this removes the
+    // list. The only origins ever allowed are the loopback set above and what
+    // APP_DOMAIN / ALLOWED_ORIGINS name.
 
     // Origin not allowed
     getLogger().info(

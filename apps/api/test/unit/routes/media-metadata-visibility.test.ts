@@ -104,7 +104,7 @@ describe("Media Metadata Visibility Routes", () => {
     vi.clearAllMocks();
 
     mockEnv = {
-      APP_DOMAIN: "https://api.rkm1.de",
+      APP_DOMAIN: "https://api.example.com",
       SESSION_SECRET: "test-secret",
       ENVIRONMENT: "dev",
     };
@@ -157,7 +157,7 @@ describe("Media Metadata Visibility Routes", () => {
       mockGetSession.mockResolvedValue(null);
 
       const request = new Request(
-        "https://api.rkm1.de/api/media/media-123/metadata-visibility",
+        "https://api.example.com/api/media/media-123/metadata-visibility",
         {
           method: "PATCH",
           body: JSON.stringify({ metadataVisible: true }),
@@ -167,7 +167,7 @@ describe("Media Metadata Visibility Routes", () => {
 
       const response = await route!.handler(request, mockEnv, {
         url: new URL(
-          "https://api.rkm1.de/api/media/media-123/metadata-visibility",
+          "https://api.example.com/api/media/media-123/metadata-visibility",
         ),
         pathname: "/api/media/media-123/metadata-visibility",
         params: { mediaId: "media-123" },
@@ -180,7 +180,7 @@ describe("Media Metadata Visibility Routes", () => {
 
     it("should reject request with no body fields - return 400", async () => {
       const request = new Request(
-        "https://api.rkm1.de/api/media/media-123/metadata-visibility",
+        "https://api.example.com/api/media/media-123/metadata-visibility",
         {
           method: "PATCH",
           body: JSON.stringify({}),
@@ -190,7 +190,7 @@ describe("Media Metadata Visibility Routes", () => {
 
       const response = await route!.handler(request, mockEnv, {
         url: new URL(
-          "https://api.rkm1.de/api/media/media-123/metadata-visibility",
+          "https://api.example.com/api/media/media-123/metadata-visibility",
         ),
         pathname: "/api/media/media-123/metadata-visibility",
         params: { mediaId: "media-123" },
@@ -223,7 +223,7 @@ describe("Media Metadata Visibility Routes", () => {
       );
 
       const request = new Request(
-        "https://api.rkm1.de/api/media/media-123/metadata-visibility",
+        "https://api.example.com/api/media/media-123/metadata-visibility",
         {
           method: "PATCH",
           body: JSON.stringify({ metadataVisible: true }),
@@ -233,7 +233,7 @@ describe("Media Metadata Visibility Routes", () => {
 
       const response = await route!.handler(request, mockEnv, {
         url: new URL(
-          "https://api.rkm1.de/api/media/media-123/metadata-visibility",
+          "https://api.example.com/api/media/media-123/metadata-visibility",
         ),
         pathname: "/api/media/media-123/metadata-visibility",
         params: { mediaId: "media-123" },
@@ -271,7 +271,7 @@ describe("Media Metadata Visibility Routes", () => {
       );
 
       const request = new Request(
-        "https://api.rkm1.de/api/media/media-123/metadata-visibility",
+        "https://api.example.com/api/media/media-123/metadata-visibility",
         {
           method: "PATCH",
           body: JSON.stringify({ locationVisible: true }),
@@ -281,7 +281,7 @@ describe("Media Metadata Visibility Routes", () => {
 
       const response = await route!.handler(request, mockEnv, {
         url: new URL(
-          "https://api.rkm1.de/api/media/media-123/metadata-visibility",
+          "https://api.example.com/api/media/media-123/metadata-visibility",
         ),
         pathname: "/api/media/media-123/metadata-visibility",
         params: { mediaId: "media-123" },
@@ -315,7 +315,7 @@ describe("Media Metadata Visibility Routes", () => {
       );
 
       const request = new Request(
-        "https://api.rkm1.de/api/media/media-123/metadata-visibility",
+        "https://api.example.com/api/media/media-123/metadata-visibility",
         {
           method: "PATCH",
           body: JSON.stringify({ metadataVisible: true, locationVisible: true }),
@@ -325,7 +325,7 @@ describe("Media Metadata Visibility Routes", () => {
 
       const response = await route!.handler(request, mockEnv, {
         url: new URL(
-          "https://api.rkm1.de/api/media/media-123/metadata-visibility",
+          "https://api.example.com/api/media/media-123/metadata-visibility",
         ),
         pathname: "/api/media/media-123/metadata-visibility",
         params: { mediaId: "media-123" },
@@ -345,7 +345,7 @@ describe("Media Metadata Visibility Routes", () => {
       );
 
       const request = new Request(
-        "https://api.rkm1.de/api/media/media-456/metadata-visibility",
+        "https://api.example.com/api/media/media-456/metadata-visibility",
         {
           method: "PATCH",
           body: JSON.stringify({ metadataVisible: true }),
@@ -357,7 +357,7 @@ describe("Media Metadata Visibility Routes", () => {
       await expect(
         route!.handler(request, mockEnv, {
           url: new URL(
-            "https://api.rkm1.de/api/media/media-456/metadata-visibility",
+            "https://api.example.com/api/media/media-456/metadata-visibility",
           ),
           pathname: "/api/media/media-456/metadata-visibility",
           params: { mediaId: "media-456" },
@@ -374,7 +374,7 @@ describe("Media Metadata Visibility Routes", () => {
 
     it("should return 400 if mediaId is missing", async () => {
       const request = new Request(
-        "https://api.rkm1.de/api/media//metadata-visibility",
+        "https://api.example.com/api/media//metadata-visibility",
         {
           method: "PATCH",
           body: JSON.stringify({ metadataVisible: true }),
@@ -384,7 +384,7 @@ describe("Media Metadata Visibility Routes", () => {
 
       const response = await route!.handler(request, mockEnv, {
         url: new URL(
-          "https://api.rkm1.de/api/media//metadata-visibility",
+          "https://api.example.com/api/media//metadata-visibility",
         ),
         pathname: "/api/media//metadata-visibility",
         params: {}, // No mediaId
@@ -397,7 +397,7 @@ describe("Media Metadata Visibility Routes", () => {
 
     it("should return 400 for invalid JSON body", async () => {
       const request = new Request(
-        "https://api.rkm1.de/api/media/media-123/metadata-visibility",
+        "https://api.example.com/api/media/media-123/metadata-visibility",
         {
           method: "PATCH",
           body: "not valid json{{{",
@@ -407,7 +407,7 @@ describe("Media Metadata Visibility Routes", () => {
 
       const response = await route!.handler(request, mockEnv, {
         url: new URL(
-          "https://api.rkm1.de/api/media/media-123/metadata-visibility",
+          "https://api.example.com/api/media/media-123/metadata-visibility",
         ),
         pathname: "/api/media/media-123/metadata-visibility",
         params: { mediaId: "media-123" },
@@ -422,7 +422,7 @@ describe("Media Metadata Visibility Routes", () => {
       mockAuditLog.mockRejectedValue(new Error("Audit service unavailable"));
 
       const request = new Request(
-        "https://api.rkm1.de/api/media/media-123/metadata-visibility",
+        "https://api.example.com/api/media/media-123/metadata-visibility",
         {
           method: "PATCH",
           body: JSON.stringify({ metadataVisible: false }),
@@ -432,7 +432,7 @@ describe("Media Metadata Visibility Routes", () => {
 
       const response = await route!.handler(request, mockEnv, {
         url: new URL(
-          "https://api.rkm1.de/api/media/media-123/metadata-visibility",
+          "https://api.example.com/api/media/media-123/metadata-visibility",
         ),
         pathname: "/api/media/media-123/metadata-visibility",
         params: { mediaId: "media-123" },
@@ -454,7 +454,7 @@ describe("Media Metadata Visibility Routes", () => {
       mockAddSecurityHeaders.mockReturnValue(rateLimitResponse);
 
       const request = new Request(
-        "https://api.rkm1.de/api/media/media-123/metadata-visibility",
+        "https://api.example.com/api/media/media-123/metadata-visibility",
         {
           method: "PATCH",
           body: JSON.stringify({ metadataVisible: true }),
@@ -464,7 +464,7 @@ describe("Media Metadata Visibility Routes", () => {
 
       const response = await route!.handler(request, mockEnv, {
         url: new URL(
-          "https://api.rkm1.de/api/media/media-123/metadata-visibility",
+          "https://api.example.com/api/media/media-123/metadata-visibility",
         ),
         pathname: "/api/media/media-123/metadata-visibility",
         params: { mediaId: "media-123" },
@@ -475,7 +475,7 @@ describe("Media Metadata Visibility Routes", () => {
 
     it("should reject non-boolean values for visibility flags", async () => {
       const request = new Request(
-        "https://api.rkm1.de/api/media/media-123/metadata-visibility",
+        "https://api.example.com/api/media/media-123/metadata-visibility",
         {
           method: "PATCH",
           body: JSON.stringify({ metadataVisible: "yes" }),
@@ -485,7 +485,7 @@ describe("Media Metadata Visibility Routes", () => {
 
       const response = await route!.handler(request, mockEnv, {
         url: new URL(
-          "https://api.rkm1.de/api/media/media-123/metadata-visibility",
+          "https://api.example.com/api/media/media-123/metadata-visibility",
         ),
         pathname: "/api/media/media-123/metadata-visibility",
         params: { mediaId: "media-123" },

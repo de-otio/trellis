@@ -102,7 +102,7 @@ describe("SecurityHeaders", () => {
 
       const csp = secureResponse.headers.get("Content-Security-Policy");
       expect(csp).toContain(
-        "connect-src 'self' https://bsky.social https://api.rkm1.de https://www.gstatic.com",
+        "connect-src 'self' https://bsky.social https://www.gstatic.com",
       );
     });
 
@@ -118,7 +118,7 @@ describe("SecurityHeaders", () => {
 
       const csp = secureResponse.headers.get("Content-Security-Policy");
       expect(csp).toContain(
-        "connect-src 'self' https://bsky.social https://api.rkm1.de https://www.gstatic.com https://analytics.example.com https://api.example.com",
+        "connect-src 'self' https://bsky.social https://www.gstatic.com https://analytics.example.com https://api.example.com",
       );
     });
 
@@ -161,7 +161,7 @@ describe("SecurityHeaders", () => {
 
       const csp = secureResponse.headers.get("Content-Security-Policy");
       expect(csp).toContain(
-        "connect-src 'self' https://bsky.social https://api.rkm1.de https://www.gstatic.com",
+        "connect-src 'self' https://bsky.social https://www.gstatic.com",
       );
     });
 
