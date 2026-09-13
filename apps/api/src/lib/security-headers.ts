@@ -85,10 +85,11 @@ export class SecurityHeaders {
    * Build CSP connect-src directive with environment-specific domains
    */
   private buildCSPConnectSrc(env?: SecurityHeadersEnv): string {
+    // The API's own origin is `'self'`; a deployment adds its other API
+    // hosts through CSP_CONNECT_SRC. No deployment's hostname ships here.
     const defaults = [
       "'self'",
       "https://bsky.social",
-      "https://api.rkm1.de",
       "https://www.gstatic.com",
     ];
 

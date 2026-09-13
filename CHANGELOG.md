@@ -176,6 +176,29 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ### Security
 
+- **The published core no longer ships anybody's hostname as a default.** Four
+  places in `@de-otio/trellis` carried one fixed domain — the author's own at
+  the time — as a compiled-in default: the CORS handler kept it (and every
+  subdomain of it) in a "known domains" allow-list that was honoured with
+  `Access-Control-Allow-Credentials: true` on **every** deployment of the core,
+  whatever `APP_DOMAIN` / `ALLOWED_ORIGINS` said; `feed-handler.ts` and
+  `media-handler.ts` fell back to it for the absolute media URLs they write
+  into responses whenever `APP_DOMAIN` was unset **or was the documented
+  bare-host form** (`new URL("app.example.com")` throws, so every deployment
+  using the bare form got media URLs pointing at somebody else's server);
+  the upload route hard-coded it for non-prod stages; and the default CSP
+  `connect-src` listed it. All four are gone. CORS now allows exactly the
+  loopback set and what the deployment configures (the `.pages.dev` project
+  list is unchanged). Response URLs go through one resolver
+  (`lib/api-origin.ts`): `APP_DOMAIN` — bare host or URL, `www.` → `api.`,
+  an `api.` label added on the apex when missing — else the request's own
+  origin where the caller has one, else relative to the API with a warning
+  logged once. **Operator note:** a deployment that relied on the removed
+  allow-list must name that origin in `ALLOWED_ORIGINS`; a deployment that
+  set `APP_DOMAIN` as a bare host now gets correct absolute media URLs
+  instead of the old fallback. A unit test scans the response-URL and CORS
+  sources for any absolute host outside the IANA example domains and fails
+  on the next one.
 - **The two post-scoped taxonomy GETs are no longer an anonymous, cross-tenant
   existence oracle.** `GET /posts/:postId/taxonomy-tags` and
   `GET /api/posts/:postId/tags/suggestions` each called `DataRouter.getPost` —

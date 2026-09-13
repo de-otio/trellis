@@ -171,7 +171,7 @@ describe("Media Routes", () => {
     };
 
     mockEnv = {
-      APP_DOMAIN: "https://api.rkm1.de",
+      APP_DOMAIN: "https://api.example.com",
       SESSION_SECRET: "test-secret",
       ENVIRONMENT: "dev",
       // The resolved media-bucket name the binding wraps; the moderation ref
@@ -297,13 +297,13 @@ describe("Media Routes", () => {
         "test.jpg",
       );
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/upload", {
+      mockRequest = new Request("https://api.example.com/api/media/upload", {
         method: "POST",
         body: formData,
       });
 
       const response = await uploadRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/upload"),
+        url: new URL("https://api.example.com/api/media/upload"),
         pathname: "/api/media/upload",
         params: {},
       });
@@ -317,13 +317,13 @@ describe("Media Routes", () => {
       const formData = new FormData();
       // No file appended
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/upload", {
+      mockRequest = new Request("https://api.example.com/api/media/upload", {
         method: "POST",
         body: formData,
       });
 
       const response = await uploadRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/upload"),
+        url: new URL("https://api.example.com/api/media/upload"),
         pathname: "/api/media/upload",
         params: {},
       });
@@ -341,13 +341,13 @@ describe("Media Routes", () => {
         "test.pdf",
       );
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/upload", {
+      mockRequest = new Request("https://api.example.com/api/media/upload", {
         method: "POST",
         body: formData,
       });
 
       const response = await uploadRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/upload"),
+        url: new URL("https://api.example.com/api/media/upload"),
         pathname: "/api/media/upload",
         params: {},
       });
@@ -366,13 +366,13 @@ describe("Media Routes", () => {
       const formData = new FormData();
       formData.append("file", largeBlob, "large.jpg");
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/upload", {
+      mockRequest = new Request("https://api.example.com/api/media/upload", {
         method: "POST",
         body: formData,
       });
 
       const response = await uploadRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/upload"),
+        url: new URL("https://api.example.com/api/media/upload"),
         pathname: "/api/media/upload",
         params: {},
       });
@@ -394,13 +394,13 @@ describe("Media Routes", () => {
       const formData = new FormData();
       formData.append("file", blob, "image.jpg");
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/upload", {
+      mockRequest = new Request("https://api.example.com/api/media/upload", {
         method: "POST",
         body: formData,
       });
 
       const response = await uploadRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/upload"),
+        url: new URL("https://api.example.com/api/media/upload"),
         pathname: "/api/media/upload",
         params: {},
       });
@@ -420,13 +420,13 @@ describe("Media Routes", () => {
       const formData = new FormData();
       formData.append("file", blob, "test.jpg");
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/upload", {
+      mockRequest = new Request("https://api.example.com/api/media/upload", {
         method: "POST",
         body: formData,
       });
 
       const response = await uploadRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/upload"),
+        url: new URL("https://api.example.com/api/media/upload"),
         pathname: "/api/media/upload",
         params: {},
       });
@@ -446,13 +446,13 @@ describe("Media Routes", () => {
       const formData = new FormData();
       formData.append("file", blob, "test.png");
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/upload", {
+      mockRequest = new Request("https://api.example.com/api/media/upload", {
         method: "POST",
         body: formData,
       });
 
       const response = await uploadRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/upload"),
+        url: new URL("https://api.example.com/api/media/upload"),
         pathname: "/api/media/upload",
         params: {},
       });
@@ -472,13 +472,13 @@ describe("Media Routes", () => {
       const formData = new FormData();
       formData.append("file", blob, "test.webp");
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/upload", {
+      mockRequest = new Request("https://api.example.com/api/media/upload", {
         method: "POST",
         body: formData,
       });
 
       const response = await uploadRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/upload"),
+        url: new URL("https://api.example.com/api/media/upload"),
         pathname: "/api/media/upload",
         params: {},
       });
@@ -495,13 +495,13 @@ describe("Media Routes", () => {
       const formData = new FormData();
       formData.append("file", blob, "test.gif");
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/upload", {
+      mockRequest = new Request("https://api.example.com/api/media/upload", {
         method: "POST",
         body: formData,
       });
 
       const response = await uploadRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/upload"),
+        url: new URL("https://api.example.com/api/media/upload"),
         pathname: "/api/media/upload",
         params: {},
       });
@@ -521,13 +521,13 @@ describe("Media Routes", () => {
       const formData = new FormData();
       formData.append("file", blob, "invalid.bin");
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/upload", {
+      mockRequest = new Request("https://api.example.com/api/media/upload", {
         method: "POST",
         body: formData,
       });
 
       const response = await uploadRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/upload"),
+        url: new URL("https://api.example.com/api/media/upload"),
         pathname: "/api/media/upload",
         params: {},
       });
@@ -545,13 +545,13 @@ describe("Media Routes", () => {
       const formData = new FormData();
       formData.append("file", blob, "test.jpg");
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/upload", {
+      mockRequest = new Request("https://api.example.com/api/media/upload", {
         method: "POST",
         body: formData,
       });
 
       const response = await uploadRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/upload"),
+        url: new URL("https://api.example.com/api/media/upload"),
         pathname: "/api/media/upload",
         params: {},
       });
@@ -579,13 +579,13 @@ describe("Media Routes", () => {
       const formData = new FormData();
       formData.append("file", blob, "test.png");
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/upload", {
+      mockRequest = new Request("https://api.example.com/api/media/upload", {
         method: "POST",
         body: formData,
       });
 
       const response = await uploadRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/upload"),
+        url: new URL("https://api.example.com/api/media/upload"),
         pathname: "/api/media/upload",
         params: {},
       });
@@ -610,13 +610,13 @@ describe("Media Routes", () => {
       const formData = new FormData();
       formData.append("file", blob, "test.jpg");
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/upload", {
+      mockRequest = new Request("https://api.example.com/api/media/upload", {
         method: "POST",
         body: formData,
       });
 
       const response = await uploadRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/upload"),
+        url: new URL("https://api.example.com/api/media/upload"),
         pathname: "/api/media/upload",
         params: {},
       });
@@ -638,13 +638,13 @@ describe("Media Routes", () => {
       const formData = new FormData();
       formData.append("file", blob, "test.jpg");
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/upload", {
+      mockRequest = new Request("https://api.example.com/api/media/upload", {
         method: "POST",
         body: formData,
       });
 
       const response = await uploadRoute!.handler(mockRequest, envWithoutR2, {
-        url: new URL("https://api.rkm1.de/api/media/upload"),
+        url: new URL("https://api.example.com/api/media/upload"),
         pathname: "/api/media/upload",
         params: {},
       });
@@ -673,7 +673,7 @@ describe("Media Routes", () => {
       const formData = new FormData();
       formData.append("file", blob, "test.jpg");
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/upload", {
+      mockRequest = new Request("https://api.example.com/api/media/upload", {
         method: "POST",
         body: formData,
       });
@@ -682,7 +682,7 @@ describe("Media Routes", () => {
         mockRequest,
         envWithLegacyR2,
         {
-          url: new URL("https://api.rkm1.de/api/media/upload"),
+          url: new URL("https://api.example.com/api/media/upload"),
           pathname: "/api/media/upload",
           params: {},
         },
@@ -708,13 +708,13 @@ describe("Media Routes", () => {
       const formData = new FormData();
       formData.append("file", blob, "test.jpg");
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/upload", {
+      mockRequest = new Request("https://api.example.com/api/media/upload", {
         method: "POST",
         body: formData,
       });
 
       const response = await uploadRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/upload"),
+        url: new URL("https://api.example.com/api/media/upload"),
         pathname: "/api/media/upload",
         params: {},
       });
@@ -739,13 +739,13 @@ describe("Media Routes", () => {
       const formData = new FormData();
       formData.append("file", blob, "test.jpg");
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/upload", {
+      mockRequest = new Request("https://api.example.com/api/media/upload", {
         method: "POST",
         body: formData,
       });
 
       const response = await uploadRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/upload"),
+        url: new URL("https://api.example.com/api/media/upload"),
         pathname: "/api/media/upload",
         params: {},
       });
@@ -763,13 +763,13 @@ describe("Media Routes", () => {
       const formData = new FormData();
       formData.append("file", blob, "test.mp4");
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/upload", {
+      mockRequest = new Request("https://api.example.com/api/media/upload", {
         method: "POST",
         body: formData,
       });
 
       const response = await uploadRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/upload"),
+        url: new URL("https://api.example.com/api/media/upload"),
         pathname: "/api/media/upload",
         params: {},
       });
@@ -790,13 +790,13 @@ describe("Media Routes", () => {
       const formData = new FormData();
       formData.append("file", largeBlob, "large.mp4");
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/upload", {
+      mockRequest = new Request("https://api.example.com/api/media/upload", {
         method: "POST",
         body: formData,
       });
 
       const response = await uploadRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/upload"),
+        url: new URL("https://api.example.com/api/media/upload"),
         pathname: "/api/media/upload",
         params: {},
       });
@@ -825,13 +825,13 @@ describe("Media Routes", () => {
       const formData = new FormData();
       formData.append("file", new Blob([jpegMagic], { type: "image/jpeg" }), "x.jpg");
       return uploadRoute!.handler(
-        new Request("https://api.rkm1.de/api/media/upload", {
+        new Request("https://api.example.com/api/media/upload", {
           method: "POST",
           body: formData,
         }),
         mockEnv,
         {
-          url: new URL("https://api.rkm1.de/api/media/upload"),
+          url: new URL("https://api.example.com/api/media/upload"),
           pathname: "/api/media/upload",
           params: {},
         },
@@ -1007,9 +1007,9 @@ describe("Media Routes", () => {
       const formData = new FormData();
       formData.append("file", new Blob([jpegMagic], { type: "image/jpeg" }), "test.jpg");
       return uploadRoute!.handler(
-        new Request("https://api.rkm1.de/api/media/upload", { method: "POST", body: formData }),
+        new Request("https://api.example.com/api/media/upload", { method: "POST", body: formData }),
         mockEnv,
-        { url: new URL("https://api.rkm1.de/api/media/upload"), pathname: "/api/media/upload", params: {} },
+        { url: new URL("https://api.example.com/api/media/upload"), pathname: "/api/media/upload", params: {} },
       );
     };
 
@@ -1023,9 +1023,9 @@ describe("Media Routes", () => {
       formData.append("file", new Blob([jpegMagic], { type: "image/jpeg" }), "test.jpg");
 
       const response = await uploadRoute!.handler(
-        new Request("https://api.rkm1.de/api/media/upload", { method: "POST", body: formData }),
+        new Request("https://api.example.com/api/media/upload", { method: "POST", body: formData }),
         mockEnv,
-        { url: new URL("https://api.rkm1.de/api/media/upload"), pathname: "/api/media/upload", params: {} },
+        { url: new URL("https://api.example.com/api/media/upload"), pathname: "/api/media/upload", params: {} },
       );
 
       expect(response.status).toBe(429);
@@ -1045,9 +1045,9 @@ describe("Media Routes", () => {
       formData.append("file", new Blob([jpegMagic], { type: "image/jpeg" }), "test.jpg");
 
       const response = await uploadRoute!.handler(
-        new Request("https://api.rkm1.de/api/media/upload", { method: "POST", body: formData }),
+        new Request("https://api.example.com/api/media/upload", { method: "POST", body: formData }),
         mockEnv,
-        { url: new URL("https://api.rkm1.de/api/media/upload"), pathname: "/api/media/upload", params: {} },
+        { url: new URL("https://api.example.com/api/media/upload"), pathname: "/api/media/upload", params: {} },
       );
 
       expect(response.status).toBe(413);
@@ -1065,9 +1065,9 @@ describe("Media Routes", () => {
       formData.append("file", new Blob([jpegMagic], { type: "image/jpeg" }), "test.jpg");
 
       const response = await uploadRoute!.handler(
-        new Request("https://api.rkm1.de/api/media/upload", { method: "POST", body: formData }),
+        new Request("https://api.example.com/api/media/upload", { method: "POST", body: formData }),
         mockEnv,
-        { url: new URL("https://api.rkm1.de/api/media/upload"), pathname: "/api/media/upload", params: {} },
+        { url: new URL("https://api.example.com/api/media/upload"), pathname: "/api/media/upload", params: {} },
       );
 
       // Should reach the sync-image path and succeed (200).
@@ -1252,9 +1252,9 @@ describe("Media Routes", () => {
       formData.append("file", new Blob([mp4Bytes], { type: "video/mp4" }), "test.mp4");
 
       const response = await uploadRoute!.handler(
-        new Request("https://api.rkm1.de/api/media/upload", { method: "POST", body: formData }),
+        new Request("https://api.example.com/api/media/upload", { method: "POST", body: formData }),
         mockEnv,
-        { url: new URL("https://api.rkm1.de/api/media/upload"), pathname: "/api/media/upload", params: {} },
+        { url: new URL("https://api.example.com/api/media/upload"), pathname: "/api/media/upload", params: {} },
       );
 
       expect(response.status).toBe(400);
@@ -1276,9 +1276,9 @@ describe("Media Routes", () => {
       formData.append("file", new Blob([webmBytes], { type: "video/webm" }), "test.webm");
 
       const response = await uploadRoute!.handler(
-        new Request("https://api.rkm1.de/api/media/upload", { method: "POST", body: formData }),
+        new Request("https://api.example.com/api/media/upload", { method: "POST", body: formData }),
         mockEnv,
-        { url: new URL("https://api.rkm1.de/api/media/upload"), pathname: "/api/media/upload", params: {} },
+        { url: new URL("https://api.example.com/api/media/upload"), pathname: "/api/media/upload", params: {} },
       );
 
       expect(response.status).toBe(400);
@@ -1294,9 +1294,9 @@ describe("Media Routes", () => {
       formData.append("file", new Blob([jpegMagic], { type: "image/jpeg" }), "test.jpg");
 
       const response = await uploadRoute!.handler(
-        new Request("https://api.rkm1.de/api/media/upload", { method: "POST", body: formData }),
+        new Request("https://api.example.com/api/media/upload", { method: "POST", body: formData }),
         mockEnv,
-        { url: new URL("https://api.rkm1.de/api/media/upload"), pathname: "/api/media/upload", params: {} },
+        { url: new URL("https://api.example.com/api/media/upload"), pathname: "/api/media/upload", params: {} },
       );
 
       expect(response.status).toBe(200);
@@ -1318,9 +1318,9 @@ describe("Media Routes", () => {
       formData.append("file", new Blob([pdfBytes], { type: "application/pdf" }), "doc.pdf");
 
       const response = await uploadRoute!.handler(
-        new Request("https://api.rkm1.de/api/media/upload", { method: "POST", body: formData }),
+        new Request("https://api.example.com/api/media/upload", { method: "POST", body: formData }),
         mockEnv,
-        { url: new URL("https://api.rkm1.de/api/media/upload"), pathname: "/api/media/upload", params: {} },
+        { url: new URL("https://api.example.com/api/media/upload"), pathname: "/api/media/upload", params: {} },
       );
 
       expect(response.status).toBe(400);
@@ -1339,9 +1339,9 @@ describe("Media Routes", () => {
       mockMediaFileCreate.mockRejectedValue(new Error("DB unavailable"));
 
       const response = await uploadRoute!.handler(
-        new Request("https://api.rkm1.de/api/media/upload", { method: "POST", body: formData }),
+        new Request("https://api.example.com/api/media/upload", { method: "POST", body: formData }),
         mockEnv,
-        { url: new URL("https://api.rkm1.de/api/media/upload"), pathname: "/api/media/upload", params: {} },
+        { url: new URL("https://api.example.com/api/media/upload"), pathname: "/api/media/upload", params: {} },
       );
 
       expect(response.status).toBe(400);
@@ -1366,12 +1366,12 @@ describe("Media Routes", () => {
 
       mockGetSession.mockResolvedValue(null);
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/test-hash", {
+      mockRequest = new Request("https://api.example.com/api/media/test-hash", {
         method: "GET",
       });
 
       const response = await getMediaRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/test-hash"),
+        url: new URL("https://api.example.com/api/media/test-hash"),
         pathname: "/api/media/test-hash",
         params: { hash: "test-hash" },
       });
@@ -1382,12 +1382,12 @@ describe("Media Routes", () => {
     });
 
     it("should return 400 when hash is missing", async () => {
-      mockRequest = new Request("https://api.rkm1.de/api/media/", {
+      mockRequest = new Request("https://api.example.com/api/media/", {
         method: "GET",
       });
 
       const response = await getMediaRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/"),
+        url: new URL("https://api.example.com/api/media/"),
         pathname: "/api/media/",
         params: {},
       });
@@ -1427,12 +1427,12 @@ describe("Media Routes", () => {
       mockR2Get.mockResolvedValue(mockR2Object);
 
       mockRequest = new Request(
-        `https://api.rkm1.de/api/media/${VALID_UPLOAD_HASH}`,
+        `https://api.example.com/api/media/${VALID_UPLOAD_HASH}`,
         { method: "GET" },
       );
 
       const response = await getMediaRoute!.handler(mockRequest, mockEnv, {
-        url: new URL(`https://api.rkm1.de/api/media/${VALID_UPLOAD_HASH}`),
+        url: new URL(`https://api.example.com/api/media/${VALID_UPLOAD_HASH}`),
         pathname: `/api/media/${VALID_UPLOAD_HASH}`,
         params: { hash: VALID_UPLOAD_HASH },
       });
@@ -1452,12 +1452,12 @@ describe("Media Routes", () => {
       mockR2Get.mockResolvedValue({ body: new ReadableStream() });
 
       mockRequest = new Request(
-        `https://api.rkm1.de/api/media/${VALID_UPLOAD_HASH}`,
+        `https://api.example.com/api/media/${VALID_UPLOAD_HASH}`,
         { method: "GET" },
       );
 
       const response = await getMediaRoute!.handler(mockRequest, mockEnv, {
-        url: new URL(`https://api.rkm1.de/api/media/${VALID_UPLOAD_HASH}`),
+        url: new URL(`https://api.example.com/api/media/${VALID_UPLOAD_HASH}`),
         pathname: `/api/media/${VALID_UPLOAD_HASH}`,
         params: { hash: VALID_UPLOAD_HASH },
       });
@@ -1472,13 +1472,13 @@ describe("Media Routes", () => {
         mockMediaFileFindUnique.mockResolvedValue(approvedRecord(over));
 
         const response = await getMediaRoute!.handler(
-          new Request(`https://api.rkm1.de/api/media/${VALID_UPLOAD_HASH}`, {
+          new Request(`https://api.example.com/api/media/${VALID_UPLOAD_HASH}`, {
             method: "GET",
           }),
           mockEnv,
           {
             url: new URL(
-              `https://api.rkm1.de/api/media/${VALID_UPLOAD_HASH}`,
+              `https://api.example.com/api/media/${VALID_UPLOAD_HASH}`,
             ),
             pathname: `/api/media/${VALID_UPLOAD_HASH}`,
             params: { hash: VALID_UPLOAD_HASH },
@@ -1492,12 +1492,12 @@ describe("Media Routes", () => {
 
     it("denies a malformed (non-hex) content hash before any lookup", async () => {
       const response = await getMediaRoute!.handler(
-        new Request("https://api.rkm1.de/api/media/not-a-valid-hash", {
+        new Request("https://api.example.com/api/media/not-a-valid-hash", {
           method: "GET",
         }),
         mockEnv,
         {
-          url: new URL("https://api.rkm1.de/api/media/not-a-valid-hash"),
+          url: new URL("https://api.example.com/api/media/not-a-valid-hash"),
           pathname: "/api/media/not-a-valid-hash",
           params: { hash: "not-a-valid-hash" },
         },
@@ -1515,12 +1515,12 @@ describe("Media Routes", () => {
     it("does NOT probe storage when MediaFile does not exist (no .jpg fallback)", async () => {
       mockMediaFileFindUnique.mockResolvedValue(null); // MediaFile not found
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/test-hash", {
+      mockRequest = new Request("https://api.example.com/api/media/test-hash", {
         method: "GET",
       });
 
       const response = await getMediaRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/test-hash"),
+        url: new URL("https://api.example.com/api/media/test-hash"),
         pathname: "/api/media/test-hash",
         params: { hash: "test-hash" },
       });
@@ -1535,13 +1535,13 @@ describe("Media Routes", () => {
       mockMediaFileFindUnique.mockResolvedValue(null);
 
       mockRequest = new Request(
-        "https://api.rkm1.de/api/media/test-hash?variant=optimized",
+        "https://api.example.com/api/media/test-hash?variant=optimized",
         { method: "GET" },
       );
 
       const response = await getMediaRoute!.handler(mockRequest, mockEnv, {
         url: new URL(
-          "https://api.rkm1.de/api/media/test-hash?variant=optimized",
+          "https://api.example.com/api/media/test-hash?variant=optimized",
         ),
         pathname: "/api/media/test-hash",
         params: { hash: "test-hash" },
@@ -1575,13 +1575,13 @@ describe("Media Routes", () => {
       mockR2Get.mockResolvedValue(mockR2Object);
 
       mockRequest = new Request(
-        `https://api.rkm1.de/api/media/${VALID_UPLOAD_HASH}?variant=optimized`,
+        `https://api.example.com/api/media/${VALID_UPLOAD_HASH}?variant=optimized`,
         { method: "GET" },
       );
 
       const response = await getMediaRoute!.handler(mockRequest, mockEnv, {
         url: new URL(
-          `https://api.rkm1.de/api/media/${VALID_UPLOAD_HASH}?variant=optimized`,
+          `https://api.example.com/api/media/${VALID_UPLOAD_HASH}?variant=optimized`,
         ),
         pathname: `/api/media/${VALID_UPLOAD_HASH}`,
         params: { hash: VALID_UPLOAD_HASH },
@@ -1600,12 +1600,12 @@ describe("Media Routes", () => {
       // All extensions return null (not found)
       mockR2Head.mockResolvedValue(null);
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/test-hash", {
+      mockRequest = new Request("https://api.example.com/api/media/test-hash", {
         method: "GET",
       });
 
       const response = await getMediaRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/test-hash"),
+        url: new URL("https://api.example.com/api/media/test-hash"),
         pathname: "/api/media/test-hash",
         params: { hash: "test-hash" },
       });
@@ -1625,12 +1625,12 @@ describe("Media Routes", () => {
       mockEnv.R2_BUCKET = null;
 
       mockRequest = new Request(
-        `https://api.rkm1.de/api/media/${VALID_UPLOAD_HASH}`,
+        `https://api.example.com/api/media/${VALID_UPLOAD_HASH}`,
         { method: "GET" },
       );
 
       const response = await getMediaRoute!.handler(mockRequest, mockEnv, {
-        url: new URL(`https://api.rkm1.de/api/media/${VALID_UPLOAD_HASH}`),
+        url: new URL(`https://api.example.com/api/media/${VALID_UPLOAD_HASH}`),
         pathname: `/api/media/${VALID_UPLOAD_HASH}`,
         params: { hash: VALID_UPLOAD_HASH },
       });
@@ -1646,12 +1646,12 @@ describe("Media Routes", () => {
       // a key (the old maze served on DB-error, a gate-bypass).
       mockMediaFileFindUnique.mockRejectedValue(new Error("Database timeout"));
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/test-hash", {
+      mockRequest = new Request("https://api.example.com/api/media/test-hash", {
         method: "GET",
       });
 
       const response = await getMediaRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/test-hash"),
+        url: new URL("https://api.example.com/api/media/test-hash"),
         pathname: "/api/media/test-hash",
         params: { hash: "test-hash" },
       });
@@ -1689,14 +1689,14 @@ describe("Media Routes", () => {
         mockGetSession.mockResolvedValue(mockSession);
 
         const response = await getMediaRoute!.handler(
-          new Request(`https://api.rkm1.de/api/media/${VALID_UPLOAD_HASH}`, {
+          new Request(`https://api.example.com/api/media/${VALID_UPLOAD_HASH}`, {
             method: "GET",
-            headers: { Origin: "https://www.rkm1.de" },
+            headers: { Origin: "https://www.api.example.com" },
           }),
           mockEnv,
           {
             url: new URL(
-              `https://api.rkm1.de/api/media/${VALID_UPLOAD_HASH}`,
+              `https://api.example.com/api/media/${VALID_UPLOAD_HASH}`,
             ),
             pathname: `/api/media/${VALID_UPLOAD_HASH}`,
             params: { hash: VALID_UPLOAD_HASH },
@@ -1733,14 +1733,14 @@ describe("Media Routes", () => {
         mockGetSession.mockResolvedValue(mockSession);
 
         const response = await getMediaRoute!.handler(
-          new Request(`https://api.rkm1.de/api/media/${VALID_UPLOAD_HASH}`, {
+          new Request(`https://api.example.com/api/media/${VALID_UPLOAD_HASH}`, {
             method: "GET",
-            headers: { Origin: "https://www.rkm1.de" },
+            headers: { Origin: "https://www.api.example.com" },
           }),
           mockEnv,
           {
             url: new URL(
-              `https://api.rkm1.de/api/media/${VALID_UPLOAD_HASH}`,
+              `https://api.example.com/api/media/${VALID_UPLOAD_HASH}`,
             ),
             pathname: `/api/media/${VALID_UPLOAD_HASH}`,
             params: { hash: VALID_UPLOAD_HASH },
@@ -1765,12 +1765,12 @@ describe("Media Routes", () => {
 
       mockGetSession.mockResolvedValue(null); // No session
 
-      mockRequest = new Request("https://api.rkm1.de/api/media", {
+      mockRequest = new Request("https://api.example.com/api/media", {
         method: "GET",
       });
 
       const response = await listRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media"),
+        url: new URL("https://api.example.com/api/media"),
         pathname: "/api/media",
         params: {},
       });
@@ -1789,11 +1789,11 @@ describe("Media Routes", () => {
             mimeType: "image/jpeg",
             size: 1024,
             thumbnailUrl:
-              "https://api.rkm1.de/api/media/hash123?variant=thumbnail",
+              "https://api.example.com/api/media/hash123?variant=thumbnail",
             optimizedUrl:
-              "https://api.rkm1.de/api/media/hash123?variant=optimized",
+              "https://api.example.com/api/media/hash123?variant=optimized",
             originalUrl:
-              "https://api.rkm1.de/api/media/hash123?variant=original",
+              "https://api.example.com/api/media/hash123?variant=original",
             createdAt: "2025-01-15T00:00:00Z",
             hidden: false,
             postCount: 1,
@@ -1804,12 +1804,12 @@ describe("Media Routes", () => {
 
       mockMediaHandlerInstance.listUserMedia.mockResolvedValue(mockResult);
 
-      mockRequest = new Request("https://api.rkm1.de/api/media", {
+      mockRequest = new Request("https://api.example.com/api/media", {
         method: "GET",
       });
 
       const response = await listRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media"),
+        url: new URL("https://api.example.com/api/media"),
         pathname: "/api/media",
         params: {},
       });
@@ -1820,12 +1820,12 @@ describe("Media Routes", () => {
     });
 
     it("should validate limit parameter", async () => {
-      mockRequest = new Request("https://api.rkm1.de/api/media?limit=200", {
+      mockRequest = new Request("https://api.example.com/api/media?limit=200", {
         method: "GET",
       });
 
       const response = await listRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media?limit=200"),
+        url: new URL("https://api.example.com/api/media?limit=200"),
         pathname: "/api/media",
         params: {},
       });
@@ -1843,12 +1843,12 @@ describe("Media Routes", () => {
 
       mockMediaHandlerInstance.listUserMedia.mockResolvedValue(mockResult);
 
-      mockRequest = new Request("https://api.rkm1.de/api/media?type=photo", {
+      mockRequest = new Request("https://api.example.com/api/media?type=photo", {
         method: "GET",
       });
 
       const response = await listRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media?type=photo"),
+        url: new URL("https://api.example.com/api/media?type=photo"),
         pathname: "/api/media",
         params: {},
       });
@@ -1866,12 +1866,12 @@ describe("Media Routes", () => {
       });
       mockApplyRateLimitKV.mockResolvedValue(rateLimitResponse);
 
-      mockRequest = new Request("https://api.rkm1.de/api/media", {
+      mockRequest = new Request("https://api.example.com/api/media", {
         method: "GET",
       });
 
       const response = await listRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media"),
+        url: new URL("https://api.example.com/api/media"),
         pathname: "/api/media",
         params: {},
       });
@@ -1890,12 +1890,12 @@ describe("Media Routes", () => {
 
       mockGetSession.mockResolvedValue(null);
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/media-123", {
+      mockRequest = new Request("https://api.example.com/api/media/media-123", {
         method: "GET",
       });
 
       const response = await detailsRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/media-123"),
+        url: new URL("https://api.example.com/api/media/media-123"),
         pathname: "/api/media/media-123",
         params: { mediaId: "media-123" },
       });
@@ -1912,9 +1912,9 @@ describe("Media Routes", () => {
         cid: "bafybe...",
         mimeType: "image/jpeg",
         size: 1024,
-        thumbnailUrl: "https://api.rkm1.de/api/media/hash123?variant=thumbnail",
-        optimizedUrl: "https://api.rkm1.de/api/media/hash123?variant=optimized",
-        originalUrl: "https://api.rkm1.de/api/media/hash123?variant=original",
+        thumbnailUrl: "https://api.example.com/api/media/hash123?variant=thumbnail",
+        optimizedUrl: "https://api.example.com/api/media/hash123?variant=optimized",
+        originalUrl: "https://api.example.com/api/media/hash123?variant=original",
         createdAt: "2025-01-15T00:00:00Z",
         updatedAt: "2025-01-15T00:00:00Z",
         hidden: false,
@@ -1935,12 +1935,12 @@ describe("Media Routes", () => {
 
       mockMediaHandlerInstance.getMediaDetails.mockResolvedValue(mockDetails);
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/media-123", {
+      mockRequest = new Request("https://api.example.com/api/media/media-123", {
         method: "GET",
       });
 
       const response = await detailsRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/media-123"),
+        url: new URL("https://api.example.com/api/media/media-123"),
         pathname: "/api/media/media-123",
         params: { mediaId: "media-123" },
       });
@@ -1955,12 +1955,12 @@ describe("Media Routes", () => {
         new Error("Media not found"),
       );
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/invalid-id", {
+      mockRequest = new Request("https://api.example.com/api/media/invalid-id", {
         method: "GET",
       });
 
       const response = await detailsRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/invalid-id"),
+        url: new URL("https://api.example.com/api/media/invalid-id"),
         pathname: "/api/media/invalid-id",
         params: { mediaId: "invalid-id" },
       });
@@ -1971,12 +1971,12 @@ describe("Media Routes", () => {
     });
 
     it("should return 400 when mediaId is missing", async () => {
-      mockRequest = new Request("https://api.rkm1.de/api/media/", {
+      mockRequest = new Request("https://api.example.com/api/media/", {
         method: "GET",
       });
 
       const response = await detailsRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/"),
+        url: new URL("https://api.example.com/api/media/"),
         pathname: "/api/media/",
         params: {},
       });
@@ -1992,12 +1992,12 @@ describe("Media Routes", () => {
       });
       mockApplyRateLimitKV.mockResolvedValue(rateLimitResponse);
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/media-123", {
+      mockRequest = new Request("https://api.example.com/api/media/media-123", {
         method: "GET",
       });
 
       const response = await detailsRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/media-123"),
+        url: new URL("https://api.example.com/api/media/media-123"),
         pathname: "/api/media/media-123",
         params: { mediaId: "media-123" },
       });
@@ -2023,14 +2023,14 @@ describe("Media Routes", () => {
       mockGetSession.mockResolvedValue(null);
 
       mockRequest = new Request(
-        "https://api.rkm1.de/api/media/media-123/hide",
+        "https://api.example.com/api/media/media-123/hide",
         {
           method: "POST",
         },
       );
 
       const response = await hideRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/media-123/hide"),
+        url: new URL("https://api.example.com/api/media/media-123/hide"),
         pathname: "/api/media/media-123/hide",
         params: { mediaId: "media-123" },
       });
@@ -2048,14 +2048,14 @@ describe("Media Routes", () => {
       mockMediaHandlerInstance.hideMedia.mockResolvedValue(mockResult);
 
       mockRequest = new Request(
-        "https://api.rkm1.de/api/media/media-123/hide",
+        "https://api.example.com/api/media/media-123/hide",
         {
           method: "POST",
         },
       );
 
       const response = await hideRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/media-123/hide"),
+        url: new URL("https://api.example.com/api/media/media-123/hide"),
         pathname: "/api/media/media-123/hide",
         params: { mediaId: "media-123" },
       });
@@ -2072,14 +2072,14 @@ describe("Media Routes", () => {
       );
 
       mockRequest = new Request(
-        "https://api.rkm1.de/api/media/invalid-id/hide",
+        "https://api.example.com/api/media/invalid-id/hide",
         {
           method: "POST",
         },
       );
 
       const response = await hideRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/invalid-id/hide"),
+        url: new URL("https://api.example.com/api/media/invalid-id/hide"),
         pathname: "/api/media/invalid-id/hide",
         params: { mediaId: "invalid-id" },
       });
@@ -2093,14 +2093,14 @@ describe("Media Routes", () => {
       );
 
       mockRequest = new Request(
-        "https://api.rkm1.de/api/media/media-123/hide",
+        "https://api.example.com/api/media/media-123/hide",
         {
           method: "POST",
         },
       );
 
       const response = await hideRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/media-123/hide"),
+        url: new URL("https://api.example.com/api/media/media-123/hide"),
         pathname: "/api/media/media-123/hide",
         params: { mediaId: "media-123" },
       });
@@ -2117,14 +2117,14 @@ describe("Media Routes", () => {
       mockApplyRateLimitKV.mockResolvedValue(rateLimitResponse);
 
       mockRequest = new Request(
-        "https://api.rkm1.de/api/media/media-123/hide",
+        "https://api.example.com/api/media/media-123/hide",
         {
           method: "POST",
         },
       );
 
       const response = await hideRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/media-123/hide"),
+        url: new URL("https://api.example.com/api/media/media-123/hide"),
         pathname: "/api/media/media-123/hide",
         params: { mediaId: "media-123" },
       });
@@ -2150,14 +2150,14 @@ describe("Media Routes", () => {
       mockGetSession.mockResolvedValue(null);
 
       mockRequest = new Request(
-        "https://api.rkm1.de/api/media/media-123/unhide",
+        "https://api.example.com/api/media/media-123/unhide",
         {
           method: "POST",
         },
       );
 
       const response = await unhideRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/media-123/unhide"),
+        url: new URL("https://api.example.com/api/media/media-123/unhide"),
         pathname: "/api/media/media-123/unhide",
         params: { mediaId: "media-123" },
       });
@@ -2175,14 +2175,14 @@ describe("Media Routes", () => {
       mockMediaHandlerInstance.unhideMedia.mockResolvedValue(mockResult);
 
       mockRequest = new Request(
-        "https://api.rkm1.de/api/media/media-123/unhide",
+        "https://api.example.com/api/media/media-123/unhide",
         {
           method: "POST",
         },
       );
 
       const response = await unhideRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/media-123/unhide"),
+        url: new URL("https://api.example.com/api/media/media-123/unhide"),
         pathname: "/api/media/media-123/unhide",
         params: { mediaId: "media-123" },
       });
@@ -2199,14 +2199,14 @@ describe("Media Routes", () => {
       );
 
       mockRequest = new Request(
-        "https://api.rkm1.de/api/media/media-123/unhide",
+        "https://api.example.com/api/media/media-123/unhide",
         {
           method: "POST",
         },
       );
 
       const response = await unhideRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/media-123/unhide"),
+        url: new URL("https://api.example.com/api/media/media-123/unhide"),
         pathname: "/api/media/media-123/unhide",
         params: { mediaId: "media-123" },
       });
@@ -2223,14 +2223,14 @@ describe("Media Routes", () => {
       mockApplyRateLimitKV.mockResolvedValue(rateLimitResponse);
 
       mockRequest = new Request(
-        "https://api.rkm1.de/api/media/media-123/unhide",
+        "https://api.example.com/api/media/media-123/unhide",
         {
           method: "POST",
         },
       );
 
       const response = await unhideRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/media-123/unhide"),
+        url: new URL("https://api.example.com/api/media/media-123/unhide"),
         pathname: "/api/media/media-123/unhide",
         params: { mediaId: "media-123" },
       });
@@ -2255,12 +2255,12 @@ describe("Media Routes", () => {
 
       mockGetSession.mockResolvedValue(null);
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/media-123", {
+      mockRequest = new Request("https://api.example.com/api/media/media-123", {
         method: "DELETE",
       });
 
       const response = await deleteRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/media-123"),
+        url: new URL("https://api.example.com/api/media/media-123"),
         pathname: "/api/media/media-123",
         params: { mediaId: "media-123" },
       });
@@ -2271,12 +2271,12 @@ describe("Media Routes", () => {
     it("should delete media successfully", async () => {
       mockMediaHandlerInstance.deleteMedia.mockResolvedValue(undefined);
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/media-123", {
+      mockRequest = new Request("https://api.example.com/api/media/media-123", {
         method: "DELETE",
       });
 
       const response = await deleteRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/media-123"),
+        url: new URL("https://api.example.com/api/media/media-123"),
         pathname: "/api/media/media-123",
         params: { mediaId: "media-123" },
       });
@@ -2294,12 +2294,12 @@ describe("Media Routes", () => {
         ),
       );
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/media-123", {
+      mockRequest = new Request("https://api.example.com/api/media/media-123", {
         method: "DELETE",
       });
 
       const response = await deleteRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/media-123"),
+        url: new URL("https://api.example.com/api/media/media-123"),
         pathname: "/api/media/media-123",
         params: { mediaId: "media-123" },
       });
@@ -2315,12 +2315,12 @@ describe("Media Routes", () => {
         new Error("Media is already deleted"),
       );
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/media-123", {
+      mockRequest = new Request("https://api.example.com/api/media/media-123", {
         method: "DELETE",
       });
 
       const response = await deleteRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/media-123"),
+        url: new URL("https://api.example.com/api/media/media-123"),
         pathname: "/api/media/media-123",
         params: { mediaId: "media-123" },
       });
@@ -2334,12 +2334,12 @@ describe("Media Routes", () => {
       });
       mockApplyRateLimitKV.mockResolvedValue(rateLimitResponse);
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/media-123", {
+      mockRequest = new Request("https://api.example.com/api/media/media-123", {
         method: "DELETE",
       });
 
       const response = await deleteRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/media-123"),
+        url: new URL("https://api.example.com/api/media/media-123"),
         pathname: "/api/media/media-123",
         params: { mediaId: "media-123" },
       });
@@ -2687,12 +2687,12 @@ describe("Media Routes", () => {
 
       mockGetSession.mockResolvedValue(null);
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/grouped", {
+      mockRequest = new Request("https://api.example.com/api/media/grouped", {
         method: "GET",
       });
 
       const response = await groupedRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/grouped"),
+        url: new URL("https://api.example.com/api/media/grouped"),
         pathname: "/api/media/grouped",
         params: {},
       });
@@ -2716,9 +2716,9 @@ describe("Media Routes", () => {
                 mimeType: "image/jpeg",
                 size: 1024,
                 thumbnailUrl:
-                  "https://api.rkm1.de/api/media/hash-1?variant=thumbnail",
+                  "https://api.example.com/api/media/hash-1?variant=thumbnail",
                 optimizedUrl:
-                  "https://api.rkm1.de/api/media/hash-1?variant=optimized",
+                  "https://api.example.com/api/media/hash-1?variant=optimized",
                 createdAt: "2025-01-15T10:00:00Z",
                 hidden: false,
                 postCount: 1,
@@ -2733,14 +2733,14 @@ describe("Media Routes", () => {
       );
 
       mockRequest = new Request(
-        "https://api.rkm1.de/api/media/grouped?groupBy=month",
+        "https://api.example.com/api/media/grouped?groupBy=month",
         {
           method: "GET",
         },
       );
 
       const response = await groupedRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/grouped?groupBy=month"),
+        url: new URL("https://api.example.com/api/media/grouped?groupBy=month"),
         pathname: "/api/media/grouped",
         params: {},
       });
@@ -2764,14 +2764,14 @@ describe("Media Routes", () => {
 
     it("should validate groupBy parameter", async () => {
       mockRequest = new Request(
-        "https://api.rkm1.de/api/media/grouped?groupBy=invalid",
+        "https://api.example.com/api/media/grouped?groupBy=invalid",
         {
           method: "GET",
         },
       );
 
       const response = await groupedRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/grouped?groupBy=invalid"),
+        url: new URL("https://api.example.com/api/media/grouped?groupBy=invalid"),
         pathname: "/api/media/grouped",
         params: {},
       });
@@ -2787,7 +2787,7 @@ describe("Media Routes", () => {
       });
 
       mockRequest = new Request(
-        "https://api.rkm1.de/api/media/grouped?groupBy=year&includeHidden=true&type=photo",
+        "https://api.example.com/api/media/grouped?groupBy=year&includeHidden=true&type=photo",
         {
           method: "GET",
         },
@@ -2795,7 +2795,7 @@ describe("Media Routes", () => {
 
       await groupedRoute!.handler(mockRequest, mockEnv, {
         url: new URL(
-          "https://api.rkm1.de/api/media/grouped?groupBy=year&includeHidden=true&type=photo",
+          "https://api.example.com/api/media/grouped?groupBy=year&includeHidden=true&type=photo",
         ),
         pathname: "/api/media/grouped",
         params: {},
@@ -2821,12 +2821,12 @@ describe("Media Routes", () => {
       });
       mockApplyRateLimitKV.mockResolvedValue(rateLimitResponse);
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/grouped", {
+      mockRequest = new Request("https://api.example.com/api/media/grouped", {
         method: "GET",
       });
 
       const response = await groupedRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/grouped"),
+        url: new URL("https://api.example.com/api/media/grouped"),
         pathname: "/api/media/grouped",
         params: {},
       });
@@ -2845,12 +2845,12 @@ describe("Media Routes", () => {
 
       mockGetSession.mockResolvedValue(null);
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/stats", {
+      mockRequest = new Request("https://api.example.com/api/media/stats", {
         method: "GET",
       });
 
       const response = await statsRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/stats"),
+        url: new URL("https://api.example.com/api/media/stats"),
         pathname: "/api/media/stats",
         params: {},
       });
@@ -2877,12 +2877,12 @@ describe("Media Routes", () => {
 
       mockMediaHandlerInstance.getUserMediaStats.mockResolvedValue(mockResult);
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/stats", {
+      mockRequest = new Request("https://api.example.com/api/media/stats", {
         method: "GET",
       });
 
       const response = await statsRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/stats"),
+        url: new URL("https://api.example.com/api/media/stats"),
         pathname: "/api/media/stats",
         params: {},
       });
@@ -2914,7 +2914,7 @@ describe("Media Routes", () => {
       });
 
       mockRequest = new Request(
-        "https://api.rkm1.de/api/media/stats?includeHidden=true&type=video",
+        "https://api.example.com/api/media/stats?includeHidden=true&type=video",
         {
           method: "GET",
         },
@@ -2922,7 +2922,7 @@ describe("Media Routes", () => {
 
       await statsRoute!.handler(mockRequest, mockEnv, {
         url: new URL(
-          "https://api.rkm1.de/api/media/stats?includeHidden=true&type=video",
+          "https://api.example.com/api/media/stats?includeHidden=true&type=video",
         ),
         pathname: "/api/media/stats",
         params: {},
@@ -2945,12 +2945,12 @@ describe("Media Routes", () => {
       });
       mockApplyRateLimitKV.mockResolvedValue(rateLimitResponse);
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/stats", {
+      mockRequest = new Request("https://api.example.com/api/media/stats", {
         method: "GET",
       });
 
       const response = await statsRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/stats"),
+        url: new URL("https://api.example.com/api/media/stats"),
         pathname: "/api/media/stats",
         params: {},
       });
@@ -2993,13 +2993,13 @@ describe("Media Routes", () => {
       const formData = new FormData();
       formData.append("file", blob, "test.jpg");
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/upload", {
+      mockRequest = new Request("https://api.example.com/api/media/upload", {
         method: "POST",
         body: formData,
       });
 
       const response = await uploadRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/upload"),
+        url: new URL("https://api.example.com/api/media/upload"),
         pathname: "/api/media/upload",
         params: {},
       });
@@ -3022,13 +3022,13 @@ describe("Media Routes", () => {
       const formData = new FormData();
       formData.append("file", blob, "test.png");
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/upload", {
+      mockRequest = new Request("https://api.example.com/api/media/upload", {
         method: "POST",
         body: formData,
       });
 
       const response = await uploadRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/upload"),
+        url: new URL("https://api.example.com/api/media/upload"),
         pathname: "/api/media/upload",
         params: {},
       });
@@ -3046,7 +3046,7 @@ describe("Media Routes", () => {
       const formData = new FormData();
       formData.append("file", blob, "test.mp4");
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/upload", {
+      mockRequest = new Request("https://api.example.com/api/media/upload", {
         method: "POST",
         body: formData,
       });
@@ -3054,7 +3054,7 @@ describe("Media Routes", () => {
       mockMediaFileCreate.mockResolvedValue({ id: "pv1", uploadId: "c" + "0".repeat(24), originalKey: null });
 
       const response = await uploadRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/upload"),
+        url: new URL("https://api.example.com/api/media/upload"),
         pathname: "/api/media/upload",
         params: {},
       });
@@ -3077,13 +3077,13 @@ describe("Media Routes", () => {
       const formData = new FormData();
       formData.append("file", blob, "test.jpg");
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/upload", {
+      mockRequest = new Request("https://api.example.com/api/media/upload", {
         method: "POST",
         body: formData,
       });
 
       const response = await uploadRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/upload"),
+        url: new URL("https://api.example.com/api/media/upload"),
         pathname: "/api/media/upload",
         params: {},
       });
@@ -3105,13 +3105,13 @@ describe("Media Routes", () => {
       const formData = new FormData();
       formData.append("file", blob, "test.jpg");
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/upload", {
+      mockRequest = new Request("https://api.example.com/api/media/upload", {
         method: "POST",
         body: formData,
       });
 
       const response = await uploadRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/upload"),
+        url: new URL("https://api.example.com/api/media/upload"),
         pathname: "/api/media/upload",
         params: {},
       });
@@ -3134,13 +3134,13 @@ describe("Media Routes", () => {
       const formData = new FormData();
       formData.append("file", blob, "test.png");
 
-      mockRequest = new Request("https://api.rkm1.de/api/media/upload", {
+      mockRequest = new Request("https://api.example.com/api/media/upload", {
         method: "POST",
         body: formData,
       });
 
       const response = await uploadRoute!.handler(mockRequest, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/upload"),
+        url: new URL("https://api.example.com/api/media/upload"),
         pathname: "/api/media/upload",
         params: {},
       });
@@ -3188,12 +3188,12 @@ describe("Media Routes", () => {
     const runUpload = async (blob: Blob, filename: string) => {
       const formData = new FormData();
       formData.append("file", blob, filename);
-      const request = new Request("https://api.rkm1.de/api/media/upload", {
+      const request = new Request("https://api.example.com/api/media/upload", {
         method: "POST",
         body: formData,
       });
       return uploadRoute!.handler(request, mockEnv, {
-        url: new URL("https://api.rkm1.de/api/media/upload"),
+        url: new URL("https://api.example.com/api/media/upload"),
         pathname: "/api/media/upload",
         params: {},
       });
@@ -3326,12 +3326,12 @@ describe("Media Routes", () => {
     const runUpload = async (blob: Blob, filename: string, env = mockEnv) => {
       const formData = new FormData();
       formData.append("file", blob, filename);
-      const request = new Request("https://api.rkm1.de/api/media/upload", {
+      const request = new Request("https://api.example.com/api/media/upload", {
         method: "POST",
         body: formData,
       });
       return uploadRoute!.handler(request, env, {
-        url: new URL("https://api.rkm1.de/api/media/upload"),
+        url: new URL("https://api.example.com/api/media/upload"),
         pathname: "/api/media/upload",
         params: {},
       });
@@ -3461,12 +3461,12 @@ describe("Media Routes", () => {
 
     const serve = () =>
       getMediaRoute!.handler(
-        new Request(`https://api.rkm1.de/api/media/${VALID_UPLOAD_HASH}`, {
+        new Request(`https://api.example.com/api/media/${VALID_UPLOAD_HASH}`, {
           method: "GET",
         }),
         mockEnv,
         {
-          url: new URL(`https://api.rkm1.de/api/media/${VALID_UPLOAD_HASH}`),
+          url: new URL(`https://api.example.com/api/media/${VALID_UPLOAD_HASH}`),
           pathname: `/api/media/${VALID_UPLOAD_HASH}`,
           params: { hash: VALID_UPLOAD_HASH },
         },
@@ -3542,13 +3542,13 @@ describe("Media Routes", () => {
         "a.jpg",
       );
       const response = await batchRoute!.handler(
-        new Request("https://api.rkm1.de/api/media/upload/batch", {
+        new Request("https://api.example.com/api/media/upload/batch", {
           method: "POST",
           body: fd,
         }),
         mockEnv,
         {
-          url: new URL("https://api.rkm1.de/api/media/upload/batch"),
+          url: new URL("https://api.example.com/api/media/upload/batch"),
           pathname: "/api/media/upload/batch",
           params: {},
         },
@@ -3591,10 +3591,10 @@ describe("Media Routes", () => {
         new Error("connection reset"),
       );
       const response = await listRoute!.handler(
-        new Request("https://api.rkm1.de/api/media", { method: "GET" }),
+        new Request("https://api.example.com/api/media", { method: "GET" }),
         mockEnv,
         {
-          url: new URL("https://api.rkm1.de/api/media"),
+          url: new URL("https://api.example.com/api/media"),
           pathname: "/api/media",
           params: {},
         },
@@ -3609,10 +3609,10 @@ describe("Media Routes", () => {
         new Error("Media not found"),
       );
       const response = await listRoute!.handler(
-        new Request("https://api.rkm1.de/api/media", { method: "GET" }),
+        new Request("https://api.example.com/api/media", { method: "GET" }),
         mockEnv,
         {
-          url: new URL("https://api.rkm1.de/api/media"),
+          url: new URL("https://api.example.com/api/media"),
           pathname: "/api/media",
           params: {},
         },
@@ -3625,12 +3625,12 @@ describe("Media Routes", () => {
         new Error("no permission to view this media"),
       );
       const response = await detailsRoute!.handler(
-        new Request("https://api.rkm1.de/api/media/media-123", {
+        new Request("https://api.example.com/api/media/media-123", {
           method: "GET",
         }),
         mockEnv,
         {
-          url: new URL("https://api.rkm1.de/api/media/media-123"),
+          url: new URL("https://api.example.com/api/media/media-123"),
           pathname: "/api/media/media-123",
           params: { mediaId: "media-123" },
         },
@@ -3645,12 +3645,12 @@ describe("Media Routes", () => {
         new Error("kaboom"),
       );
       const response = await detailsRoute!.handler(
-        new Request("https://api.rkm1.de/api/media/media-123", {
+        new Request("https://api.example.com/api/media/media-123", {
           method: "GET",
         }),
         mockEnv,
         {
-          url: new URL("https://api.rkm1.de/api/media/media-123"),
+          url: new URL("https://api.example.com/api/media/media-123"),
           pathname: "/api/media/media-123",
           params: { mediaId: "media-123" },
         },
@@ -3667,12 +3667,12 @@ describe("Media Routes", () => {
       mockMediaFileFindUnique.mockResolvedValue(null);
       const hashId = "b".repeat(64);
       const response = await detailsRoute!.handler(
-        new Request(`https://api.rkm1.de/api/media/${hashId}`, {
+        new Request(`https://api.example.com/api/media/${hashId}`, {
           method: "GET",
         }),
         mockEnv,
         {
-          url: new URL(`https://api.rkm1.de/api/media/${hashId}`),
+          url: new URL(`https://api.example.com/api/media/${hashId}`),
           pathname: `/api/media/${hashId}`,
           params: { mediaId: hashId },
         },
@@ -3689,12 +3689,12 @@ describe("Media Routes", () => {
         new Error("user lacks permission"),
       );
       const response = await hideRoute!.handler(
-        new Request("https://api.rkm1.de/api/media/media-123/hide", {
+        new Request("https://api.example.com/api/media/media-123/hide", {
           method: "POST",
         }),
         mockEnv,
         {
-          url: new URL("https://api.rkm1.de/api/media/media-123/hide"),
+          url: new URL("https://api.example.com/api/media/media-123/hide"),
           pathname: "/api/media/media-123/hide",
           params: { mediaId: "media-123" },
         },
@@ -3709,12 +3709,12 @@ describe("Media Routes", () => {
         new Error("Media is deleted"),
       );
       const response = await hideRoute!.handler(
-        new Request("https://api.rkm1.de/api/media/media-123/hide", {
+        new Request("https://api.example.com/api/media/media-123/hide", {
           method: "POST",
         }),
         mockEnv,
         {
-          url: new URL("https://api.rkm1.de/api/media/media-123/hide"),
+          url: new URL("https://api.example.com/api/media/media-123/hide"),
           pathname: "/api/media/media-123/hide",
           params: { mediaId: "media-123" },
         },
@@ -3727,12 +3727,12 @@ describe("Media Routes", () => {
     it("POST /hide → 500 on a generic error", async () => {
       mockMediaHandlerInstance.hideMedia.mockRejectedValue(new Error("boom"));
       const response = await hideRoute!.handler(
-        new Request("https://api.rkm1.de/api/media/media-123/hide", {
+        new Request("https://api.example.com/api/media/media-123/hide", {
           method: "POST",
         }),
         mockEnv,
         {
-          url: new URL("https://api.rkm1.de/api/media/media-123/hide"),
+          url: new URL("https://api.example.com/api/media/media-123/hide"),
           pathname: "/api/media/media-123/hide",
           params: { mediaId: "media-123" },
         },
@@ -3747,12 +3747,12 @@ describe("Media Routes", () => {
         new Error("Media not found"),
       );
       const response = await unhideRoute!.handler(
-        new Request("https://api.rkm1.de/api/media/media-123/unhide", {
+        new Request("https://api.example.com/api/media/media-123/unhide", {
           method: "POST",
         }),
         mockEnv,
         {
-          url: new URL("https://api.rkm1.de/api/media/media-123/unhide"),
+          url: new URL("https://api.example.com/api/media/media-123/unhide"),
           pathname: "/api/media/media-123/unhide",
           params: { mediaId: "media-123" },
         },
@@ -3765,12 +3765,12 @@ describe("Media Routes", () => {
         new Error("permission denied"),
       );
       const response = await unhideRoute!.handler(
-        new Request("https://api.rkm1.de/api/media/media-123/unhide", {
+        new Request("https://api.example.com/api/media/media-123/unhide", {
           method: "POST",
         }),
         mockEnv,
         {
-          url: new URL("https://api.rkm1.de/api/media/media-123/unhide"),
+          url: new URL("https://api.example.com/api/media/media-123/unhide"),
           pathname: "/api/media/media-123/unhide",
           params: { mediaId: "media-123" },
         },
@@ -3783,12 +3783,12 @@ describe("Media Routes", () => {
         new Error("kaboom"),
       );
       const response = await unhideRoute!.handler(
-        new Request("https://api.rkm1.de/api/media/media-123/unhide", {
+        new Request("https://api.example.com/api/media/media-123/unhide", {
           method: "POST",
         }),
         mockEnv,
         {
-          url: new URL("https://api.rkm1.de/api/media/media-123/unhide"),
+          url: new URL("https://api.example.com/api/media/media-123/unhide"),
           pathname: "/api/media/media-123/unhide",
           params: { mediaId: "media-123" },
         },
@@ -3800,12 +3800,12 @@ describe("Media Routes", () => {
 
     it("POST /unhide → 400 Invalid request when mediaId is missing", async () => {
       const response = await unhideRoute!.handler(
-        new Request("https://api.rkm1.de/api/media//unhide", {
+        new Request("https://api.example.com/api/media//unhide", {
           method: "POST",
         }),
         mockEnv,
         {
-          url: new URL("https://api.rkm1.de/api/media//unhide"),
+          url: new URL("https://api.example.com/api/media//unhide"),
           pathname: "/api/media//unhide",
           params: {},
         },
@@ -3820,12 +3820,12 @@ describe("Media Routes", () => {
         new Error("permission required"),
       );
       const response = await deleteRoute!.handler(
-        new Request("https://api.rkm1.de/api/media/media-123", {
+        new Request("https://api.example.com/api/media/media-123", {
           method: "DELETE",
         }),
         mockEnv,
         {
-          url: new URL("https://api.rkm1.de/api/media/media-123"),
+          url: new URL("https://api.example.com/api/media/media-123"),
           pathname: "/api/media/media-123",
           params: { mediaId: "media-123" },
         },
@@ -3840,12 +3840,12 @@ describe("Media Routes", () => {
         new Error("Media not found"),
       );
       const response = await deleteRoute!.handler(
-        new Request("https://api.rkm1.de/api/media/media-123", {
+        new Request("https://api.example.com/api/media/media-123", {
           method: "DELETE",
         }),
         mockEnv,
         {
-          url: new URL("https://api.rkm1.de/api/media/media-123"),
+          url: new URL("https://api.example.com/api/media/media-123"),
           pathname: "/api/media/media-123",
           params: { mediaId: "media-123" },
         },
@@ -3858,12 +3858,12 @@ describe("Media Routes", () => {
         new Error("Media is used by other users."),
       );
       const response = await deleteRoute!.handler(
-        new Request("https://api.rkm1.de/api/media/media-123", {
+        new Request("https://api.example.com/api/media/media-123", {
           method: "DELETE",
         }),
         mockEnv,
         {
-          url: new URL("https://api.rkm1.de/api/media/media-123"),
+          url: new URL("https://api.example.com/api/media/media-123"),
           pathname: "/api/media/media-123",
           params: { mediaId: "media-123" },
         },
@@ -3878,12 +3878,12 @@ describe("Media Routes", () => {
         new Error("kaboom"),
       );
       const response = await deleteRoute!.handler(
-        new Request("https://api.rkm1.de/api/media/media-123", {
+        new Request("https://api.example.com/api/media/media-123", {
           method: "DELETE",
         }),
         mockEnv,
         {
-          url: new URL("https://api.rkm1.de/api/media/media-123"),
+          url: new URL("https://api.example.com/api/media/media-123"),
           pathname: "/api/media/media-123",
           params: { mediaId: "media-123" },
         },
@@ -3895,10 +3895,10 @@ describe("Media Routes", () => {
 
     it("DELETE /api/media/:mediaId → 400 Invalid request when mediaId is missing", async () => {
       const response = await deleteRoute!.handler(
-        new Request("https://api.rkm1.de/api/media/", { method: "DELETE" }),
+        new Request("https://api.example.com/api/media/", { method: "DELETE" }),
         mockEnv,
         {
-          url: new URL("https://api.rkm1.de/api/media/"),
+          url: new URL("https://api.example.com/api/media/"),
           pathname: "/api/media/",
           params: {},
         },
@@ -3913,13 +3913,13 @@ describe("Media Routes", () => {
         new Error("Media not found"),
       );
       const response = await groupedRoute!.handler(
-        new Request("https://api.rkm1.de/api/media/grouped?groupBy=month", {
+        new Request("https://api.example.com/api/media/grouped?groupBy=month", {
           method: "GET",
         }),
         mockEnv,
         {
           url: new URL(
-            "https://api.rkm1.de/api/media/grouped?groupBy=month",
+            "https://api.example.com/api/media/grouped?groupBy=month",
           ),
           pathname: "/api/media/grouped",
           params: {},
@@ -3935,12 +3935,12 @@ describe("Media Routes", () => {
         new Error("group boom"),
       );
       const response = await groupedRoute!.handler(
-        new Request("https://api.rkm1.de/api/media/grouped?groupBy=year", {
+        new Request("https://api.example.com/api/media/grouped?groupBy=year", {
           method: "GET",
         }),
         mockEnv,
         {
-          url: new URL("https://api.rkm1.de/api/media/grouped?groupBy=year"),
+          url: new URL("https://api.example.com/api/media/grouped?groupBy=year"),
           pathname: "/api/media/grouped",
           params: {},
         },
@@ -3951,13 +3951,13 @@ describe("Media Routes", () => {
     it("GET /api/media/grouped → 400 Invalid limit when limit is out of range", async () => {
       const response = await groupedRoute!.handler(
         new Request(
-          "https://api.rkm1.de/api/media/grouped?groupBy=month&limit=0",
+          "https://api.example.com/api/media/grouped?groupBy=month&limit=0",
           { method: "GET" },
         ),
         mockEnv,
         {
           url: new URL(
-            "https://api.rkm1.de/api/media/grouped?groupBy=month&limit=0",
+            "https://api.example.com/api/media/grouped?groupBy=month&limit=0",
           ),
           pathname: "/api/media/grouped",
           params: {},
@@ -3973,10 +3973,10 @@ describe("Media Routes", () => {
         new Error("Media not found"),
       );
       const response = await statsRoute!.handler(
-        new Request("https://api.rkm1.de/api/media/stats", { method: "GET" }),
+        new Request("https://api.example.com/api/media/stats", { method: "GET" }),
         mockEnv,
         {
-          url: new URL("https://api.rkm1.de/api/media/stats"),
+          url: new URL("https://api.example.com/api/media/stats"),
           pathname: "/api/media/stats",
           params: {},
         },
@@ -3991,10 +3991,10 @@ describe("Media Routes", () => {
         new Error("stats boom"),
       );
       const response = await statsRoute!.handler(
-        new Request("https://api.rkm1.de/api/media/stats", { method: "GET" }),
+        new Request("https://api.example.com/api/media/stats", { method: "GET" }),
         mockEnv,
         {
-          url: new URL("https://api.rkm1.de/api/media/stats"),
+          url: new URL("https://api.example.com/api/media/stats"),
           pathname: "/api/media/stats",
           params: {},
         },
@@ -4031,13 +4031,13 @@ describe("Media Routes", () => {
       const fd = new FormData();
       fd.append("file", new Blob([bytes], { type: "image/jpeg" }), "fat.jpg");
       const response = await uploadRoute!.handler(
-        new Request("https://api.rkm1.de/api/media/upload", {
+        new Request("https://api.example.com/api/media/upload", {
           method: "POST",
           body: fd,
         }),
         mockEnv,
         {
-          url: new URL("https://api.rkm1.de/api/media/upload"),
+          url: new URL("https://api.example.com/api/media/upload"),
           pathname: "/api/media/upload",
           params: {},
         },
@@ -4061,13 +4061,13 @@ describe("Media Routes", () => {
       const fd = new FormData();
       fd.append("file", new Blob([mp4], { type: "video/mp4" }), "clip.mp4");
       const response = await uploadRoute!.handler(
-        new Request("https://api.rkm1.de/api/media/upload", {
+        new Request("https://api.example.com/api/media/upload", {
           method: "POST",
           body: fd,
         }),
         envEmptyVideo,
         {
-          url: new URL("https://api.rkm1.de/api/media/upload"),
+          url: new URL("https://api.example.com/api/media/upload"),
           pathname: "/api/media/upload",
           params: {},
         },

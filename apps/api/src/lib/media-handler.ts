@@ -6,6 +6,7 @@
 
 import type { Env } from "../env.js";
 import { getLogger, Logger } from "./logger.js";
+import { resolveApiOrigin } from "./api-origin.js";
 import { MediaMetrics } from "./media-metrics.js";
 import { mediaProvenanceView } from "./provenance/response.js";
 
@@ -19,34 +20,12 @@ export class MediaHandler {
   }
 
   /**
-   * Get API domain consistently across all media operations
-   * Respects APP_DOMAIN environment variable, converts www. to api., or uses default
+   * Get API domain consistently across all media operations.
+   * Delegates to `resolveApiOrigin` (`lib/api-origin.ts`): APP_DOMAIN, else
+   * relative URLs — no compiled-in hostname.
    */
   private static getApiDomain(env: Env): string {
-    if (env.APP_DOMAIN) {
-      try {
-        const url = new URL(env.APP_DOMAIN);
-        let hostname = url.hostname;
-
-        // Convert www. to api.
-        if (hostname.startsWith("www.")) {
-          hostname = hostname.replace("www.", "api.");
-        } else if (!hostname.includes("api.")) {
-          // If no api. subdomain, add it
-          const parts = hostname.split(".");
-          if (parts.length >= 2) {
-            hostname = `api.${parts.slice(-2).join(".")}`;
-          }
-        }
-
-        return `${url.protocol}//${hostname}`;
-      } catch {
-        // Invalid URL, fall through to default
-      }
-    }
-
-    // Default fallback
-    return "https://api.rkm1.de";
+    return resolveApiOrigin(env);
   }
 
   /**
@@ -482,7 +461,7 @@ export class MediaHandler {
 
       // Extract contentHashes and media IDs from Entity avatar URLs
       // Avatar URLs can be stored in multiple formats:
-      // 1. Full URL: https://api.rkm1.de/api/media/{contentHash}?variant=...
+      // 1. Full URL: https://api.example.com/api/media/{contentHash}?variant=...
       // 2. ContentHash: just the hash string
       // 3. Media ID: the media ID (CUID) directly
       const avatarContentHashes = new Set<string>();
@@ -506,7 +485,7 @@ export class MediaHandler {
             }
 
             // Extract contentHash from URL format: /api/media/{contentHash}?variant=...
-            // Or: https://api.rkm1.de/api/media/{contentHash}?variant=...
+            // Or: https://api.example.com/api/media/{contentHash}?variant=...
             const match = avatarUrl.match(/\/api\/media\/([a-f0-9]+)(?:\?|$)/i);
             if (match && match[1]) {
               avatarContentHashes.add(match[1]);
@@ -514,7 +493,7 @@ export class MediaHandler {
             }
 
             // Extract media ID from URL format: /api/media/{mediaId}
-            // Or: https://api.rkm1.de/api/media/{mediaId}
+            // Or: https://api.example.com/api/media/{mediaId}
             const mediaIdMatch = avatarUrl.match(
               /\/api\/media\/([a-z0-9]+)(?:\?|$)/i,
             );
@@ -878,7 +857,7 @@ export class MediaHandler {
 
       // Extract contentHashes and media IDs from Entity avatar URLs
       // Avatar URLs can be stored in multiple formats:
-      // 1. Full URL: https://api.rkm1.de/api/media/{contentHash}?variant=...
+      // 1. Full URL: https://api.example.com/api/media/{contentHash}?variant=...
       // 2. ContentHash: just the hash string
       // 3. Media ID: the media ID (CUID) directly
       const avatarContentHashes = new Set<string>();
@@ -902,7 +881,7 @@ export class MediaHandler {
             }
 
             // Extract contentHash from URL format: /api/media/{contentHash}?variant=...
-            // Or: https://api.rkm1.de/api/media/{contentHash}?variant=...
+            // Or: https://api.example.com/api/media/{contentHash}?variant=...
             const match = avatarUrl.match(/\/api\/media\/([a-f0-9]+)(?:\?|$)/i);
             if (match && match[1]) {
               avatarContentHashes.add(match[1]);
@@ -910,7 +889,7 @@ export class MediaHandler {
             }
 
             // Extract media ID from URL format: /api/media/{mediaId}
-            // Or: https://api.rkm1.de/api/media/{mediaId}
+            // Or: https://api.example.com/api/media/{mediaId}
             const mediaIdMatch = avatarUrl.match(
               /\/api\/media\/([a-z0-9]+)(?:\?|$)/i,
             );
@@ -1328,7 +1307,7 @@ export class MediaHandler {
 
       // Extract contentHashes from Entity avatar URLs
       // Avatar URLs can be stored in multiple formats:
-      // 1. Full URL: https://api.rkm1.de/api/media/{contentHash}?variant=...
+      // 1. Full URL: https://api.example.com/api/media/{contentHash}?variant=...
       // 2. ContentHash: just the hash string
       // 3. Media ID: the media ID (CUID)
       let isAvatar = false;
@@ -1350,7 +1329,7 @@ export class MediaHandler {
             }
 
             // Extract contentHash from URL format: /api/media/{contentHash}?variant=...
-            // Or: https://api.rkm1.de/api/media/{contentHash}?variant=...
+            // Or: https://api.example.com/api/media/{contentHash}?variant=...
             const match = avatarUrl.match(/\/api\/media\/([a-f0-9]+)(?:\?|$)/i);
             if (match && match[1] === media.contentHash) {
               isAvatar = true;

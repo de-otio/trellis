@@ -84,8 +84,8 @@ Current configuration:
 
 To fix, set one of:
   - TEST_ENV=dev (auto-loads from environments/dev/config.yaml)
-  - API_URL=https://api.rkm1.de FRONTEND_URL=https://www.rkm1.de
-  - API_DOMAIN=api.rkm1.de WWW_DOMAIN=www.rkm1.de
+  - API_URL=https://api.example.com FRONTEND_URL=https://www.example.com
+  - API_DOMAIN=api.example.com WWW_DOMAIN=www.example.com
 
 Example:
   export TEST_ENV=dev
@@ -189,17 +189,8 @@ export function getApiUrl(): string {
     return apiUrl;
   }
 
-  // Try to construct from APP_DOMAIN (but skip test.example.com as it's not a real dev server)
-  // For dev environment, prefer api.rkm1.de if APP_DOMAIN is test.example.com
+  // Try to construct from APP_DOMAIN
   if (process.env.APP_DOMAIN) {
-    if (process.env.APP_DOMAIN.includes("test.example.com")) {
-      // test.example.com is not a real dev server, use api.rkm1.de instead
-      const devApiUrl = "https://api.rkm1.de";
-      console.log(
-        `[test-config] APP_DOMAIN is test.example.com (not a real server), using dev API: ${devApiUrl}`,
-      );
-      return devApiUrl;
-    }
     console.log(
       `[test-config] Using APP_DOMAIN from environment: ${process.env.APP_DOMAIN}`,
     );
@@ -234,7 +225,7 @@ export function getApiUrl(): string {
 ❌ ERROR: Cannot determine API URL for postdeployment tests.
 
 Postdeployment tests require a deployed API to test against. Please set one of:
-  - API_URL environment variable (e.g., export API_URL="https://api.rkm1.de")
+  - API_URL environment variable (e.g., export API_URL="https://api.example.com")
   - DEPLOYED_API_URL environment variable
   - API_DOMAIN environment variable (will be prefixed with https://)
   - APP_DOMAIN environment variable
@@ -247,7 +238,7 @@ Working directory: ${process.cwd()}
 For local testing against deployed API:
   export TEST_ENV="dev"
   # or
-  export API_URL="https://api.rkm1.de"
+  export API_URL="https://api.example.com"
   npm run test:postdeployment
 
 For CI/CD: Ensure the workflow sets TEST_ENV or API_URL after deployment.
@@ -276,9 +267,9 @@ Cannot determine API URL for e2e tests. E2E tests require deployed URLs.
 
 Please set one of:
   - TEST_ENV=dev (loads from environments/dev/config.yaml) - RECOMMENDED
-  - API_URL=https://api.rkm1.de
-  - API_DOMAIN=api.rkm1.de
-  - DEPLOYED_API_URL=https://api.rkm1.de
+  - API_URL=https://api.example.com
+  - API_DOMAIN=api.example.com
+  - DEPLOYED_API_URL=https://api.example.com
 
 Current environment: ${environment}
 Working directory: ${process.cwd()}
@@ -301,8 +292,8 @@ For CI/CD: Ensure the workflow sets TEST_ENV or API_URL after deployment.
   console.warn(
     `[test-config] To use deployed API, set one of:
   - TEST_ENV=dev (loads from environments/dev/config.yaml)
-  - API_URL=https://api.rkm1.de
-  - API_DOMAIN=api.rkm1.de`,
+  - API_URL=https://api.example.com
+  - API_DOMAIN=api.example.com`,
   );
   return defaultUrl;
 }
@@ -365,9 +356,6 @@ export function getFrontendUrl(): string {
   const apiUrl = getApiUrl();
   if (apiUrl && apiUrl !== "http://localhost:8787") {
     // Try common patterns
-    if (apiUrl.includes("api.rkm1.de")) {
-      return "https://www.rkm1.de";
-    }
     if (apiUrl.includes("api.example.com")) {
       return "https://www.example.com";
     }
@@ -398,9 +386,9 @@ Cannot determine Frontend URL for e2e tests. E2E tests require deployed URLs.
 
 Please set one of:
   - TEST_ENV=dev (loads from environments/dev/config.yaml) - RECOMMENDED
-  - FRONTEND_URL=https://www.rkm1.de
-  - WWW_DOMAIN=www.rkm1.de
-  - WWW_URL=https://www.rkm1.de
+  - FRONTEND_URL=https://www.example.com
+  - WWW_DOMAIN=www.example.com
+  - WWW_URL=https://www.example.com
 
 Current environment: ${environment}
 Working directory: ${process.cwd()}
@@ -423,8 +411,8 @@ For CI/CD: Ensure the workflow sets TEST_ENV or FRONTEND_URL after deployment.
   console.warn(
     `[test-config] To use deployed frontend, set one of:
   - TEST_ENV=dev (loads from environments/dev/config.yaml)
-  - FRONTEND_URL=https://www.rkm1.de
-  - WWW_DOMAIN=www.rkm1.de`,
+  - FRONTEND_URL=https://www.example.com
+  - WWW_DOMAIN=www.example.com`,
   );
   return defaultUrl;
 }
