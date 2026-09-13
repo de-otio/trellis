@@ -17,9 +17,12 @@
   "containerUser": "root",
   "remoteUser": "node",
 
-  "mounts": [
-    "source=${localEnv:HOME}/.config/repo-aegis/engagements.yaml,target=/opt/agent/registry/engagements.yaml,type=bind,readonly"
-  ],
+  // The read-only engagement-registry mount is declared in
+  // docker-compose.devcontainer.yml, not here: in compose mode the CLI drops
+  // the readonly flag from a "mounts" entry (verified 2026-09-13, same
+  // finding as skybber's landing) — the mount came up read-write, which
+  // defeats the whole point of the mount (the agent must not be able to
+  // shrink its own deny set). Compose's own ":ro" is honoured.
 
   "remoteEnv": { "GH_TOKEN": "${localEnv:AGENT_GH_TOKEN}" },
   "containerEnv": { "AGENT_ALLOW_SERVICES": "postgres:5432,dynamodb:8000,localstack:4566" },

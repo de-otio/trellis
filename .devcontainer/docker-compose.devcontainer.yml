@@ -29,6 +29,13 @@ services:
       - "no-new-privileges:true"
     volumes:
       - .:/workspace:cached
+      # The one deliberate host mount (finding C9): the marker deny set, READ
+      # ONLY so the agent cannot shrink it. It lives here rather than in
+      # devcontainer.json "mounts" because — VERIFIED 2026-09-13, same finding
+      # as skybber's landing — in compose mode the devcontainer CLI rewrites a
+      # "mounts" entry into a plain compose volume and DROPS its readonly
+      # flag. Compose's own ":ro" is honoured.
+      - ${HOME}/.config/repo-aegis/engagements.yaml:/opt/agent/registry/engagements.yaml:ro
     working_dir: /workspace
     command: ["sleep", "infinity"]
     # Without this, `docker compose up -d postgres dynamodb localstack agent`
