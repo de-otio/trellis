@@ -1,10 +1,11 @@
-# After a Dependabot PR auto-merges, bump the prerelease suffix and tag —
-# ALWAYS a prerelease, never straight to a stable/`latest` release. The
-# release event then fires publish.yml, which publishes to the registry
-# under a non-`latest` dist-tag (see publish.yml's "Select dist-tag from
-# version": any version containing `-` lands on alpha/beta/rc/next, never
-# `latest`). Promoting a vetted prerelease to `latest` stays a human action
-# (a manual `npm dist-tag add` or a manually tagged stable release).
+# After a Dependabot PR auto-merges, bump the prerelease suffix — ALWAYS a
+# prerelease, never straight to a stable/`latest` release. publish.yml is
+# TAG-triggered (`on: push: tags: [v*, extension-api-v*, extension-testkit-v*]`),
+# and publishes to the registry under a non-`latest` dist-tag (see publish.yml's
+# "Select dist-tag from version": any version containing `-` lands on
+# alpha/beta/rc/next, never `latest`). Promoting a vetted prerelease to `latest`
+# stays a human action (a manual `npm dist-tag add` or a manually tagged stable
+# release).
 #
 # HIGH-1 (2026-08 security review): this used to default to
 # `version-strategy: auto`, which bumps a *stable* version with `patch` —
@@ -22,12 +23,86 @@
 # The paired compensating control is `.github/dependabot.yml`'s `cooldown`
 # (4 days): a hijacked upstream release has a few days to be caught/pulled
 # before Dependabot even opens the PR that starts this chain.
+#
+# -----------------------------------------------------------------------------
+# 2026-09-13 — this chain had never completed once since the rulesets went
+# active, for two reasons in a fixed order. Both are fixed in
+# de-otio/.github's reusable workflow; this file supplies the inputs that make
+# the fix apply to trellis. Background: dot-notes
+# github-native-orchestration/plan/session-handoff-2026-09-12.md §2e and
+# "Still open" item 5.
+#
+# `verify-command` (defect 5a). The reusable workflow's sanity-check used to
+#   hardcode `npm ci` → `npm run build` → `npm test`. On this repo the root
+#   `build` script is only `npm run build -w @de-otio/trellis` and does NO
+#   codegen, so `tsc` compiled against an ungenerated Prisma client and died
+#   with `TS2305: Module '"@prisma/client"' has no exported member
+#   'PrismaClient'` — three runs on 2026-09-12 (34674353867, 34674371242,
+#   34674398301), while this repo's own CI was green on the same commit
+#   (34677671716). So the value below mirrors ci.yml's recipe instead of
+#   substituting a weaker one.
+#
+#   WHAT IT DELIBERATELY OMITS, and why that is not a gap:
+#     * `npm run prisma:migrate:deploy` and every test lane. Those need the
+#       postgis + dynamodb-local SERVICE CONTAINERS ci.yml declares, and a
+#       service container cannot be passed through a workflow input — it is a
+#       property of the job. There is no version of this input that reaches a
+#       database.
+#     * The gate on the tests is ci.yml itself, which runs on `push: [main]`
+#       against the very commit this job is re-verifying, and whose
+#       `ci-required` aggregate is what the merge queue required before the
+#       Dependabot PR landed in the first place. This step's job is narrower
+#       and honest about it: prove the BUMPED tree (package.json +
+#       package-lock.json rewritten) still installs, generates and compiles.
+#
+#   `prisma generate` needs no database and no DATABASE_URL here: Prisma 7
+#   moved the connection out of the datasource block, and apps/api/prisma.config.ts
+#   reads `process.env.DATABASE_URL ?? ""` precisely so that generate works
+#   "in environments without a live database (CI, fresh checkouts)" — its own
+#   comment. ci.yml passes a DATABASE_URL to its generate step out of habit,
+#   not necessity.
+#
+#   The worker typecheck is in the list because it is the one compile that
+#   catches a dependency bump breaking the no-DOM-lib build of the api sources
+#   (found 2026-08-21: threat-intel-service.ts TS2322 at v0.25.0-alpha.9), and
+#   nothing else outside ci.yml exercises it.
+#
+# `node-version: '22'` — ci.yml pins 22 and the reusable workflow defaults to
+#   24. Verifying a bump on a different Node major than CI uses is the same
+#   class of mistake as verifying it with a different build recipe.
+#
+# `release-mode: pull-request` (defect 5b / §2e). The reusable workflow used to
+#   `git push origin HEAD:main` and then push a tag as `github-actions[bot]`.
+#   This repo carries `d2a-minimal-pr-required` and `byo-full-public` (both
+#   `bypass_actors: []`) plus `d8-release-tags`, so both writes are refused —
+#   fixing only the sanity-check would have moved the failure from `TS2305` to
+#   `GH013 Repository rule violations found` four steps later. In this mode the
+#   bump goes to a side branch (untouched by either ruleset, which target
+#   `~DEFAULT_BRANCH`), and NO tag is created: cutting the release tag stays a
+#   human action under `d8-release-tags`' `OrganizationAdmin` bypass, which
+#   already works from a terminal today. Widening
+#   `rulesets/bypass-allowlist.json` was rejected — that file is keyed per
+#   ruleset, so the entry would grant every workflow in all ten
+#   ruleset-carrying repos a direct push to `main`.
+#
+#   Opening the pull request is a human action too, for now. `GITHUB_TOKEN`
+#   cannot open one (`can_approve_pull_request_reviews` is false org-wide and
+#   here), and the GitHub App route has three unmet prerequisites as of
+#   2026-09-13 — the org automation App holds `pull_requests: read`, this repo
+#   holds neither `SWEEP_BEDROCK_ROLE_ARN` nor `HYGIENE_CRED_ROLE_ARN`, and the
+#   dot-ops OIDC trust does not admit this repo. Automating it is its own
+#   change once those land; the job summary carries a ready-to-run
+#   `gh pr create` in the meantime.
 name: Auto-release on Dependabot merge
 
 on:
   push:
     branches: [main, master, dev]
 
+# `contents: write` and nothing else: the side-branch push uses GITHUB_TOKEN
+# and no ruleset covers a non-default branch. Nothing here opens a pull request
+# or exchanges an OIDC token, so neither `pull-requests` nor `id-token` is
+# granted.
 permissions:
   contents: write
 
@@ -45,4 +120,15 @@ jobs:
     uses: de-otio/.github/.github/workflows/dependabot-release-on-bump.yml@main
     with:
       version-strategy: prerelease
+      node-version: '22'
+      release-mode: pull-request
+      verify-timeout-minutes: 15
+      # Mirrors ci.yml's DB-free steps, in ci.yml's order. Keep the two in
+      # sync: if ci.yml gains a compile step that a dependency bump could
+      # break, it belongs here too.
+      verify-command: |
+        npm ci
+        npm run prisma:generate
+        npm run build -w @de-otio/trellis
+        npx tsc -p apps/worker/tsconfig.json
     secrets: inherit
