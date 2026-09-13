@@ -1,0 +1,30 @@
+// Vendored/adapted from de-otio/dot-work devcontainer/base at 7615bc703f6fa7bda32b8cc0d49f6f8ac0df6121
+// on 2026-09-13, per devcontainer/README.md "Per-repo consumption" and
+// "Repos with service containers (trellis)". Do not edit the vendored
+// Dockerfile/entrypoint.sh/init-firewall.sh/boundary-test.sh here — edit the
+// base in dot-work and re-vendor.
+{
+  "name": "trellis (agent sandbox)",
+
+  "dockerComposeFile": [
+    "../docker-compose.yml",
+    "docker-compose.devcontainer.yml"
+  ],
+  "service": "agent",
+  "runServices": ["postgres", "dynamodb", "localstack"],
+  "workspaceFolder": "/workspace",
+
+  "containerUser": "root",
+  "remoteUser": "node",
+
+  "mounts": [
+    "source=${localEnv:HOME}/.config/repo-aegis/engagements.yaml,target=/opt/agent/registry/engagements.yaml,type=bind,readonly"
+  ],
+
+  "remoteEnv": { "GH_TOKEN": "${localEnv:AGENT_GH_TOKEN}" },
+  "containerEnv": { "AGENT_ALLOW_SERVICES": "postgres:5432,dynamodb:8000,localstack:4566" },
+
+  "postCreateCommand": "npm ci",
+
+  "features": {}
+}

@@ -1,0 +1,52 @@
+# Vendored/adapted from de-otio/dot-work devcontainer/base at 7615bc703f6fa7bda32b8cc0d49f6f8ac0df6121
+# on 2026-09-13. Adds the agent-sandbox service alongside trellis's own
+# docker-compose.yml (postgres/dynamodb/localstack) so the agent container
+# joins the same compose network. See dot-work devcontainer/README.md,
+# "Repos with service containers (trellis)".
+#
+# cap_add / security_opt live HERE, not in devcontainer.json's "runArgs": the
+# devcontainer CLI does not apply runArgs when dockerComposeFile is set: the
+# compose file is the source of truth for container creation flags in that mode.
+#
+# PATH GOTCHA, verified 2026-09-13: docker compose resolves relative paths in
+# EVERY merged compose file against one "project directory" — the directory of
+# the FIRST file in dockerComposeFile's list, here "../docker-compose.yml" i.e.
+# the repo root — not against the directory this file itself lives in
+# (.devcontainer/). A first attempt used `context: .` / `dockerfile: Dockerfile`
+# / `..:/workspace`, on the (wrong) assumption that paths in this file resolve
+# relative to .devcontainer/. That produced `context` = repo root (Dockerfile
+# not found there — ENOENT) and a bind mount source one level ABOVE the repo
+# root. The paths below are written relative to the repo root instead.
+services:
+  agent:
+    build:
+      context: .devcontainer
+      dockerfile: Dockerfile
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    security_opt:
+      - "no-new-privileges:true"
+    volumes:
+      - .:/workspace:cached
+    working_dir: /workspace
+    command: ["sleep", "infinity"]
+    # Without this, `docker compose up -d postgres dynamodb localstack agent`
+    # starts all four in parallel with no ordering guarantee. Observed
+    # 2026-09-13: the agent's ENTRYPOINT (init-firewall.sh, resolving
+    # AGENT_ALLOW_SERVICES via the compose network's embedded DNS) is fast
+    # enough on a cached build that it can run before postgres/dynamodb have
+    # attached to the network and registered their service names, so
+    # `getent ahostsv4 postgres` fails and the firewall — correctly —
+    # refuses to start with a partial allowlist. depends_on only needs
+    # service_started (a name resolves once the container is network-attached,
+    # well before its own app is ready); do not change this to
+    # service_healthy for dynamodb/localstack, which define no healthcheck in
+    # the parent docker-compose.yml and would block forever.
+    depends_on:
+      postgres:
+        condition: service_started
+      dynamodb:
+        condition: service_started
+      localstack:
+        condition: service_started
