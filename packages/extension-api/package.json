@@ -30,7 +30,7 @@
     "README.md"
   ],
   "dependencies": {
-    "zod": "^4.5.4"
+    "zod": "^4.6.4"
   },
   "devDependencies": {
     "@types/node": "^26.4.0",
