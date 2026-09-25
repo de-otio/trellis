@@ -197,6 +197,25 @@ describe("deleteUserData", () => {
     });
   });
 
+  // Worker review W3: the sink guard. Every filter is `{ where: { fk: userId } }`,
+  // so a non-string userId would be an all-rows predicate.
+  describe("userId type guard at the sink (W3)", () => {
+    it.each([
+      ["a Prisma operator object", { not: "" }],
+      ["an empty string", ""],
+      ["a number", 42],
+      ["undefined", undefined],
+    ])("throws BEFORE any deletion when userId is %s", async (_label, userId) => {
+      await expect(
+        deleteUserData(mockDb, userId as unknown as string, { pseudonymSecret: TEST_SECRET }),
+      ).rejects.toThrow(/userId must be a non-empty string/);
+
+      expect(mockDb.commentSentiment.deleteMany).not.toHaveBeenCalled();
+      expect(mockDb.report.updateMany).not.toHaveBeenCalled();
+      expect(mockDb.user.delete).not.toHaveBeenCalled();
+    });
+  });
+
   // WS-2 finding 2: the fail-closed tombstone-key gate.
   describe("pseudonym-secret fail-closed gate (finding 2)", () => {
     it("throws BEFORE any deletion when the secret is empty", async () => {

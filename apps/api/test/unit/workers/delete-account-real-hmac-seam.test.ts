@@ -42,7 +42,11 @@ interface DbCall {
 function makeFakeDb(calls: DbCall[]): unknown {
   const respond = (model: string, method: string): unknown => {
     if (model === "user" && method === "findUnique") {
-      return { email: "subject@test.example" };
+      return {
+        email: "subject@test.example",
+        deletionConfirmedAt: new Date("2026-01-01T00:00:00Z"),
+        deletionScheduledAt: new Date("2026-01-08T00:00:00Z"),
+      };
     }
     switch (method) {
       case "findMany":
@@ -96,6 +100,7 @@ function makeCtx(
     logger: { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn(), trace: vi.fn() },
     identity: undefined,
     resolvePseudonymSecret: resolver,
+    clock: () => Date.parse("2026-02-01T00:00:00Z"),
     deleteStagingObjects: vi
       .fn()
       .mockResolvedValue({ requested: 0, failedBatches: 0, truncated: false }),

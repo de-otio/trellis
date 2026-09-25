@@ -19,6 +19,8 @@
  * schema-revealing structure.
  */
 
+import { z } from "zod";
+
 /**
  * The queue message trellis produces (`user-export-handler.ts` — a job
  * POINTER, not the export content): the job id resolves all further state
@@ -32,6 +34,27 @@ export interface ExportJobMessage {
   readonly format: string;
   readonly region: string;
 }
+
+/**
+ * Wire schema for `ExportJobMessage` (worker review W3): the container
+ * validates the message against this before handing it to the injected port,
+ * so the port never receives an unchecked cast. Loose, not strict — keys
+ * beyond the five are passed through untouched, as before; only the fields
+ * the interface promises are checked. Same shape as the producer's `send`.
+ */
+export const ExportJobMessageSchema = z.looseObject({
+  jobId: z.string().min(1),
+  userId: z.string().min(1),
+  email: z.string(),
+  format: z.string(),
+  region: z.string(),
+});
+
+// Compile-time proof that the schema's output satisfies the interface — if
+// either drifts, this line stops type-checking.
+const _schemaSatisfiesMessage: (m: z.infer<typeof ExportJobMessageSchema>) => ExportJobMessage =
+  (m) => m;
+void _schemaSatisfiesMessage;
 
 /** Terminal disposition of one export job run. */
 export type ExportRunResult =

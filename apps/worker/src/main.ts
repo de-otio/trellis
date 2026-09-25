@@ -136,6 +136,7 @@ async function main(): Promise<void> {
 
   const table = buildDispatchTable({
     logger,
+    clock: Date.now,
     deleteAccount: {
       getDb: () => getLambdaPrisma(),
       // LAZY at-use resolution (finding 4) — never resolved onto a context.

@@ -174,6 +174,14 @@ export async function deleteUserData(
   userId: string,
   options: DeleteUserDataOptions,
 ): Promise<DeletionResult> {
+  // Type-confusion guard at the sink (worker review W3): every filter below is
+  // `{ where: { <fk>: userId } }`, so a non-string here — e.g. `{ not: "" }`
+  // from an unvalidated queue payload — is an all-rows predicate. The callers
+  // validate; this makes the guarantee independent of call order.
+  if (typeof userId !== "string" || userId.length === 0) {
+    throw new Error("deleteUserData: userId must be a non-empty string — refusing erasure");
+  }
+
   // FAIL-CLOSED gate (finding 2): assert the tombstone key BEFORE any
   // deletion, so an unkeyed run can never delete data and then write a
   // reversible `HMAC("", …)` tombstone in step 15c. Re-asserted here (not

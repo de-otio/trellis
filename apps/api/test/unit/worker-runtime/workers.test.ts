@@ -28,6 +28,7 @@ function makeLogger(): Logger {
 function baseInput(overrides: Partial<DispatchTableInput> = {}): DispatchTableInput {
   return {
     logger: makeLogger(),
+    clock: () => Date.parse("2026-09-25T12:00:00Z"),
     deleteAccount: {
       getDb: vi.fn(async () => ({ user: { findUnique: vi.fn().mockResolvedValue(null) } }) as never),
       resolvePseudonymSecret: vi.fn(async () => "secret"),
@@ -200,5 +201,84 @@ describe("user-export boundary (T11, finding 9)", () => {
     ]) {
       expect(src.toLowerCase()).not.toContain(marker.toLowerCase());
     }
+  });
+});
+
+describe("payload validation at the dispatcher seam (W3)", () => {
+  it("delete-account: a schema failure returns fail BEFORE any capability is touched", async () => {
+    const input = baseInput();
+    const table = buildDispatchTable(input);
+
+    for (const payload of [{ userId: { not: "" } }, { userId: 7 }, {}, "u1", null]) {
+      expect(await table["delete-account"](payload, raw("{}"))).toBe("fail");
+    }
+    expect(input.deleteAccount.getDb).not.toHaveBeenCalled();
+    expect(input.deleteAccount.resolvePseudonymSecret).not.toHaveBeenCalled();
+    expect(input.logger.error).toHaveBeenCalledWith(
+      expect.stringContaining("failed schema validation"),
+      expect.objectContaining({ queue: "delete-account", messageId: "m-1" }),
+    );
+  });
+
+  it("delete-account: a valid pointer to a user with no due deletion throws (no-ack → DLQ), never erases", async () => {
+    const findUnique = vi.fn().mockResolvedValue({
+      email: "user@test.com",
+      deletionConfirmedAt: null,
+      deletionScheduledAt: null,
+    });
+    const input = baseInput();
+    const table = buildDispatchTable({
+      ...input,
+      deleteAccount: { ...input.deleteAccount, getDb: vi.fn(async () => ({ user: { findUnique } }) as never) },
+    });
+
+    await expect(table["delete-account"]({ userId: "u1" }, raw("{}"))).rejects.toThrow(/refusing erasure/);
+    expect(input.deleteAccount.deleteStagingObjects).not.toHaveBeenCalled();
+  });
+
+  it("user-export: a schema failure returns fail and the injected port never sees the payload", async () => {
+    const run = vi.fn();
+    const input = baseInput({ exportWorker: { run } });
+    const table = buildDispatchTable(input);
+
+    for (const payload of [
+      { userId: "u1", email: "u@example.com", format: "json", region: "EU" }, // no jobId
+      { jobId: { $ne: null }, userId: "u1", email: "u@example.com", format: "json", region: "EU" },
+      { jobId: "j1", userId: "u1", email: "u@example.com", format: "json" }, // no region
+    ]) {
+      expect(await table["user-export"](payload, raw("{}"))).toBe("fail");
+    }
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("user-export: the schema failure log carries paths, never the email", async () => {
+    const input = baseInput({ exportWorker: { run: vi.fn() } });
+    const table = buildDispatchTable(input);
+
+    await table["user-export"]({ jobId: 1, email: "leak@example.com" }, raw("{}"));
+
+    const logged = JSON.stringify((input.logger.error as ReturnType<typeof vi.fn>).mock.calls);
+    expect(logged).toContain("jobId");
+    expect(logged).not.toContain("leak@example.com");
+  });
+
+  it("user-export: a valid message reaches the port unchanged, extra keys included", async () => {
+    const run = vi.fn().mockResolvedValue({ kind: "completed" });
+    const table = buildDispatchTable(baseInput({ exportWorker: { run } }));
+    const msg = { jobId: "j1", userId: "u1", email: "u@example.com", format: "json", region: "EU", traceId: "t" };
+
+    expect(await table["user-export"](msg, raw("{}"))).toBe("ack");
+    expect(run).toHaveBeenCalledWith(msg);
+  });
+
+  it("GATE: the dispatch table carries no unchecked payload cast", () => {
+    const src = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "../../../../worker/src/workers.ts"),
+      "utf-8",
+    );
+    // Every queue that reads payload fields binds a schema; `payload as X`
+    // is the shape W3 removed. Comments are stripped so prose can't mask it.
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    expect(code).not.toMatch(/payload\s+as\s+[A-Z]/);
   });
 });

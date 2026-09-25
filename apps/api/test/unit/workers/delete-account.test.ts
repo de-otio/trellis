@@ -16,17 +16,30 @@ vi.mock("../../../src/lib/services/user-data-deletion.js", () => ({
   deleteUserData: mockDeleteUserData,
 }));
 
+import fc from "fast-check";
 import {
+  erasureAuthorization,
   runDeleteAccount,
   type DeleteAccountContext,
 } from "../../../src/lib/workers/delete-account.js";
+
+/** Frozen "now" for every test (W3 reads the clock). */
+const NOW = Date.parse("2026-09-25T12:00:00Z");
+const DAY = 24 * 60 * 60 * 1000;
+
+/** A user whose confirmed deletion fell due yesterday — erasure authorized. */
+const DUE_USER = {
+  email: "user@test.com",
+  deletionConfirmedAt: new Date(NOW - 8 * DAY),
+  deletionScheduledAt: new Date(NOW - DAY),
+};
 
 function makeCtx(overrides: Partial<DeleteAccountContext> = {}): DeleteAccountContext & {
   _findUnique: ReturnType<typeof vi.fn>;
   _deleteStaging: ReturnType<typeof vi.fn>;
   _identityDelete: ReturnType<typeof vi.fn>;
 } {
-  const _findUnique = vi.fn().mockResolvedValue({ email: "user@test.com" });
+  const _findUnique = vi.fn().mockResolvedValue(DUE_USER);
   const _deleteStaging = vi
     .fn()
     .mockResolvedValue({ requested: 0, failedBatches: 0, truncated: false });
@@ -37,6 +50,7 @@ function makeCtx(overrides: Partial<DeleteAccountContext> = {}): DeleteAccountCo
     identity: { deleteUser: _identityDelete },
     resolvePseudonymSecret: vi.fn().mockResolvedValue("test-secret"),
     deleteStagingObjects: _deleteStaging,
+    clock: () => NOW,
     ...overrides,
   };
   return Object.assign(ctx, { _findUnique, _deleteStaging, _identityDelete });
@@ -62,7 +76,7 @@ describe("runDeleteAccount", () => {
 
     expect(ctx._findUnique).toHaveBeenCalledWith({
       where: { id: "u1" },
-      select: { email: true },
+      select: { email: true, deletionConfirmedAt: true, deletionScheduledAt: true },
     });
     expect(mockDeleteUserData).toHaveBeenCalledWith(ctx.db, "u1", {
       pseudonymSecret: "test-secret",
@@ -250,5 +264,129 @@ describe("runDeleteAccount", () => {
       "Account deleted",
       expect.objectContaining({ stagingCleanupIncomplete: true }),
     );
+  });
+
+  // ── W3: the message is a pointer, the user row is the authority ──────────
+  describe("payload validation (W3 — type-confusion class)", () => {
+    it.each([
+      ["an operator object", { userId: { not: "" } }],
+      ["a number", { userId: 42 }],
+      ["an empty string", { userId: "" }],
+      ["an over-long id", { userId: "x".repeat(256) }],
+      ["a missing userId", {}],
+      ["an extra key", { userId: "u1", tenantId: "t1" }],
+      ["null", null],
+      ["an array", [{ userId: "u1" }]],
+    ])("THROWS before any lookup or deletion for %s", async (_label, payload) => {
+      const ctx = makeCtx();
+
+      await expect(runDeleteAccount(payload, ctx)).rejects.toThrow(/schema validation/);
+
+      expect(ctx.resolvePseudonymSecret).not.toHaveBeenCalled();
+      expect(ctx._findUnique).not.toHaveBeenCalled();
+      expect(mockDeleteUserData).not.toHaveBeenCalled();
+      expect(ctx._deleteStaging).not.toHaveBeenCalled();
+      expect(ctx._identityDelete).not.toHaveBeenCalled();
+    });
+
+    it("never echoes the rejected value into the error (untrusted, may be PII)", async () => {
+      const ctx = makeCtx();
+      await expect(
+        runDeleteAccount({ userId: { contains: "victim@example.com" } }, ctx),
+      ).rejects.toThrow(expect.objectContaining({ message: expect.not.stringContaining("victim@") }));
+    });
+  });
+
+  describe("erasure authorization (W3 — bound to state the API wrote)", () => {
+    it.each([
+      ["no deletion was ever requested", { deletionConfirmedAt: null, deletionScheduledAt: null }],
+      ["a request was made but never confirmed", { deletionConfirmedAt: null, deletionScheduledAt: new Date(NOW - DAY) }],
+      ["confirmed but no scheduled time", { deletionConfirmedAt: new Date(NOW - DAY), deletionScheduledAt: null }],
+      ["confirmed, still inside the grace window", { deletionConfirmedAt: new Date(NOW - DAY), deletionScheduledAt: new Date(NOW + 6 * DAY) }],
+    ])("REFUSES (throws, no erasure) when %s", async (_label, state) => {
+      const ctx = makeCtx();
+      ctx._findUnique.mockResolvedValueOnce({ email: "user@test.com", ...state });
+
+      await expect(runDeleteAccount({ userId: "u1" }, ctx)).rejects.toThrow(/refusing erasure/);
+
+      expect(mockDeleteUserData).not.toHaveBeenCalled();
+      expect(ctx._deleteStaging).not.toHaveBeenCalled();
+      expect(ctx._identityDelete).not.toHaveBeenCalled();
+      expect(ctx.logger.error).toHaveBeenCalledWith(
+        expect.stringContaining("refusing erasure"),
+        expect.objectContaining({ userId: "u1" }),
+      );
+    });
+
+    it("erases at exactly the scheduled instant (the nightly cron's `lte`)", async () => {
+      const ctx = makeCtx();
+      ctx._findUnique.mockResolvedValueOnce({ ...DUE_USER, deletionScheduledAt: new Date(NOW) });
+
+      await expect(runDeleteAccount({ userId: "u1" }, ctx)).resolves.toBeUndefined();
+      expect(mockDeleteUserData).toHaveBeenCalledTimes(1);
+    });
+
+    it("refuses one millisecond before the scheduled instant", async () => {
+      const ctx = makeCtx();
+      ctx._findUnique.mockResolvedValueOnce({ ...DUE_USER, deletionScheduledAt: new Date(NOW + 1) });
+
+      await expect(runDeleteAccount({ userId: "u1" }, ctx)).rejects.toThrow(/not yet reached/);
+      expect(mockDeleteUserData).not.toHaveBeenCalled();
+    });
+
+    it("erases an e2e test user without deletion state (the sweeper's own rule)", async () => {
+      const ctx = makeCtx();
+      ctx._findUnique.mockResolvedValueOnce({
+        email: "__e2e_run42@test.example",
+        deletionConfirmedAt: null,
+        deletionScheduledAt: null,
+      });
+
+      await expect(runDeleteAccount({ userId: "u1" }, ctx)).resolves.toBeUndefined();
+      expect(mockDeleteUserData).toHaveBeenCalledTimes(1);
+      expect(ctx.logger.info).toHaveBeenCalledWith(
+        "Account deleted",
+        expect.objectContaining({ basis: "e2e-test-user" }),
+      );
+    });
+
+    it("does not treat the prefix appearing later in the address as e2e", async () => {
+      const ctx = makeCtx();
+      ctx._findUnique.mockResolvedValueOnce({
+        email: "someone.__e2e_@test.example",
+        deletionConfirmedAt: null,
+        deletionScheduledAt: null,
+      });
+
+      await expect(runDeleteAccount({ userId: "u1" }, ctx)).rejects.toThrow(/refusing erasure/);
+      expect(mockDeleteUserData).not.toHaveBeenCalled();
+    });
+
+    it("property: authorized ⇔ e2e prefix OR (confirmed AND scheduled ≤ now)", () => {
+      const maybeDate = fc.option(
+        fc.integer({ min: NOW - 30 * DAY, max: NOW + 30 * DAY }).map((ms) => new Date(ms)),
+        { nil: null },
+      );
+      fc.assert(
+        fc.property(
+          fc.boolean(),
+          maybeDate,
+          maybeDate,
+          (e2e, deletionConfirmedAt, deletionScheduledAt) => {
+            const email = e2e ? "__e2e_x@test.example" : "user@test.example";
+            const verdict = erasureAuthorization(
+              { email, deletionConfirmedAt, deletionScheduledAt },
+              NOW,
+            );
+            const expected =
+              e2e ||
+              (deletionConfirmedAt !== null &&
+                deletionScheduledAt !== null &&
+                deletionScheduledAt.getTime() <= NOW);
+            return verdict.authorized === expected;
+          },
+        ),
+      );
+    });
   });
 });

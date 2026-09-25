@@ -24,7 +24,10 @@ import type { Logger } from "../../api/src/lib/logger.js";
 import type { StagingCleanupResult } from "../../api/src/lib/media/staging-object-cleanup.js";
 import type { IdentityAdminPort } from "../../api/src/lib/workers/identity-admin-port.js";
 import type { LinkThreatIntelPort } from "../../api/src/lib/workers/context.js";
-import { runDeleteAccount, type DeleteAccountPayload } from "../../api/src/lib/workers/delete-account.js";
+import {
+  DeleteAccountPayloadSchema,
+  runDeleteAccount,
+} from "../../api/src/lib/workers/delete-account.js";
 import { runLinkCheck } from "../../api/src/lib/workers/link-check.js";
 import { runFollowersEvents } from "../../api/src/lib/workers/followers-events.js";
 import { runFederationOutbox } from "../../api/src/lib/workers/federation-outbox.js";
@@ -36,10 +39,11 @@ import {
   processCompletion,
   type CompletionDeps,
 } from "../../api/src/lib/workers/media-completion.js";
-import type {
-  ExportJobMessage,
-  ExportWorkerPort,
+import {
+  ExportJobMessageSchema,
+  type ExportWorkerPort,
 } from "../../api/src/lib/workers/export-worker-port.js";
+import { withPayloadSchema } from "../../api/src/lib/workers/queue-payload.js";
 import type { MessageWorker } from "./dispatch.js";
 
 /** The queues this runtime consumes (§0 handler table + the T11 export
@@ -84,6 +88,8 @@ export const FORBIDDEN_MEDIA_CAPABILITY_KEYS: readonly string[] = [
 
 export interface DispatchTableInput {
   readonly logger: Logger;
+  /** Injectable clock, epoch ms — the delete-account authorization reads it. */
+  readonly clock: () => number;
   readonly deleteAccount: DeleteAccountCapabilities;
   readonly media: MediaCapabilities;
   /**
@@ -127,17 +133,21 @@ export function buildDispatchTable(
   const { logger } = input;
 
   return {
-    "delete-account": async (payload) => {
+    // W3: validated at the seam — a schema failure returns "fail" before any
+    // capability is touched. The core re-validates (the AWS entrypoint reaches
+    // it directly) and checks the user row authorizes the erasure.
+    "delete-account": withPayloadSchema("delete-account", DeleteAccountPayloadSchema, logger, async (payload) => {
       const db = await input.deleteAccount.getDb();
-      await runDeleteAccount(payload as DeleteAccountPayload, {
+      await runDeleteAccount(payload, {
         db,
         logger,
+        clock: input.clock,
         identity: input.deleteAccount.identity,
         resolvePseudonymSecret: input.deleteAccount.resolvePseudonymSecret,
         deleteStagingObjects: input.deleteAccount.deleteStagingObjects,
       });
       // void return ⇒ ack; a throw propagates ⇒ fail (dispatcher rule).
-    },
+    }),
 
     "media-processing": async (_payload, raw) => {
       const deps = getInjectedMediaProcessingDeps();
@@ -206,14 +216,14 @@ export function buildDispatchTable(
       // OFF-branch returns ⇒ ack (log-and-drop); ON-branch throws ⇒ fail.
     },
 
-    "user-export": async (payload) => {
+    "user-export": withPayloadSchema("user-export", ExportJobMessageSchema, logger, async (payload) => {
       const port = input.exportWorker;
       if (port === undefined) {
         // Fail closed: an un-wired export consumer must never drop a DSAR
         // request. Throw ⇒ no-ack ⇒ redeliver ⇒ DLQ pages.
         throw new Error("user-export: ExportWorkerPort not injected");
       }
-      const result = await port.run(payload as ExportJobMessage);
+      const result = await port.run(payload);
       switch (result.kind) {
         case "completed":
           return "ack";
@@ -226,6 +236,6 @@ export function buildDispatchTable(
         case "retry":
           return "fail";
       }
-    },
+    }),
   };
 }
