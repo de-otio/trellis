@@ -32,6 +32,7 @@ async function buildContext(): Promise<DeleteAccountContext> {
   return {
     db,
     logger: getLogger(),
+    clock: Date.now,
     // WS-3.3: the shared IdentityProviderPort (X6 absorbed) — byte-identical
     // AdminDeleteUser on the default cognito provider.
     identity: makeIdentityAdminPort(),
@@ -56,8 +57,9 @@ export const handler: SQSHandler = async (event) => {
 
   for (const record of event.Records) {
     try {
-      const payload = JSON.parse(record.body) as { userId: string };
-      await runDeleteAccount(payload, ctx);
+      // No cast: the core validates the payload and checks the user row
+      // authorizes the erasure (W3); either failure throws → batch failure.
+      await runDeleteAccount(JSON.parse(record.body), ctx);
     } catch (err) {
       logger.error("Failed to delete account", { error: err, messageId: record.messageId });
       failedIds.push(record.messageId);

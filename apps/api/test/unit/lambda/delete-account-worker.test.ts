@@ -64,6 +64,12 @@ vi.mock("../../../src/lib/services/user-data-deletion", () => ({
   resolvePseudonymSecret: vi.fn().mockResolvedValue("test-pseudonym-secret"),
 }));
 
+/** Deletion state the W3 authorization requires: confirmed, and already due. */
+const DUE = {
+  deletionConfirmedAt: new Date("2026-01-01T00:00:00Z"),
+  deletionScheduledAt: new Date("2026-01-08T00:00:00Z"),
+};
+
 describe("DeleteAccountWorker Lambda", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -81,8 +87,9 @@ describe("DeleteAccountWorker Lambda", () => {
       ),
     );
 
-    // Default: user exists
-    mockPrismaFindUnique.mockResolvedValue({ email: "user@test.com" });
+    // Default: user exists, with a confirmed deletion whose scheduled time has
+    // passed — the state the W3 authorization requires before any erasure.
+    mockPrismaFindUnique.mockResolvedValue({ email: "user@test.com", ...DUE });
 
     // Default: deleteUserData succeeds (AR7: media erasure happens inside it
     // and reports the staging keys the worker must delete from S3)
@@ -137,7 +144,7 @@ describe("DeleteAccountWorker Lambda", () => {
     const result = await handler(event, {} as any, () => {});
 
     expect(result).toBeUndefined();
-    expect(mockPrismaFindUnique).toHaveBeenCalledWith({ where: { id: "u1" }, select: { email: true } });
+    expect(mockPrismaFindUnique).toHaveBeenCalledWith({ where: { id: "u1" }, select: { email: true, deletionConfirmedAt: true, deletionScheduledAt: true } });
     expect(mockDeleteUserData).toHaveBeenCalled();
     expect(mockS3Send).toHaveBeenCalledTimes(1); // one DeleteObjects batch
     expect(mockCognitoSend).toHaveBeenCalled();
@@ -161,11 +168,11 @@ describe("DeleteAccountWorker Lambda", () => {
 
   it("should return batchItemFailures for records that fail", async () => {
     // First record succeeds
-    mockPrismaFindUnique.mockResolvedValueOnce({ email: "user1@test.com" });
+    mockPrismaFindUnique.mockResolvedValueOnce({ email: "user1@test.com", ...DUE });
     mockDeleteUserData.mockResolvedValueOnce({ posts: 0, mediaStagingKeys: [] });
 
     // Second record: deleteUserData fails
-    mockPrismaFindUnique.mockResolvedValueOnce({ email: "user2@test.com" });
+    mockPrismaFindUnique.mockResolvedValueOnce({ email: "user2@test.com", ...DUE });
     mockDeleteUserData.mockRejectedValueOnce(new Error("DB connection lost"));
 
     const handler = await loadHandler();
@@ -178,6 +185,40 @@ describe("DeleteAccountWorker Lambda", () => {
 
     expect(result.batchItemFailures).toHaveLength(1);
     expect(result.batchItemFailures[0].itemIdentifier).toBe("msg-2");
+  });
+
+  it("W3: a type-confused payload is a batch failure with no lookup and no erasure", async () => {
+    const handler = await loadHandler();
+    const event = makeSQSEvent([
+      { messageId: "msg-evil", body: JSON.stringify({ userId: { not: "" } }) },
+    ]);
+
+    const result: any = await handler(event, {} as any, () => {});
+
+    expect(result.batchItemFailures).toEqual([{ itemIdentifier: "msg-evil" }]);
+    expect(mockPrismaFindUnique).not.toHaveBeenCalled();
+    expect(mockDeleteUserData).not.toHaveBeenCalled();
+    expect(mockCognitoSend).not.toHaveBeenCalled();
+  });
+
+  it("W3: a well-formed pointer to a user with no confirmed deletion is refused (batch failure)", async () => {
+    mockPrismaFindUnique.mockResolvedValueOnce({
+      email: "user@test.com",
+      deletionConfirmedAt: null,
+      deletionScheduledAt: null,
+    });
+
+    const handler = await loadHandler();
+    const event = makeSQSEvent([
+      { messageId: "msg-forged", body: JSON.stringify({ userId: "u1" }) },
+    ]);
+
+    const result: any = await handler(event, {} as any, () => {});
+
+    expect(result.batchItemFailures).toEqual([{ itemIdentifier: "msg-forged" }]);
+    expect(mockDeleteUserData).not.toHaveBeenCalled();
+    expect(mockS3Send).not.toHaveBeenCalled();
+    expect(mockCognitoSend).not.toHaveBeenCalled();
   });
 
   it("should handle invalid JSON in message body", async () => {
