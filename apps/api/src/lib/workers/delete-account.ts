@@ -9,9 +9,15 @@
  *   failure; the container leaves the message in flight → redelivery).
  * - `deleteUserData` is idempotent (soft-delete + GC), safe under
  *   at-least-once redelivery.
- * - External-identity deletion is deliberately best-effort (swallowed): an
- *   identity-provider failure must NOT become a batch-item failure (it would
- *   re-run `deleteUserData` idempotently but re-page).
+ * - External-identity deletion runs FIRST and a failure THROWS (message not
+ *   acked → redelivery, then DLQ). It used to run last and be swallowed:
+ *   once `deleteUserData` had removed the row, nothing recorded that the
+ *   identity still needed deleting, so a failed delete was never retried and
+ *   the erased account could still sign in. Throwing before any erasure makes
+ *   the redelivery a clean rerun; adapters treat "already absent" as success,
+ *   so a rerun after a later step failed is a no-op here. Same order as the
+ *   nightly cron, which also backstops a message that ends in the DLQ (the
+ *   row is still due).
  * - GDPR fail-closed (findings 2 + 7): the pseudonym tombstone HMAC key is
  *   resolved lazily through `ctx.resolvePseudonymSecret` (never
  *   `process.env`) and re-asserted non-empty BEFORE any deletion; if
@@ -150,13 +156,19 @@ export async function runDeleteAccount(
     throw new Error(`delete-account: refusing erasure (${authorization.reason})`);
   }
 
-  // 2. Delete all database records. Media erasure happens inside
+  // 2. Delete the external identity FIRST (see the module contract): a
+  //    failure throws before anything is erased, so redelivery retries it.
+  if (ctx.identity) {
+    await ctx.identity.deleteUser({ email: user.email });
+  }
+
+  // 3. Delete all database records. Media erasure happens inside
   //    deleteUserData (AR7 / GDPR Art. 17): the user's MediaFile rows are
   //    soft-deleted into the nightly GC purge, which reclaims their CAS
   //    bytes (`cas/{tenantId}/{contentHash}`) within its bounded window.
   const result = await deleteUserData(ctx.db, userId, { pseudonymSecret });
 
-  // 3. Delete the user-scoped STAGING objects (`pending/…`, `processing/…`)
+  // 4. Delete the user-scoped STAGING objects (`pending/…`, `processing/…`)
   //    reported by the erasure — the GC purge does not cover staging keys.
   //    Never touches `cas/*` (the helper refuses cas/ keys defensively).
   const staging = await ctx.deleteStagingObjects(result.mediaStagingKeys);
@@ -168,16 +180,6 @@ export async function runDeleteAccount(
   const stagingCleanupIncomplete = staging.failedBatches > 0 || staging.truncated;
   if (stagingCleanupIncomplete) {
     ctx.logger.error("Staging object cleanup incomplete", { userId, ...staging });
-  }
-
-  // 4. Delete the external identity (best-effort — swallowed by design; see
-  //    the module contract above).
-  if (ctx.identity) {
-    try {
-      await ctx.identity.deleteUser({ email: user.email });
-    } catch (identityErr) {
-      ctx.logger.warn("Identity deletion failed", { userId, error: identityErr });
-    }
   }
 
   // The completion record must not read as an unqualified success when part of

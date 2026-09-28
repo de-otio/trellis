@@ -17,9 +17,10 @@
  *    flow is untouched — this server-side initiation is purely additive.
  *  - `deleteUser` is exactly WS-2's provisional X6 `IdentityAdminPort`
  *    implementation (`AdminDeleteUserCommand({ UserPoolId, Username: email })`,
- *    previously hand-rolled per Lambda entrypoint). SDK errors propagate
- *    UNWRAPPED, as they did there — the WS-2 call sites treat deletion as
- *    best-effort and swallow failures themselves.
+ *    previously hand-rolled per Lambda entrypoint). It is idempotent —
+ *    `UserNotFoundException` resolves — because the nightly erasure retries a
+ *    whole account after a partial failure. Every other SDK error propagates
+ *    UNWRAPPED.
  */
 
 import {
@@ -33,6 +34,7 @@ import {
   type MagicLinkInitiation,
   type MagicLinkOptions,
 } from "@de-otio/saas-foundation/identity";
+import { getLogger, type Logger } from "../logger.js";
 
 /** The subset of the Cognito client this adapter uses (injectable in tests). */
 export interface CognitoClientLike {
@@ -55,6 +57,8 @@ export interface CognitoIdentityProviderConfig {
   readonly region?: string;
   /** Injectable client (tests). */
   readonly client?: CognitoClientLike;
+  /** Where the "already absent" warning goes (default: the app logger). */
+  readonly logger?: Pick<Logger, "warn">;
 }
 
 export class CognitoIdentityProvider implements IdentityProviderPort {
@@ -148,11 +152,29 @@ export class CognitoIdentityProvider implements IdentityProviderPort {
    * propagate unwrapped; callers keep their best-effort handling.
    */
   async deleteUser(input: { readonly email: string }): Promise<void> {
-    await this.getClient().send(
-      new AdminDeleteUserCommand({
-        UserPoolId: this.cfg.userPoolId,
-        Username: input.email,
-      }),
-    );
+    try {
+      await this.getClient().send(
+        new AdminDeleteUserCommand({
+          UserPoolId: this.cfg.userPoolId,
+          Username: input.email,
+        }),
+      );
+    } catch (err) {
+      // Idempotent, like the Keycloak adapter (no match / 404 = done): the
+      // nightly erasure deletes the identity FIRST and retries the whole
+      // account on the next run if a later step fails, so "already gone"
+      // must be success here or that account could never finish erasing.
+      // Every other SDK error still propagates unwrapped.
+      if ((err as { name?: unknown } | null)?.name === "UserNotFoundException") {
+        // Not silent: "not found" is also what a misconfigured pool or an
+        // email changed on the IdP side looks like. No address in the log.
+        (this.cfg.logger ?? getLogger()).warn(
+          "[CognitoIdentityProvider] deleteUser: identity already absent — treated as deleted",
+          { userPoolId: this.cfg.userPoolId },
+        );
+        return;
+      }
+      throw err;
+    }
   }
 }

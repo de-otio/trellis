@@ -269,12 +269,29 @@ describe("NightlyCron Lambda", () => {
       });
     });
 
-    it("sends the completion email and continues when Cognito deletion fails", async () => {
-      mockCognitoSend.mockRejectedValueOnce(new Error("UserNotFoundException"));
+    it("treats an already-deleted identity (UserNotFoundException) as done and completes the erasure", async () => {
+      mockCognitoSend.mockRejectedValueOnce(
+        Object.assign(new Error("User does not exist."), { name: "UserNotFoundException" }),
+      );
 
       const handler = await loadHandler();
       await expect(handler()).resolves.toBeUndefined();
+      expect(mockDeleteUserData).toHaveBeenCalled();
       expect(mockSesSend).toHaveBeenCalled();
+    });
+
+    it("an identity-provider failure fails THAT account before any erasure, so the next run retries it", async () => {
+      mockCognitoSend.mockRejectedValueOnce(
+        Object.assign(new Error("Rate exceeded"), { name: "TooManyRequestsException" }),
+      );
+
+      const handler = await loadHandler();
+      await expect(handler()).resolves.toBeUndefined();
+      // Nothing erased: the user row (the record that the identity still needs
+      // deleting) survives, still due, for the next nightly run.
+      expect(mockDeleteUserData).not.toHaveBeenCalled();
+      expect(mockDb.deletionAuditLog.create).not.toHaveBeenCalled();
+      expect(mockSesSend).not.toHaveBeenCalled();
     });
 
     it("From uses FROM_EMAIL + EMAIL_BRAND_NAME so the sender aligns with DMARC", async () => {
