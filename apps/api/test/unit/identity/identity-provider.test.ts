@@ -160,8 +160,23 @@ describe("CognitoIdentityProvider (existing-surface parity)", () => {
     expect(cmd.input).toEqual({ UserPoolId: "pool-1", Username: "user@example.test" });
   });
 
-  it("deleteUser propagates SDK errors UNWRAPPED (best-effort callers unchanged)", async () => {
-    const sdkError = Object.assign(new Error("gone"), { name: "UserNotFoundException" });
+  it("deleteUser is idempotent: an already-absent user (UserNotFoundException) resolves", async () => {
+    // The nightly erasure deletes the identity first and retries the whole
+    // account if a later step fails; "already gone" must not fail the retry.
+    const provider = new CognitoIdentityProvider({
+      userPoolId: "pool-1",
+      appClientId: "client-1",
+      client: {
+        send: async () => {
+          throw Object.assign(new Error("gone"), { name: "UserNotFoundException" });
+        },
+      },
+    });
+    await expect(provider.deleteUser({ email: "x@example.test" })).resolves.toBeUndefined();
+  });
+
+  it("deleteUser propagates every OTHER SDK error UNWRAPPED", async () => {
+    const sdkError = Object.assign(new Error("throttled"), { name: "TooManyRequestsException" });
     const provider = new CognitoIdentityProvider({
       userPoolId: "pool-1",
       appClientId: "client-1",

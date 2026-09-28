@@ -330,6 +330,8 @@ interface PurgeRun {
 async function runPurge(
   nowMs: number,
   wrapDb: (real: PrismaClient) => PrismaClient = (real) => real,
+  /** Emails whose identity-provider delete fails in THIS run. */
+  identityFailsFor: readonly string[] = [],
 ): Promise<PurgeRun> {
   const run: PurgeRun = {
     identityDeletes: [],
@@ -352,6 +354,9 @@ async function runPurge(
     objectStore: { deleteObjects: async () => {} },
     identity: {
       deleteUser: async ({ email }: { email: string }) => {
+        if (identityFailsFor.includes(email)) {
+          throw new Error("identity provider unavailable (injected)");
+        }
         run.identityDeletes.push(email);
       },
     },
@@ -619,17 +624,52 @@ describe("account deletion — grace period and nightly purge (real DB)", () => 
     await expectAccountErased(ok);
     expect(run.identityDeletes).toContain(ok.email);
     // The failed account keeps its row and its due state, so the next night
-    // retries it; its identity is NOT deleted while its data still exists.
+    // retries it. (Its identity was deleted first, before the DB fault; the
+    // retry re-issues that delete, which adapters treat as idempotent.)
     const stillDue = await db.user.findUniqueOrThrow({ where: { id: failing.id } });
     expect(stillDue.deletionConfirmedAt).not.toBeNull();
     expect(stillDue.deletionScheduledAt!.getTime()).toBeLessThanOrEqual(now);
-    expect(run.identityDeletes).not.toContain(failing.email);
     expect(deletionCounts(run)).toMatchObject({ ProcessedCount: 1, FailedCount: 1 });
 
     // Next night, fault gone: it is purged.
     const retry = await runPurge(now + DAY);
     expect(await db.user.findUnique({ where: { id: failing.id } })).toBeNull();
     expect(retry.identityDeletes).toContain(failing.email);
+    await expectBystanderIntact(friend);
+  });
+});
+
+describe("account deletion — identity-provider failure is retried, not lost", () => {
+  it("a failed identity delete leaves the account due and untouched; the next run deletes identity and data", async () => {
+    const friend = await seedBystander();
+    const a = await seedAccount("idp-down", friend);
+    const other = await seedAccount("idp-ok", friend);
+    const { scheduledAt: s1 } = await requestDeletion(a.id);
+    const { scheduledAt: s2 } = await requestDeletion(other.id);
+    const now = Math.max(s1.getTime(), s2.getTime()) + DAY;
+
+    const first = await runPurge(now, undefined, [a.email]);
+
+    // Before: the identity delete ran AFTER the DB erasure and its failure was
+    // swallowed — the row was gone, nothing recorded that the identity still
+    // existed, and it was never retried. Now nothing is erased for that
+    // account, so its row is still the record of the outstanding work.
+    await expectAccountIntact(a);
+    const row = await db.user.findUniqueOrThrow({ where: { id: a.id } });
+    expect(row.deletionConfirmedAt).not.toBeNull();
+    expect(row.deletionScheduledAt!.getTime()).toBeLessThanOrEqual(now);
+    expect(first.identityDeletes).not.toContain(a.email);
+    expect(first.emails).not.toContain(a.email);
+    expect(await db.deletionAuditLog.count({ where: { userId: a.id } })).toBe(0);
+    // …and it did not hold up the other account.
+    await expectAccountErased(other);
+    expect(deletionCounts(first)).toMatchObject({ ProcessedCount: 1, FailedCount: 1 });
+
+    const retry = await runPurge(now + DAY);
+    expect(retry.identityDeletes).toContain(a.email);
+    await expectAccountErased(a);
+    expect(retry.emails).toContain(a.email);
+    expect(await db.deletionAuditLog.count({ where: { userId: a.id } })).toBe(1);
     await expectBystanderIntact(friend);
   });
 });

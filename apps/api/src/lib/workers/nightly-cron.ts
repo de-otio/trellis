@@ -6,9 +6,10 @@
  *  1. Hard-delete soft-deleted media older than 7 days + batch-remove their
  *     object-storage keys (the GC purge that reclaims CAS bytes).
  *  2. Clean up expired invitations.
- *  4. Process scheduled account deletions (GDPR Art. 17): `deleteUserData`
- *     (with the FAIL-CLOSED pseudonym tombstone key, findings 2+7), staging
- *     cleanup, best-effort external-identity deletion + profile-cache
+ *  4. Process scheduled account deletions (GDPR Art. 17): external-identity
+ *     deletion FIRST (a failure fails that account, which stays due and is
+ *     retried next run), then `deleteUserData` (with the FAIL-CLOSED
+ *     pseudonym tombstone key, findings 2+7), staging cleanup, profile-cache
  *     cleanup, audit row, completion email, deletion metrics.
  *  5. Age-tier transitions (Safer Social Design).
  *  6. Sentiment-digest notifications.
@@ -218,12 +219,26 @@ export async function runNightlyCron(
         for (const user of usersToDelete) {
           signal.throwIfAborted();
           try {
-            // 4a. Delete all database records. Media erasure happens inside
+            // 4a. Delete the external identity FIRST, and fail the account
+            //     (not the run) if that fails. It used to run after the DB
+            //     erasure and swallow errors: by then the user row — the only
+            //     record that the identity still needs deleting — was gone, so
+            //     a failed identity delete was never retried and the account
+            //     could still sign in. In this order a failure leaves the row
+            //     due and untouched, and the next nightly run retries it.
+            //     Adapters must treat "no such user" as success (Keycloak: no
+            //     match / 404; Cognito: UserNotFoundException) so a retry after
+            //     a later step failed is a no-op here, not a permanent failure.
+            if (ctx.identity) {
+              await ctx.identity.deleteUser({ email: user.email });
+            }
+
+            // 4b. Delete all database records. Media erasure happens inside
             //     deleteUserData (AR7 / GDPR Art. 17): the user's MediaFile
             //     rows are soft-deleted into step 1's purge.
             const result = await deleteUserData(db, user.id, { pseudonymSecret });
 
-            // 4b. Delete the user-scoped STAGING objects reported by the
+            // 4c. Delete the user-scoped STAGING objects reported by the
             //     erasure — step 1's purge does not cover staging keys.
             //     Never touches `cas/*`.
             try {
@@ -243,19 +258,6 @@ export async function runNightlyCron(
                 userId: user.id,
                 error: s3Err,
               });
-            }
-
-            // 4c. Delete the external identity (best-effort)
-            if (ctx.identity) {
-              try {
-                await ctx.identity.deleteUser({ email: user.email });
-              } catch (cognitoErr) {
-                // Log but don't fail — user may already be deleted upstream
-                ctx.logger.warn("Cognito deletion failed", {
-                  userId: user.id,
-                  error: cognitoErr,
-                });
-              }
             }
 
             // 4d. Clean up profile-cache entries (best-effort)
