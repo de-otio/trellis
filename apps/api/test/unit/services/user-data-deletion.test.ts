@@ -188,6 +188,64 @@ describe("deleteUserData", () => {
     });
   });
 
+  // Regression: entity deletion had no scope — `deleteMany({ owners: { none:
+  // {} } })` removed every ownerless entity on the platform, in every tenant,
+  // on each account erasure; and taxonomy tags were stripped from every entity
+  // the user co-owned, including those that survive with another owner.
+  describe("entity deletion is scoped to the user's own entities", () => {
+    it("deletes only candidates the user owned, never a platform-wide ownerless sweep", async () => {
+      mockDb.entity.findMany
+        .mockResolvedValueOnce([{ id: "e-sole" }, { id: "e-shared" }]) // user's entities
+        .mockResolvedValueOnce([{ id: "e-sole" }]); // …of which now ownerless
+
+      await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
+
+      expect(mockDb.entity.findMany).toHaveBeenNthCalledWith(2, {
+        where: { id: { in: ["e-sole", "e-shared"] }, owners: { none: {} } },
+        select: { id: true },
+      });
+      expect(mockDb.entity.deleteMany).toHaveBeenCalledTimes(1);
+      expect(mockDb.entity.deleteMany).toHaveBeenCalledWith({
+        where: { id: { in: ["e-sole"] }, owners: { none: {} } },
+      });
+      // The orphan check runs after the user's ownerships are gone.
+      expect(mockDb.entityOwnership.deleteMany.mock.invocationCallOrder[0]).toBeLessThan(
+        mockDb.entity.findMany.mock.invocationCallOrder[1],
+      );
+    });
+
+    it("keeps the taxonomy tags of an entity that still has another owner", async () => {
+      mockDb.entity.findMany
+        .mockResolvedValueOnce([{ id: "e-sole" }, { id: "e-shared" }])
+        .mockResolvedValueOnce([{ id: "e-sole" }]);
+
+      await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
+
+      expect(mockDb.entityTaxonomyTag.deleteMany).toHaveBeenCalledTimes(1);
+      expect(mockDb.entityTaxonomyTag.deleteMany).toHaveBeenCalledWith({
+        where: { entityId: { in: ["e-sole"] } },
+      });
+    });
+
+    it("issues no entity delete at all when the user owned nothing", async () => {
+      mockDb.entity.findMany.mockResolvedValue([]);
+
+      const result = await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
+
+      expect(mockDb.entity.deleteMany).not.toHaveBeenCalled();
+      expect(result.entities).toBe(0);
+    });
+
+    it("considers ownerships of any status, not only ACTIVE ones", async () => {
+      await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
+
+      expect(mockDb.entity.findMany).toHaveBeenNthCalledWith(1, {
+        where: { owners: { some: { userId: "user-123" } } },
+        select: { id: true },
+      });
+    });
+  });
+
   // Regression: these four tables reference users(id) ON DELETE RESTRICT
   // (prisma/migrations/20260705050826_init) and nothing removed them, so
   // user.delete() failed for any account with a notification — after the

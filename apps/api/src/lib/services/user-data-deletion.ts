@@ -259,25 +259,39 @@ export async function deleteUserData(
   const { eraseUserMedia } = await import("./user-media-erasure.js");
   const mediaErasure = await eraseUserMedia(db, userId);
 
-  // 7. Delete entity-related records
+  // 7. The entities the user holds an ownership row for (any status) are the
+  //    ONLY candidates for deletion. The previous `deleteMany({ owners: {
+  //    none: {} } })` had no scope at all: every account erasure deleted every
+  //    ownerless entity on the platform, in every tenant.
   const userEntities = await db.entity.findMany({
-    where: { owners: { some: { userId: userId, status: 'ACTIVE' } } },
+    where: { owners: { some: { userId } } },
     select: { id: true },
   });
-  if (userEntities.length > 0) {
-    const entityIds = userEntities.map((e) => e.id);
-    await db.entityTaxonomyTag.deleteMany({
-      where: { entityId: { in: entityIds } },
-    });
-  }
+  const candidateEntityIds = userEntities.map((e) => e.id);
 
-  // 8. Delete entity ownerships and entities
+  // 8. Remove the user's ownerships, then delete the candidates that no
+  //    longer have any owner. A co-owned entity stays, taxonomy tags included
+  //    (they used to be stripped from every entity the user co-owned).
   await db.entityOwnership.deleteMany({
     where: { userId: userId },
   });
-  const entities = await db.entity.deleteMany({
-    where: { owners: { none: {} } }, // Delete entities with no remaining owners
-  });
+  let entities = { count: 0 };
+  if (candidateEntityIds.length > 0) {
+    const orphanedIds = (
+      await db.entity.findMany({
+        where: { id: { in: candidateEntityIds }, owners: { none: {} } },
+        select: { id: true },
+      })
+    ).map((e) => e.id);
+    if (orphanedIds.length > 0) {
+      await db.entityTaxonomyTag.deleteMany({
+        where: { entityId: { in: orphanedIds } },
+      });
+      entities = await db.entity.deleteMany({
+        where: { id: { in: orphanedIds }, owners: { none: {} } },
+      });
+    }
+  }
 
   // 9. Follow relationships now handled by graph DB — no-op
 
