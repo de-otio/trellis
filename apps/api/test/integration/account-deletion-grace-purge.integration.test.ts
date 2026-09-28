@@ -690,6 +690,33 @@ describe("account deletion — grace period and nightly purge (real DB)", () => 
   });
 });
 
+describe("account deletion — a partial failure is finished by the retry", () => {
+  it("a fault right after the user's ownerships are removed does not strand their solely-owned entity", async () => {
+    const friend = await seedBystander();
+    const a = await seedAccount("partial", friend);
+    const { scheduledAt } = await requestDeletion(a.id);
+    const now = scheduledAt.getTime() + DAY;
+
+    // Fail the first database call that follows `entityOwnership.deleteMany`
+    // — whatever step that is. Erasure is not one transaction, so the retry
+    // must be able to finish from ANY intermediate state.
+    const first = await runPurge(now, (real) =>
+      injectFaultAfter(real, "entityOwnership", "deleteMany"),
+    );
+    expect(deletionCounts(first)).toMatchObject({ FailedCount: 1 });
+    expect(await db.user.findUnique({ where: { id: a.id } })).not.toBeNull();
+
+    await runPurge(now + DAY);
+
+    // Before the fix the ownership row was already gone, so the retry's
+    // "entities this user owns" query found nothing and the dog survived,
+    // ownerless, forever.
+    await expectAccountErased(a);
+    expect(await db.entity.findUnique({ where: { id: a.soleEntityId } })).toBeNull();
+    await expectBystanderIntact(friend);
+  });
+});
+
 describe("account deletion — identity-provider failure is retried, not lost", () => {
   it("a failed identity delete leaves the account due and untouched; the next run deletes identity and data", async () => {
     const friend = await seedBystander();
@@ -724,6 +751,40 @@ describe("account deletion — identity-provider failure is retried, not lost", 
     await expectBystanderIntact(friend);
   });
 });
+
+/**
+ * Wrap the real client so that, once `<model>.<method>` has completed, the
+ * NEXT delegate call of any kind throws — exactly once.
+ */
+function injectFaultAfter(real: PrismaClient, model: string, method: string): PrismaClient {
+  let armed = false;
+  let fired = false;
+  const wrapDelegate = (name: string, delegate: object) =>
+    new Proxy(delegate, {
+      get(target, prop, receiver) {
+        const v = Reflect.get(target, prop, receiver);
+        if (typeof v !== "function") return v;
+        return async (...args: unknown[]) => {
+          if (armed && !fired) {
+            fired = true;
+            throw new Error(`injected fault after ${model}.${method} (at ${name}.${String(prop)})`);
+          }
+          const out = await (v as (...a: unknown[]) => unknown).apply(target, args);
+          if (name === model && prop === method && !fired) armed = true;
+          return out;
+        };
+      },
+    });
+  return new Proxy(real, {
+    get(target, prop) {
+      const v = Reflect.get(target, prop, target);
+      if (typeof prop === "string" && !prop.startsWith("$") && v && typeof v === "object") {
+        return wrapDelegate(prop, v as object);
+      }
+      return typeof v === "function" ? v.bind(target) : v;
+    },
+  });
+}
 
 /**
  * Wrap the real client so `user.delete` for one id throws (a stand-in for any

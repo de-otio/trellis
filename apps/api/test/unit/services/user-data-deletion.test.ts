@@ -206,56 +206,46 @@ describe("deleteUserData", () => {
   // on each account erasure; and taxonomy tags were stripped from every entity
   // the user co-owned, including those that survive with another owner.
   describe("entity deletion is scoped to the user's own entities", () => {
-    it("deletes only candidates the user owned, never a platform-wide ownerless sweep", async () => {
-      mockDb.entity.findMany
-        .mockResolvedValueOnce([{ id: "e-sole" }, { id: "e-shared" }]) // user's entities
-        .mockResolvedValueOnce([{ id: "e-sole" }]); // …of which now ownerless
+    it("deletes only entities every ownership row of which is the user's — never a platform-wide sweep", async () => {
+      mockDb.entity.findMany.mockResolvedValueOnce([{ id: "e-sole" }]);
 
       await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
 
-      expect(mockDb.entity.findMany).toHaveBeenNthCalledWith(2, {
-        where: { id: { in: ["e-sole", "e-shared"] }, owners: { none: {} } },
+      expect(mockDb.entity.findMany).toHaveBeenCalledWith({
+        where: { owners: { some: { userId: "user-123" }, every: { userId: "user-123" } } },
         select: { id: true },
       });
       expect(mockDb.entity.deleteMany).toHaveBeenCalledTimes(1);
       expect(mockDb.entity.deleteMany).toHaveBeenCalledWith({
-        where: { id: { in: ["e-sole"] }, owners: { none: {} } },
+        where: { id: { in: ["e-sole"] }, owners: { every: { userId: "user-123" } } },
       });
-      // The orphan check runs after the user's ownerships are gone.
-      expect(mockDb.entityOwnership.deleteMany.mock.invocationCallOrder[0]).toBeLessThan(
-        mockDb.entity.findMany.mock.invocationCallOrder[1],
-      );
     });
 
-    it("keeps the taxonomy tags of an entity that still has another owner", async () => {
-      mockDb.entity.findMany
-        .mockResolvedValueOnce([{ id: "e-sole" }, { id: "e-shared" }])
-        .mockResolvedValueOnce([{ id: "e-sole" }]);
+    it("deletes the entities BEFORE the user's ownership rows, so a failed run can be retried", async () => {
+      // If the ownerships went first and a later step failed, the retry could
+      // no longer find which entities were this user's.
+      mockDb.entity.findMany.mockResolvedValueOnce([{ id: "e-sole" }]);
 
       await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
 
-      expect(mockDb.entityTaxonomyTag.deleteMany).toHaveBeenCalledTimes(1);
-      expect(mockDb.entityTaxonomyTag.deleteMany).toHaveBeenCalledWith({
-        where: { entityId: { in: ["e-sole"] } },
-      });
+      expect(mockDb.entity.deleteMany.mock.invocationCallOrder[0]).toBeLessThan(
+        mockDb.entityOwnership.deleteMany.mock.invocationCallOrder[0],
+      );
     });
 
-    it("issues no entity delete at all when the user owned nothing", async () => {
+    it("never strips taxonomy tags directly (they cascade from a deleted entity; a co-owned one keeps them)", async () => {
+      mockDb.entity.findMany.mockResolvedValueOnce([{ id: "e-sole" }]);
+      await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
+      expect(mockDb.entityTaxonomyTag.deleteMany).not.toHaveBeenCalled();
+    });
+
+    it("issues no entity delete at all when the user owns nothing alone", async () => {
       mockDb.entity.findMany.mockResolvedValue([]);
 
       const result = await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
 
       expect(mockDb.entity.deleteMany).not.toHaveBeenCalled();
       expect(result.entities).toBe(0);
-    });
-
-    it("considers ownerships of any status, not only ACTIVE ones", async () => {
-      await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
-
-      expect(mockDb.entity.findMany).toHaveBeenNthCalledWith(1, {
-        where: { owners: { some: { userId: "user-123" } } },
-        select: { id: true },
-      });
     });
   });
 

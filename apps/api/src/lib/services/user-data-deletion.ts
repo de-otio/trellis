@@ -310,39 +310,36 @@ export async function deleteUserData(
   const { eraseUserMedia } = await import("./user-media-erasure.js");
   const mediaErasure = await eraseUserMedia(db, userId);
 
-  // 7. The entities the user holds an ownership row for (any status) are the
-  //    ONLY candidates for deletion. The previous `deleteMany({ owners: {
-  //    none: {} } })` had no scope at all: every account erasure deleted every
-  //    ownerless entity on the platform, in every tenant.
-  const userEntities = await db.entity.findMany({
-    where: { owners: { some: { userId } } },
-    select: { id: true },
-  });
-  const candidateEntityIds = userEntities.map((e) => e.id);
+  // 7. Entities this user owns ALONE: at least one ownership row, and every
+  //    ownership row (any status) is theirs. These — and only these — are
+  //    deleted; the previous `deleteMany({ owners: { none: {} } })` had no
+  //    scope and deleted every ownerless entity on the platform.
+  //
+  //    ORDER MATTERS FOR RETRY. Erasure is not one transaction, and a failed
+  //    account is simply re-run the next night, so each step must be finishable
+  //    from any state an earlier failure left behind. The entity is therefore
+  //    deleted BEFORE the user's ownership rows: if the ownerships went first
+  //    and anything after them failed, the retry could no longer tell which
+  //    entities were this user's, and those pets would survive forever.
+  //    Ownerships, taxonomy tags and post_subjects cascade from the entity.
+  const soleOwnedIds = (
+    await db.entity.findMany({
+      where: { owners: { some: { userId }, every: { userId } } },
+      select: { id: true },
+    })
+  ).map((e) => e.id);
+  let entities = { count: 0 };
+  if (soleOwnedIds.length > 0) {
+    entities = await db.entity.deleteMany({
+      where: { id: { in: soleOwnedIds }, owners: { every: { userId } } },
+    });
+  }
 
-  // 8. Remove the user's ownerships, then delete the candidates that no
-  //    longer have any owner. A co-owned entity stays, taxonomy tags included
-  //    (they used to be stripped from every entity the user co-owned).
+  // 8. The user's remaining ownerships are of entities someone else also
+  //    owns: those entities stay (tags included), only the user's row goes.
   await db.entityOwnership.deleteMany({
     where: { userId: userId },
   });
-  let entities = { count: 0 };
-  if (candidateEntityIds.length > 0) {
-    const orphanedIds = (
-      await db.entity.findMany({
-        where: { id: { in: candidateEntityIds }, owners: { none: {} } },
-        select: { id: true },
-      })
-    ).map((e) => e.id);
-    if (orphanedIds.length > 0) {
-      await db.entityTaxonomyTag.deleteMany({
-        where: { entityId: { in: orphanedIds } },
-      });
-      entities = await db.entity.deleteMany({
-        where: { id: { in: orphanedIds }, owners: { none: {} } },
-      });
-    }
-  }
 
   // 9. Follow relationships now handled by graph DB — no-op
 
