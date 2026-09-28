@@ -82,6 +82,18 @@ describe("deleteUserData", () => {
       },
       connectionCodeRedemption: { deleteMany: vi.fn().mockResolvedValue({ count: 2 }) },
       parentalLink: { deleteMany: vi.fn().mockResolvedValue({ count: 1 }) },
+      // References with no FK (step 9) and entity-keyed edges (step 7).
+      relationship: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
+      entityRelationship: {
+        deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+      },
+      collectionItem: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
+      entityLocation: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
+      rsvp: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
+      shiftSignup: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
+      collection: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
+      groupMember: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
       // Personal tenant (step 15f). Default: the user has none.
       tenant: {
         findFirst: vi.fn().mockResolvedValue(null),
@@ -90,9 +102,18 @@ describe("deleteUserData", () => {
       },
       tenantMember: { count: vi.fn().mockResolvedValue(0) },
       tenantDirectoryProfile: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
-      event: { count: vi.fn().mockResolvedValue(0) },
-      group: { count: vi.fn().mockResolvedValue(0) },
-      user: { delete: vi.fn().mockResolvedValue({ id: "user-123" }) },
+      event: {
+        count: vi.fn().mockResolvedValue(0),
+        deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+      },
+      group: {
+        count: vi.fn().mockResolvedValue(0),
+        deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+      },
+      user: {
+        delete: vi.fn().mockResolvedValue({ id: "user-123" }),
+        findUnique: vi.fn().mockResolvedValue({ actorUri: "https://x.example/users/u" }),
+      },
       // AR7 — GDPR media erasure: MediaFile rows + reference lookups.
       mediaFile: {
         findMany: vi.fn().mockResolvedValue([]),
@@ -132,6 +153,17 @@ describe("deleteUserData", () => {
       connectionCodeRedemptions: 2,
       parentalLinks: 1,
       personalTenant: "none",
+      unlinkedReferences: {
+        relationshipEdges: 0,
+        proposalsDeattributed: 0,
+        events: 0,
+        eventRsvps: 0,
+        eventShiftSignups: 0,
+        collections: 0,
+        collectionItems: 0,
+        groups: 0,
+        groupMemberships: 0,
+      },
     });
 
     // Verify deletion order: sentiments before comments, comments before posts, posts before entities
@@ -246,6 +278,81 @@ describe("deleteUserData", () => {
 
       expect(mockDb.entity.deleteMany).not.toHaveBeenCalled();
       expect(result.entities).toBe(0);
+    });
+  });
+
+  // Regression: these tables reference the user with NO foreign key, so
+  // nothing cascaded them and erasure never touched them.
+  describe("references without a foreign key are erased across all tenants", () => {
+    it("deletes relationship edges from and to the user, with no tenant predicate", async () => {
+      await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
+      expect(mockDb.relationship.deleteMany).toHaveBeenCalledWith({
+        where: { OR: [{ userId: "user-123" }, { targetType: "user", targetId: "user-123" }] },
+      });
+    });
+
+    it("tombstones the user's entity-edge proposals instead of deleting other owners' edges", async () => {
+      await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
+      expect(mockDb.entityRelationship.updateMany).toHaveBeenCalledWith({
+        where: { proposedByUserId: "user-123" },
+        data: { proposedByUserId: pseudonymizeUserId("user-123", TEST_SECRET) },
+      });
+    });
+
+    it("deletes the user's events, RSVPs, shift signups, lists, and list items pointing at them", async () => {
+      await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
+      expect(mockDb.event.deleteMany).toHaveBeenCalledWith({ where: { creatorId: "user-123" } });
+      expect(mockDb.rsvp.deleteMany).toHaveBeenCalledWith({ where: { userId: "user-123" } });
+      expect(mockDb.shiftSignup.deleteMany).toHaveBeenCalledWith({ where: { userId: "user-123" } });
+      expect(mockDb.collection.deleteMany).toHaveBeenCalledWith({ where: { ownerUserId: "user-123" } });
+      expect(mockDb.collectionItem.deleteMany).toHaveBeenCalledWith({
+        where: { targetType: "user", targetId: "user-123" },
+      });
+    });
+
+    it("deletes groups the user is the only member of, THEN the user's memberships (by actor URI)", async () => {
+      await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
+      const actorUri = "https://x.example/users/u";
+      expect(mockDb.group.deleteMany).toHaveBeenCalledWith({
+        where: { members: { some: { actorUri }, every: { actorUri } } },
+      });
+      expect(mockDb.groupMember.deleteMany).toHaveBeenCalledWith({ where: { actorUri } });
+      expect(mockDb.group.deleteMany.mock.invocationCallOrder[0]).toBeLessThan(
+        mockDb.groupMember.deleteMany.mock.invocationCallOrder[0],
+      );
+    });
+
+    it("skips group cleanup for a user with no actor URI (never an unscoped delete)", async () => {
+      mockDb.user.findUnique.mockResolvedValue({ actorUri: null });
+      await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
+      expect(mockDb.group.deleteMany).not.toHaveBeenCalled();
+      expect(mockDb.groupMember.deleteMany).not.toHaveBeenCalled();
+    });
+
+    it("removes edges, list items and the location keyed by a deleted entity BEFORE deleting it", async () => {
+      mockDb.entity.findMany.mockResolvedValueOnce([{ id: "e-sole" }]);
+      await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
+
+      const entityDelete = mockDb.entity.deleteMany.mock.invocationCallOrder[0];
+      expect(mockDb.relationship.deleteMany).toHaveBeenCalledWith({
+        where: { targetType: "entity", targetId: { in: ["e-sole"] } },
+      });
+      expect(mockDb.entityRelationship.deleteMany).toHaveBeenCalledWith({
+        where: { OR: [{ entityId: { in: ["e-sole"] } }, { relatedEntityId: { in: ["e-sole"] } }] },
+      });
+      expect(mockDb.collectionItem.deleteMany).toHaveBeenCalledWith({
+        where: { targetType: "entity", targetId: { in: ["e-sole"] } },
+      });
+      expect(mockDb.entityLocation.deleteMany).toHaveBeenCalledWith({
+        where: { entityId: { in: ["e-sole"] } },
+      });
+      for (const fn of [
+        mockDb.relationship.deleteMany,
+        mockDb.entityRelationship.deleteMany,
+        mockDb.entityLocation.deleteMany,
+      ]) {
+        expect(fn.mock.invocationCallOrder[0]).toBeLessThan(entityDelete);
+      }
     });
   });
 

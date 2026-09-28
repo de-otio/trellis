@@ -113,6 +113,16 @@ interface Account {
   /** An invitation to the friend's tenant that this user sent. */
   sentInvitationId: string;
   handle: string;
+  actorUri: string;
+  /** References WITHOUT a foreign key, seeded across both tenants. */
+  noFk: {
+    friendDogId: string;
+    survivingEdgeId: string;
+    friendEventId: string;
+    friendCollectionId: string;
+    friendGroupId: string;
+    ownGroupId: string;
+  };
   /** Whether the personal tenant still holds someone else's data after erasure. */
   tenantHoldsOthersData: boolean;
   stagingKeys: string[];
@@ -302,6 +312,104 @@ async function seedAccount(
     data: { childId: friend.id, guardianId: user.id, status: "ACTIVE" },
   });
 
+  // ── References with NO foreign key: nothing cascades them, so erasure must
+  //    find them by user id — in the friend's tenant as much as the user's.
+  const actorUri = `https://deletion-it.example.com/users/${user.handle}`;
+  await db.user.update({ where: { id: user.id }, data: { actorUri } });
+  // Relationship edges: the user's own, one pointing AT the user, and one
+  // pointing at the user's solely-owned dog.
+  await db.relationship.create({
+    data: { tenantId: friend.tenantId, userId: user.id, targetType: "user", targetId: friend.id, connectionMethod: "code" },
+  });
+  await db.relationship.create({
+    data: { tenantId: friend.tenantId, userId: friend.id, targetType: "user", targetId: user.id, connectionMethod: "code" },
+  });
+  await db.relationship.create({
+    data: { tenantId: friend.tenantId, userId: friend.id, targetType: "entity", targetId: soleEntity.id, connectionMethod: "discovery" },
+  });
+  // Entity↔entity edges: one touching the sole dog (goes with it), one the
+  // user PROPOSED between the shared dog and the friend's dog (stays,
+  // de-attributed).
+  const friendDog = await db.entity.create({
+    data: { tenantId: friend.tenantId, name: `${label} friend's dog` },
+  });
+  await db.entityOwnership.create({
+    data: { tenantId: friend.tenantId, entityId: friendDog.id, userId: friend.id, role: "PRIMARY_OWNER", addedByUserId: friend.id },
+  });
+  await db.entityRelationship.create({
+    data: { tenantId: tenant.id, entityId: soleEntity.id, relatedEntityId: friendDog.id, type: "PACK_MATE", proposedByUserId: user.id },
+  });
+  const survivingEdge = await db.entityRelationship.create({
+    data: { tenantId: sharedTenantId, entityId: sharedEntity.id, relatedEntityId: friendDog.id, type: "SIBLING", proposedByUserId: user.id },
+  });
+  // The sole dog's (home) location — a PostGIS row keyed by entity, no FK.
+  await db.$executeRaw`INSERT INTO entity_location (entity_id, tenant_id, location, lat, lng)
+    VALUES (${soleEntity.id}, ${tenant.id}, ST_SetSRID(ST_MakePoint(13.4, 52.5), 4326)::geography, 52.5, 13.4)`;
+  // Events: one the user created; an RSVP and a shift signup on the friend's.
+  await db.event.create({
+    data: { tenantId: tenant.id, creatorId: user.id, title: `${label} walk`, startsAt: new Date(Date.now() + 7 * DAY) },
+  });
+  const friendEvent = await db.event.create({
+    data: { tenantId: friend.tenantId, creatorId: friend.id, title: `friend walk ${n}`, startsAt: new Date(Date.now() + 7 * DAY) },
+  });
+  await db.rsvp.create({
+    data: { tenantId: friend.tenantId, eventId: friendEvent.id, userId: user.id, status: "GOING" },
+  });
+  const shift = await db.eventShift.create({
+    data: { tenantId: friend.tenantId, eventId: friendEvent.id, title: "setup", capacity: 3 },
+  });
+  await db.shiftSignup.create({
+    data: { tenantId: friend.tenantId, shiftId: shift.id, userId: user.id, status: "CONFIRMED" },
+  });
+  // Collections: the user's own list, and the friend's list featuring the user
+  // and the user's sole dog.
+  await db.collection.create({
+    data: {
+      tenantId: tenant.id,
+      ownerUserId: user.id,
+      title: `${label} favourites`,
+      items: { create: [{ targetType: "entity", targetId: friendDog.id, position: 0 }] },
+    },
+  });
+  const friendCollection = await db.collection.create({
+    data: {
+      tenantId: friend.tenantId,
+      ownerUserId: friend.id,
+      title: `friend list ${n}`,
+      items: {
+        create: [
+          { targetType: "user", targetId: user.id, position: 0 },
+          { targetType: "entity", targetId: soleEntity.id, position: 1 },
+          { targetType: "entity", targetId: friendDog.id, position: 2 },
+        ],
+      },
+    },
+  });
+  // Groups (membership is keyed by actor URI): a group only the user is in,
+  // and the friend's group the user joined.
+  const group = (t: string, name: string) => ({
+    tenantId: t,
+    name,
+    actorUri: `https://deletion-it.example.com/groups/${name}`,
+    inboxUrl: "https://deletion-it.example.com/inbox",
+    outboxUrl: "https://deletion-it.example.com/outbox",
+    followersUrl: "https://deletion-it.example.com/followers",
+    publicKey: "test-public-key",
+    privateKey: "test-private-key",
+    privacy: "PRIVATE" as const,
+  });
+  const ownGroup = await db.group.create({ data: group(tenant.id, `own-${label}-${n}`) });
+  await db.groupMember.create({
+    data: { tenantId: tenant.id, groupId: ownGroup.id, actorUri, role: "ADMIN" },
+  });
+  const friendGroup = await db.group.create({ data: group(friend.tenantId, `friend-${label}-${n}`) });
+  await db.groupMember.create({
+    data: { tenantId: friend.tenantId, groupId: friendGroup.id, actorUri: `https://deletion-it.example.com/users/friend-${n}`, role: "ADMIN" },
+  });
+  await db.groupMember.create({
+    data: { tenantId: friend.tenantId, groupId: friendGroup.id, actorUri, role: "MEMBER" },
+  });
+
   return {
     id: user.id,
     email: user.email,
@@ -313,6 +421,15 @@ async function seedAccount(
     sharedEntityId: sharedEntity.id,
     friendOwnershipId: friendOwnership.id,
     handle: user.handle,
+    actorUri,
+    noFk: {
+      friendDogId: friendDog.id,
+      survivingEdgeId: survivingEdge.id,
+      friendEventId: friendEvent.id,
+      friendCollectionId: friendCollection.id,
+      friendGroupId: friendGroup.id,
+      ownGroupId: ownGroup.id,
+    },
     tenantHoldsOthersData: sharedDogInOwnTenant,
     sentInvitationId: invitation.id,
     stagingKeys: [
@@ -445,6 +562,54 @@ async function expectAccountErased(a: Account): Promise<void> {
   const invitation = await db.tenantInvitation.findUnique({ where: { id: a.sentInvitationId } });
   expect(invitation, "the tenant's invitation must survive").not.toBeNull();
   expect(invitation!.invitedByUserId).toBeNull();
+  // References with no FK, across every tenant.
+  expect(
+    await db.relationship.count({
+      where: { OR: [{ userId: a.id }, { targetType: "user", targetId: a.id }] },
+    }),
+    "relationship edges from or to the user",
+  ).toBe(0);
+  expect(
+    await db.relationship.count({ where: { targetType: "entity", targetId: a.soleEntityId } }),
+    "relationship edges to the user's deleted dog",
+  ).toBe(0);
+  expect(
+    await db.entityRelationship.count({
+      where: { OR: [{ entityId: a.soleEntityId }, { relatedEntityId: a.soleEntityId }] },
+    }),
+    "entity edges touching the deleted dog",
+  ).toBe(0);
+  expect(await db.entityRelationship.count({ where: { proposedByUserId: a.id } })).toBe(0);
+  const edge = await db.entityRelationship.findUnique({ where: { id: a.noFk.survivingEdgeId } });
+  expect(edge, "an edge between two surviving dogs stays").not.toBeNull();
+  expect(edge!.proposedByUserId).toMatch(/^deleted:[0-9a-f]{32}$/);
+  const loc = await db.$queryRaw<Array<{ n: bigint }>>`SELECT count(*)::bigint AS n FROM entity_location WHERE entity_id = ${a.soleEntityId}`;
+  expect(Number(loc[0].n), "the deleted dog's location").toBe(0);
+  expect(await db.event.count({ where: { creatorId: a.id } })).toBe(0);
+  expect(await db.rsvp.count({ where: { userId: a.id } })).toBe(0);
+  expect(await db.shiftSignup.count({ where: { userId: a.id } })).toBe(0);
+  expect(await db.event.findUnique({ where: { id: a.noFk.friendEventId } })).not.toBeNull();
+  expect(await db.collection.count({ where: { ownerUserId: a.id } })).toBe(0);
+  expect(
+    await db.collectionItem.count({
+      where: {
+        OR: [
+          { targetType: "user", targetId: a.id },
+          { targetType: "entity", targetId: a.soleEntityId },
+        ],
+      },
+    }),
+    "other people's list items pointing at the user or their deleted dog",
+  ).toBe(0);
+  expect(
+    await db.collectionItem.count({ where: { collectionId: a.noFk.friendCollectionId } }),
+    "the friend's list keeps its other items",
+  ).toBe(1);
+  expect(await db.groupMember.count({ where: { actorUri: a.actorUri } })).toBe(0);
+  expect(await db.group.findUnique({ where: { id: a.noFk.ownGroupId } }), "a group left with no members").toBeNull();
+  expect(await db.group.findUnique({ where: { id: a.noFk.friendGroupId } })).not.toBeNull();
+  expect(await db.entity.findUnique({ where: { id: a.noFk.friendDogId } })).not.toBeNull();
+
   // The personal tenant no longer carries the user's name: deleted outright,
   // or — when someone else's data still lives in it — kept and anonymised.
   const personal = await db.tenant.findUnique({ where: { id: a.tenantId } });
