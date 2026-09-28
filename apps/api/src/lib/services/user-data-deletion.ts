@@ -137,6 +137,14 @@ export interface DeletionResult {
    *  model registry (design §6 / §12.4 item 1). Registry is empty until an
    *  extension declares a subject-scoped model, so this is 0 today. */
   extensionRowsErased: number;
+  /** The user's notification inbox rows (FK to User is RESTRICT). */
+  notifications: number;
+  /** The user's saved notification preferences (FK to User is RESTRICT). */
+  notificationPreferences: number;
+  /** Connection codes the user created (FK to User is RESTRICT). */
+  connectionCodes: number;
+  /** Redemptions by the user, and redemptions of the user's own codes. */
+  connectionCodeRedemptions: number;
 }
 
 export interface DeleteUserDataOptions {
@@ -348,6 +356,37 @@ export async function deleteUserData(
     });
   }
 
+  // 15e. Rows whose foreign key to User is ON DELETE RESTRICT and that no step
+  //      above removes. Any one of them left behind makes the final
+  //      user.delete() fail — AFTER every step above has run, since there is
+  //      no transaction — so the account is left half-erased, stays due, and
+  //      fails again on every nightly run while its identity is never
+  //      deleted. The notification inbox alone is enough: nearly every active
+  //      account has one row in it.
+  const notifications = await db.notification.deleteMany({ where: { userId } });
+  const notificationPreferences = await db.notificationPreference.deleteMany({
+    where: { userId },
+  });
+  // Codes the user created, and every redemption row pointing at them (the
+  // redemption → code FK is RESTRICT too), plus the user's own redemptions of
+  // other people's codes. The relationship a redemption created lives in the
+  // graph edge tables, not here.
+  const ownCodeIds = (
+    await db.connectionCode.findMany({
+      where: { creatorId: userId },
+      select: { id: true },
+    })
+  ).map((c) => c.id);
+  const connectionCodeRedemptions = await db.connectionCodeRedemption.deleteMany({
+    where:
+      ownCodeIds.length > 0
+        ? { OR: [{ userId }, { codeId: { in: ownCodeIds } }] }
+        : { userId },
+  });
+  const connectionCodes = await db.connectionCode.deleteMany({
+    where: { creatorId: userId },
+  });
+
   // 16. Delete the user (cascades to MfaEnrollment, Report (reporter side),
   //     and actor-side InteractionEvent rows)
   await db.user.delete({ where: { id: userId } });
@@ -371,5 +410,9 @@ export async function deleteUserData(
     mediaFilesRetainedShared: mediaErasure.retainedShared,
     mediaStagingKeys: mediaErasure.stagingKeys,
     extensionRowsErased,
+    notifications: notifications.count,
+    notificationPreferences: notificationPreferences.count,
+    connectionCodes: connectionCodes.count,
+    connectionCodeRedemptions: connectionCodeRedemptions.count,
   };
 }

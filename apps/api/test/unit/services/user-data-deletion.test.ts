@@ -73,6 +73,14 @@ describe("deleteUserData", () => {
       interactionEvent: { deleteMany: vi.fn().mockResolvedValue({ count: 5 }) },
       // Surveillance-hardening Phase 0 (P4): ACCOUNT-report pseudonymization.
       report: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
+      // RESTRICT-FK rows the final user.delete() would otherwise fail on.
+      notification: { deleteMany: vi.fn().mockResolvedValue({ count: 6 }) },
+      notificationPreference: { deleteMany: vi.fn().mockResolvedValue({ count: 1 }) },
+      connectionCode: {
+        findMany: vi.fn().mockResolvedValue([{ id: "code-1" }]),
+        deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+      connectionCodeRedemption: { deleteMany: vi.fn().mockResolvedValue({ count: 2 }) },
       user: { delete: vi.fn().mockResolvedValue({ id: "user-123" }) },
       // AR7 — GDPR media erasure: MediaFile rows + reference lookups.
       mediaFile: {
@@ -107,6 +115,10 @@ describe("deleteUserData", () => {
       mediaFilesRetainedShared: 0,
       mediaStagingKeys: [],
       extensionRowsErased: 0,
+      notifications: 6,
+      notificationPreferences: 1,
+      connectionCodes: 1,
+      connectionCodeRedemptions: 2,
     });
 
     // Verify deletion order: sentiments before comments, comments before posts, posts before entities
@@ -173,6 +185,67 @@ describe("deleteUserData", () => {
       where: {
         OR: [{ createdBy: "user-123" }, { usedBy: "user-123" }],
       },
+    });
+  });
+
+  // Regression: these four tables reference users(id) ON DELETE RESTRICT
+  // (prisma/migrations/20260705050826_init) and nothing removed them, so
+  // user.delete() failed for any account with a notification — after the
+  // rest of the erasure had already run, with no transaction to undo it. The
+  // nightly purge then retried, and failed, every night. Proven against real
+  // Postgres in test/integration/account-deletion-grace-purge.integration.test.ts.
+  describe("rows that would block the final user.delete() (RESTRICT FKs)", () => {
+    it("removes the user's notifications and notification preferences", async () => {
+      await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
+
+      expect(mockDb.notification.deleteMany).toHaveBeenCalledWith({
+        where: { userId: "user-123" },
+      });
+      expect(mockDb.notificationPreference.deleteMany).toHaveBeenCalledWith({
+        where: { userId: "user-123" },
+      });
+    });
+
+    it("removes the user's connection codes, their redemptions, and the user's own redemptions", async () => {
+      await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
+
+      expect(mockDb.connectionCode.findMany).toHaveBeenCalledWith({
+        where: { creatorId: "user-123" },
+        select: { id: true },
+      });
+      expect(mockDb.connectionCodeRedemption.deleteMany).toHaveBeenCalledWith({
+        where: { OR: [{ userId: "user-123" }, { codeId: { in: ["code-1"] } }] },
+      });
+      expect(mockDb.connectionCode.deleteMany).toHaveBeenCalledWith({
+        where: { creatorId: "user-123" },
+      });
+      // Redemptions first: redemption → code is RESTRICT as well.
+      expect(
+        mockDb.connectionCodeRedemption.deleteMany.mock.invocationCallOrder[0],
+      ).toBeLessThan(mockDb.connectionCode.deleteMany.mock.invocationCallOrder[0]);
+    });
+
+    it("scopes redemptions to the user alone when they created no codes", async () => {
+      mockDb.connectionCode.findMany.mockResolvedValue([]);
+      await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
+
+      expect(mockDb.connectionCodeRedemption.deleteMany).toHaveBeenCalledWith({
+        where: { userId: "user-123" },
+      });
+    });
+
+    it("clears all of them BEFORE deleting the user row", async () => {
+      await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
+
+      const userDelete = mockDb.user.delete.mock.invocationCallOrder[0];
+      for (const fn of [
+        mockDb.notification.deleteMany,
+        mockDb.notificationPreference.deleteMany,
+        mockDb.connectionCodeRedemption.deleteMany,
+        mockDb.connectionCode.deleteMany,
+      ]) {
+        expect(fn.mock.invocationCallOrder[0]).toBeLessThan(userDelete);
+      }
     });
   });
 
