@@ -79,6 +79,12 @@ const PHASE0_INTEGRATION = [
   // for every tagged post. Only a real Prisma client against real Postgres
   // does.
   "test/integration/post-subject-write.integration.test.ts",
+  // Account deletion: the grace period and the nightly purge that ends it.
+  // The unit lane mocks the due-account query and `deleteUserData`, so it can
+  // decide neither WHICH accounts get purged nor whether the erasure survives
+  // the schema's foreign keys. Runs the real handler + worker core against a
+  // dedicated throwaway database it creates and migrates itself.
+  "test/integration/account-deletion-grace-purge.integration.test.ts",
 ];
 
 export default defineConfig({

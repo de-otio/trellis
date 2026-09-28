@@ -82,6 +82,10 @@ export default defineConfig({
       // filter" semantics against a real database, which this config's
       // test/setup.ts cannot provide. Runs in the Phase0 integration lane.
       "test/integration/extension-tenant-binding.integration.test.ts",
+      // Account deletion grace → nightly purge — creates and migrates its own
+      // throwaway database, so it needs a real Postgres admin URL. Runs in
+      // the Phase0 integration lane (registered in PHASE0_INTEGRATION).
+      "test/integration/account-deletion-grace-purge.integration.test.ts",
     ],
     setupFiles: ["test/setup.ts"],
     globalTeardown: "test/teardown.ts",
