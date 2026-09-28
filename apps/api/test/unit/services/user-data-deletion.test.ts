@@ -102,6 +102,7 @@ describe("deleteUserData", () => {
       },
       tenantMember: { count: vi.fn().mockResolvedValue(0) },
       tenantDirectoryProfile: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
+      tenantDomain: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
       event: {
         count: vi.fn().mockResolvedValue(0),
         deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
@@ -367,10 +368,26 @@ describe("deleteUserData", () => {
       mockDb.entity.count = vi.fn().mockResolvedValue(0);
     });
 
-    it("is looked up by its personal owner", async () => {
+    it("is looked up by its back-link, or by the user's pointer to an unowned PERSONAL tenant", async () => {
+      mockDb.user.findUnique.mockResolvedValue({ actorUri: null, personalTenantId: TENANT });
       await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
       expect(mockDb.tenant.findFirst).toHaveBeenCalledWith({
-        where: { personalOwnerUserId: "user-123", type: "PERSONAL" },
+        where: {
+          type: "PERSONAL",
+          OR: [
+            { personalOwnerUserId: "user-123" },
+            { id: TENANT, personalOwnerUserId: null },
+          ],
+        },
+        select: { id: true },
+      });
+    });
+
+    it("uses only the back-link when the user has no personal-tenant pointer", async () => {
+      mockDb.user.findUnique.mockResolvedValue({ actorUri: null, personalTenantId: null });
+      await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
+      expect(mockDb.tenant.findFirst).toHaveBeenCalledWith({
+        where: { type: "PERSONAL", OR: [{ personalOwnerUserId: "user-123" }] },
         select: { id: true },
       });
     });
@@ -406,6 +423,7 @@ describe("deleteUserData", () => {
       expect(mockDb.tenantDirectoryProfile.deleteMany).toHaveBeenCalledWith({
         where: { tenantId: TENANT },
       });
+      expect(mockDb.tenantDomain.deleteMany).toHaveBeenCalledWith({ where: { tenantId: TENANT } });
       expect(result.personalTenant).toBe("anonymised");
     });
 

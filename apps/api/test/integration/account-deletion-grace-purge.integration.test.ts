@@ -181,7 +181,7 @@ async function seedBystander(): Promise<Bystander> {
 async function seedAccount(
   label: string,
   friend: Bystander,
-  opts: { sharedDogInOwnTenant?: boolean } = {},
+  opts: { sharedDogInOwnTenant?: boolean; linkedOnlyFromUser?: boolean } = {},
 ): Promise<Account> {
   const sharedDogInOwnTenant = opts.sharedDogInOwnTenant ?? true;
   const user = await createUser(label);
@@ -193,8 +193,23 @@ async function seedAccount(
     data: { displayName: user.handle, personalOwnerUserId: user.id },
   });
   await db.user.update({ where: { id: user.id }, data: { personalTenantId: tenant.id } });
+  if (opts.linkedOnlyFromUser) {
+    // The link can exist from the user's side only (tenant.personalOwnerUserId
+    // is SET NULL-able and was cleared) — the tenant must still be found.
+    await db.tenant.update({ where: { id: tenant.id }, data: { personalOwnerUserId: null } });
+  }
   await db.tenantMember.create({
     data: { tenantId: tenant.id, userId: user.id, role: "OWNER" },
+  });
+  // A custom domain on the personal tenant: identifying, and it survives an
+  // anonymised tenant unless removed.
+  await db.tenantDomain.create({
+    data: {
+      tenantId: tenant.id,
+      domain: `${label}-${seq}.deletion-it.example.com`,
+      verificationToken: "0".repeat(32),
+      tokenExpiresAt: new Date(Date.now() + DAY),
+    },
   });
   const n = ++seq;
 
@@ -618,6 +633,7 @@ async function expectAccountErased(a: Account): Promise<void> {
     expect(personal!.displayName).toBe("Deleted account");
     expect(personal!.slug).toBe(`deleted-${a.tenantId}`);
     expect(personal!.personalOwnerUserId).toBeNull();
+    expect(await db.tenantDomain.count({ where: { tenantId: a.tenantId } }), "custom domains").toBe(0);
   } else {
     expect(personal, "a personal tenant with nothing of anyone else's must go").toBeNull();
   }
@@ -769,6 +785,18 @@ describe("account deletion — grace period and nightly purge (real DB)", () => 
     expect(await db.tenant.findUnique({ where: { id: a.tenantId } })).toBeNull();
     // The co-owned dog now lives in the friend's tenant and survives there.
     expect(await db.entity.findUnique({ where: { id: a.sharedEntityId } })).not.toBeNull();
+    await expectBystanderIntact(friend);
+  });
+
+  it("finds the personal tenant through user.personalTenantId when the tenant's back-link is gone", async () => {
+    const friend = await seedBystander();
+    const a = await seedAccount("backlink-gone", friend, { linkedOnlyFromUser: true });
+    const { scheduledAt } = await requestDeletion(a.id);
+
+    await runPurge(scheduledAt.getTime() + DAY);
+
+    // Holds the friend's co-owned dog → kept, but anonymised and domain-free.
+    await expectAccountErased(a);
     await expectBystanderIntact(friend);
   });
 

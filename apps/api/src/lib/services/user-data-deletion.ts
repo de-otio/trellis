@@ -178,9 +178,22 @@ export const ERASED_TENANT_DISPLAY_NAME = "Deleted account";
 async function erasePersonalTenant(
   db: PrismaClient,
   userId: string,
+  personalTenantId: string | null,
 ): Promise<PersonalTenantOutcome> {
+  // The link is two-sided and either side can be missing: the tenant's
+  // back-link (personalOwnerUserId) is ON DELETE SET NULL and may already be
+  // cleared, so the user's own pointer counts too — but only to a PERSONAL
+  // tenant that is not someone else's.
   const tenant = await db.tenant.findFirst({
-    where: { personalOwnerUserId: userId, type: "PERSONAL" },
+    where: {
+      type: "PERSONAL",
+      OR: [
+        { personalOwnerUserId: userId },
+        ...(personalTenantId
+          ? [{ id: personalTenantId, personalOwnerUserId: null }]
+          : []),
+      ],
+    },
     select: { id: true },
   });
   if (!tenant) return "none";
@@ -202,8 +215,9 @@ async function erasePersonalTenant(
 
   // Something in it is someone else's: keep the tenant, drop what identifies
   // the erased user. The directory profile can hold a location and a
-  // self-description.
+  // self-description; a custom domain is often the person's own name.
   await db.tenantDirectoryProfile.deleteMany({ where: { tenantId } });
+  await db.tenantDomain.deleteMany({ where: { tenantId } });
   await db.tenant.update({
     where: { id: tenantId },
     data: { displayName: ERASED_TENANT_DISPLAY_NAME, slug: `deleted-${tenantId}` },
@@ -382,7 +396,7 @@ export async function deleteUserData(
   //    guarded non-empty at the top of this function.)
   const subject = await db.user.findUnique({
     where: { id: userId },
-    select: { actorUri: true },
+    select: { actorUri: true, personalTenantId: true },
   });
   // Relationship edges from the user, and pointing at the user.
   const { count: userEdges } = await db.relationship.deleteMany({
@@ -548,7 +562,11 @@ export async function deleteUserData(
   //      with a friend lives in this tenant) and strip the identifying names.
   //      MediaFile rows carry no FK to tenants, so soft-deleted media stays in
   //      the GC purge either way.
-  const personalTenantOutcome = await erasePersonalTenant(db, userId);
+  const personalTenantOutcome = await erasePersonalTenant(
+    db,
+    userId,
+    subject?.personalTenantId ?? null,
+  );
 
   // 16. Delete the user (cascades to MfaEnrollment, Report (reporter side),
   //     and actor-side InteractionEvent rows)
