@@ -163,6 +163,7 @@ describe("CognitoIdentityProvider (existing-surface parity)", () => {
   it("deleteUser is idempotent: an already-absent user (UserNotFoundException) resolves", async () => {
     // The nightly erasure deletes the identity first and retries the whole
     // account if a later step fails; "already gone" must not fail the retry.
+    const warnings: unknown[][] = [];
     const provider = new CognitoIdentityProvider({
       userPoolId: "pool-1",
       appClientId: "client-1",
@@ -171,8 +172,16 @@ describe("CognitoIdentityProvider (existing-surface parity)", () => {
           throw Object.assign(new Error("gone"), { name: "UserNotFoundException" });
         },
       },
+      logger: { warn: (...a: unknown[]) => void warnings.push(a) },
     });
     await expect(provider.deleteUser({ email: "x@example.test" })).resolves.toBeUndefined();
+
+    // …but never SILENTLY: "not found" is also what a wrong pool or a changed
+    // email looks like, so an operator must be able to see it. Without the
+    // address — the log is not a place for it.
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0][0]).toMatch(/already absent/);
+    expect(JSON.stringify(warnings)).not.toContain("x@example.test");
   });
 
   it("deleteUser propagates every OTHER SDK error UNWRAPPED", async () => {

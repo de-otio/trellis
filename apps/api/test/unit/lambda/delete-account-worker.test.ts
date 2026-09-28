@@ -311,8 +311,10 @@ describe("DeleteAccountWorker Lambda", () => {
     });
   });
 
-  it("should continue if Cognito deletion fails", async () => {
-    mockCognitoSend.mockRejectedValueOnce(new Error("UserNotFoundException"));
+  it("treats an already-absent Cognito user as deleted and completes the erasure", async () => {
+    mockCognitoSend.mockRejectedValueOnce(
+      Object.assign(new Error("User does not exist."), { name: "UserNotFoundException" }),
+    );
 
     const handler = await loadHandler();
     const event = makeSQSEvent([
@@ -321,8 +323,23 @@ describe("DeleteAccountWorker Lambda", () => {
 
     const result = await handler(event, {} as any, () => {});
 
-    // Should succeed despite Cognito failure
     expect(result).toBeUndefined();
     expect(mockDeleteUserData).toHaveBeenCalled();
+  });
+
+  it("reports a batch-item failure, and erases nothing, when Cognito deletion fails otherwise", async () => {
+    mockCognitoSend.mockRejectedValueOnce(
+      Object.assign(new Error("Rate exceeded"), { name: "TooManyRequestsException" }),
+    );
+
+    const handler = await loadHandler();
+    const event = makeSQSEvent([
+      { messageId: "msg-1", body: JSON.stringify({ userId: "u1" }) },
+    ]);
+
+    const result = await handler(event, {} as any, () => {});
+
+    expect(result).toEqual({ batchItemFailures: [{ itemIdentifier: "msg-1" }] });
+    expect(mockDeleteUserData).not.toHaveBeenCalled();
   });
 });

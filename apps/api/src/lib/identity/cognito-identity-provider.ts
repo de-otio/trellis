@@ -34,6 +34,7 @@ import {
   type MagicLinkInitiation,
   type MagicLinkOptions,
 } from "@de-otio/saas-foundation/identity";
+import { getLogger, type Logger } from "../logger.js";
 
 /** The subset of the Cognito client this adapter uses (injectable in tests). */
 export interface CognitoClientLike {
@@ -56,6 +57,8 @@ export interface CognitoIdentityProviderConfig {
   readonly region?: string;
   /** Injectable client (tests). */
   readonly client?: CognitoClientLike;
+  /** Where the "already absent" warning goes (default: the app logger). */
+  readonly logger?: Pick<Logger, "warn">;
 }
 
 export class CognitoIdentityProvider implements IdentityProviderPort {
@@ -162,7 +165,15 @@ export class CognitoIdentityProvider implements IdentityProviderPort {
       // account on the next run if a later step fails, so "already gone"
       // must be success here or that account could never finish erasing.
       // Every other SDK error still propagates unwrapped.
-      if ((err as { name?: unknown } | null)?.name === "UserNotFoundException") return;
+      if ((err as { name?: unknown } | null)?.name === "UserNotFoundException") {
+        // Not silent: "not found" is also what a misconfigured pool or an
+        // email changed on the IdP side looks like. No address in the log.
+        (this.cfg.logger ?? getLogger()).warn(
+          "[CognitoIdentityProvider] deleteUser: identity already absent — treated as deleted",
+          { userPoolId: this.cfg.userPoolId },
+        );
+        return;
+      }
       throw err;
     }
   }

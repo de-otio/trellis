@@ -67,7 +67,7 @@ describe("runDeleteAccount", () => {
     });
   });
 
-  it("runs the full flow: DB erasure -> staging cleanup -> identity deletion", async () => {
+  it("runs the full flow: identity deletion -> DB erasure -> staging cleanup", async () => {
     const keys = ["processing/t/x", "pending/t/y"];
     mockDeleteUserData.mockResolvedValueOnce({ posts: 1, mediaStagingKeys: keys });
     const ctx = makeCtx();
@@ -83,6 +83,11 @@ describe("runDeleteAccount", () => {
     });
     expect(ctx._deleteStaging).toHaveBeenCalledWith(keys);
     expect(ctx._identityDelete).toHaveBeenCalledWith({ email: "user@test.com" });
+    // Identity FIRST: once the row is gone nothing records that the identity
+    // still needs deleting, so it must not be the step that can be lost.
+    expect(ctx._identityDelete.mock.invocationCallOrder[0]).toBeLessThan(
+      mockDeleteUserData.mock.invocationCallOrder[0],
+    );
   });
 
   it("returns (acks) without deleting when the user is not found", async () => {
@@ -96,12 +101,17 @@ describe("runDeleteAccount", () => {
     expect(ctx._identityDelete).not.toHaveBeenCalled();
   });
 
-  it("swallows identity-deletion failure (best-effort — never a batch failure)", async () => {
+  it("an identity-deletion failure THROWS before any erasure, so the message is redelivered", async () => {
+    // Previously swallowed AFTER the DB erasure: the row was gone, nothing
+    // recorded the outstanding identity, and it was never retried.
     const ctx = makeCtx();
-    ctx._identityDelete.mockRejectedValueOnce(new Error("UserNotFoundException"));
+    ctx._identityDelete.mockRejectedValueOnce(new Error("identity provider unavailable"));
 
-    await expect(runDeleteAccount({ userId: "u1" }, ctx)).resolves.toBeUndefined();
-    expect(mockDeleteUserData).toHaveBeenCalled();
+    await expect(runDeleteAccount({ userId: "u1" }, ctx)).rejects.toThrow(
+      "identity provider unavailable",
+    );
+    expect(mockDeleteUserData).not.toHaveBeenCalled();
+    expect(ctx._deleteStaging).not.toHaveBeenCalled();
   });
 
   it("skips identity deletion when no identity port is wired", async () => {
