@@ -82,6 +82,16 @@ describe("deleteUserData", () => {
       },
       connectionCodeRedemption: { deleteMany: vi.fn().mockResolvedValue({ count: 2 }) },
       parentalLink: { deleteMany: vi.fn().mockResolvedValue({ count: 1 }) },
+      // Personal tenant (step 15f). Default: the user has none.
+      tenant: {
+        findFirst: vi.fn().mockResolvedValue(null),
+        delete: vi.fn().mockResolvedValue({}),
+        update: vi.fn().mockResolvedValue({}),
+      },
+      tenantMember: { count: vi.fn().mockResolvedValue(0) },
+      tenantDirectoryProfile: { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
+      event: { count: vi.fn().mockResolvedValue(0) },
+      group: { count: vi.fn().mockResolvedValue(0) },
       user: { delete: vi.fn().mockResolvedValue({ id: "user-123" }) },
       // AR7 — GDPR media erasure: MediaFile rows + reference lookups.
       mediaFile: {
@@ -121,6 +131,7 @@ describe("deleteUserData", () => {
       connectionCodes: 1,
       connectionCodeRedemptions: 2,
       parentalLinks: 1,
+      personalTenant: "none",
     });
 
     // Verify deletion order: sentiments before comments, comments before posts, posts before entities
@@ -244,6 +255,67 @@ describe("deleteUserData", () => {
       expect(mockDb.entity.findMany).toHaveBeenNthCalledWith(1, {
         where: { owners: { some: { userId: "user-123" } } },
         select: { id: true },
+      });
+    });
+  });
+
+  // Regression: the personal tenant's FK to the user is SET NULL, so it
+  // survived erasure named after the user (displayName = handle).
+  describe("the user's personal tenant", () => {
+    const TENANT = "t-personal";
+    beforeEach(() => {
+      mockDb.tenant.findFirst.mockResolvedValue({ id: TENANT });
+      mockDb.post.count = vi.fn().mockResolvedValue(0);
+      mockDb.postComment.count = vi.fn().mockResolvedValue(0);
+      mockDb.entity.count = vi.fn().mockResolvedValue(0);
+    });
+
+    it("is looked up by its personal owner", async () => {
+      await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
+      expect(mockDb.tenant.findFirst).toHaveBeenCalledWith({
+        where: { personalOwnerUserId: "user-123", type: "PERSONAL" },
+        select: { id: true },
+      });
+    });
+
+    it("is deleted when nothing in it belongs to anyone else", async () => {
+      const result = await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
+
+      expect(mockDb.tenant.delete).toHaveBeenCalledWith({ where: { id: TENANT } });
+      expect(mockDb.tenant.update).not.toHaveBeenCalled();
+      expect(result.personalTenant).toBe("deleted");
+      expect(mockDb.tenant.delete.mock.invocationCallOrder[0]).toBeLessThan(
+        mockDb.user.delete.mock.invocationCallOrder[0],
+      );
+    });
+
+    it.each([
+      ["another member", "tenantMember"],
+      ["another user's entity (e.g. a co-owned dog)", "entity"],
+      ["a post", "post"],
+      ["a comment", "postComment"],
+      ["an event", "event"],
+      ["a group", "group"],
+    ])("is kept but anonymised when it still holds %s", async (_label, model) => {
+      mockDb[model].count = vi.fn().mockResolvedValue(1);
+
+      const result = await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
+
+      expect(mockDb.tenant.delete).not.toHaveBeenCalled();
+      expect(mockDb.tenant.update).toHaveBeenCalledWith({
+        where: { id: TENANT },
+        data: { displayName: "Deleted account", slug: `deleted-${TENANT}` },
+      });
+      expect(mockDb.tenantDirectoryProfile.deleteMany).toHaveBeenCalledWith({
+        where: { tenantId: TENANT },
+      });
+      expect(result.personalTenant).toBe("anonymised");
+    });
+
+    it("counts only OTHER members, never the user being erased", async () => {
+      await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
+      expect(mockDb.tenantMember.count).toHaveBeenCalledWith({
+        where: { tenantId: TENANT, userId: { not: "user-123" } },
       });
     });
   });

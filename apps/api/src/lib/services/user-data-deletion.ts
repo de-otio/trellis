@@ -147,6 +147,55 @@ export interface DeletionResult {
   connectionCodeRedemptions: number;
   /** Guardian/child links the user was either party to (both FKs RESTRICT). */
   parentalLinks: number;
+  /** What happened to the user's personal tenant: deleted outright, kept with
+   *  its names anonymised (something in it belongs to someone else), or none. */
+  personalTenant: PersonalTenantOutcome;
+}
+
+export type PersonalTenantOutcome = "deleted" | "anonymised" | "none";
+
+/** Display name an anonymised personal tenant is left with. */
+export const ERASED_TENANT_DISPLAY_NAME = "Deleted account";
+
+/**
+ * Delete or anonymise the erased user's personal tenant (see step 15f).
+ * Runs after the user's own content is gone, so any row still counted here
+ * belongs to someone else.
+ */
+async function erasePersonalTenant(
+  db: PrismaClient,
+  userId: string,
+): Promise<PersonalTenantOutcome> {
+  const tenant = await db.tenant.findFirst({
+    where: { personalOwnerUserId: userId, type: "PERSONAL" },
+    select: { id: true },
+  });
+  if (!tenant) return "none";
+  const tenantId = tenant.id;
+
+  const [otherMembers, posts, comments, entities, events, groups] = await Promise.all([
+    db.tenantMember.count({ where: { tenantId, userId: { not: userId } } }),
+    db.post.count({ where: { tenantId } }),
+    db.postComment.count({ where: { tenantId } }),
+    db.entity.count({ where: { tenantId } }),
+    db.event.count({ where: { tenantId } }),
+    db.group.count({ where: { tenantId } }),
+  ]);
+
+  if (otherMembers + posts + comments + entities + events + groups === 0) {
+    await db.tenant.delete({ where: { id: tenantId } });
+    return "deleted";
+  }
+
+  // Something in it is someone else's: keep the tenant, drop what identifies
+  // the erased user. The directory profile can hold a location and a
+  // self-description.
+  await db.tenantDirectoryProfile.deleteMany({ where: { tenantId } });
+  await db.tenant.update({
+    where: { id: tenantId },
+    data: { displayName: ERASED_TENANT_DISPLAY_NAME, slug: `deleted-${tenantId}` },
+  });
+  return "anonymised";
 }
 
 export interface DeleteUserDataOptions {
@@ -414,6 +463,16 @@ export async function deleteUserData(
   // another owner / to the tenant, so the database nulls the reference rather
   // than this service deleting someone else's data.
 
+  // 15f. The user's PERSONAL tenant. Its FK to the user is SET NULL, so it
+  //      used to survive erasure under its original name — the user's handle
+  //      (displayName) and `personal-<userId>` (slug). Delete it when nothing
+  //      in it belongs to anyone else; otherwise keep it (a tenant delete
+  //      CASCADES to every tenant-scoped row, e.g. a dog the user co-owned
+  //      with a friend lives in this tenant) and strip the identifying names.
+  //      MediaFile rows carry no FK to tenants, so soft-deleted media stays in
+  //      the GC purge either way.
+  const personalTenantOutcome = await erasePersonalTenant(db, userId);
+
   // 16. Delete the user (cascades to MfaEnrollment, Report (reporter side),
   //     and actor-side InteractionEvent rows)
   await db.user.delete({ where: { id: userId } });
@@ -442,5 +501,6 @@ export async function deleteUserData(
     connectionCodes: connectionCodes.count,
     connectionCodeRedemptions: connectionCodeRedemptions.count,
     parentalLinks: parentalLinks.count,
+    personalTenant: personalTenantOutcome,
   };
 }

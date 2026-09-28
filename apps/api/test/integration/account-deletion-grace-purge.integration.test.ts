@@ -112,6 +112,9 @@ interface Account {
   friendOwnershipId: string;
   /** An invitation to the friend's tenant that this user sent. */
   sentInvitationId: string;
+  handle: string;
+  /** Whether the personal tenant still holds someone else's data after erasure. */
+  tenantHoldsOthersData: boolean;
   stagingKeys: string[];
 }
 
@@ -165,9 +168,24 @@ async function seedBystander(): Promise<Bystander> {
  * saved notification preferences, a connection code a friend redeemed, a dog
  * profile they own alone and one they co-own with a friend.
  */
-async function seedAccount(label: string, friend: Bystander): Promise<Account> {
+async function seedAccount(
+  label: string,
+  friend: Bystander,
+  opts: { sharedDogInOwnTenant?: boolean } = {},
+): Promise<Account> {
+  const sharedDogInOwnTenant = opts.sharedDogInOwnTenant ?? true;
   const user = await createUser(label);
   const tenant = await createTenant(label);
+  // Make it the user's PERSONAL tenant, the way provisioning does: named after
+  // the handle, owned by and linked to the user, with the user as OWNER.
+  await db.tenant.update({
+    where: { id: tenant.id },
+    data: { displayName: user.handle, personalOwnerUserId: user.id },
+  });
+  await db.user.update({ where: { id: user.id }, data: { personalTenantId: tenant.id } });
+  await db.tenantMember.create({
+    data: { tenantId: tenant.id, userId: user.id, role: "OWNER" },
+  });
   const n = ++seq;
 
   const contentHash = n.toString(16).padStart(64, "a");
@@ -239,12 +257,15 @@ async function seedAccount(label: string, friend: Bystander): Promise<Account> {
       addedByUserId: user.id,
     },
   });
+  // The dog co-owned with the friend. By default it lives in the user's own
+  // tenant, so that tenant still holds someone else's data after erasure.
+  const sharedTenantId = sharedDogInOwnTenant ? tenant.id : friend.tenantId;
   const sharedEntity = await db.entity.create({
-    data: { tenantId: tenant.id, name: `${label} shared dog` },
+    data: { tenantId: sharedTenantId, name: `${label} shared dog` },
   });
   await db.entityOwnership.create({
     data: {
-      tenantId: tenant.id,
+      tenantId: sharedTenantId,
       entityId: sharedEntity.id,
       userId: user.id,
       role: "PRIMARY_OWNER",
@@ -253,7 +274,7 @@ async function seedAccount(label: string, friend: Bystander): Promise<Account> {
   });
   await db.entityOwnership.create({
     data: {
-      tenantId: tenant.id,
+      tenantId: sharedTenantId,
       entityId: sharedEntity.id,
       userId: friend.id,
       role: "CO_OWNER",
@@ -291,6 +312,8 @@ async function seedAccount(label: string, friend: Bystander): Promise<Account> {
     soleEntityId: soleEntity.id,
     sharedEntityId: sharedEntity.id,
     friendOwnershipId: friendOwnership.id,
+    handle: user.handle,
+    tenantHoldsOthersData: sharedDogInOwnTenant,
     sentInvitationId: invitation.id,
     stagingKeys: [
       `pending/${tenant.id}/${uploadId}`,
@@ -385,6 +408,8 @@ function deletionCounts(run: PurgeRun): Record<string, number> {
 async function expectAccountIntact(a: Account): Promise<void> {
   const user = await db.user.findUnique({ where: { id: a.id } });
   expect(user, `${a.email} must still exist`).not.toBeNull();
+  const personal = await db.tenant.findUniqueOrThrow({ where: { id: a.tenantId } });
+  expect(personal.displayName).toBe(a.handle);
   expect(await db.post.findUnique({ where: { id: a.postId } })).not.toBeNull();
   expect(await db.postComment.findUnique({ where: { id: a.commentId } })).not.toBeNull();
   expect(await db.notification.count({ where: { userId: a.id } })).toBe(1);
@@ -420,6 +445,18 @@ async function expectAccountErased(a: Account): Promise<void> {
   const invitation = await db.tenantInvitation.findUnique({ where: { id: a.sentInvitationId } });
   expect(invitation, "the tenant's invitation must survive").not.toBeNull();
   expect(invitation!.invitedByUserId).toBeNull();
+  // The personal tenant no longer carries the user's name: deleted outright,
+  // or — when someone else's data still lives in it — kept and anonymised.
+  const personal = await db.tenant.findUnique({ where: { id: a.tenantId } });
+  if (a.tenantHoldsOthersData) {
+    expect(personal, "a tenant holding a co-owner's dog must be kept").not.toBeNull();
+    expect(personal!.displayName).toBe("Deleted account");
+    expect(personal!.slug).toBe(`deleted-${a.tenantId}`);
+    expect(personal!.personalOwnerUserId).toBeNull();
+  } else {
+    expect(personal, "a personal tenant with nothing of anyone else's must go").toBeNull();
+  }
+  expect(await db.tenant.count({ where: { displayName: a.handle } })).toBe(0);
   // A pairing with an erased account describes nobody.
   expect(
     await db.parentalLink.count({ where: { OR: [{ childId: a.id }, { guardianId: a.id }] } }),
@@ -554,6 +591,20 @@ describe("account deletion — grace period and nightly purge (real DB)", () => 
     expect(audit[0].requestedAt.getTime()).toBe(requestedAt.getTime());
     expect(audit[0].itemsDeleted).toMatchObject({ posts: 1, comments: 1, mediaFilesErased: 1 });
     expect(deletionCounts(run).FailedCount).toBe(0);
+  });
+
+  it("deletes the personal tenant outright when nothing in it belongs to anyone else", async () => {
+    const friend = await seedBystander();
+    const a = await seedAccount("solo-tenant", friend, { sharedDogInOwnTenant: false });
+    const { scheduledAt } = await requestDeletion(a.id);
+
+    await runPurge(scheduledAt.getTime() + DAY);
+
+    await expectAccountErased(a);
+    expect(await db.tenant.findUnique({ where: { id: a.tenantId } })).toBeNull();
+    // The co-owned dog now lives in the friend's tenant and survives there.
+    expect(await db.entity.findUnique({ where: { id: a.sharedEntityId } })).not.toBeNull();
+    await expectBystanderIntact(friend);
   });
 
   it("does NOT purge a cancelled request, even long after its original scheduled instant", async () => {
