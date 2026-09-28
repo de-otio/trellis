@@ -108,6 +108,10 @@ interface Account {
   mediaId: string;
   soleEntityId: string;
   sharedEntityId: string;
+  /** The friend's co-ownership of the shared dog — added BY this user. */
+  friendOwnershipId: string;
+  /** An invitation to the friend's tenant that this user sent. */
+  sentInvitationId: string;
   stagingKeys: string[];
 }
 
@@ -253,8 +257,28 @@ async function seedAccount(label: string, friend: Bystander): Promise<Account> {
       entityId: sharedEntity.id,
       userId: friend.id,
       role: "CO_OWNER",
-      addedByUserId: friend.id,
+      // The user added the friend as co-owner: the row is the FRIEND's, and
+      // it references the user being erased (added_by_user_id).
+      addedByUserId: user.id,
     },
+  });
+  const friendOwnership = await db.entityOwnership.findUniqueOrThrow({
+    where: { entityId_userId: { entityId: sharedEntity.id, userId: friend.id } },
+  });
+  // An invitation the user sent to the friend's tenant (invited_by_user_id).
+  const invitation = await db.tenantInvitation.create({
+    data: {
+      tenantId: friend.tenantId,
+      email: `invitee-${n}@deletion-it.example.com`,
+      role: "MEMBER",
+      token: `invite-token-${label}-${n}`,
+      expiresAt: new Date(Date.now() + 30 * DAY),
+      invitedByUserId: user.id,
+    },
+  });
+  // A guardian link: the user is the friend's guardian (both FKs RESTRICT).
+  await db.parentalLink.create({
+    data: { childId: friend.id, guardianId: user.id, status: "ACTIVE" },
   });
 
   return {
@@ -266,6 +290,8 @@ async function seedAccount(label: string, friend: Bystander): Promise<Account> {
     mediaId: media.id,
     soleEntityId: soleEntity.id,
     sharedEntityId: sharedEntity.id,
+    friendOwnershipId: friendOwnership.id,
+    sentInvitationId: invitation.id,
     stagingKeys: [
       `pending/${tenant.id}/${uploadId}`,
       `processing/${tenant.id}/${contentHash}`,
@@ -379,6 +405,20 @@ async function expectAccountErased(a: Account): Promise<void> {
   // Solely-owned entity goes; the co-owned one stays with its other owner.
   expect(await db.entity.findUnique({ where: { id: a.soleEntityId } })).toBeNull();
   expect(await db.entity.findUnique({ where: { id: a.sharedEntityId } })).not.toBeNull();
+  // Someone else's rows that merely POINT at the user survive, de-referenced:
+  // the friend keeps their co-ownership, the tenant keeps its invitation.
+  const friendOwnership = await db.entityOwnership.findUnique({
+    where: { id: a.friendOwnershipId },
+  });
+  expect(friendOwnership, "the co-owner's ownership must survive").not.toBeNull();
+  expect(friendOwnership!.addedByUserId).toBeNull();
+  const invitation = await db.tenantInvitation.findUnique({ where: { id: a.sentInvitationId } });
+  expect(invitation, "the tenant's invitation must survive").not.toBeNull();
+  expect(invitation!.invitedByUserId).toBeNull();
+  // A pairing with an erased account describes nobody.
+  expect(
+    await db.parentalLink.count({ where: { OR: [{ childId: a.id }, { guardianId: a.id }] } }),
+  ).toBe(0);
   // Media handed to the GC purge: soft-deleted with the personal link
   // scrubbed — or already hard-deleted by a later run's step-1 GC purge.
   const media = await db.mediaFile.findUnique({ where: { id: a.mediaId } });

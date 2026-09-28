@@ -1646,7 +1646,9 @@ model EntityOwnership {
   userId   String        @map("user_id")
   role     OwnershipRole @default(CO_OWNER)
 
-  addedByUserId String          @map("added_by_user_id")
+  // Nullable (ON DELETE SET NULL): erasing the user who ADDED an owner must not
+  // delete that other owner's ownership, and must not be blocked by it.
+  addedByUserId String?         @map("added_by_user_id")
   addedAt       DateTime        @default(now()) @map("added_at")
   status        OwnershipStatus @default(ACTIVE)
   removedAt     DateTime?       @map("removed_at")
@@ -1654,7 +1656,7 @@ model EntityOwnership {
   entity  Entity @relation(fields: [entityId], references: [id], onDelete: Cascade)
   user    User   @relation("EntityOwners", fields: [userId], references: [id], onDelete: Cascade)
   tenant  Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  addedBy User   @relation("OwnershipAddedBy", fields: [addedByUserId], references: [id])
+  addedBy User?  @relation("OwnershipAddedBy", fields: [addedByUserId], references: [id], onDelete: SetNull)
 
   // AR10 prune: dropped [entityId] (prefix of the unique and of [entityId, role]).
   @@unique([entityId, userId])
@@ -2535,11 +2537,13 @@ model TenantInvitation {
   acceptedAt       DateTime?  @map("accepted_at")
   acceptedByUserId String?    @map("accepted_by_user_id")
 
-  invitedByUserId String   @map("invited_by_user_id")
+  // Nullable (ON DELETE SET NULL): the invitation is the tenant's; erasing the
+  // member who sent it must neither be blocked by it nor revoke it.
+  invitedByUserId String?  @map("invited_by_user_id")
   createdAt       DateTime @default(now()) @map("created_at")
 
   tenant     Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  invitedBy  User   @relation("TenantInvitationInviter", fields: [invitedByUserId], references: [id])
+  invitedBy  User?  @relation("TenantInvitationInviter", fields: [invitedByUserId], references: [id], onDelete: SetNull)
   acceptedBy User?  @relation("TenantInvitationAcceptedBy", fields: [acceptedByUserId], references: [id])
 
   // AR10 prune: dropped [token] (duplicate of @unique).

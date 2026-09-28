@@ -81,6 +81,7 @@ describe("deleteUserData", () => {
         deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
       connectionCodeRedemption: { deleteMany: vi.fn().mockResolvedValue({ count: 2 }) },
+      parentalLink: { deleteMany: vi.fn().mockResolvedValue({ count: 1 }) },
       user: { delete: vi.fn().mockResolvedValue({ id: "user-123" }) },
       // AR7 — GDPR media erasure: MediaFile rows + reference lookups.
       mediaFile: {
@@ -119,6 +120,7 @@ describe("deleteUserData", () => {
       notificationPreferences: 1,
       connectionCodes: 1,
       connectionCodeRedemptions: 2,
+      parentalLinks: 1,
     });
 
     // Verify deletion order: sentiments before comments, comments before posts, posts before entities
@@ -292,6 +294,14 @@ describe("deleteUserData", () => {
       });
     });
 
+    it("removes guardian/child links in which the user is either party", async () => {
+      await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
+
+      expect(mockDb.parentalLink.deleteMany).toHaveBeenCalledWith({
+        where: { OR: [{ childId: "user-123" }, { guardianId: "user-123" }] },
+      });
+    });
+
     it("clears all of them BEFORE deleting the user row", async () => {
       await deleteUserData(mockDb, "user-123", { pseudonymSecret: TEST_SECRET });
 
@@ -301,6 +311,7 @@ describe("deleteUserData", () => {
         mockDb.notificationPreference.deleteMany,
         mockDb.connectionCodeRedemption.deleteMany,
         mockDb.connectionCode.deleteMany,
+        mockDb.parentalLink.deleteMany,
       ]) {
         expect(fn.mock.invocationCallOrder[0]).toBeLessThan(userDelete);
       }

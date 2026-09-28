@@ -145,6 +145,8 @@ export interface DeletionResult {
   connectionCodes: number;
   /** Redemptions by the user, and redemptions of the user's own codes. */
   connectionCodeRedemptions: number;
+  /** Guardian/child links the user was either party to (both FKs RESTRICT). */
+  parentalLinks: number;
 }
 
 export interface DeleteUserDataOptions {
@@ -400,6 +402,17 @@ export async function deleteUserData(
   const connectionCodes = await db.connectionCode.deleteMany({
     where: { creatorId: userId },
   });
+  // Guardian↔child links in either direction. A link is a relation between
+  // two accounts; with one of them erased it describes nobody, so it goes
+  // (both FKs are RESTRICT). The surviving account keeps its own age tier —
+  // this removes the pairing, not any age-based restriction.
+  const parentalLinks = await db.parentalLink.deleteMany({
+    where: { OR: [{ childId: userId }, { guardianId: userId }] },
+  });
+  // entity_ownerships.added_by_user_id and tenant_invitations.invited_by_user_id
+  // are ON DELETE SET NULL (migration 20260928120000): those rows belong to
+  // another owner / to the tenant, so the database nulls the reference rather
+  // than this service deleting someone else's data.
 
   // 16. Delete the user (cascades to MfaEnrollment, Report (reporter side),
   //     and actor-side InteractionEvent rows)
@@ -428,5 +441,6 @@ export async function deleteUserData(
     notificationPreferences: notificationPreferences.count,
     connectionCodes: connectionCodes.count,
     connectionCodeRedemptions: connectionCodeRedemptions.count,
+    parentalLinks: parentalLinks.count,
   };
 }
