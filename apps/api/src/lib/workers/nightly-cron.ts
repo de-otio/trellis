@@ -210,6 +210,12 @@ export async function runNightlyCron(
             deletionRequestedAt: true,
             deletionConfirmedAt: true,
           },
+          // A queue, not whatever the plan returns: oldest-due first, so a
+          // newly due account is reached as long as fewer than `take` older
+          // ones fail every night. (There is no per-account failure counter
+          // to back off on; 50 permanently failing accounts would still fill
+          // the batch — the FailedCount metric is what surfaces that.)
+          orderBy: [{ deletionScheduledAt: "asc" }, { id: "asc" }],
           take: 50,
         });
 
