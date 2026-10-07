@@ -153,7 +153,11 @@ Used by the pre-token generation trigger.
 
 ### ActivityPub: Fedify KV Store
 
-Used by the Fedify framework.
+> **Not used.** No code reads or writes these keys. Actor key pairs are
+> Postgres columns, the private key encrypted under
+> `ACTIVITYPUB_KEY_ENCRYPTION_KEY`; the HTTP-signature nonce cache is
+> in-process. See [ActivityPub federation](activitypub.md). The table below
+> records the original design.
 
 | Access Pattern | pk | sk | ttl | data |
 |---|---|---|---|---|
@@ -197,5 +201,4 @@ Almost every item has a TTL. DynamoDB automatically deletes expired items (withi
 - **Rate limit reset** — counters auto-expire
 
 Items without TTL (permanent storage):
-- `fedify:key:*` — actor key pairs (must persist indefinitely)
 - `config:feature-toggles` — refreshed continuously but never deleted

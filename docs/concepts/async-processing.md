@@ -25,7 +25,7 @@ approved bytes) is triggered by moderation-completion events wired in the
 deploying application's infrastructure, not by an API-bound queue. See
 [Media Moderation](media-moderation.md).
 
-> Outbound ActivityPub delivery does **not** use an SQS queue. Activities are delivered through Fedify directly; see [ActivityPub federation](activitypub.md).
+> Outbound ActivityPub delivery does **not** use an SQS queue. Each activity is delivered inline as one signed `POST` per recipient inbox, with no queue and no retry yet; see [ActivityPub federation](activitypub.md).
 
 ### DLQ Alarm
 

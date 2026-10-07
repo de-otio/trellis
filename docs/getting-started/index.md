@@ -35,7 +35,7 @@ environment.
 | KV / cache | DynamoDB single-table |
 | Auth | AWS Cognito with custom Lambda triggers |
 | Queues | SQS with Lambda workers |
-| Federation | ActivityPub via Fedify |
+| Federation | ActivityPub (off by default; [enablement gate](../concepts/activitypub.md)) |
 
 ## Repository structure
 
