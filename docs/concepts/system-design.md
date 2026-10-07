@@ -24,7 +24,7 @@ order: 10
 | Scheduled jobs | EventBridge Scheduler + Lambda | DynamoDB locks prevent double-execution |
 | Email | AWS SES | Transactional email delivery |
 | Image processing | Lambda + Sharp | On-demand resize/transcode from S3 originals |
-| Federation | Fedify library (in ECS container) | ActivityPub inbox/outbox, HTTP signatures |
+| Federation | Trellis's own ActivityPub module (in the API container); Fedify for vocabulary/serialisation | ActivityPub inbox/outbox, HTTP signatures; off by default |
 | Observability | CloudWatch Logs + Metrics + X-Ray | Dashboards, alarms, distributed traces |
 
 ## Request Flow

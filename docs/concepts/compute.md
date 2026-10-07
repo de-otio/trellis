@@ -78,7 +78,7 @@ The queues bound by the API process (`apps/api/src/env.ts`) are `user-export`, `
 | `media-reconciliation-worker` | (not bound in env) | Yes (RDS) | Orphaned media cleanup | Stub (`TODO: implement`) |
 | `federation-outbox-worker` | (not bound in env) | No | Outgoing ActivityPub delivery | Stub (`TODO: implement`) |
 
-> **Note on outbound federation.** There is no `federation-outbox` queue wired into the API process. Outgoing ActivityPub activities are delivered through Fedify directly (`deliverActivityWithFedify` in `apps/api/src/lib/activitypub/services/fedify-delivery.ts`); `federation-outbox-worker.ts` is a placeholder. See [ActivityPub federation](activitypub.md).
+> **Note on outbound federation.** There is no `federation-outbox` queue wired into the API process. Outgoing ActivityPub activities are delivered inline, one signed `POST` per recipient inbox with no retry (`deliverActivityWithFedify` in `apps/api/src/lib/activitypub/services/fedify-delivery.ts` — Trellis's own code despite the name); `federation-outbox-worker.ts` is a placeholder. See [ActivityPub federation](activitypub.md).
 
 ### SQS Event Source Mapping
 

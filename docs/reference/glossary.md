@@ -19,6 +19,6 @@ order: 10
 | **Stateless stack** | CDK stack containing compute-only resources (API, workers, CDN). Can be recreated freely. |
 | **DLQ** | Dead-Letter Queue — receives SQS messages that exhausted their processing retries, so worker failures can be inspected and alerted on. |
 | **OAC** | Origin Access Control — CloudFront mechanism to keep S3 buckets private while serving assets through the CDN. |
-| **Fedify** | The ActivityPub framework powering Trellis federation. |
+| **Fedify** | An ActivityPub library; Trellis uses it for ActivityStreams vocabulary and serialisation. Signing, verification and delivery are Trellis's own code. |
 | **Presigned URL** | Time-limited S3 URL for direct client uploads, bypassing the API server. |
 | **Cognito trigger** | Lambda function invoked by Cognito on auth events (e.g. pre-signup, post-confirmation). |
