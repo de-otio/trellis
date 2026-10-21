@@ -376,6 +376,12 @@ export class ModerationProviderError extends Error {
    * unaffected.
    */
   readonly infraFault: boolean;
+  /**
+   * The provider refused the call for lack of CAPACITY (a quota or concurrency
+   * ceiling), as distinct from a fault. Typed only: `undefined` when the
+   * adapter does not say, and no core path reads it yet.
+   */
+  readonly capacity: boolean | undefined;
 
   constructor(
     message: string,
@@ -383,6 +389,7 @@ export class ModerationProviderError extends Error {
       retryable: boolean;
       unknownCause?: boolean;
       infraFault?: boolean;
+      capacity?: boolean;
       cause?: unknown;
     } = {
       retryable: false,
@@ -395,6 +402,7 @@ export class ModerationProviderError extends Error {
     // `unknownCause` implies `infraFault`, so no existing adapter changes
     // behaviour and no caller has to set both.
     this.infraFault = options.infraFault === true || this.unknownCause;
+    this.capacity = options.capacity;
     if (options.cause !== undefined) {
       (this as { cause?: unknown }).cause = options.cause;
     }
@@ -417,6 +425,50 @@ export function isModerationProviderError(
     o.name === "ModerationProviderError" && typeof o.retryable === "boolean"
   );
 }
+
+/**
+ * Thrown when an asynchronous moderation job has been started but has not
+ * produced a result yet. It is a control-flow signal, not a fault: the caller
+ * should come back later rather than retry the call or fail the track.
+ */
+export class ModerationJobPendingError extends Error {
+  readonly pending = true as const;
+
+  constructor(message = "moderation job pending", options?: { cause?: unknown }) {
+    super(message);
+    this.name = "ModerationJobPendingError";
+    if (options?.cause !== undefined) {
+      (this as { cause?: unknown }).cause = options.cause;
+    }
+  }
+}
+
+/**
+ * Structural type guard for {@link ModerationJobPendingError}, structural for
+ * the same reason as {@link isModerationProviderError}: an error built by
+ * another copy of this package must still be recognised.
+ */
+export function isModerationJobPendingError(
+  e: unknown,
+): e is ModerationJobPendingError {
+  if (e === null || typeof e !== "object") return false;
+  const o = e as Record<string, unknown>;
+  return o.name === "ModerationJobPendingError" && o.pending === true;
+}
+
+/**
+ * Why a track is being held rather than released:
+ *   - `content`        — the verdict itself calls for a hold;
+ *   - `technical`      — moderation could not complete for infrastructure reasons;
+ *   - `unprocessable`  — the bytes could not be processed at all;
+ *   - `taxonomy-drift` — the provider answered in a vocabulary or model version
+ *                        the policy does not accept.
+ */
+export type HoldGround =
+  | "content"
+  | "technical"
+  | "unprocessable"
+  | "taxonomy-drift";
 
 // ---------------------------------------------------------------------------
 // Warning sink.

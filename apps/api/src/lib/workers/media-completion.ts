@@ -164,6 +164,16 @@ export interface CompletionStore {
    */
   createEscalationJob?(spec: EscalationJobSpec): Promise<CreatedEscalationJob>;
 
+  /**
+   * Record, up front, which tracks a media object will be moderated on, so a
+   * completion for one track can tell a sibling that has not started yet from
+   * one that will never exist. MUST be idempotent: reserving the same tracks
+   * twice is a no-op.
+   *
+   * OPTIONAL so existing implementers keep compiling; no core path calls it yet.
+   */
+  reserveTracks?(mediaId: string, tracks: readonly Track[]): Promise<void>;
+
   /** Read the media object's current persisted lifecycle + CAS coords. */
   findMedia(mediaId: string): Promise<MediaCoords | null>;
 
@@ -349,7 +359,15 @@ export type RecordOutcome =
   | { readonly kind: "retry"; readonly reason: string } // transient I/O — return to queue
   // Routed to the deferred lane (plan 031 C1): no verdict written, the job
   // stays open, the escalation row + workflow own the rest. An ack.
-  | { readonly kind: "escalated"; readonly escalationJobId: string };
+  | { readonly kind: "escalated"; readonly escalationJobId: string }
+  // The job reported progress that is not a final result. An ack.
+  | { readonly kind: "not-terminal" }
+  // This track resolved but a sibling track has not; the sibling's completion
+  // finishes the media object. An ack.
+  | { readonly kind: "awaiting-sibling" }
+  // A concurrent delivery already moved the media object; this one stands
+  // down without writing. An ack.
+  | { readonly kind: "lost-race" };
 
 // ---------------------------------------------------------------------------
 // Body parsing — extract ONLY the job id from an untrusted pointer.

@@ -96,10 +96,21 @@ export interface CategoryPolicy {
 export interface LabelPolicyConfig {
   readonly categories: Readonly<Record<string, CategoryPolicy>>;
   readonly pinMode: TaxonomyPinMode;
-  /** The pinned taxonomy version. REQUIRED when `pinMode` is `"config"`. */
-  readonly expectedModelVersion?: string;
+  /**
+   * The pinned taxonomy version. REQUIRED when `pinMode` is `"config"`.
+   *
+   * The list form is typed only: until a follow-up accepts it, a list is
+   * refused at construction under `"config"` mode, so it fails closed.
+   */
+  readonly expectedModelVersion?: string | readonly string[];
   /** Must be explicitly `true` when `pinMode` is `"none"`. */
   readonly acceptUnpinnedTaxonomy?: boolean;
+  /**
+   * What to do when a verdict reports a version outside the accepted set:
+   * hold the media, or count a warning and continue. Typed only; nothing
+   * reads it yet.
+   */
+  readonly onUnacceptedVersion?: "hold" | "warn";
 }
 
 /** Thrown at wiring time when the policy is unusable. Never thrown per-verdict. */

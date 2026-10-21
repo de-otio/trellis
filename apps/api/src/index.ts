@@ -158,6 +158,8 @@ export type {
 export {
   ModerationProviderError,
   isModerationProviderError,
+  ModerationJobPendingError,
+  isModerationJobPendingError,
   NullModerationProvider,
   assertModerationProviderAllowed,
   moderationProviderName,
@@ -172,7 +174,24 @@ export type {
   ModerationLabel,
   ModerationCallOptions,
   VideoModerationStart,
+  HoldGround,
 } from "./lib/media/moderation-provider.js";
+// Media moderation contract types the follow-up pipeline work builds against.
+// Types and pure helpers only: nothing here is wired into a code path yet.
+export type { ReviewActor } from "./lib/media/media-review-handler.js";
+export type { UploadQuotaPort } from "./lib/media/media-ports.js";
+export type {
+  ProcessingOutcome,
+  ProcessingClock,
+} from "./lib/workers/media-processing.js";
+export { validateRecoverySweepConfig } from "./lib/workers/media-recovery-sweep.js";
+export type {
+  MediaRecoverySweepConfig,
+  RecoveryAction,
+  RecoveryCandidate,
+  RecoveryTrackState,
+  CompletionQueueTiming,
+} from "./lib/workers/media-recovery-sweep.js";
 // The canonical completion envelope a backend publishes when an async job
 // finishes, plus its producer.
 export {

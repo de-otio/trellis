@@ -864,8 +864,13 @@ export { CrossCheckModerationProvider } from "./lib/media/cross-check-provider.j
 export type { CrossCheckModerationConfig } from "./lib/media/cross-check-provider.js";
 export { MinimumContentGateModerationProvider } from "./lib/media/minimum-content-gate.js";
 export type { MinimumContentGateConfig, MinimumContentGateDecision, } from "./lib/media/minimum-content-gate.js";
-export { ModerationProviderError, isModerationProviderError, NullModerationProvider, assertModerationProviderAllowed, moderationProviderName, UNKNOWN_PROVIDER_NAME, } from "./lib/media/moderation-provider.js";
-export type { MediaModerationProvider, MediaPin, ImageRef, S3Ref, ModerationVerdict, ModerationLabel, ModerationCallOptions, VideoModerationStart, } from "./lib/media/moderation-provider.js";
+export { ModerationProviderError, isModerationProviderError, ModerationJobPendingError, isModerationJobPendingError, NullModerationProvider, assertModerationProviderAllowed, moderationProviderName, UNKNOWN_PROVIDER_NAME, } from "./lib/media/moderation-provider.js";
+export type { MediaModerationProvider, MediaPin, ImageRef, S3Ref, ModerationVerdict, ModerationLabel, ModerationCallOptions, VideoModerationStart, HoldGround, } from "./lib/media/moderation-provider.js";
+export type { ReviewActor } from "./lib/media/media-review-handler.js";
+export type { UploadQuotaPort } from "./lib/media/media-ports.js";
+export type { ProcessingOutcome, ProcessingClock, } from "./lib/workers/media-processing.js";
+export { validateRecoverySweepConfig } from "./lib/workers/media-recovery-sweep.js";
+export type { MediaRecoverySweepConfig, RecoveryAction, RecoveryCandidate, RecoveryTrackState, CompletionQueueTiming, } from "./lib/workers/media-recovery-sweep.js";
 export { completionEnvelopeBody, parseCompletionEnvelope, } from "./lib/media/completion-envelope.js";
 export type { ModerationCompletionEnvelope } from "./lib/media/completion-envelope.js";
 export { setTextModerationProvider } from "./lib/media/request-text-moderation.js";
@@ -2763,10 +2768,21 @@ export interface CategoryPolicy {
 export interface LabelPolicyConfig {
     readonly categories: Readonly<Record<string, CategoryPolicy>>;
     readonly pinMode: TaxonomyPinMode;
-    /** The pinned taxonomy version. REQUIRED when `pinMode` is `"config"`. */
-    readonly expectedModelVersion?: string;
+    /**
+     * The pinned taxonomy version. REQUIRED when `pinMode` is `"config"`.
+     *
+     * The list form is typed only: until a follow-up accepts it, a list is
+     * refused at construction under `"config"` mode, so it fails closed.
+     */
+    readonly expectedModelVersion?: string | readonly string[];
     /** Must be explicitly `true` when `pinMode` is `"none"`. */
     readonly acceptUnpinnedTaxonomy?: boolean;
+    /**
+     * What to do when a verdict reports a version outside the accepted set:
+     * hold the media, or count a warning and continue. Typed only; nothing
+     * reads it yet.
+     */
+    readonly onUnacceptedVersion?: "hold" | "warn";
 }
 /** Thrown at wiring time when the policy is unusable. Never thrown per-verdict. */
 export declare class LabelPolicyConfigError extends Error {
@@ -3018,6 +3034,8 @@ export type ModerationDecision = "approved" | "review" | "quarantine";
  *                      the shell deletes the staged bytes BEFORE moderation.
  * - `upload-failed`  — the session expired / was abandoned / was reaped
  *                      before the object became moderatable.
+ * - `automated-review` — an automated reviewer's decision on a held object.
+ *                      Illegal from every state for now.
  */
 export type MediaLifecycleEvent = {
     readonly kind: "bytes-arrived";
@@ -3033,6 +3051,9 @@ export type MediaLifecycleEvent = {
     readonly kind: "over-duration";
 } | {
     readonly kind: "upload-failed";
+} | {
+    readonly kind: "automated-review";
+    readonly action: "approve";
 };
 /**
  * A transition that the state machine refuses. Returned (never thrown) so the
@@ -3302,6 +3323,22 @@ export interface TranscribePort {
  * functional core (a separate caps unit), and the mock must not silently make
  * that decision for it.
  */
+/**
+ * Per-user upload quota, checked before an upload is accepted. A refusal
+ * carries how long the caller should wait before trying again; the limits
+ * themselves are the adapter's runtime config, never core's.
+ */
+export interface UploadQuotaPort {
+    check(i: {
+        userId: string;
+        kind: "image" | "video";
+    }): Promise<{
+        ok: true;
+    } | {
+        ok: false;
+        retryAfterSeconds: number;
+    }>;
+}
 export declare class MockTranscodePort implements TranscodePort {
     private duration;
     private hasAudio;
@@ -3456,6 +3493,18 @@ export declare const MODERATOR_ROLES: readonly ["MODERATOR", "SUPER_ADMIN"];
 export declare function isModeratorRole(role: string | null | undefined): boolean;
 /** A moderator decision on a review item. `reject` is terminal (→ REJECTED). */
 export type ModeratorDecision = "approve" | "reject";
+/**
+ * Who made a review decision: a human moderator, or an automated reviewer
+ * identified by its own id and the model it ran.
+ */
+export type ReviewActor = {
+    kind: "human";
+    userId: string;
+} | {
+    kind: "automated";
+    reviewerId: string;
+    modelId: string;
+};
 /** The media "kind" derived from its stored mimeType (drives the client view). */
 export type MediaKind = "image" | "video" | "audio" | "other";
 /** Derive the coarse media kind from a mimeType. Total; unknown → "other". */
@@ -4205,10 +4254,17 @@ export declare class ModerationProviderError extends Error {
      * unaffected.
      */
     readonly infraFault: boolean;
+    /**
+     * The provider refused the call for lack of CAPACITY (a quota or concurrency
+     * ceiling), as distinct from a fault. Typed only: `undefined` when the
+     * adapter does not say, and no core path reads it yet.
+     */
+    readonly capacity: boolean | undefined;
     constructor(message: string, options?: {
         retryable: boolean;
         unknownCause?: boolean;
         infraFault?: boolean;
+        capacity?: boolean;
         cause?: unknown;
     });
 }
@@ -4220,6 +4276,32 @@ export declare class ModerationProviderError extends Error {
  * demote it to the untyped fallback.
  */
 export declare function isModerationProviderError(err: unknown): err is ModerationProviderError;
+/**
+ * Thrown when an asynchronous moderation job has been started but has not
+ * produced a result yet. It is a control-flow signal, not a fault: the caller
+ * should come back later rather than retry the call or fail the track.
+ */
+export declare class ModerationJobPendingError extends Error {
+    readonly pending: true;
+    constructor(message?: string, options?: {
+        cause?: unknown;
+    });
+}
+/**
+ * Structural type guard for {@link ModerationJobPendingError}, structural for
+ * the same reason as {@link isModerationProviderError}: an error built by
+ * another copy of this package must still be recognised.
+ */
+export declare function isModerationJobPendingError(e: unknown): e is ModerationJobPendingError;
+/**
+ * Why a track is being held rather than released:
+ *   - `content`        — the verdict itself calls for a hold;
+ *   - `technical`      — moderation could not complete for infrastructure reasons;
+ *   - `unprocessable`  — the bytes could not be processed at all;
+ *   - `taxonomy-drift` — the provider answered in a vocabulary or model version
+ *                        the policy does not accept.
+ */
+export type HoldGround = "content" | "technical" | "unprocessable" | "taxonomy-drift";
 export type WarnSink = (message: string, data?: unknown) => void;
 /**
  * A verdict that fails closed: every call resolves to `review` with no labels.
@@ -4604,6 +4686,92 @@ export declare class ScalewayVisionModerationProvider implements MediaModeration
      * the label policy is expected to do the thresholding.
      */
     private baselineDecision;
+}
+
+// ===== lib/media/spend-guard.d.ts =====
+/**
+ * The spend-guard slice of the worker config. Both values are operator-tuned
+ * runtime config sourced from Env/SSM by the consuming app (never literals).
+ */
+export interface MediaSpendConfig {
+    /** Daily estimated-spend ceiling (USD). At/above it, new AI jobs stop. */
+    readonly dailyCapUsd: number;
+    /**
+     * Combined per-minute-of-media rate (USD/min) covering the AI jobs one
+     * processed upload triggers (video moderation + transcription + downstream
+     * text moderation). An intentionally coarse operator-owned estimate.
+     */
+    readonly perMinuteRateUsd: number;
+}
+/**
+ * The daily spend counter the worker consults before starting paid AI jobs.
+ * Implemented by the consuming app (Skybber: a TTL'd DynamoDB counter item);
+ * in tests by {@link MockSpendGuardPort}.
+ */
+export interface MediaSpendGuardPort {
+    /**
+     * Today's accumulated estimated spend (USD). MUST throw on a backend error —
+     * the worker fails CLOSED (retry/DLQ) when the counter cannot be read; a
+     * defaulted 0 here would silently disable the cap exactly when the backend
+     * is unhealthy.
+     */
+    getTodaySpendUsd(): Promise<number>;
+    /**
+     * Add one started job's estimated cost (USD) to today's counter. Called
+     * AFTER the jobs were started (the money is committed at that point). May
+     * throw; the worker logs and acks anyway — see the worker's documented
+     * fail-open-on-record-error note.
+     */
+    recordSpendUsd(estimatedUsd: number): Promise<void>;
+    /**
+     * Signal that a job was short-circuited because the cap was reached (the
+     * adapter emits an observability metric). Best-effort: implementations
+     * should not throw, and the worker ignores failures.
+     */
+    reportCapExceeded(): Promise<void>;
+}
+/**
+ * Estimate the AI cost (USD) of processing one upload of `durationSeconds`,
+ * at the operator-configured `perMinuteRateUsd`.
+ *
+ * Throws on non-finite or negative inputs: a silently-wrong estimate would
+ * corrupt the counter (an under-estimate is a cost leak), so invalid inputs
+ * fail loudly and the caller's classifier retries/DLQs the job (fail closed).
+ */
+export declare function estimateJobCostUsd(durationSeconds: number, perMinuteRateUsd: number): number;
+/**
+ * Whether today's accumulated spend has reached the daily cap.
+ *
+ * - `currentSpendUsd >= dailyCapUsd` is over (the cap is a ceiling, not a
+ *   budget to exactly consume; equality blocks the next job).
+ * - A non-finite `currentSpendUsd` (corrupted counter) is OVER — fail closed.
+ * - A cap ≤ 0 blocks everything (operator emergency stop).
+ */
+export declare function isOverDailyCap(currentSpendUsd: number, dailyCapUsd: number): boolean;
+/**
+ * In-memory MediaSpendGuardPort. Tests program the current counter value (or
+ * a read failure) and assert the recorded amounts / cap-exceeded signals.
+ */
+export declare class MockSpendGuardPort implements MediaSpendGuardPort {
+    private spendUsd;
+    private readError;
+    private recordError;
+    /** Records of each recordSpendUsd call, for assertions. */
+    readonly recorded: number[];
+    /** Number of reportCapExceeded calls, for assertions. */
+    capExceededReports: number;
+    constructor(opts?: {
+        spendUsd?: number;
+    });
+    /** Program the counter value subsequent reads return. */
+    setSpendUsd(usd: number): void;
+    /** Program getTodaySpendUsd to throw (backend outage). */
+    failReads(err: Error): void;
+    /** Program recordSpendUsd to throw (backend outage on the write path). */
+    failRecords(err: Error): void;
+    getTodaySpendUsd(): Promise<number>;
+    recordSpendUsd(estimatedUsd: number): Promise<void>;
+    reportCapExceeded(): Promise<void>;
 }
 
 // ===== lib/media/text-moderation.d.ts =====
@@ -5098,6 +5266,106 @@ export type DeclarationRejection =
  * rejection onto an HTTP response.
  */
 export declare function validateDeclaration(posture: DisclosurePosture, declared: string | undefined): DeclarationRejection | null;
+
+// ===== lib/provenance/types.d.ts =====
+/**
+ * What the content is, aligned with the IPTC `DigitalSourceType` vocabulary.
+ *
+ * `UNKNOWN` is not a synonym for `HUMAN_CREATED`. Absence of a marking is
+ * absence of evidence, never evidence of human origin.
+ */
+export type SyntheticSourceType = 
+/** No signal, or a signal we could not interpret. The default. */
+"UNKNOWN"
+/** Affirmatively declared or attested as not AI-generated. */
+ | "HUMAN_CREATED"
+/** AI applied to human-captured content beyond standard editing. */
+ | "AI_EDITED"
+/** Human-authored with AI in the loop (IPTC compositeWithTrainedAlgorithmicMedia). */
+ | "AI_ASSISTED"
+/** Wholly synthetic (IPTC trainedAlgorithmicMedia). */
+ | "AI_GENERATED";
+/**
+ * How we came to believe the `SyntheticSourceType`. This is what carries the
+ * legal weight — an author's declaration is a statement by a deployer, a file's
+ * metadata is hearsay from an upstream tool, and a classifier's output is a
+ * guess. They must never be collapsed into one another.
+ */
+export type SyntheticBasis = 
+/** The posting author said so. */
+"AUTHOR_DECLARED"
+/** Our own generation feature produced it. Highest confidence; never downgradable. */
+ | "PLATFORM_GENERATED"
+/** Read from IPTC/XMP/C2PA before the ingest metadata strip. */
+ | "EMBEDDED_METADATA"
+/** A detector inferred it. Advisory ONLY; never renders as a claim. */
+ | "CLASSIFIER_INFERRED";
+/** A provenance value together with its basis. `basis` is null only when `sourceType` is UNKNOWN. */
+export interface Provenance {
+    readonly sourceType: SyntheticSourceType;
+    readonly basis: SyntheticBasis | null;
+}
+/**
+ * The API-facing projection.
+ *
+ * Emits i18n KEYS, never localized strings, and takes no locale: Trellis is
+ * headless and the consuming application owns translation
+ * (analysis 08 §3). The vocabulary is core's; the wording is the vertical's.
+ */
+export interface ProvenanceView {
+    readonly sourceType: SyntheticSourceType;
+    readonly basis: SyntheticBasis | null;
+    /** Resolved disclosure obligation. See `toProvenanceView` for the current default. */
+    readonly disclosureRequired: boolean;
+    /** i18n key, e.g. "provenance.ai_assisted". */
+    readonly labelKey: string;
+    /**
+     * i18n key for the accessible text equivalent. NON-OPTIONAL by design:
+     * Art. 50(5) requires conformance with accessibility requirements, and an
+     * optional accessible label is one that gets skipped.
+     */
+    readonly labelDetailKey: string;
+}
+/**
+ * Summary of a C2PA manifest found in a media file's ORIGINAL bytes and copied
+ * out before the ingest metadata strip destroyed it.
+ *
+ * READ THE `verified` FIELD BEFORE YOU RENDER ANY OF THIS. Trellis extracts the
+ * manifest; it does not check its signature, walk its certificate chain, or read
+ * a single assertion out of it. `verified` is a constant `false`, and there is
+ * no stored column behind it — a client that renders "Content Credentials
+ * verified" from this object is publishing a claim the platform never made. The
+ * honest rendering is "this file arrived carrying Content Credentials, which we
+ * have kept but not checked", or nothing at all.
+ */
+export interface C2paManifestView {
+    /** Always true when this object exists at all; absence is expressed as null. */
+    readonly present: true;
+    /** How the manifest was carried: "jpeg-app11", "png-cabx", or "unidentified". */
+    readonly container: string;
+    /**
+     * Storage key of the kept manifest bytes, or null when presence was recorded
+     * but the bytes could not be located cleanly in that container.
+     */
+    readonly sidecarKey: string | null;
+    readonly byteLength: number | null;
+    /** SHA-256 (lowercase hex) of the kept bytes. An integrity check on OUR copy,
+     *  not a signature check on the manifest. */
+    readonly sha256: string | null;
+    /** ALWAYS false. See the interface doc. */
+    readonly verified: false;
+}
+/**
+ * A media file's provenance view: the Art. 50 projection plus the C2PA manifest
+ * summary, which exists only for media (text has no container to carry one).
+ */
+export type MediaProvenanceView = ProvenanceView & {
+    /** Null when no manifest was found, or the bytes predate the sidecar. */
+    readonly c2pa: C2paManifestView | null;
+};
+/** Every source type, in ascending disclosure strength. The ONE ordering. */
+export declare const SOURCE_TYPES_BY_STRENGTH: readonly SyntheticSourceType[];
+export declare const SYNTHETIC_BASES: readonly SyntheticBasis[];
 
 // ===== lib/push/index.d.ts =====
 export type { PushPlatformWire, PushDeviceTarget, PushSendOutcome, PushTransport, } from "./push-transport.js";
@@ -6586,6 +6854,542 @@ export declare class SessionManager {
     }): Promise<void>;
 }
 export { MIN_SECRET_LENGTH, MIN_SALT_LENGTH };
+
+// ===== lib/workers/media-processing.d.ts =====
+import type { Track } from "../media/track-verdict.js";
+import type { ModerationDecision } from "../media/media-lifecycle.js";
+import type { SyntheticSourceType } from "../provenance/types.js";
+import type { MetricsPort } from "./metrics-port.js";
+import type { StoragePort, TranscodePort, TranscribePort } from "../media/media-ports.js";
+import type { MediaLifecycle } from "../media/media-lifecycle.js";
+import type { MediaModerationProvider, ModerationJobDetail, ModerationLabel } from "../media/moderation-provider.js";
+import { type MediaSpendConfig, type MediaSpendGuardPort } from "../media/spend-guard.js";
+/**
+ * Scheduling intent for a moderation job. Recorded, not yet acted on: a
+ * deferred lane needs a scheduler, and this is the field it will read.
+ */
+export type ModerationJobPriority = "interactive" | "deferred";
+/**
+ * The slice of a queue record the worker consumes. Structurally satisfied by
+ * the AWS `SQSRecord`, so the Lambda entrypoint passes its records through
+ * unchanged; the container consumer builds the same shape from received
+ * messages.
+ */
+export interface QueueRecordLike {
+    readonly body: string;
+    readonly messageId: string;
+}
+/**
+ * Structural logger seam. Satisfied by BOTH a powertools `Logger` instance
+ * (what Skybber injects on Lambda today) and the neutral `lib/logger.ts`
+ * shape (what the container injects) — the seam is the shape, not the class.
+ */
+export interface MediaWorkerLogger {
+    info(message: string, data?: Record<string, unknown>): void;
+    warn(message: string, data?: Record<string, unknown>): void;
+    error(message: string, data?: Record<string, unknown>): void;
+}
+/**
+ * The minimal MediaFile row shape the worker reads. Re-declared (not imported
+ * from the Prisma client) so this module compiles in worktrees that have not
+ * regenerated the client, mirroring moderation-status.ts's discipline. The
+ * shell maps the real Prisma row to this shape at the persistence-port boundary.
+ */
+export interface MediaFileRow {
+    readonly id: string;
+    readonly tenantId: string;
+    readonly uploadId: string | null;
+    /**
+     * The row's CURRENT lifecycle, when the adapter can supply it.
+     *
+     * Needed because this worker's queue is at-least-once and it has no dedupe
+     * of its own: a redelivered message re-runs the whole pipeline, and without
+     * knowing where the object actually stands, a second pass would compute a
+     * transition from a state the object left long ago. If a moderator has since
+     * REJECTED it, that is a rejection being silently reversed.
+     *
+     * OPTIONAL, as a published seam requires. The consequence is stated rather
+     * than hidden: without it, an object whose tracks all resolve during
+     * processing is NOT settled here — it is held for human review instead,
+     * because settling would mean writing a lifecycle computed from a guess.
+     */
+    readonly lifecycle?: MediaLifecycle;
+}
+/**
+ * A copy of the operative moderation thresholds, snapshotted at job-submission
+ * time so historical decisions stay auditable after a threshold change. The
+ * shape mirrors Env.media.thresholds; the worker treats it as an opaque JSON
+ * blob and never reads individual values (no compiled threshold logic here).
+ */
+export type ThresholdSnapshot = Record<string, {
+    review: number;
+    quarantine: number;
+}>;
+/**
+ * The persistence operations the worker needs, narrowed to exactly what it
+ * uses. Implemented in production by a thin Prisma adapter; in tests by an
+ * in-memory fake. Keeping this narrow keeps the worker testable without the
+ * generated client and documents the worker's full DB surface in one place.
+ */
+export interface MediaPersistencePort {
+    /** Load the MediaFile row for an upload session, or null if none exists. */
+    findMediaByUploadId(uploadId: string): Promise<MediaFileRow | null>;
+    /**
+     * Persist a started per-track moderation job with its threshold snapshot.
+     *
+     * `initialDecision` pre-resolves the track's verdict at creation time. It is
+     * used ONLY for the vacuously-approved AUDIO track of a no-audio video: there
+     * is no transcription job to later fan in, so the decision is recorded up
+     * front and the completion worker reads it as the sibling track's outcome.
+     * Omitted for normal tracks (decision stays null until fan-in resolves it).
+     */
+    createModerationJob(input: {
+        mediaId: string;
+        track: Track;
+        jobId: string;
+        thresholdSnapshot: ThresholdSnapshot;
+        initialDecision?: ModerationDecision;
+        /**
+         * Which backend produced (or will produce) this verdict. Together with the
+         * media row's `contentHash`, {@link modelVersion} and {@link policyVersion},
+         * this is the four-part identity of a verdict: the same bytes, scored by
+         * the same provider, under the same taxonomy and the same sampling policy,
+         * are the same answer. Persisting all four now is what lets a verdict cache
+         * — or an audit asking "how do you know you caught it?" — be built later
+         * without a migration.
+         */
+        provider?: string;
+        /** The taxonomy/model build the verdict was produced under. */
+        modelVersion?: string;
+        /** The sampling/scoring policy the verdict was produced under. */
+        policyVersion?: string;
+        /**
+         * Scheduling intent. `interactive` is an upload someone is waiting on;
+         * `deferred` is one that may be scored later (a budget-pressure lane).
+         * Nothing schedules on it yet — carrying the field is the point, because
+         * adding it to persisted rows afterwards is a migration and carrying it now
+         * is a word.
+         */
+        priority?: ModerationJobPriority;
+        /**
+         * Per-frame evidence and counts behind the verdict.
+         *
+         * NEVER SERVE ANY OF THIS TO A CLIENT — confidences, frame timings and skip
+         * counts are a tuning oracle. It is recorded so operators can audit their
+         * own pipeline, and the frames it describes are deleted immediately, so if
+         * it is not captured here it does not exist anywhere.
+         */
+        detail?: ModerationJobDetail;
+        /** The provider's raw labels. Same server-side-only rule as `detail`. */
+        labels?: ReadonlyArray<ModerationLabel>;
+    }): Promise<void>;
+    /**
+     * Persist the REAL content identity of the cleaned bytes onto the MediaFile
+     * row, replacing the upload-time `uploadId` placeholder contentHash with the
+     * SHA-256 of the transcoded output and recording the future serve key. The
+     * completion worker derives the promote target (`cas/{tenant}/{hash}`) from
+     * this persisted `contentHash`, so this write MUST happen before moderation
+     * fans in — otherwise the object can never promote.
+     *
+     * `stagingVersionId` (AR-SEC F3) is the S3 versionId of the cleaned STAGING
+     * object this worker hashed and started moderation on. The adapter must
+     * persist it retrievably for the completion store (no schema change needed —
+     * e.g. inside the existing `MediaFile.videoMetadata` JSON column) and
+     * surface it back as `MediaCoords.stagingVersionId`, so the promote copy can
+     * pin the EXACT moderated version.
+     */
+    persistCleanedContent(mediaId: string, content: {
+        contentHash: string;
+        originalKey: string;
+        stagingVersionId: string;
+    }): Promise<void>;
+    /**
+     * Record the synthetic-content provenance read from the ORIGINAL video/audio
+     * bytes, before the transcode destroys it (AI Act Art. 50).
+     *
+     * MONOTONIC RAISE, not a write. The adapter must implement this as a guarded
+     * `updateMany` — `where: { id, embeddedSourceType: { in: weakerThan(next) } }`
+     * — exactly as the image path does in routes/media.ts, because `MediaFile` is
+     * content-addressed and deduped within a tenant: two different originals can
+     * transcode to identical bytes and land on the same row, and whichever upload
+     * lands second must not erase the other's marking. Also set
+     * `provenanceExamined: true` when `examined` is true.
+     *
+     * OPTIONAL, so an existing consumer adapter still satisfies this interface —
+     * this is a published package and a required method would be a breaking change.
+     * The consequence is stated plainly rather than hidden: until a consumer
+     * implements it, video and audio provenance is READ AND DISCARDED, and the
+     * worker logs a warning saying so on every marked upload. See the
+     * consuming-application contract (analysis 08).
+     */
+    recordEmbeddedProvenance?(mediaId: string, reading: {
+        readonly sourceType: SyntheticSourceType;
+        readonly examined: boolean;
+    }): Promise<void>;
+    /** Drive a media object's lifecycle to REVIEW (poison path). */
+    markMediaForReview(mediaId: string): Promise<void>;
+    /**
+     * Persist an arbitrary resolved lifecycle.
+     *
+     * Needed only when EVERY track resolves during processing — a
+     * frame-sampled visual verdict on a silent video — because then no
+     * completion notification will arrive and there is nothing else to settle
+     * the object. The completion worker owns this transition in every other
+     * case.
+     *
+     * OPTIONAL, as a published seam requires. The consequence is stated rather
+     * than hidden: without it, an object whose tracks all resolved inline is
+     * driven to REVIEW via `markMediaForReview` instead, whatever the verdict
+     * was. That is fail-closed and visible in the review queue — unlike the
+     * alternative, which would be a row stuck before any verdict, invisible to
+     * everyone.
+     */
+    persistMediaStatus?(mediaId: string, status: MediaLifecycle, options?: {
+        /**
+         * Apply the write ONLY if the row still holds this lifecycle.
+         *
+         * MUST be implemented as a conditional update (`where: { id, lifecycle:
+         * expectedFrom }`), for the same reason `markMediaUploaded` must: a human
+         * decision can land between this worker reading the row and writing it
+         * back, and an unconditional write would clobber it. Together with the
+         * lifecycle read this is belt and braces — the read catches a stale
+         * replay, the condition catches a race.
+         */
+        readonly expectedFrom: MediaLifecycle;
+    }): Promise<void>;
+    /**
+     * Drive the `bytes-arrived` transition: AWAITING_UPLOAD -> UPLOADED (T14).
+     * MUST be a conditional write (update ... where lifecycle=AWAITING_UPLOAD)
+     * so it is idempotent and can never rewind a resolved verdict — the client
+     * completion call performs the same transition and the two race benignly.
+     */
+    markMediaUploaded(mediaId: string): Promise<void>;
+    /**
+     * Drive a media object's lifecycle to REJECTED — the T14 over-duration
+     * terminal path (UPLOADED --over-duration--> REJECTED). The worker deletes
+     * the staged object right after; the row must never serve either way.
+     */
+    markMediaRejected(mediaId: string): Promise<void>;
+}
+/**
+ * The slice of Env.media this worker consumes. Operational parameters arrive
+ * here as VALUES sourced from Env.media — never as literals in this file.
+ */
+export interface MediaProcessingConfig {
+    /** Hard duration cap (seconds). From Env.media.maxDurationSeconds. */
+    readonly maxDurationSeconds: number;
+    /** Current operative thresholds, snapshotted onto each started job. */
+    readonly thresholds: ThresholdSnapshot;
+    /**
+     * Daily AI-spend guard config (AR5). Optional for consumers that have not
+     * adopted the guard; when set, `deps.spendGuard` MUST also be wired (and
+     * vice versa) — a half-wired guard fails the record closed rather than
+     * running unguarded. Values are Env/SSM-sourced, never literals.
+     */
+    readonly spend?: MediaSpendConfig;
+    /**
+     * Byte budget for each end of the Art. 50 provenance sniff on video/audio
+     * originals (head slice AND tail slice, so the total read is twice this).
+     *
+     * Runtime config with a conservative default rather than a compiled literal —
+     * this bounds a scan of attacker-supplied input, and the npm tarball is public
+     * (CLAUDE.md rule 8). Omitted ⇒ {@link DEFAULT_PROVENANCE_SNIFF_BYTES}.
+     */
+    readonly provenanceSniffBytes?: number;
+}
+/**
+ * Default per-end sniff budget: 256 KiB, matching the image path's JUMBF sniff
+ * bound. Large enough for an `ftyp` + `uuid` XMP box at either end of a
+ * well-formed MP4, small enough that a malicious 500 MB upload cannot make the
+ * worker read itself out of memory.
+ */
+export declare const DEFAULT_PROVENANCE_SNIFF_BYTES: number;
+/**
+ * All capability seams the orchestration core binds to. The handler builds this
+ * from the injected concrete adapters; tests build it from the B0 Mocks + an
+ * in-memory persistence fake.
+ */
+export interface MediaProcessingDeps {
+    readonly storage: StoragePort;
+    readonly transcode: TranscodePort;
+    readonly transcribe: TranscribePort;
+    readonly moderation: MediaModerationProvider;
+    readonly persistence: MediaPersistencePort;
+    readonly config: MediaProcessingConfig;
+    /**
+     * Daily AI-spend counter (AR5). Optional; active iff `config.spend` is also
+     * set. Consulted BEFORE the transcode + paid AI jobs; incremented AFTER the
+     * jobs were started.
+     */
+    readonly spendGuard?: MediaSpendGuardPort;
+    /**
+     * Emit the anti-oracle `moderation.resolved` event (ready|not-ready ONLY).
+     *
+     * Needed only on the inline-settlement path, where this worker performs the
+     * transition the completion worker normally performs — and therefore owes the
+     * same notification. Without it a client waiting on the event after uploading
+     * a frame-sampled silent video waits forever, which is the exact
+     * silent-forever failure the inline path exists to prevent.
+     *
+     * OPTIONAL, and best-effort: a failure to notify must never undo a decision.
+     */
+    readonly emitResolved?: (payload: {
+        readonly mediaId: string;
+        readonly status: "ready" | "not-ready";
+    }) => Promise<void>;
+    /**
+     * Provider-neutral metric emission (WS-2 §5.2). OPTIONAL: this worker predates
+     * the port and consumers wire it at their own pace. Absent means the Art. 50
+     * provenance counters are not emitted and the log lines are the only signal —
+     * which is why the discarded-marking case logs at WARN with the mediaId, rather
+     * than relying on a counter that may not be wired.
+     */
+    readonly metrics?: MetricsPort;
+    /** The object-storage bucket handle moderation/transcription refs carry. */
+    readonly bucket: string;
+    /**
+     * Job-name factory for transcription/idempotency. Injected so the shell stays
+     * free of Date.now/Math.random in tests; production passes a uuid/time-based
+     * generator. `seed` is a stable per-call input (the cas key).
+     *
+     * MUST BE UNPREDICTABLE — never a pure function of the seed. The job name
+     * becomes a completion pointer, and the completion queue dedupes on it: a
+     * name derivable from the tenant and upload ids lets anyone who knows those
+     * send a completion first, claim the dedupe key, and have the genuine
+     * completion later ack-dropped as a duplicate. The object never serves, but
+     * it never resolves either. Include real entropy (a uuid) and treat the seed
+     * as correlation, not identity.
+     */
+    readonly newJobName: (seed: string) => string;
+    readonly logger: MediaWorkerLogger;
+}
+/**
+ * The disposition of one SQS record after orchestration.
+ *
+ * - `ack`  — remove from the queue (success, drop-non-pending, or poison routed
+ *            to REVIEW). A poison ack carries `poison: true` for observability.
+ * - `fail` — leave on the queue for SQS to retry (transient/retryable fault).
+ *            The handler maps this to a batchItemFailure.
+ */
+export type RecordOutcome = {
+    readonly disposition: "ack";
+    readonly reason: string;
+    readonly poison?: boolean;
+} | {
+    readonly disposition: "fail";
+    readonly reason: string;
+};
+/**
+ * What one processing attempt concluded, independent of the queue transport:
+ * finished, retry now, or come back after `delaySeconds`. Typed only; the
+ * orchestration still returns {@link RecordOutcome}.
+ */
+export type ProcessingOutcome = {
+    kind: "done";
+} | {
+    kind: "retry";
+    reason: string;
+} | {
+    kind: "defer";
+    delaySeconds: number;
+    reason: string;
+};
+/**
+ * How old the media object is, and how old it may get before processing must
+ * give up deferring. Both values are seconds; the maximum is runtime config.
+ */
+export interface ProcessingClock {
+    readonly mediaAgeSeconds: number;
+    readonly maxMediaAgeSeconds: number;
+}
+/**
+ * Parse a triggering key as a `pending/{tenantId}/{uploadId}` key, validating
+ * the FORM by round-tripping the parsed parts back through `pendingKey()`. A
+ * key only parses if rebuilding it from its parts yields the identical string —
+ * so a path-traversal payload, extra segments, or a malformed id can never pass
+ * (cas-keys.ts owns the anchored allowlists).
+ *
+ * @returns the {tenantId, uploadId} when the key is a canonical pending key,
+ *          or null for ANY other key (which the caller ack-drops; we never
+ *          write outputs under pending/, so a non-pending key is not our work).
+ */
+export declare function parsePendingKey(key: string): {
+    tenantId: string;
+    uploadId: string;
+} | null;
+/**
+ * Every object key referenced by one queue record. Accepts BOTH shapes
+ * (WS-2 §4, Option B — unified path):
+ *
+ *  - the **native control-inversion message** `{ objectKey: string }` the API
+ *    sends from `completeSession` (plus `tenantId`/`uploadId` for logging,
+ *    which this parser ignores). NOT URL-decoded — the producer sends the
+ *    literal key.
+ *  - the **S3-event envelope** `{ Records: [{ s3: { object: { key } } }] }`
+ *    from the legacy bucket notification. Kept only to consume in-flight
+ *    AWS-notification messages during migration; delete at WS-8. S3
+ *    URL-encodes keys and uses '+' for spaces, so these are decoded.
+ *
+ * Malformed/forged native keys are NOT this parser's problem: the pending-key
+ * form gate + row-tenant re-derivation in `processObjectKey` reject them
+ * (finding 12 — ack-drop as poison, no retry storm).
+ */
+export declare function extractObjectKeys(recordBody: string): string[];
+/**
+ * Orchestrate processing for ONE already-extracted object key.
+ *
+ * Steps (every uncertainty fails closed; nothing here can yield APPROVED):
+ *  1. Reject any key that is not a canonical `pending/{tenant}/{upload}` key —
+ *     ack-drop it; outputs are NEVER written under pending/.
+ *  2. Load the MediaFile row by uploadId; re-derive tenant FROM THE ROW and
+ *     assert pendingKey(rowTenant, uploadId) === the triggering key. Mismatch
+ *     (or missing/uploadId-less row) is a hard reject → REVIEW + ack.
+ *  3. Probe duration; over-cap ⇒ poison ⇒ REVIEW + ack (no transcode).
+ *  4. Transcode-and-discard ⇒ cleaned bytes at the STAGING key (read back from
+ *     the cleaned key). The cleaned bytes are NOT written to cas/ here — cas/ is
+ *     the CDN-served prefix and must hold only APPROVED bytes (promotion happens
+ *     in the completion worker).
+ *  5. Hash the cleaned bytes ⇒ realHash; PERSIST {contentHash: realHash,
+ *     originalKey: casKey(tenant, realHash)} onto the row, replacing the
+ *     upload-time uploadId placeholder so the completion worker can derive the
+ *     promote target.
+ *  6. START moderation on the cleaned STAGING object (NOT the raw pending upload,
+ *     NOT a cas/ key) — moderation must run on EXACTLY the bytes that will be
+ *     served: provider.startVideoModeration ⇒ persist VISUAL job (+ threshold
+ *     snapshot); transcribe.startTranscription ⇒ persist AUDIO job (+ snapshot).
+ *     The worker only STARTS jobs + persists jobIds; it never fetches verdicts.
+ */
+export declare function processObjectKey(triggeringKey: string, deps: MediaProcessingDeps): Promise<RecordOutcome>;
+/**
+ * Process one SQS record (which may carry several S3 object keys). The record
+ * fails (SQS retry) iff ANY of its keys produced a retryable fault; otherwise
+ * it is acked. Per-key poison is acked, never failed.
+ */
+export declare function processRecord(record: QueueRecordLike, deps: MediaProcessingDeps): Promise<RecordOutcome>;
+/**
+ * Inject the concrete media-processing seams. The consuming app (Skybber) calls
+ * this once at Lambda cold start with its ffmpeg/MediaConvert TranscodePort, S3
+ * StoragePort, Transcribe TranscribePort, injected MediaModerationProvider, and
+ * a Prisma-backed MediaPersistencePort. Core ships NO concrete adapters.
+ */
+export declare function setMediaProcessingDeps(deps: MediaProcessingDeps): void;
+/** Test helper: clear injected deps between cases. */
+export declare function __resetMediaProcessingDeps(): void;
+/**
+ * The currently-injected deps, or undefined when un-wired. Used by the AWS
+ * entrypoint (and the container dispatcher) to fail CLOSED when no backend
+ * was wired — an un-wired worker must never ack-drop real uploads.
+ */
+export declare function getInjectedMediaProcessingDeps(): MediaProcessingDeps | undefined;
+
+// ===== lib/workers/media-recovery-sweep.d.ts =====
+import type { MediaLifecycle, ModerationDecision } from "../media/media-lifecycle.js";
+import type { Track } from "../media/track-verdict.js";
+/** Operator config for the sweep. All values are seconds except `batchSize`. */
+export interface MediaRecoverySweepConfig {
+    /**
+     * How long a stalled object is left alone before the sweep acts on it. Must
+     * outlast every redelivery the completion queue can still make, so the sweep
+     * never races a completion that is merely slow.
+     */
+    readonly settleWindowSeconds: number;
+    /**
+     * Past this age an object that still has no verdict is settled as a
+     * technical hold rather than re-driven. Strictly greater than the settle
+     * window.
+     */
+    readonly maxMediaAgeSeconds: number;
+    /** Maximum objects read per sweep run. */
+    readonly batchSize: number;
+}
+/** One thing the sweep decided to do about one media object. */
+export type RecoveryAction = {
+    readonly kind: "reenqueue-processing";
+    readonly mediaId: string;
+} | {
+    readonly kind: "repair-promotion";
+    readonly mediaId: string;
+} | {
+    readonly kind: "settle-technical";
+    readonly mediaId: string;
+};
+/** What the sweep knows about one moderation track of a candidate. */
+export interface RecoveryTrackState {
+    /** A job row for this track exists and has not been superseded. */
+    readonly hasLiveRow: boolean;
+    /** The track's resolved decision, or `null` while unresolved. */
+    readonly decision: ModerationDecision | null;
+}
+/** The read model the planner needs for one media object. */
+export interface RecoveryCandidate {
+    readonly mediaId: string;
+    readonly lifecycle: MediaLifecycle;
+    readonly createdAt: Date;
+    /** Keyed by track; a track the object is not moderated on is absent. */
+    readonly tracks: Readonly<Partial<Record<Track, RecoveryTrackState>>>;
+    /** The content-addressed object exists in storage. */
+    readonly casObjectPresent: boolean;
+}
+/** The completion queue's settings the sweep config must be checked against. */
+export interface CompletionQueueTiming {
+    readonly completionVisibilitySeconds: number;
+    readonly completionMaxReceive: number;
+}
+/**
+ * Check a sweep config against the completion queue's timing. Pure and total:
+ * returns every problem found, and an empty list when the config is usable.
+ *
+ *   - `settleWindowSeconds` ≥ visibility × max receive count, so the sweep
+ *     cannot act while the queue could still redeliver a completion;
+ *   - `maxMediaAgeSeconds` > `settleWindowSeconds`;
+ *   - every value is a finite non-negative number and `batchSize` a positive
+ *     integer, so a malformed value is reported rather than compared.
+ */
+export declare function validateRecoverySweepConfig(c: MediaRecoverySweepConfig, queue: CompletionQueueTiming): string[];
+
+// ===== lib/workers/metrics-port.d.ts =====
+/**
+ * MetricsPort — provider-neutral metric emission for extracted worker cores
+ * (WS-2 §5.2).
+ *
+ * Powertools `Metrics` emits EMF (embedded metric format) that only CloudWatch
+ * consumes. Extracted cores emit through this port instead:
+ *
+ * - AWS entrypoints inject an EMF-backed adapter (wraps powertools `Metrics`)
+ *   so the CloudWatch alarms (`PruneFailed`, `PruneCircuitBreakerTripped`,
+ *   deletion `FailedCount`, …) keep working byte-identically.
+ * - The worker container injects an OTel/Cockpit adapter (WS-5) or
+ *   {@link noopMetrics} until that lands.
+ *
+ * `emitCounts` is the grouped primitive: one call = one metric blob sharing one
+ * dimension set. This mirrors powertools' `singleMetric()` /
+ * `publishStoredMetrics()` grouping exactly, which is what keeps the AWS EMF
+ * output byte-identical after extraction (three counts on one blob must not
+ * become three blobs).
+ */
+export interface MetricDatum {
+    readonly name: string;
+    /** Count value (all current emissions are Count-unit). */
+    readonly value: number;
+}
+export interface MetricsPort {
+    /**
+     * Emit a group of Count metrics sharing one dimension set as ONE metric
+     * blob. Implementations must be fail-open: a metrics failure never affects
+     * the worker's disposition (adapters catch + log internally).
+     */
+    emitCounts(dimensions: Readonly<Record<string, string>>, metrics: readonly MetricDatum[]): void;
+}
+/** No-op adapter for tests and profiles without a metrics backend. */
+export declare const noopMetrics: MetricsPort;
+/** In-memory capture adapter for unit tests. */
+export declare class CapturingMetrics implements MetricsPort {
+    readonly emitted: Array<{
+        dimensions: Readonly<Record<string, string>>;
+        metrics: readonly MetricDatum[];
+    }>;
+    emitCounts(dimensions: Readonly<Record<string, string>>, metrics: readonly MetricDatum[]): void;
+}
 
 // ===== server.d.ts =====
 /**

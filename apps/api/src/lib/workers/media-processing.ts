@@ -419,6 +419,25 @@ export type RecordOutcome =
   | { readonly disposition: "ack"; readonly reason: string; readonly poison?: boolean }
   | { readonly disposition: "fail"; readonly reason: string };
 
+/**
+ * What one processing attempt concluded, independent of the queue transport:
+ * finished, retry now, or come back after `delaySeconds`. Typed only; the
+ * orchestration still returns {@link RecordOutcome}.
+ */
+export type ProcessingOutcome =
+  | { kind: "done" }
+  | { kind: "retry"; reason: string }
+  | { kind: "defer"; delaySeconds: number; reason: string };
+
+/**
+ * How old the media object is, and how old it may get before processing must
+ * give up deferring. Both values are seconds; the maximum is runtime config.
+ */
+export interface ProcessingClock {
+  readonly mediaAgeSeconds: number;
+  readonly maxMediaAgeSeconds: number;
+}
+
 // ---------------------------------------------------------------------------
 // Key parsing — pending/{tenantId}/{uploadId}
 // ---------------------------------------------------------------------------
