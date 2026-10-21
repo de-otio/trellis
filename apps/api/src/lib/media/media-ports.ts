@@ -242,6 +242,18 @@ export interface TranscribePort {
  * functional core (a separate caps unit), and the mock must not silently make
  * that decision for it.
  */
+/**
+ * Per-user upload quota, checked before an upload is accepted. A refusal
+ * carries how long the caller should wait before trying again; the limits
+ * themselves are the adapter's runtime config, never core's.
+ */
+export interface UploadQuotaPort {
+  check(i: {
+    userId: string;
+    kind: "image" | "video";
+  }): Promise<{ ok: true } | { ok: false; retryAfterSeconds: number }>;
+}
+
 export class MockTranscodePort implements TranscodePort {
   private duration: number;
   private hasAudio: boolean;
