@@ -886,6 +886,24 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ### Changed
 
+- **`TENANT_SCOPE_MODE=enforce` rejects tenant reassignment on writes, matching
+  the `ext_*` proxy.** The tenant-scope Prisma extension
+  (`apps/api/src/lib/tenant-scope.ts`) now inspects write payloads as well as
+  `where`: a `data` (create, createMany, update, updateMany and their
+  `*AndReturn` forms) or either half of an `upsert` that sets `tenantId` to
+  anything but the active tenant, or writes the `tenant` relation, throws —
+  including inside nested relation writes. A `tenantId` equal to the active
+  tenant still passes, and creates are still stamped when it is absent; a
+  create carrying a different `tenantId` is now rejected rather than silently
+  overwritten. By-unique `update` keeps its `where` as-is but gets the same
+  payload check. `createManyAndReturn` and `updateManyAndReturn` are now
+  stamped and where-merged like their plain forms. `shadow` mode logs
+  `enforce would reject tenant reassignment` for such writes without
+  changing them, so the rollout gate sees them first. `off` (the default) is
+  unchanged. A new inert migration adds the `tenant_isolation` RLS policy to
+  `domain_events`, and `prisma/rls/enable-rls.sql` / `disable-rls.sql` now
+  list it; `rls-guc-name.test.ts` fails if a table-backed tenant-scoped model
+  has no policy.
 - **Accounts are 18+, enforced server-side; the CHILD/TEEN machinery is
   quarantined — BREAKING for the parental-control endpoints.** `session.ageTier`
   was never populated in production: the Cognito claim narrowing dropped
