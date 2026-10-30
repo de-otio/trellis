@@ -63,6 +63,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Depth 2 so HEAD^1 exists: on pull_request and merge_group HEAD is a
+          # merge commit whose first parent is the base tip, so HEAD^1..HEAD is
+          # exactly the change under test.
+          fetch-depth: 2
 
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -72,6 +77,13 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      # Ratchet, not a repo-wide gate: the tree is not prettier-clean yet, so
+      # only files this change touches are held to the format. Swap for
+      # `npm run format:check` once a full reformat has landed.
+      - name: Format check (changed files)
+        timeout-minutes: 5
+        run: bash scripts/check-format-changed.sh HEAD^1
 
       - name: Generate Prisma client
         run: npm run prisma:generate
