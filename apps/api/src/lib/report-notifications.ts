@@ -11,6 +11,8 @@
 
 import type { Env } from "../env.js";
 import { getLogger } from "./logger.js";
+import { runWithTenantContext } from "@de-otio/saas-foundation/tenant";
+import { mintTenantId } from "./mint-tenant-id.js";
 import {
   REPORT_TEMPLATE_KEYS,
   resolveReportTemplate,
@@ -41,17 +43,26 @@ async function deliver(
   });
 
   // 1. In-app notification (best-effort; needs a tenant scope).
-  if (target.tenantId) {
+  const reporterTenantId = target.tenantId;
+  if (reporterTenantId) {
     try {
       const { NotificationHandler } = await import("./notification-handler.js");
-      await new NotificationHandler().createNotification(
-        target.reporterUserId,
-        "SYSTEM",
-        title,
-        body,
-        { reportId: target.reportId, kind: templateKey },
-        env,
-        target.tenantId,
+      // The notice lands in the REPORTER's tenant, which is not the active
+      // tenant when a moderator's decision triggers it. Under
+      // TENANT_SCOPE_MODE=enforce a write into another tenant is rejected, so
+      // the write runs with the reporter's tenant as the active one: the
+      // tenant-scope extension then guards it against that tenant, and so will
+      // the RLS GUC once writes route through `withTenantTx`.
+      await runWithTenantContext(mintTenantId(reporterTenantId, "job"), () =>
+        new NotificationHandler().createNotification(
+          target.reporterUserId,
+          "SYSTEM",
+          title,
+          body,
+          { reportId: target.reportId, kind: templateKey },
+          env,
+          reporterTenantId,
+        ),
       );
     } catch (error) {
       logger.error("[ReportNotifications] in-app notification failed", error);
@@ -61,9 +72,8 @@ async function deliver(
   // 2. Transactional email (best-effort; the guaranteed receipt channel).
   if (target.reporterEmail) {
     try {
-      const { createEmailProvider, emailProviderConfigFromEnv } = await import(
-        "./email-provider.js"
-      );
+      const { createEmailProvider, emailProviderConfigFromEnv } =
+        await import("./email-provider.js");
       const provider = createEmailProvider(
         emailProviderConfigFromEnv(env as unknown as Record<string, string>),
       );

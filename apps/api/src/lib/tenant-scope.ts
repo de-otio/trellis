@@ -10,26 +10,41 @@
  *
  * Modes:
  *  - `off`     — not attached (zero behavior change). The default.
- *  - `shadow`  — observe only: logs where a scoped query lacks a tenant filter
- *                or runs with no tenant context. Does NOT modify any query.
+ *  - `shadow`  — observe only: logs where a scoped query lacks a tenant filter,
+ *                runs with no tenant context, or carries a write payload that
+ *                `enforce` would reject. Does NOT modify any query.
  *  - `enforce` — injects `tenantId = <active>` into where-mergeable reads/writes
  *                and sets `tenantId` on creates; throws on a scoped op with no
- *                tenant context (unless inside `runUnscoped`).
+ *                tenant context (unless inside `runUnscoped`) and on a write
+ *                that would reassign a row's tenant (below).
  *
  * `enforce` covers the where-mergeable operations (findMany/findFirst/count/
- * aggregate/groupBy/updateMany/deleteMany and create/createMany/upsert).
- * `findUnique`/`update`/`delete` by a unique selector cannot have a non-unique
- * `tenantId` merged into their `where`; those rely on the RLS backstop (WS3).
- * `shadow` logs all divergences regardless, so the gap is quantified first.
+ * aggregate/groupBy/updateMany/updateManyAndReturn/deleteMany and create/
+ * createMany/createManyAndReturn/upsert). `findUnique`/`update`/`delete` by a
+ * unique selector cannot have a non-unique `tenantId` merged into their
+ * `where`; those rely on the RLS backstop (WS3). `shadow` logs all divergences
+ * regardless, so the gap is quantified first.
+ *
+ * Tenant reassignment on writes: `enforce` rejects, rather than rewrites, any
+ * write payload (`data` of create/createMany/update/updateMany and their
+ * `*AndReturn` forms, both halves of `upsert`, and nested relation writes inside
+ * them) that sets `tenantId` to anything but the active tenant or writes the
+ * `tenant` relation. Merging `tenantId` into the `where` only proves the row
+ * starts in the active tenant; this check keeps it there. This matches the
+ * ext_* proxy (`extension-scoped-db.ts`), except that an explicit `tenantId`
+ * equal to the active tenant is allowed. Creates are still stamped with the
+ * active tenant when `tenantId` is absent.
  *
  * SECURITY — `enforce` is a PARTIAL defense and must NOT be the sole isolation
  * mechanism (security review, doc/14). It does not cover: unique-selector reads/
- * writes (findUnique/update/delete by id), raw SQL ($queryRaw/$executeRaw), or
- * `by-relation` models without their own `tenantId`. Those are closed only by
- * the PostgreSQL RLS backstop (WS3). Do not enable `enforce` in production
- * before RLS is deployed; also note unauthenticated/public paths (federation)
- * that query scoped models must use `runUnscoped` or they fail closed (throw)
- * under `enforce` (review finding 2).
+ * deletes and the `where` of a by-id `update` (findUnique/update/delete by id),
+ * raw SQL ($queryRaw/$executeRaw), `by-relation` models without their own
+ * `tenantId`, nested `connect`/`set` of an existing child row (a link, which
+ * moves no row between tenants), or nested writes rooted at an unscoped model
+ * (its whole op passes through). Those are closed only by the PostgreSQL RLS backstop (WS3). Do
+ * not enable `enforce` in production before RLS is deployed; also note
+ * unauthenticated/public paths (federation) that query scoped models must use
+ * `runUnscoped` or they fail closed (throw) under `enforce` (review finding 2).
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -268,11 +283,167 @@ const WHERE_MERGEABLE = new Set([
   "aggregate",
   "groupBy",
   "updateMany",
+  "updateManyAndReturn",
   "deleteMany",
 ]);
-// `create`/`createMany`/`upsert` are stamped with the active tenant, and
-// unique-selector ops (`findUnique`/`update`/`delete`) fall through to the RLS
-// backstop (WS3) — both handled inline in `planTenantScope`.
+// `create`/`createMany`/`createManyAndReturn`/`upsert` are stamped with the
+// active tenant, and unique-selector ops (`findUnique`/`update`/`delete`) keep
+// their `where` and fall through to the RLS backstop (WS3) — both handled
+// inline in `planTenantScope`.
+
+/**
+ * The row-data payloads each write operation carries. These are what the
+ * tenant-reassignment guard inspects; `where` selectors are never inspected
+ * (a filter on another tenant matches nothing once the where is merged).
+ */
+function writePayloads(operation: string, a: Record<string, unknown>): unknown[] {
+  switch (operation) {
+    case "create":
+    case "createMany":
+    case "createManyAndReturn":
+    case "update":
+    case "updateMany":
+    case "updateManyAndReturn":
+      return [a.data];
+    case "upsert":
+      return [a.create, a.update];
+    default:
+      return [];
+  }
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return (
+    typeof v === "object" &&
+    v !== null &&
+    !Array.isArray(v) &&
+    !(v instanceof Date) &&
+    !(v instanceof Uint8Array)
+  );
+}
+
+/**
+ * Nested relation-write operators that carry row data of their own, mapped to
+ * where in their payload the rows sit. `connect`/`disconnect`/`set`/`delete`/
+ * `deleteMany` carry only selectors, so they are not listed.
+ */
+const NESTED_ROW_DATA: ReadonlyMap<string, (op: Record<string, unknown>) => unknown[]> = new Map([
+  ["create", (op) => [op]],
+  ["createMany", (op) => [op.data]],
+  ["connectOrCreate", (op) => [op.create]],
+  // To-many `update` is `{ where, data }`; to-one `update` is the row itself
+  // or `{ where?, data }`. A row whose only keys are `where`/`data` is
+  // indistinguishable from the wrapper by value, so both readings are checked.
+  ["update", (op) => (isWhereDataWrapper(op) ? [op.data, op] : [op])],
+  ["updateMany", (op) => [op.data]],
+  ["upsert", (op) => [op.create, op.update]],
+]);
+
+function isWhereDataWrapper(op: Record<string, unknown>): boolean {
+  return (
+    Object.prototype.hasOwnProperty.call(op, "data") &&
+    Object.keys(op).every((k) => k === "where" || k === "data")
+  );
+}
+
+/** A `tenantId` write that keeps the row in the active tenant (or is omitted). */
+function isSameTenantValue(value: unknown, tenantId: string): boolean {
+  if (value === undefined || value === tenantId) return true;
+  // Prisma's scalar update form `{ set: <value> }`.
+  return isPlainObject(value) && Object.keys(value).length === 1 && value.set === tenantId;
+}
+
+/**
+ * Relation fields per model (field name → target model), from the generated
+ * schema. The guard recurses only through these, so a Json column whose
+ * content happens to contain `create`/`update`/`tenantId` keys is data, not a
+ * nested write. Built on first use, so importing this module does not touch
+ * the generated client (several unit suites mock `@prisma/client` without it).
+ */
+let relationFields: ReadonlyMap<string, ReadonlyMap<string, string>> | undefined;
+function relationFieldsOf(model: string): ReadonlyMap<string, string> | undefined {
+  relationFields ??= new Map(
+    Prisma.dmmf.datamodel.models.map((m) => [
+      m.name,
+      new Map(m.fields.filter((f) => f.kind === "object").map((f) => [f.name, f.type])),
+    ]),
+  );
+  return relationFields.get(model);
+}
+
+/**
+ * Find a write that would place a row in a tenant other than the active one:
+ * a `tenantId` that differs from it, or any write to the `tenant` relation.
+ * Recurses through nested relation writes. Returns the path of the first
+ * offending field, or `null`. The value itself is never echoed (it is
+ * caller-supplied).
+ *
+ * Mirrors the ext_* proxy's tenant-field guard (`extension-scoped-db.ts`),
+ * with one difference: core callers commonly pass the active tenant's id
+ * explicitly, so an equal `tenantId` is allowed here rather than rejected.
+ */
+function findTenantReassignment(
+  rows: unknown,
+  model: string,
+  tenantId: string,
+  path: string,
+): string | null {
+  if (Array.isArray(rows)) {
+    for (const [i, row] of rows.entries()) {
+      const hit = findTenantReassignment(row, model, tenantId, `${path}[${i}]`);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  if (!isPlainObject(rows)) return null;
+  const relations = relationFieldsOf(model);
+  for (const [key, value] of Object.entries(rows)) {
+    if (key === "tenantId") {
+      if (!isSameTenantValue(value, tenantId)) return `${path}.tenantId`;
+      continue;
+    }
+    if (key === "tenant") {
+      if (value !== undefined) return `${path}.tenant`;
+      continue;
+    }
+    // A nested relation write: a relation field holding an object keyed by
+    // relation-write operators. Scalars, Json columns and `{ increment: 1 }`
+    // are data. A model missing from the schema (not expected) is walked
+    // without that filter, so the guard fails closed.
+    const target = relations ? relations.get(key) : model;
+    if (target === undefined || !isPlainObject(value)) continue;
+    for (const [op, payload] of Object.entries(value)) {
+      const rowsOf = NESTED_ROW_DATA.get(op);
+      if (!rowsOf) continue;
+      const wrappers = Array.isArray(payload) ? payload : [payload];
+      for (const [i, wrapper] of wrappers.entries()) {
+        if (!isPlainObject(wrapper)) continue;
+        const at = Array.isArray(payload) ? `${path}.${key}.${op}[${i}]` : `${path}.${key}.${op}`;
+        for (const nested of rowsOf(wrapper)) {
+          const hit = findTenantReassignment(nested, target, tenantId, at);
+          if (hit) return hit;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/** The guard for one operation: the offending field path, or `null`. */
+function tenantReassignment(
+  model: string,
+  operation: string,
+  a: Record<string, unknown>,
+  tenantId: string,
+): string | null {
+  const labels = operation === "upsert" ? ["create", "update"] : ["data"];
+  const payloads = writePayloads(operation, a);
+  for (const [i, payload] of payloads.entries()) {
+    const hit = findTenantReassignment(payload, model, tenantId, labels[i]);
+    if (hit) return hit;
+  }
+  return null;
+}
 
 // Escape hatch for legitimate cross-tenant work (super-admin tooling, the
 // ActivityPub federation graph, operator analytics, the membership loader).
@@ -302,8 +473,10 @@ function andWhere(where: unknown, tenantId: string): Record<string, unknown> {
 /** Outcome of the pure scoping decision; the extension maps it onto Prisma. */
 export type ScopePlan =
   | { action: "passthrough" } // not scoped / off / unscoped / unique-op
-  | { action: "throw"; message: string } // enforce, no tenant context
-  | { action: "observe"; wouldScope: boolean } // shadow, tenant present
+  | { action: "throw"; message: string } // enforce: no tenant context, or tenant reassignment
+  // shadow, tenant present. `wouldReject` is set when enforce would refuse the
+  // write (the message enforce would throw).
+  | { action: "observe"; wouldScope: boolean; wouldReject?: string }
   | { action: "observe-no-context" } // shadow, no tenant context
   | { action: "rewrite"; args: Record<string, unknown> }; // enforce rewrite
 
@@ -335,23 +508,29 @@ export function planTenantScope(input: {
       : { action: "observe-no-context" };
   }
 
+  const a = args ?? {};
+  const reassigned = tenantReassignment(model, operation, a, tenantId);
+  const rejection = reassigned
+    ? `[tenant-scope] ${model}.${operation} writes ${reassigned}, which would move the row out of the active tenant`
+    : undefined;
+
   if (mode === "shadow") {
     const w = (args?.where as Record<string, unknown> | undefined) ?? undefined;
-    const wouldScope = !(
-      w && Object.prototype.hasOwnProperty.call(w, "tenantId")
-    );
-    return { action: "observe", wouldScope };
+    const wouldScope = !(w && Object.prototype.hasOwnProperty.call(w, "tenantId"));
+    return rejection
+      ? { action: "observe", wouldScope, wouldReject: rejection }
+      : { action: "observe", wouldScope };
   }
 
   // enforce
-  const a = args ?? {};
+  if (rejection) return { action: "throw", message: rejection };
   if (WHERE_MERGEABLE.has(operation)) {
     return { action: "rewrite", args: { ...a, where: andWhere(a.where, tenantId) } };
   }
   if (operation === "create") {
     return { action: "rewrite", args: { ...a, data: { ...(a.data as object), tenantId } } };
   }
-  if (operation === "createMany") {
+  if (operation === "createMany" || operation === "createManyAndReturn") {
     const data = a.data;
     const stamped = Array.isArray(data)
       ? data.map((d) => ({ ...(d as object), tenantId }))
@@ -369,8 +548,9 @@ export function planTenantScope(input: {
       },
     };
   }
-  // UNIQUE_OPS and anything else: cannot merge a non-unique tenantId — rely on
-  // the RLS backstop (WS3).
+  // Unique-selector ops and anything else: cannot merge a non-unique tenantId
+  // into the where — rely on the RLS backstop (WS3). A by-unique `update` has
+  // already had its data checked above.
   return { action: "passthrough" };
 }
 
@@ -403,12 +583,19 @@ export function tenantScopeExtension(mode: TenantScopeMode) {
             case "throw":
               throw new Error(plan.message);
             case "observe-no-context":
-              getLogger().warn(
-                "[tenant-scope:shadow] scoped op with no tenant context",
-                { model, operation },
-              );
+              getLogger().warn("[tenant-scope:shadow] scoped op with no tenant context", {
+                model,
+                operation,
+              });
               return query(args);
             case "observe":
+              if (plan.wouldReject) {
+                getLogger().warn("[tenant-scope:shadow] enforce would reject tenant reassignment", {
+                  model,
+                  operation,
+                  reason: plan.wouldReject,
+                });
+              }
               if (plan.wouldScope) {
                 getLogger().info("[tenant-scope:shadow] would scope query", {
                   model,

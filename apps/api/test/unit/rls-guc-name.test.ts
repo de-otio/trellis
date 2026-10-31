@@ -29,6 +29,8 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { Prisma } from "@prisma/client";
+import { extensionScopedModelNames, TENANT_SCOPED_MODELS } from "../../src/lib/tenant-scope.js";
 
 const REPO_ROOT = join(__dirname, "..", "..", "..", "..");
 const MIGRATIONS_DIR = join(REPO_ROOT, "prisma", "migrations");
@@ -45,12 +47,38 @@ const CONNECTION_MANAGER = join(
 /** The single GUC name both halves must use. */
 const GUC = "app.current_tenant";
 
+/** The original backstop migration: the resolver function and the first policies. */
 function rlsMigrationSql(): string {
-  const dir = readdirSync(MIGRATIONS_DIR).find((d) =>
-    d.includes("rls_backstop"),
-  );
+  const dir = readdirSync(MIGRATIONS_DIR).find((d) => d.includes("rls_backstop_policies_inert"));
   expect(dir, "the RLS backstop migration must exist").toBeDefined();
   return readFileSync(join(MIGRATIONS_DIR, dir!, "migration.sql"), "utf8");
+}
+
+/** Pull the table names out of an `ARRAY[ … ]` literal, layout-agnostic. */
+function arrayTables(sql: string): string[] {
+  const block = /ARRAY\[([\s\S]*?)\]/.exec(sql);
+  return block ? [...block[1].matchAll(/'([a-z_]+)'/g)].map((m) => m[1]) : [];
+}
+
+/**
+ * Every table any `*_rls_backstop_*` migration policies. The original one
+ * loops over an ARRAY; later ones add a table with a direct
+ * `CREATE POLICY tenant_isolation ON <table>`.
+ */
+function policiedTables(): Set<string> {
+  const tables = new Set<string>();
+  for (const dir of readdirSync(MIGRATIONS_DIR).filter((d) => d.includes("rls_backstop"))) {
+    // Comments are stripped so a commented-out policy never counts as live.
+    const sql = readFileSync(join(MIGRATIONS_DIR, dir, "migration.sql"), "utf8").replace(
+      /--.*$/gm,
+      "",
+    );
+    for (const t of arrayTables(sql)) tables.add(t);
+    for (const m of sql.matchAll(/CREATE POLICY tenant_isolation ON ([a-z_]+)/g)) {
+      tables.add(m[1]);
+    }
+  }
+  return tables;
 }
 
 describe("RLS GUC name", () => {
@@ -107,23 +135,29 @@ describe("RLS GUC name", () => {
     expect(disable).toMatch(/DISABLE\s+ROW\s+LEVEL\s+SECURITY/i);
   });
 
-  it("every table the migration policies is also armed and disarmed by the scripts", () => {
-    /** Pull the table names out of the `ARRAY[ … ]` literal, layout-agnostic. */
-    const tablesIn = (sql: string) => {
-      const block = /ARRAY\[([\s\S]*?)\]/.exec(sql);
-      expect(block, "each RLS file declares its table list as ARRAY[…]").not
-        .toBeNull();
-      return new Set(
-        [...block![1].matchAll(/'([a-z_]+)'/g)].map((m) => m[1]),
-      );
-    };
-
-    const policied = tablesIn(rlsMigrationSql());
-    const armed = tablesIn(readFileSync(join(RLS_DIR, "enable-rls.sql"), "utf8"));
+  it("every table the migrations policy is also armed and disarmed by the scripts", () => {
+    const policied = policiedTables();
+    const armed = arrayTables(readFileSync(join(RLS_DIR, "enable-rls.sql"), "utf8"));
+    const disarmed = arrayTables(readFileSync(join(RLS_DIR, "disable-rls.sql"), "utf8"));
 
     expect(policied.size).toBeGreaterThan(0);
+    expect(armed.length, "enable-rls.sql declares its table list as ARRAY[…]").toBeGreaterThan(0);
     // A table policied but never armed is a silent gap; a table armed but never
     // policied is a lockout (RLS on, no policy = deny all).
     expect([...policied].sort()).toEqual([...armed].sort());
+    expect([...disarmed].sort()).toEqual([...armed].sort());
+  });
+
+  it("every table-backed TENANT_SCOPED_MODELS entry has a policy", () => {
+    // Model → table, for the scoped models (ext_* tables are policied by the
+    // composer that creates them, so the registry-derived names are excluded).
+    const policied = policiedTables();
+    const ext = new Set(extensionScopedModelNames());
+    const tableOf = new Map(Prisma.dmmf.datamodel.models.map((m) => [m.name, m.dbName ?? m.name]));
+    const unpolicied = [...TENANT_SCOPED_MODELS]
+      .filter((name) => !ext.has(name))
+      .map((name) => tableOf.get(name))
+      .filter((table) => !policied.has(table!));
+    expect(unpolicied).toEqual([]);
   });
 });

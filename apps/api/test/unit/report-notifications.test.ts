@@ -6,11 +6,13 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Env } from "../../src/env.js";
 import {
-  sendReportReceipt,
-  sendReportDecision,
-} from "../../src/lib/report-notifications.js";
+  getCurrentTenantId,
+  runWithTenantContext,
+  tenantId,
+} from "@de-otio/saas-foundation/tenant";
+import type { Env } from "../../src/env.js";
+import { sendReportReceipt, sendReportDecision } from "../../src/lib/report-notifications.js";
 import {
   REPORT_TEMPLATE_KEYS,
   setReportTemplates,
@@ -48,8 +50,7 @@ describe("sendReportReceipt", () => {
     );
 
     expect(mockCreateNotification).toHaveBeenCalledOnce();
-    const [userId, type, title, body, data, , tenantId] =
-      mockCreateNotification.mock.calls[0];
+    const [userId, type, title, body, data, , tenantId] = mockCreateNotification.mock.calls[0];
     expect(userId).toBe("u1");
     expect(type).toBe("SYSTEM");
     expect(body).toContain("rep1");
@@ -147,5 +148,29 @@ describe("sendReportDecision", () => {
       mockEnv,
     );
     expect(mockCreateNotification.mock.calls[0][2]).toBe("Rejected");
+  });
+
+  it("writes the in-app notice with the reporter's tenant active, not the moderator's", async () => {
+    // A moderator's decision runs in the moderator's tenant; the notice belongs
+    // to the reporter's. Under TENANT_SCOPE_MODE=enforce the write is guarded
+    // against the active tenant, so it must be the reporter's.
+    let activeDuringWrite: string | undefined;
+    mockCreateNotification.mockImplementationOnce(async () => {
+      activeDuringWrite = getCurrentTenantId();
+    });
+    await runWithTenantContext(tenantId("tenant-moderator"), () =>
+      sendReportDecision(
+        {
+          reportId: "rep8",
+          reporterUserId: "u1",
+          reporterEmail: null,
+          tenantId: "tenant-reporter",
+        },
+        "actioned",
+        mockEnv,
+      ),
+    );
+    expect(mockCreateNotification).toHaveBeenCalledOnce();
+    expect(activeDuringWrite).toBe("tenant-reporter");
   });
 });
