@@ -886,6 +886,15 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ### Changed
 
+- **The RLS backstop covers the child tables that carry their own
+  `tenant_id`.** A new inert migration adds the `tenant_isolation` policy to
+  `post_media`, `post_sentiments`, `link_checks`, `post_geo_index` and
+  `product_taxonomy_tags`, and `prisma/rls/enable-rls.sql` / `disable-rls.sql`
+  now list them. `tenant_classification_tags` stays out, following its
+  tenant-admin parent. `rls-guc-name.test.ts` now fails when a by-relation
+  model with a `tenant_id` column has neither a policy nor a recorded
+  exemption. Nothing is armed; query behaviour is unchanged.
+
 - **`TENANT_SCOPE_MODE=enforce` keeps nested links and nested writes under
   unscoped models in the active tenant.** Nested rows and links are now held
   to the active tenant whenever their model has its own `tenantId` column:
