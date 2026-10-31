@@ -397,6 +397,17 @@ const PAYLOADS: ReadonlyArray<{
     }),
   },
   {
+    // PostMedia is by-relation but carries its own tenantId column.
+    name: "nested by-relation child, same tenant",
+    reject: false,
+    build: (a) => ({ media: { create: { mediaId: "m1", tenantId: a } } }),
+  },
+  {
+    name: "nested by-relation child, other tenant",
+    reject: true,
+    build: (_a, o) => ({ media: { create: { mediaId: "m1", tenantId: o } } }),
+  },
+  {
     name: "nested tenant relation write",
     reject: true,
     build: (_a, o) => ({ comments: { create: { tenant: { connect: { id: o } } } } }),
@@ -512,6 +523,411 @@ describe("planTenantScope — enforce rejects tenant reassignment on writes", ()
         ).toEqual({ action: "passthrough" });
       }),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Nested links: enforce narrows connect/set/disconnect/connectOrCreate.where
+// into scoped models to the active tenant
+// ---------------------------------------------------------------------------
+
+/**
+ * Link payloads on a Post row. `build` returns the payload and the payload
+ * enforce must produce from it (`t` is the active tenant).
+ */
+const LINK_PAYLOADS: ReadonlyArray<{
+  name: string;
+  build: (t: string) => { raw: Payload; narrowed: Payload };
+}> = [
+  {
+    name: "to-many connect",
+    build: (t) => ({
+      raw: { comments: { connect: { id: "c1" } } },
+      narrowed: { comments: { connect: { id: "c1", tenantId: t } } },
+    }),
+  },
+  {
+    name: "to-many connect array",
+    build: (t) => ({
+      raw: { comments: { connect: [{ id: "c1" }, { id: "c2" }] } },
+      narrowed: {
+        comments: {
+          connect: [
+            { id: "c1", tenantId: t },
+            { id: "c2", tenantId: t },
+          ],
+        },
+      },
+    }),
+  },
+  {
+    name: "to-one connect",
+    build: (t) => ({
+      raw: { primaryEntity: { connect: { id: "e1" } } },
+      narrowed: { primaryEntity: { connect: { id: "e1", tenantId: t } } },
+    }),
+  },
+  {
+    name: "set",
+    build: (t) => ({
+      raw: { comments: { set: [{ id: "c1" }] } },
+      narrowed: { comments: { set: [{ id: "c1", tenantId: t }] } },
+    }),
+  },
+  {
+    name: "disconnect by selector, and to-one disconnect: true",
+    build: (t) => ({
+      raw: { comments: { disconnect: { id: "c1" } }, group: { disconnect: true } },
+      narrowed: {
+        comments: { disconnect: { id: "c1", tenantId: t } },
+        group: { disconnect: true },
+      },
+    }),
+  },
+  {
+    name: "connectOrCreate",
+    build: (t) => ({
+      raw: { comments: { connectOrCreate: { where: { id: "c1" }, create: { body: "c" } } } },
+      narrowed: {
+        comments: {
+          connectOrCreate: { where: { id: "c1", tenantId: t }, create: { body: "c" } },
+        },
+      },
+    }),
+  },
+  {
+    name: "another tenant's id in the selector is overridden, not trusted",
+    build: (t) => ({
+      raw: { comments: { connect: { id: "c1", tenantId: "someone-else" } } },
+      narrowed: { comments: { connect: { id: "c1", tenantId: t } } },
+    }),
+  },
+  {
+    name: "connect nested inside a nested create",
+    build: (t) => ({
+      raw: { comments: { create: { body: "c", post: { connect: { id: "p2" } } } } },
+      narrowed: {
+        comments: { create: { body: "c", post: { connect: { id: "p2", tenantId: t } } } },
+      },
+    }),
+  },
+  {
+    name: "connect nested inside a to-many update",
+    build: (t) => ({
+      raw: {
+        comments: { update: { where: { id: "c1" }, data: { post: { connect: { id: "p2" } } } } },
+      },
+      narrowed: {
+        comments: {
+          update: { where: { id: "c1" }, data: { post: { connect: { id: "p2", tenantId: t } } } },
+        },
+      },
+    }),
+  },
+  {
+    name: "connect into a by-relation child that carries tenantId",
+    build: (t) => ({
+      raw: { media: { connect: { id: "pm1" } } },
+      narrowed: { media: { connect: { id: "pm1", tenantId: t } } },
+    }),
+  },
+  {
+    name: "compound unique selector",
+    build: (t) => ({
+      raw: { comments: { connect: { postId_order: { postId: "p1", order: 1 } } } },
+      narrowed: {
+        comments: { connect: { postId_order: { postId: "p1", order: 1 }, tenantId: t } },
+      },
+    }),
+  },
+  {
+    name: "to-one disconnect: true alone is not a link",
+    build: () => ({
+      raw: { group: { disconnect: true } },
+      narrowed: { group: { disconnect: true } },
+    }),
+  },
+  {
+    name: "connect into an unscoped model is left alone",
+    build: () => ({
+      raw: { author: { connect: { id: "u1" } } },
+      narrowed: { author: { connect: { id: "u1" } } },
+    }),
+  },
+];
+
+/** The write payload of `args` for an operation. */
+function payloadsOf(operation: string, args: Record<string, unknown>): unknown[] {
+  return operation === "upsert" ? [args.create, args.update] : [args.data];
+}
+
+const linkCase = fc.record({
+  shape: fc.constantFrom(...WRITE_SHAPES),
+  link: fc.constantFrom(...LINK_PAYLOADS),
+  active: fc.uuid(),
+});
+
+describe("planTenantScope — enforce narrows nested links to the active tenant", () => {
+  it("adds the active tenant to every link into a scoped model and changes nothing else", () => {
+    fc.assert(
+      fc.property(linkCase, ({ shape, link, active }) => {
+        const { raw, narrowed } = link.build(active);
+        const plan = planTenantScope({
+          mode: "enforce",
+          model: "Post",
+          operation: shape.operation,
+          args: deepFreeze(shape.args(raw)),
+          tenantId: active,
+          unscoped: false,
+        });
+        // Planning from the narrowed payload must give the same result: the
+        // narrowing is the only change, and it is idempotent.
+        const fromNarrowed = planTenantScope({
+          mode: "enforce",
+          model: "Post",
+          operation: shape.operation,
+          args: deepFreeze(shape.args(narrowed)),
+          tenantId: active,
+          unscoped: false,
+        });
+        expect(fromNarrowed).toEqual(plan);
+        const unchanged = JSON.stringify(raw) === JSON.stringify(narrowed);
+        if (shape.operation === "update") {
+          // A by-unique update is rewritten only when a link was narrowed.
+          expect(plan).toEqual(
+            unchanged
+              ? { action: "passthrough" }
+              : { action: "rewrite", args: shape.args(narrowed) },
+          );
+          return;
+        }
+        expect(plan.action).toBe("rewrite");
+        const out = (plan as { args: Record<string, unknown> }).args;
+        const expected = payloadsOf(shape.operation, shape.args(narrowed));
+        const stamp = (row: unknown) => ({ ...(row as object), tenantId: active });
+        payloadsOf(shape.operation, out).forEach((p, i) => {
+          const creates =
+            shape.operation === "create" ||
+            shape.operation.startsWith("createMany") ||
+            (shape.operation === "upsert" && i === 0);
+          const want = expected[i];
+          expect(p).toEqual(creates ? (Array.isArray(want) ? want.map(stamp) : stamp(want)) : want);
+        });
+      }),
+    );
+  });
+
+  it("shadow does not rewrite links", () => {
+    fc.assert(
+      fc.property(linkCase, ({ shape, link, active }) => {
+        const plan = planTenantScope({
+          mode: "shadow",
+          model: "Post",
+          operation: shape.operation,
+          args: deepFreeze(shape.args(link.build(active).raw)),
+          tenantId: active,
+          unscoped: false,
+        });
+        expect(plan.action).toBe("observe");
+        expect((plan as { wouldReject?: string }).wouldReject).toBeUndefined();
+      }),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Unscoped roots: nested writes into scoped models are held to the active tenant
+// ---------------------------------------------------------------------------
+
+/** User-rooted writes whose payload nests a Post row under `posts`. */
+const USER_ROOTS: ReadonlyArray<{
+  name: string;
+  operation: string;
+  args: (posts: Payload) => Record<string, unknown>;
+}> = [
+  { name: "create", operation: "create", args: (posts) => ({ data: { email: "e", posts } }) },
+  {
+    name: "update",
+    operation: "update",
+    args: (posts) => ({ where: { id: "u1" }, data: { posts } }),
+  },
+  {
+    name: "upsert.create",
+    operation: "upsert",
+    args: (posts) => ({ where: { id: "u1" }, create: { email: "e", posts }, update: {} }),
+  },
+  {
+    name: "upsert.update",
+    operation: "upsert",
+    args: (posts) => ({ where: { id: "u1" }, create: { email: "e" }, update: { posts } }),
+  },
+];
+
+/** The nested-write operators that carry a Post row under `User.posts`. */
+const NESTS: ReadonlyArray<{ name: string; links: boolean; wrap: (row: Payload) => Payload }> = [
+  { name: "create", links: true, wrap: (row) => ({ create: row }) },
+  { name: "create[]", links: true, wrap: (row) => ({ create: [{ body: "a" }, row] }) },
+  {
+    name: "update { where, data }",
+    links: true,
+    wrap: (row) => ({ update: { where: { id: "p1" }, data: row } }),
+  },
+  {
+    name: "upsert (both halves)",
+    links: true,
+    wrap: (row) => ({ upsert: { where: { id: "p1" }, create: row, update: row } }),
+  },
+  // createMany/updateMany rows cannot nest relation writes, so only the
+  // reassignment check applies to them.
+  { name: "createMany", links: false, wrap: (row) => ({ createMany: { data: [row] } }) },
+];
+
+const userRootCase = fc.record({
+  root: fc.constantFrom(...USER_ROOTS),
+  nest: fc.constantFrom(...NESTS),
+  payload: fc.constantFrom(...PAYLOADS),
+  tenants: tenantPair,
+});
+
+describe("planTenantScope — writes rooted at an unscoped model", () => {
+  it("enforce throws exactly when a nested scoped row reassigns the tenant", () => {
+    fc.assert(
+      fc.property(userRootCase, ({ root, nest, payload, tenants: [active, other] }) => {
+        const args = deepFreeze(root.args(nest.wrap(payload.build(active, other))));
+        const plan = planTenantScope({
+          mode: "enforce",
+          model: "User",
+          operation: root.operation,
+          args,
+          tenantId: active,
+          unscoped: false,
+        });
+        if (payload.reject) {
+          expect(plan.action).toBe("throw");
+          expect((plan as { message: string }).message).toContain(`User.${root.operation}`);
+          expect((plan as { message: string }).message).not.toContain(other);
+        } else {
+          // Nothing to narrow in PAYLOADS, so the op is untouched.
+          expect(plan).toEqual({ action: "passthrough" });
+        }
+      }),
+    );
+  });
+
+  it("shadow flags exactly the writes enforce would reject and otherwise stays silent", () => {
+    fc.assert(
+      fc.property(userRootCase, ({ root, nest, payload, tenants: [active, other] }) => {
+        const plan = planTenantScope({
+          mode: "shadow",
+          model: "User",
+          operation: root.operation,
+          args: deepFreeze(root.args(nest.wrap(payload.build(active, other)))),
+          tenantId: active,
+          unscoped: false,
+        });
+        if (payload.reject) {
+          expect(plan).toMatchObject({ action: "observe", wouldScope: false });
+          expect(typeof (plan as { wouldReject?: string }).wouldReject).toBe("string");
+        } else {
+          expect(plan).toEqual({ action: "passthrough" });
+        }
+      }),
+    );
+  });
+
+  it("no tenant context, runUnscoped and off pass through untouched", () => {
+    fc.assert(
+      fc.property(userRootCase, ({ root, nest, payload, tenants: [active, other] }) => {
+        const args = deepFreeze(root.args(nest.wrap(payload.build(active, other))));
+        const common = { model: "User", operation: root.operation, args };
+        for (const input of [
+          { ...common, mode: "enforce" as const, tenantId: undefined, unscoped: false },
+          { ...common, mode: "enforce" as const, tenantId: active, unscoped: true },
+          { ...common, mode: "off" as const, tenantId: active, unscoped: false },
+        ]) {
+          expect(planTenantScope(input)).toEqual({ action: "passthrough" });
+        }
+      }),
+    );
+  });
+
+  it("narrows links under every nesting operator and both upsert halves", () => {
+    fc.assert(
+      fc.property(
+        fc.record({
+          root: fc.constantFrom(...USER_ROOTS),
+          nest: fc.constantFrom(...NESTS.filter((n) => n.links)),
+          link: fc.constantFrom(...LINK_PAYLOADS),
+          active: fc.uuid(),
+        }),
+        ({ root, nest, link, active }) => {
+          const { raw, narrowed } = link.build(active);
+          const plan = planTenantScope({
+            mode: "enforce",
+            model: "User",
+            operation: root.operation,
+            args: deepFreeze(root.args(nest.wrap(raw))),
+            tenantId: active,
+            unscoped: false,
+          });
+          const unchanged = JSON.stringify(raw) === JSON.stringify(narrowed);
+          expect(plan).toEqual(
+            unchanged
+              ? { action: "passthrough" }
+              : { action: "rewrite", args: root.args(nest.wrap(narrowed)) },
+          );
+        },
+      ),
+    );
+  });
+
+  it("fails closed for a model missing from the schema: links under it are narrowed", () => {
+    const plan = planTenantScope({
+      ...base,
+      model: "NotInSchema",
+      mode: "enforce",
+      operation: "update",
+      args: deepFreeze({ where: { id: "x" }, data: { anything: { connect: { id: "y" } } } }),
+    });
+    expect(plan).toEqual({
+      action: "rewrite",
+      args: {
+        where: { id: "x" },
+        data: { anything: { connect: { id: "y", tenantId: "t-acme" } } },
+      },
+    });
+  });
+
+  it("narrows a nested link into a scoped model", () => {
+    const plan = planTenantScope({
+      ...base,
+      model: "User",
+      mode: "enforce",
+      operation: "update",
+      args: deepFreeze({ where: { id: "u1" }, data: { posts: { connect: { id: "p1" } } } }),
+    });
+    expect(plan).toEqual({
+      action: "rewrite",
+      args: { where: { id: "u1" }, data: { posts: { connect: { id: "p1", tenantId: "t-acme" } } } },
+    });
+  });
+
+  it("does not hold the unscoped row's own tenantId or tenant relation to the active tenant", () => {
+    // Joining another tenant is a TenantMember write with that tenant's id.
+    for (const data of [
+      { tenantId: "t-other", userId: "u1" },
+      { tenant: { connect: { id: "t-other" } }, user: { connect: { id: "u1" } } },
+    ]) {
+      expect(
+        planTenantScope({
+          ...base,
+          model: "TenantMember",
+          mode: "enforce",
+          operation: "create",
+          args: deepFreeze({ data }),
+        }),
+      ).toEqual({ action: "passthrough" });
+    }
   });
 });
 

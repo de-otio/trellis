@@ -35,13 +35,28 @@
  * equal to the active tenant is allowed. Creates are still stamped with the
  * active tenant when `tenantId` is absent.
  *
+ * Nested rows and links are held to the active tenant whenever their model has
+ * its own `tenantId` column: the scoped models above and the by-relation
+ * children that denormalize it (PostMedia, LinkCheck, …), but not the
+ * tenant-admin tables. `enforce` narrows every nested `connect`, `set`,
+ * `disconnect` and `connectOrCreate.where` into such a model to the active
+ * tenant (adds `tenantId` to the unique selector), so a link to another
+ * tenant's row matches nothing and the write fails. `shadow` cannot tell
+ * which tenant a selector points at, so it does not report these.
+ *
+ * Unscoped roots: a write on an unscoped model (`user.update`, …) run with an
+ * active tenant gets the same checks and link narrowing for its nested rows.
+ * The unscoped root row's own `tenantId` is not checked, and with no active
+ * tenant the op passes through.
+ *
  * SECURITY — `enforce` is a PARTIAL defense and must NOT be the sole isolation
  * mechanism (security review, doc/14). It does not cover: unique-selector reads/
  * deletes and the `where` of a by-id `update` (findUnique/update/delete by id),
  * raw SQL ($queryRaw/$executeRaw), `by-relation` models without their own
- * `tenantId`, nested `connect`/`set` of an existing child row (a link, which
- * moves no row between tenants), or nested writes rooted at an unscoped model
- * (its whole op passes through). Those are closed only by the PostgreSQL RLS backstop (WS3). Do
+ * `tenantId`. Those are closed only by the PostgreSQL RLS backstop (WS3).
+ * Neither layer checks the target of a scalar foreign key (`postId`): Postgres
+ * FK checks bypass RLS, so a handler that takes a foreign id from a request
+ * must load it through a scoped read first. Do
  * not enable `enforce` in production before RLS is deployed; also note
  * unauthenticated/public paths (federation) that query scoped models must use
  * `runUnscoped` or they fail closed (throw) under `enforce` (review finding 2).
@@ -371,12 +386,35 @@ function relationFieldsOf(model: string): ReadonlyMap<string, string> | undefine
   return relationFields.get(model);
 }
 
+let tenantColumnModels: ReadonlySet<string> | undefined;
+/**
+ * Whether a row of `model`, written as a NESTED row or linked from another
+ * row, is held to the active tenant: every model with its own `tenantId`
+ * column, including the by-relation children that denormalize it (PostMedia,
+ * LinkCheck, …), except tenant-admin tables, where pointing at another tenant
+ * is the point (a membership in another tenant). A model missing from the
+ * schema (not expected) is held, so the guard fails closed.
+ */
+function holdsTenant(model: string): boolean {
+  tenantColumnModels ??= new Set(
+    Prisma.dmmf.datamodel.models
+      .filter((m) => m.fields.some((f) => f.name === "tenantId" && f.kind === "scalar"))
+      .map((m) => m.name),
+  );
+  if (relationFieldsOf(model) === undefined) return true;
+  return tenantColumnModels.has(model) && UNSCOPED_MODELS.get(model) !== "tenant-admin";
+}
+
 /**
  * Find a write that would place a row in a tenant other than the active one:
  * a `tenantId` that differs from it, or any write to the `tenant` relation.
  * Recurses through nested relation writes. Returns the path of the first
  * offending field, or `null`. The value itself is never echoed (it is
  * caller-supplied).
+ *
+ * `held` says whether this row's own `tenantId`/`tenant` is checked: for the
+ * root row, whether its model is scoped (an unscoped root such as
+ * TenantMember may name another tenant); for nested rows, {@link holdsTenant}.
  *
  * Mirrors the ext_* proxy's tenant-field guard (`extension-scoped-db.ts`),
  * with one difference: core callers commonly pass the active tenant's id
@@ -385,12 +423,13 @@ function relationFieldsOf(model: string): ReadonlyMap<string, string> | undefine
 function findTenantReassignment(
   rows: unknown,
   model: string,
+  held: boolean,
   tenantId: string,
   path: string,
 ): string | null {
   if (Array.isArray(rows)) {
     for (const [i, row] of rows.entries()) {
-      const hit = findTenantReassignment(row, model, tenantId, `${path}[${i}]`);
+      const hit = findTenantReassignment(row, model, held, tenantId, `${path}[${i}]`);
       if (hit) return hit;
     }
     return null;
@@ -398,11 +437,11 @@ function findTenantReassignment(
   if (!isPlainObject(rows)) return null;
   const relations = relationFieldsOf(model);
   for (const [key, value] of Object.entries(rows)) {
-    if (key === "tenantId") {
+    if (held && key === "tenantId") {
       if (!isSameTenantValue(value, tenantId)) return `${path}.tenantId`;
       continue;
     }
-    if (key === "tenant") {
+    if (held && key === "tenant") {
       if (value !== undefined) return `${path}.tenant`;
       continue;
     }
@@ -420,7 +459,7 @@ function findTenantReassignment(
         if (!isPlainObject(wrapper)) continue;
         const at = Array.isArray(payload) ? `${path}.${key}.${op}[${i}]` : `${path}.${key}.${op}`;
         for (const nested of rowsOf(wrapper)) {
-          const hit = findTenantReassignment(nested, target, tenantId, at);
+          const hit = findTenantReassignment(nested, target, holdsTenant(target), tenantId, at);
           if (hit) return hit;
         }
       }
@@ -439,10 +478,168 @@ function tenantReassignment(
   const labels = operation === "upsert" ? ["create", "update"] : ["data"];
   const payloads = writePayloads(operation, a);
   for (const [i, payload] of payloads.entries()) {
-    const hit = findTenantReassignment(payload, model, tenantId, labels[i]);
+    const hit = findTenantReassignment(
+      payload,
+      model,
+      TENANT_SCOPED_MODELS.has(model),
+      tenantId,
+      labels[i],
+    );
     if (hit) return hit;
   }
   return null;
+}
+
+/** The payload keys of `a` that carry row data for `operation`. */
+function writePayloadKeys(operation: string): readonly string[] {
+  if (operation === "upsert") return ["create", "update"];
+  return writePayloads(operation, {}).length > 0 ? ["data"] : [];
+}
+
+/** Narrow a unique selector to the active tenant (`{ id }` → `{ id, tenantId }`). */
+function scopeSelector(selector: unknown, tenantId: string): unknown {
+  return isPlainObject(selector) ? { ...selector, tenantId } : selector;
+}
+
+function scopeSelectors(selectors: unknown, tenantId: string): unknown {
+  return Array.isArray(selectors)
+    ? selectors.map((s) => scopeSelector(s, tenantId))
+    : scopeSelector(selectors, tenantId);
+}
+
+/** Apply `fn` to one item or to each item of an array. */
+function eachOf(value: unknown, fn: (item: unknown) => unknown): unknown {
+  return Array.isArray(value) ? value.map(fn) : fn(value);
+}
+
+/**
+ * Rewrite one nested relation write (`{ connect: …, create: … }`) on a field
+ * whose target is `target`. Links to an existing row (`connect`, `set`,
+ * `disconnect`, the `where` of `connectOrCreate`) into a model that
+ * {@link holdsTenant} gain `tenantId: <active>`, so a row in another tenant
+ * matches nothing and Prisma fails the write. Row data (`create`, `update`,
+ * `upsert`, the `create` of `connectOrCreate`) is walked for further nested
+ * links.
+ */
+function scopeRelationWrite(
+  ops: Record<string, unknown>,
+  target: string,
+  tenantId: string,
+): Record<string, unknown> {
+  const scoped = holdsTenant(target);
+  const rows = (v: unknown) => scopeNestedLinks(v, target, tenantId);
+  return Object.fromEntries(
+    Object.entries(ops).map(([op, payload]) => {
+      switch (op) {
+        case "connect":
+        case "set":
+        case "disconnect":
+          return [op, scoped ? scopeSelectors(payload, tenantId) : payload];
+        case "connectOrCreate":
+          return [
+            op,
+            eachOf(payload, (c) =>
+              isPlainObject(c)
+                ? {
+                    ...c,
+                    where: scoped ? scopeSelector(c.where, tenantId) : c.where,
+                    create: rows(c.create),
+                  }
+                : c,
+            ),
+          ];
+        case "create":
+          return [op, eachOf(payload, rows)];
+        case "update":
+          return [
+            op,
+            eachOf(payload, (u) =>
+              isPlainObject(u) && isWhereDataWrapper(u) ? { ...u, data: rows(u.data) } : rows(u),
+            ),
+          ];
+        case "upsert":
+          return [
+            op,
+            eachOf(payload, (u) =>
+              isPlainObject(u) ? { ...u, create: rows(u.create), update: rows(u.update) } : u,
+            ),
+          ];
+        default:
+          // createMany/updateMany rows cannot nest relation writes; the rest are
+          // selectors relative to the parent row.
+          return [op, payload];
+      }
+    }),
+  );
+}
+
+/**
+ * Return a copy of a write payload in which every nested link into a scoped
+ * model is narrowed to the active tenant (see {@link scopeRelationWrite}).
+ * Follows relation fields only, like the reassignment guard. Never mutates
+ * the input.
+ */
+function scopeNestedLinks(rows: unknown, model: string, tenantId: string): unknown {
+  if (Array.isArray(rows)) return rows.map((r) => scopeNestedLinks(r, model, tenantId));
+  if (!isPlainObject(rows)) return rows;
+  const relations = relationFieldsOf(model);
+  return Object.fromEntries(
+    Object.entries(rows).map(([key, value]) => {
+      const target = relations ? relations.get(key) : model;
+      return target !== undefined && isPlainObject(value)
+        ? [key, scopeRelationWrite(value, target, tenantId)]
+        : [key, value];
+    }),
+  );
+}
+
+/**
+ * Whether a write payload holds a selector link (not `disconnect: true`) into
+ * a model that {@link holdsTenant}, at any depth.
+ */
+function hasNestedLink(rows: unknown, model: string): boolean {
+  if (Array.isArray(rows)) return rows.some((r) => hasNestedLink(r, model));
+  if (!isPlainObject(rows)) return false;
+  const relations = relationFieldsOf(model);
+  return Object.entries(rows).some(([key, value]) => {
+    const target = relations ? relations.get(key) : model;
+    if (target === undefined || !isPlainObject(value)) return false;
+    return Object.entries(value).some(([op, payload]) => {
+      if (
+        holdsTenant(target) &&
+        (op === "connect" || op === "set" || op === "disconnect" || op === "connectOrCreate") &&
+        (isPlainObject(payload) || Array.isArray(payload))
+      ) {
+        return true;
+      }
+      // createMany/updateMany rows cannot nest relation writes.
+      const rowsOf =
+        op === "createMany" || op === "updateMany" ? undefined : NESTED_ROW_DATA.get(op);
+      if (!rowsOf) return false;
+      return (Array.isArray(payload) ? payload : [payload]).some(
+        (w) => isPlainObject(w) && rowsOf(w).some((r) => hasNestedLink(r, target)),
+      );
+    });
+  });
+}
+
+/**
+ * `a` with nested links in its write payloads narrowed to the active tenant,
+ * or `a` itself (same reference) when it has none, so callers can pass the
+ * operation through untouched.
+ */
+function scopeWriteLinks(
+  model: string,
+  operation: string,
+  a: Record<string, unknown>,
+  tenantId: string,
+): Record<string, unknown> {
+  const keys = writePayloadKeys(operation).filter((k) => hasNestedLink(a[k], model));
+  if (keys.length === 0) return a;
+  return {
+    ...a,
+    ...Object.fromEntries(keys.map((k) => [k, scopeNestedLinks(a[k], model, tenantId)])),
+  };
 }
 
 // Escape hatch for legitimate cross-tenant work (super-admin tooling, the
@@ -495,8 +692,30 @@ export function planTenantScope(input: {
 }): ScopePlan {
   const { mode, model, operation, args, tenantId, unscoped } = input;
 
-  if (mode === "off" || unscoped || !TENANT_SCOPED_MODELS.has(model)) {
+  if (mode === "off" || unscoped) {
     return { action: "passthrough" };
+  }
+
+  if (!TENANT_SCOPED_MODELS.has(model)) {
+    // The model itself is not scoped, but a write on it can still reach scoped
+    // models through nested relation writes (`user.update` creating a
+    // notification). With an active tenant, those nested rows and links are
+    // held to it exactly as if they were written directly. Without one there is
+    // nothing to hold them to.
+    if (!tenantId) return { action: "passthrough" };
+    const a = args ?? {};
+    const reassigned = tenantReassignment(model, operation, a, tenantId);
+    const rejection = reassigned
+      ? `[tenant-scope] ${model}.${operation} writes ${reassigned}, which would move the row out of the active tenant`
+      : undefined;
+    if (mode === "shadow") {
+      return rejection
+        ? { action: "observe", wouldScope: false, wouldReject: rejection }
+        : { action: "passthrough" };
+    }
+    if (rejection) return { action: "throw", message: rejection };
+    const linked = scopeWriteLinks(model, operation, a, tenantId);
+    return linked === a ? { action: "passthrough" } : { action: "rewrite", args: linked };
   }
 
   if (!tenantId) {
@@ -508,7 +727,8 @@ export function planTenantScope(input: {
       : { action: "observe-no-context" };
   }
 
-  const a = args ?? {};
+  // Rebound once below, to the copy with nested links narrowed (never mutated).
+  let a = args ?? {};
   const reassigned = tenantReassignment(model, operation, a, tenantId);
   const rejection = reassigned
     ? `[tenant-scope] ${model}.${operation} writes ${reassigned}, which would move the row out of the active tenant`
@@ -524,6 +744,10 @@ export function planTenantScope(input: {
 
   // enforce
   if (rejection) return { action: "throw", message: rejection };
+  // Nested links (`connect`/`set`/`disconnect`/`connectOrCreate.where`) into
+  // scoped models are narrowed to the active tenant before the op is scoped.
+  const original = a;
+  a = scopeWriteLinks(model, operation, a, tenantId);
   if (WHERE_MERGEABLE.has(operation)) {
     return { action: "rewrite", args: { ...a, where: andWhere(a.where, tenantId) } };
   }
@@ -550,8 +774,8 @@ export function planTenantScope(input: {
   }
   // Unique-selector ops and anything else: cannot merge a non-unique tenantId
   // into the where — rely on the RLS backstop (WS3). A by-unique `update` has
-  // already had its data checked above.
-  return { action: "passthrough" };
+  // already had its data checked above, and its nested links narrowed.
+  return a === original ? { action: "passthrough" } : { action: "rewrite", args: a };
 }
 
 /**

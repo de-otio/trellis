@@ -886,6 +886,21 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ### Changed
 
+- **`TENANT_SCOPE_MODE=enforce` keeps nested links and nested writes under
+  unscoped models in the active tenant.** Nested rows and links are now held
+  to the active tenant whenever their model has its own `tenantId` column:
+  the tenant-scoped models and the child tables that denormalize it
+  (`PostMedia`, `LinkCheck`, …), but not the tenant-admin tables. Nested
+  `connect`, `set`, `disconnect` and the `where` of `connectOrCreate` into
+  such a model now carry `tenantId: <active>` in their selector, so they only
+  match rows in the active tenant. A write on a model that is not itself
+  tenant-scoped (`user.update`, …) and runs with an active tenant now gets the
+  same checks for its nested rows; the unscoped row's own `tenantId` is not
+  checked, and with no active tenant the op passes through as before. `shadow` logs the
+  nested writes under unscoped models that `enforce` would reject; it cannot
+  see which tenant a link selector points at, so it does not log links. `off`
+  is unchanged.
+
 - **`TENANT_SCOPE_MODE=enforce` rejects tenant reassignment on writes, matching
   the `ext_*` proxy.** The tenant-scope Prisma extension
   (`apps/api/src/lib/tenant-scope.ts`) now inspects write payloads as well as
