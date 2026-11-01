@@ -886,6 +886,17 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ### Changed
 
+- **`tenant_id` is immutable in the database.** A `BEFORE UPDATE OF
+  tenant_id` trigger (`trellis_tenant_id_immutable()`) on every table with
+  the column raises when the value changes, through any client, raw SQL
+  included. The tenant-qualified FKs already stop a parent moving while it
+  has children; this covers rows with no children and tables outside an FK
+  pair. Writing back the same value passes. Nothing in trellis changes a
+  `tenant_id`. One consequence: a tenant's `id` can no longer change once
+  rows reference it, because the `ON UPDATE CASCADE` from `tenants` is
+  refused too. New tables with a `tenant_id` must add the trigger in their
+  migration; `tenant-id-immutable.integration.test.ts` fails otherwise.
+
 - **The join tables carry their own `tenant_id`.** `post_subjects`,
   `post_taxonomy_tags` and `entity_taxonomy_tags` joined two tenant-holding
   parents with no tenant of their own, so nothing stopped a row from joining
