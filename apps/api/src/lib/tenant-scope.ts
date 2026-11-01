@@ -136,8 +136,8 @@ export const TENANT_SCOPED_MODELS: ReadonlySet<string> = new Set<string>([
   "EntityRelationship",
   // D18: MediaFile is now tenant-scoped (carries its own tenantId). Dedup is
   // within-tenant via @@unique([tenantId, contentHash]). PostMedia is
-  // "by-relation" (no own tenantId) and crosses the scope boundary via
-  // the post→media join — flagged for T9/integration.
+  // "by-relation" (with a denormalized tenantId) and crosses the scope
+  // boundary via the post→media join — flagged for T9/integration.
   "MediaFile",
   // Events primitive (R1 — HIGH-3 fix). All four carry their OWN denormalized
   // tenantId, so they are auto-scoped here (NOT by-relation). Handlers ALSO
@@ -209,8 +209,11 @@ export const UNSCOPED_MODELS: ReadonlyMap<string, string> = new Map([
   ["DeletionAuditLog", "user"],
   ["Invitation", "user"],
   ["DirectMessage", "user-pair"],
-  // Scoped-by-relation: no own tenantId yet (doc/14 §04 C / WS0). Rely on the
-  // parent's scope + the RLS backstop until tenantId is denormalized onto them.
+  // Scoped-by-relation (doc/14 §04 C / WS0): isolation flows through the
+  // parent. Several now carry a denormalized tenantId (PostMedia,
+  // PostSentiment, LinkCheck, PostGeoIndex, ProductTaxonomyTag); those have
+  // their own RLS policy and are held to the active tenant when written as
+  // nested rows. The rest rely on the parent's scope.
   // P0b moderation job: tenant-scoped through its parent MediaFile via mediaId
   // (onDelete: Cascade). No own tenantId column, so it cannot be auto-scoped by
   // the where-merge/create-stamp extension — same posture as the other

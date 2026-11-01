@@ -36,7 +36,8 @@ DECLARE
     'connection_code_redemptions', 'taxonomy_dimensions', 'taxonomy_categories',
     'taxonomy_taxons', 'entity_location', 'relationships',
     'entity_relationships', 'media_files', 'events', 'event_rsvps',
-    'event_shifts', 'event_shift_signups', 'domain_events'
+    'event_shifts', 'event_shift_signups', 'domain_events', 'post_media',
+    'post_sentiments', 'link_checks', 'post_geo_index', 'product_taxonomy_tags'
   ];
 BEGIN
   FOREACH t IN ARRAY tables LOOP

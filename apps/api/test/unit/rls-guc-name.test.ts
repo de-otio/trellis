@@ -30,7 +30,11 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { Prisma } from "@prisma/client";
-import { extensionScopedModelNames, TENANT_SCOPED_MODELS } from "../../src/lib/tenant-scope.js";
+import {
+  extensionScopedModelNames,
+  TENANT_SCOPED_MODELS,
+  UNSCOPED_MODELS,
+} from "../../src/lib/tenant-scope.js";
 
 const REPO_ROOT = join(__dirname, "..", "..", "..", "..");
 const MIGRATIONS_DIR = join(REPO_ROOT, "prisma", "migrations");
@@ -159,5 +163,26 @@ describe("RLS GUC name", () => {
       .map((name) => tableOf.get(name))
       .filter((table) => !policied.has(table!));
     expect(unpolicied).toEqual([]);
+  });
+
+  it("every by-relation model with its own tenant_id has a policy, or a recorded exemption", () => {
+    // Exemptions, each with its reason. Nothing else may be left out.
+    const exempt = new Map([
+      // Follows its tenant-admin parent (tenant_classifications), which
+      // platform admins update across tenants and which has no policy.
+      ["TenantClassificationTag", "parent is tenant-admin"],
+    ]);
+    const policied = policiedTables();
+    const unpolicied = Prisma.dmmf.datamodel.models
+      .filter((m) => UNSCOPED_MODELS.get(m.name)?.startsWith("by-relation"))
+      .filter((m) => m.fields.some((f) => f.name === "tenantId" && f.kind === "scalar"))
+      .filter((m) => !exempt.has(m.name))
+      .filter((m) => !policied.has(m.dbName ?? m.name))
+      .map((m) => m.name);
+    expect(unpolicied).toEqual([]);
+    // A stale exemption hides nothing but misleads; keep the list honest.
+    for (const name of exempt.keys()) {
+      expect(UNSCOPED_MODELS.get(name), `${name} is still by-relation`).toMatch(/^by-relation/);
+    }
   });
 });
