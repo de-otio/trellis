@@ -16,6 +16,7 @@
 
 import type { Prisma } from "@prisma/client";
 import { DataRouter } from "./data-router.js";
+import { buildEntityCreateData } from "./entity-create-data.js";
 import { getLogger, Logger, type LoggerEnv } from "./logger.js";
 import { detectRegion } from "./region-detection.js";
 import { deriveUniqueHandle } from "./user/derive-handle.js";
@@ -328,38 +329,24 @@ export class EntityHandler {
       }
       const entityTenantId = tenantResolution.tenantId;
 
-      const entityData: any = {
-        name: profileData.name.trim(),
+      const entityData = buildEntityCreateData({
+        name: profileData.name,
         entityType,
         tenantId: entityTenantId,
         metadata,
-        // The creator's ownership row, written in the same statement so an
-        // entity is never persisted without an owner. (The graph dual-write
-        // below also upserts it, but only when an AMBIENT tenant is set —
-        // which it is not in the default scope mode.)
-        owners: {
-          create: {
-            tenantId: entityTenantId,
-            userId: session.userId,
-            role: "PRIMARY_OWNER",
-            addedByUserId: session.userId,
-          },
-        },
-      };
-
-      // Set life stage if calculated
-      if (calculatedLifeStage) {
-        entityData.lifeStage = calculatedLifeStage;
-        entityData.lifeStageCalculatedAt = new Date();
-        entityData.lifeStageManualOverride =
-          profileData.lifeStageManualOverride || false;
-      }
+        creatorUserId: session.userId,
+        lifeStage: calculatedLifeStage
+          ? {
+              value: calculatedLifeStage,
+              manualOverride: profileData.lifeStageManualOverride || false,
+            }
+          : undefined,
+      });
 
       // Create entity in database
-      // Load-bearing cast: `entityData` above is `any` (see comment there), so
-      // TS cannot infer `create`'s return shape from it; asserting the shape we
-      // actually read below keeps call sites honest without papering over the
-      // underlying `any`.
+      // Load-bearing cast: `db` is untyped here, so TS cannot infer `create`'s
+      // return shape; asserting the shape we actually read below keeps call
+      // sites honest.
       const entity = await (db.entity.create({
         data: entityData,
       }) as unknown as Promise<{

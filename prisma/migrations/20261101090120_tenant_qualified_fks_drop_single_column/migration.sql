@@ -3,7 +3,9 @@
 -- Each composite key added in step 2 and validated in step 3 implies the old
 -- one (tenant_id is NOT NULL on both sides; MATCH SIMPLE still skips a NULL
 -- <col>, as before), so nothing is lost. Each DROP takes a brief ACCESS
--- EXCLUSIVE lock on the child and the parent.
+-- EXCLUSIVE lock on the child and the parent; statements commit one at a time
+-- (see step 2's header), so no lock is held across them, and IF EXISTS makes
+-- a re-run after a part-way failure safe.
 
 SET lock_timeout = '1s';
 SET statement_timeout = '30s';

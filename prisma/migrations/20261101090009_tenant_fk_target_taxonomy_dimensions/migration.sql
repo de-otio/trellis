@@ -2,9 +2,8 @@
 -- `taxonomy_dimensions` that child tables reference in step 2
 -- (20261101090100_tenant_qualified_fks_add).
 --
--- One CONCURRENTLY statement per file: it cannot run inside the transaction
--- Prisma wraps a multi-statement DDL file in (M7a/M7b precedent,
--- 20260823150001_deferred_escalation_parent_unique). The index name is the one
+-- One CONCURRENTLY statement per file, following the precedent
+-- (20260823150001_deferred_escalation_parent_unique). The index name is the one
 -- Prisma derives for @@unique([tenantId, id]), so `prisma migrate diff` sees
 -- no drift. No ADD CONSTRAINT ... USING INDEX: Postgres accepts a unique index
 -- as a foreign-key target.

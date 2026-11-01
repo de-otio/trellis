@@ -893,8 +893,9 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   `group_members`, `link_checks`, `connection_code_redemptions`, the event
   RSVP/shift tables and `tenant_classification_tags`), so the database
   refuses a child whose parent is in another tenant, for every client and
-  with or without RLS armed. They are `ON UPDATE NO ACTION`: a parent's
-  `tenant_id` can no longer change while it has children. Twelve parents gain
+  with or without RLS armed. They are `ON UPDATE NO ACTION` (they were
+  `CASCADE`): a parent's `tenant_id`, or its `id`, can no longer change while
+  it has children. Twelve parents gain
   `@@unique([tenantId, id])`, built `CONCURRENTLY`; the new FKs are added
   `NOT VALID`, validated, and only then replace the single-column FKs, so
   there is no window without one. **Upgrading:** `VALIDATE` stops
@@ -902,7 +903,10 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   repair such rows by hand, then `prisma migrate resolve`. Generated types:
   each parent gains a `tenantId_id` compound unique input, and the
   `*UncheckedCreateWithout<Parent>Input` of a nested child create no longer
-  takes `tenantId` (the parent supplies it). The four `ON DELETE SET NULL`
+  takes `tenantId` (the parent supplies it); Prisma rejects one at runtime,
+  so `EntityHandler.createEntityProfile`'s nested owner create, which passed
+  it behind an `any`, now goes through a typed `buildEntityCreateData`
+  without it. The four `ON DELETE SET NULL`
   FKs follow separately. New schema lane test:
   `tenant-qualified-fk-shape.integration.test.ts`.
 

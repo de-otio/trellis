@@ -20,6 +20,7 @@
 import { PrismaClient } from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { buildEntityCreateData } from "../../../src/lib/entity-create-data.js";
 import { TEST_DB_URL } from "./_schema-helpers.js";
 
 /**
@@ -43,11 +44,14 @@ interface FkRow {
   child_cols: string[];
   parent_cols: string[];
   upd: string;
+  child_tenant_not_null: boolean;
 }
 
 const RUN = `tqfk-${Date.now()}`;
 const TENANT_A = `${RUN}-a`;
 const TENANT_B = `${RUN}-b`;
+const USER_TENANT = `${RUN}-pt`;
+const USER = `${RUN}-user`;
 
 let prisma: PrismaClient;
 
@@ -61,11 +65,26 @@ beforeAll(async () => {
       data: { id, slug: id, displayName: id, type: "ORGANIZATION" },
     });
   }
+  await prisma.tenant.create({
+    data: { id: USER_TENANT, slug: USER_TENANT, displayName: USER_TENANT, type: "PERSONAL" },
+  });
+  await prisma.user.create({
+    data: {
+      id: USER,
+      email: `${USER}@test.example.com`,
+      handle: `h-${RUN.slice(-10)}`,
+      personalTenantId: USER_TENANT,
+      dataRegion: "US",
+    },
+  });
 });
 
 afterAll(async () => {
-  // Deleting the tenants cascades to their events, and from there to shifts.
+  // Deleting the tenants cascades to their events, shifts, entities and
+  // ownerships; the user goes after its ownership rows.
   await prisma.tenant.deleteMany({ where: { id: { in: [TENANT_A, TENANT_B] } } });
+  await prisma.user.deleteMany({ where: { id: USER } });
+  await prisma.tenant.deleteMany({ where: { id: USER_TENANT } });
   await prisma.$disconnect();
 });
 
@@ -84,7 +103,9 @@ async function tenantHoldingFks(): Promise<FkRow[]> {
                     FROM unnest(c.confkey) WITH ORDINALITY k(attnum, ord)
                     JOIN pg_attribute a ON a.attrelid = c.confrelid AND a.attnum = k.attnum
                    ORDER BY k.ord) AS parent_cols,
-            c.confupdtype::text AS upd
+            c.confupdtype::text AS upd,
+            (SELECT attnotnull FROM pg_attribute
+              WHERE attrelid = c.conrelid AND attname = 'tenant_id') AS child_tenant_not_null
        FROM pg_constraint c
        JOIN pg_class ch ON ch.oid = c.conrelid
        JOIN pg_class pa ON pa.oid = c.confrelid
@@ -127,6 +148,8 @@ describe("tenant-qualified foreign keys: coverage", () => {
     for (const fk of fks) {
       expect(fk.child_cols, fk.conname).toHaveLength(2);
       expect(fk.parent_cols, fk.conname).toEqual(["tenant_id", "id"]);
+      // Under MATCH SIMPLE a NULL tenant_id would skip the check entirely.
+      expect(fk.child_tenant_not_null, fk.conname).toBe(true);
     }
   });
 });
@@ -203,5 +226,31 @@ describe("tenant-qualified foreign keys: behaviour (event_shifts -> events)", ()
     });
     await prisma.event.delete({ where: { id: event.id } });
     expect(await prisma.eventShift.count({ where: { id: `${RUN}-sh-6` } })).toBe(0);
+  });
+});
+
+describe("tenant-qualified foreign keys: nested child creates", () => {
+  // The nested create's parent supplies the tenant. Runs the payload
+  // EntityHandler.createEntityProfile sends, so a nested `tenantId` (which
+  // Prisma now rejects at runtime) fails here and not only in production.
+  it("creates an entity with its owner row, in the entity's tenant", async () => {
+    const entity = await prisma.entity.create({
+      data: buildEntityCreateData({
+        name: " Rex ",
+        entityType: "dog",
+        tenantId: TENANT_A,
+        metadata: {},
+        creatorUserId: USER,
+        lifeStage: { value: "life-stage:adult", manualOverride: false },
+      }),
+      include: { owners: true },
+    });
+    expect(entity.name).toBe("Rex");
+    expect(entity.owners).toHaveLength(1);
+    expect(entity.owners[0]).toMatchObject({
+      tenantId: TENANT_A,
+      userId: USER,
+      role: "PRIMARY_OWNER",
+    });
   });
 });
