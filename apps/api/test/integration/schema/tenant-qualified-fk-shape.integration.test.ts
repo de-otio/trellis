@@ -228,17 +228,19 @@ describe("tenant-qualified foreign keys: behaviour (event_shifts -> events)", ()
     });
     await expect(
       prisma.eventShift.update({ where: { id: `${RUN}-sh-4` }, data: { tenantId: TENANT_B } }),
-    ).rejects.toMatchObject({ code: "P2003" });
+    ).rejects.toThrow(/tenant_id of a row in event_shifts cannot change/);
   });
 
-  it("refuses changing a parent's tenant_id while it has children (ON UPDATE NO ACTION)", async () => {
+  it("refuses changing a parent's tenant_id while it has children", async () => {
+    // The tenant_id trigger refuses before the FK runs; the FK's own ON UPDATE
+    // NO ACTION is pinned by the catalog test above.
     const event = await eventIn(TENANT_A, 5);
     await prisma.eventShift.create({
       data: { id: `${RUN}-sh-5`, tenantId: TENANT_A, eventId: event.id, title: "s", capacity: 1 },
     });
     await expect(
       prisma.event.update({ where: { id: event.id }, data: { tenantId: TENANT_B } }),
-    ).rejects.toMatchObject({ code: "P2003" });
+    ).rejects.toThrow(/tenant_id of a row in events cannot change/);
     const shift = await prisma.eventShift.findUniqueOrThrow({ where: { id: `${RUN}-sh-5` } });
     expect(shift.tenantId).toBe(TENANT_A);
   });
