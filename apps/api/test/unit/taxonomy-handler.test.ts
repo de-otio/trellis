@@ -391,8 +391,8 @@ describe("TaxonomyHandler", () => {
 
       expect(mockDb.postTaxonomyTag.createMany).toHaveBeenCalledWith({
         data: [
-          { postId, taxonId: "taxon-1", addedBy },
-          { postId, taxonId: "taxon-2", addedBy },
+          { tenantId, postId, taxonId: "taxon-1", addedBy },
+          { tenantId, postId, taxonId: "taxon-2", addedBy },
         ],
         skipDuplicates: true,
       });
@@ -496,7 +496,7 @@ describe("TaxonomyHandler", () => {
       await handler.addEntityTaxonomyTags(entityId, taxonIds);
 
       expect(mockDb.entityTaxonomyTag.createMany).toHaveBeenCalledWith({
-        data: [{ entityId, taxonId: "taxon-1" }],
+        data: [{ tenantId, entityId, taxonId: "taxon-1" }],
         skipDuplicates: true,
       });
     });

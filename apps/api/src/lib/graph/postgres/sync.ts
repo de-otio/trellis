@@ -202,25 +202,31 @@ export class SyncOps {
    *   re-write and the set-replace should move to the handler.
    */
   async syncPostSubjects(input: SyncPostSubjectsInput): Promise<void> {
-    const tenantId = getCurrentTenantId();
-    const { postId, entityIds, primaryEntityId } = input;
+    const { postId, tenantId, entityIds, primaryEntityId } = input;
 
     await this.prisma.$transaction(async (tx) => {
-      await tx.postSubject.deleteMany({ where: { postId } });
+      // The caller passes the tenant it holds (the ambient context is unset in
+      // the default scope mode). The post must be in it, so this cannot
+      // rewrite another tenant's post; the tenant-qualified FK on entity_id
+      // then refuses an entity from any other tenant.
+      const post = await tx.post.findFirst({
+        where: { id: postId, tenantId },
+        select: { tenantId: true },
+      });
+      if (!post) return;
+      await tx.postSubject.deleteMany({ where: { postId, tenantId: post.tenantId } });
       if (entityIds.length === 0) return;
       // Dedupe to respect the @@unique([postId, entityId]) constraint.
       const uniqueEntityIds = [...new Set(entityIds)];
       await tx.postSubject.createMany({
         data: uniqueEntityIds.map((entityId) => ({
+          tenantId: post.tenantId,
           postId,
           entityId,
           isPrimary: primaryEntityId != null && entityId === primaryEntityId,
         })),
         skipDuplicates: true,
       });
-      // post_subjects has no tenantId column in the schema, so `tenantId` from
-      // the ambient context is intentionally not persisted here.
-      void tenantId;
     });
   }
 

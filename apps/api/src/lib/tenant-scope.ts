@@ -214,9 +214,10 @@ export const UNSCOPED_MODELS: ReadonlyMap<string, string> = new Map([
   ["DirectMessage", "user-pair"],
   // Scoped-by-relation (doc/14 §04 C / WS0): isolation flows through the
   // parent. Several now carry a denormalized tenantId (PostMedia,
-  // PostSentiment, LinkCheck, PostGeoIndex, ProductTaxonomyTag); those have
-  // their own RLS policy and are held to the active tenant when written as
-  // nested rows. The rest rely on the parent's scope.
+  // PostSentiment, LinkCheck, PostGeoIndex, ProductTaxonomyTag, and the join
+  // tables PostSubject, PostTaxonomyTag, EntityTaxonomyTag); those have their
+  // own RLS policy and are held to the active tenant when written as nested
+  // rows. The rest rely on the parent's scope.
   // P0b moderation job: tenant-scoped through its parent MediaFile via mediaId
   // (onDelete: Cascade). No own tenantId column, so it cannot be auto-scoped by
   // the where-merge/create-stamp extension — same posture as the other
@@ -271,7 +272,7 @@ export const UNSCOPED_MODELS: ReadonlyMap<string, string> = new Map([
   ["TenantDirectoryProfile", "tenant-admin"],
   // TenantClassificationTag: child of TenantClassification; carries a
   // denormalized tenantId for the index, but isolation flows through the
-  // parent (same posture as EntityTaxonomyTag, PostTaxonomyTag).
+  // parent, whose tenant its tenant-qualified FK pins it to.
   ["TenantClassificationTag", "by-relation"],
   // Open Social Web (follow-by-email + collections). EmailSubscription carries
   // its own tenantId for attribution but is NOT auto-scoped: the subscribe /

@@ -59,8 +59,8 @@ describe("Entity Taxonomy Tags", () => {
 
       expect(mockDb.entityTaxonomyTag.createMany).toHaveBeenCalledWith({
         data: [
-          { entityId, taxonId: "taxon-1" },
-          { entityId, taxonId: "taxon-2" },
+          { tenantId, entityId, taxonId: "taxon-1" },
+          { tenantId, entityId, taxonId: "taxon-2" },
         ],
         skipDuplicates: true,
       });
@@ -94,7 +94,7 @@ describe("Entity Taxonomy Tags", () => {
 
       expect(mockDb.entityTaxonomyTag.createMany).toHaveBeenCalledTimes(2);
       expect(mockDb.entityTaxonomyTag.createMany).toHaveBeenCalledWith({
-        data: [{ entityId: "entity-123", taxonId: "taxon-1" }],
+        data: [{ tenantId, entityId: "entity-123", taxonId: "taxon-1" }],
         skipDuplicates: true,
       });
     });
