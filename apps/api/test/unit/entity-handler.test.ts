@@ -799,9 +799,11 @@ describe("EntityHandler", () => {
       const createArg = mockDb.entity.create.mock.calls[0][0];
       expect(createArg.data.tenantId).toBe("tenant-123");
       expect(createArg.data).not.toHaveProperty("ownerId");
+      // No tenantId in the nested create: entity_ownerships references
+      // entities (tenant_id, id), so the entity supplies it and Prisma rejects
+      // the argument at runtime.
       expect(createArg.data.owners).toEqual({
         create: {
-          tenantId: "tenant-123",
           userId: "user-123",
           role: "PRIMARY_OWNER",
           addedByUserId: "user-123",

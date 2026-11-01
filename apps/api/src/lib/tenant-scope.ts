@@ -55,8 +55,11 @@
  * raw SQL ($queryRaw/$executeRaw), `by-relation` models without their own
  * `tenantId`. Those are closed only by the PostgreSQL RLS backstop (WS3).
  * Neither layer checks the target of a scalar foreign key (`postId`): Postgres
- * FK checks bypass RLS, so a handler that takes a foreign id from a request
- * must load it through a scoped read first. Do
+ * FK checks bypass RLS. The schema closes that for FKs between tenant-holding
+ * tables with tenant-qualified keys (`(tenant_id, post_id) -> posts(tenant_id,
+ * id)`, test/integration/schema/tenant-qualified-fk-shape). A pointer with no
+ * FK (polymorphic ids, bare scalars) is still unchecked, so a handler that
+ * takes one from a request must load it through a scoped read first. Do
  * not enable `enforce` in production before RLS is deployed; also note
  * unauthenticated/public paths (federation) that query scoped models must use
  * `runUnscoped` or they fail closed (throw) under `enforce` (review finding 2).
