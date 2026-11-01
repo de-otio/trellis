@@ -1019,8 +1019,11 @@ export class DataRouter {
         // (lib/graph/postgres/sync.ts).
         if (entityRefs.length > 0) {
           const uniqueEntityIds = [...new Set(entityRefs)];
+          // The post's tenant; the tenant-qualified FK on entity_id then
+          // refuses an entity from any other tenant.
           await tx.postSubject.createMany({
             data: uniqueEntityIds.map((entityId) => ({
+              tenantId: post.tenantId,
               postId: post.id,
               entityId,
               isPrimary: false,

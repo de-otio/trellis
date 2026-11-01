@@ -886,6 +886,24 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ### Changed
 
+- **The join tables carry their own `tenant_id`.** `post_subjects`,
+  `post_taxonomy_tags` and `entity_taxonomy_tags` joined two tenant-holding
+  parents with no tenant of their own, so nothing stopped a row from joining
+  two tenants' rows. Each gains a NOT NULL `tenant_id` (backfilled from the
+  post, or the entity for `entity_taxonomy_tags`), a `Tenant` relation, an
+  index, and tenant-qualified FKs to **both** parents, so a row can only join
+  rows of one tenant. They also get the inert `tenant_isolation` RLS policy,
+  and `prisma/rls/enable-rls.sql` / `disable-rls.sql` list them. Writers now
+  pass `tenantId`: `DataRouter.createPost` the new post's,
+  `TaxonomyHandler` its own, and `syncPostSubjects` the post row's (read in
+  its transaction, since the ambient tenant is unset in the default scope
+  mode). **Upgrading:** an existing row whose two parents are in different
+  tenants stops `migrate deploy` at `VALIDATE`, naming the key. From the
+  first of these migrations on, an application built against an older
+  release can no longer insert into these tables (it sends no `tenant_id`),
+  so roll the application out right after migrating. Generated types:
+  `tenantId` is required on these models' unchecked create inputs.
+
 - **The remaining pointers between tenant-holding tables are tenant-qualified
   too.** The four `ON DELETE SET NULL` FKs (`posts.group_id`,
   `posts.primary_entity_id`, `taxonomy_taxons.parent_taxon_id`,

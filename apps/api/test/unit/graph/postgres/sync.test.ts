@@ -39,6 +39,10 @@ const relationship = {
 const entityRelationship = { deleteMany: vi.fn() };
 const entityOwnership = { upsert: vi.fn(), deleteMany: vi.fn() };
 const postSubject = { deleteMany: vi.fn(), createMany: vi.fn() };
+// syncPostSubjects reads the post's own tenant; deliberately not the ambient
+// TENANT, so the tests show which one is written.
+const POST_TENANT = "tenant-of-the-post";
+const post = { findUnique: vi.fn() };
 
 // syncEntity owns the PostGIS location write (entity_location has no other
 // writer), so SyncOps is constructed with a geoLookup.
@@ -51,7 +55,7 @@ const geoLookup = {
 
 // $transaction supports BOTH forms: an array of promises and a callback that
 // receives the (same) mocked tx client.
-const txClient = { relationship, entityRelationship, entityOwnership, postSubject };
+const txClient = { relationship, entityRelationship, entityOwnership, postSubject, post };
 const $transaction = vi.fn((arg: unknown) =>
   typeof arg === "function"
     ? (arg as (tx: unknown) => unknown)(txClient)
@@ -75,6 +79,7 @@ beforeEach(() => {
       ? (arg as (tx: unknown) => unknown)(txClient)
       : Promise.all(arg as Promise<unknown>[]),
   );
+  post.findUnique.mockResolvedValue({ tenantId: POST_TENANT });
   ops = new SyncOps(prisma, geoLookup as unknown as EntityGeoLookup);
 });
 
@@ -236,12 +241,12 @@ describe("syncPostSubjects set-replace", () => {
     );
 
     expect(postSubject.deleteMany).toHaveBeenCalledWith({
-      where: { postId: "post-1" },
+      where: { postId: "post-1", tenantId: POST_TENANT },
     });
     expect(postSubject.createMany).toHaveBeenCalledWith({
       data: [
-        { postId: "post-1", entityId: "entity-1", isPrimary: true },
-        { postId: "post-1", entityId: "entity-2", isPrimary: false },
+        { tenantId: POST_TENANT, postId: "post-1", entityId: "entity-1", isPrimary: true },
+        { tenantId: POST_TENANT, postId: "post-1", entityId: "entity-2", isPrimary: false },
       ],
       skipDuplicates: true,
     });
@@ -252,7 +257,7 @@ describe("syncPostSubjects set-replace", () => {
       ops.syncPostSubjects({ postId: "post-1", entityIds: [] }),
     );
     expect(postSubject.deleteMany).toHaveBeenCalledWith({
-      where: { postId: "post-1" },
+      where: { postId: "post-1", tenantId: POST_TENANT },
     });
     expect(postSubject.createMany).not.toHaveBeenCalled();
   });
@@ -267,11 +272,20 @@ describe("syncPostSubjects set-replace", () => {
     );
     expect(postSubject.createMany).toHaveBeenCalledWith({
       data: [
-        { postId: "post-1", entityId: "entity-1", isPrimary: false },
-        { postId: "post-1", entityId: "entity-2", isPrimary: true },
+        { tenantId: POST_TENANT, postId: "post-1", entityId: "entity-1", isPrimary: false },
+        { tenantId: POST_TENANT, postId: "post-1", entityId: "entity-2", isPrimary: true },
       ],
       skipDuplicates: true,
     });
+  });
+
+  it("writes nothing when the post does not exist", async () => {
+    post.findUnique.mockResolvedValue(null);
+    await withTenant(() =>
+      ops.syncPostSubjects({ postId: "gone", entityIds: ["entity-1"] }),
+    );
+    expect(postSubject.deleteMany).not.toHaveBeenCalled();
+    expect(postSubject.createMany).not.toHaveBeenCalled();
   });
 });
 

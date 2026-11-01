@@ -150,7 +150,7 @@ suite("CircleOps dual-gated visibility (Postgres)", () => {
     });
     for (const entityId of subjectEntityIds) {
       await prisma.postSubject.create({
-        data: { postId: id, entityId },
+        data: { tenantId: tenant, postId: id, entityId },
       });
     }
   }
@@ -336,7 +336,7 @@ suite("CircleOps dual-gated visibility (Postgres)", () => {
       },
     });
     await prisma.postSubject.create({
-      data: { postId: "p-other-tenant", entityId: "circ-other-ent" },
+      data: { tenantId: OTHER_TENANT, postId: "p-other-tenant", entityId: "circ-other-ent" },
     });
 
     const res = await ops.getVisiblePostIds(VIEWER, 0, since, { limit: 50 }, TENANT);
@@ -473,6 +473,7 @@ suite("CircleOps dual-gated visibility (Postgres)", () => {
       });
       await prisma.postSubject.createMany({
         data: Array.from({ length: count }, (_, i) => ({
+          tenantId: tenant,
           postId: `${prefix}-${i + 1}`,
           entityId,
         })),

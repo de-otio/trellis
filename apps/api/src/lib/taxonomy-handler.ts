@@ -555,8 +555,11 @@ export class TaxonomyHandler {
     }
 
     // Create post-taxonomy tag associations
+    // tenantId: the tags' tenant; the tenant-qualified FKs then require the
+    // post to be in it too.
     await this.db.postTaxonomyTag.createMany({
       data: taxons.map((taxon) => ({
+        tenantId: this.tenantId,
         postId,
         taxonId: taxon.id,
         addedBy,
@@ -645,6 +648,7 @@ export class TaxonomyHandler {
 
     await this.db.entityTaxonomyTag.createMany({
       data: taxons.map((taxon) => ({
+        tenantId: this.tenantId,
         entityId,
         taxonId: taxon.id,
       })),

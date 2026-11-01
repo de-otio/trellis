@@ -123,7 +123,9 @@ async function makePost(
     },
   });
   if (opts.subjectEntity) {
-    await prisma.postSubject.create({ data: { postId: id, entityId: ENTITY } });
+    await prisma.postSubject.create({
+      data: { tenantId: opts.tenantId ?? TENANT_A, postId: id, entityId: ENTITY },
+    });
   }
   return id;
 }

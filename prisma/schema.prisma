@@ -1362,18 +1362,23 @@ model CommentSentiment {
 // Post-Subject junction — which entities a post is about (primary content model)
 model PostSubject {
   id        String   @id @default(cuid())
+  // Denormalized from the post (P1 direct-RLS convention). Both parents are
+  // tenant-qualified FKs, so the post and the entity share this tenant.
+  tenantId  String   @map("tenant_id")
   postId    String   @map("post_id")
   entityId  String   @map("entity_id")
   isPrimary Boolean  @default(false) @map("is_primary") // The "main" entity when multiple are featured
   createdAt DateTime @default(now()) @map("created_at")
 
-  post   Post   @relation(fields: [postId], references: [id], onDelete: Cascade)
-  entity Entity @relation(fields: [entityId], references: [id], onDelete: Cascade)
+  post   Post   @relation(fields: [tenantId, postId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
+  entity Entity @relation(fields: [tenantId, entityId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   // AR10 prune: dropped [postId] (prefix of the unique) and [entityId]
   // (prefix of [entityId, createdAt]).
   @@unique([postId, entityId])
   @@index([entityId, createdAt]) // Core query: "posts about this entity, newest first"
+  @@index([tenantId])
   @@map("post_subjects")
 }
 
@@ -1606,34 +1611,44 @@ model TaxonomyTaxon {
 // Junction table for post-taxonomy tag relationships
 model PostTaxonomyTag {
   id        String   @id @default(cuid())
+  // Denormalized from the post (P1 direct-RLS convention); both parents are
+  // tenant-qualified FKs.
+  tenantId  String   @map("tenant_id")
   postId    String   @map("post_id")
   taxonId   String   @map("taxon_id")
   addedBy   String   @map("added_by") // User ID
   createdAt DateTime @default(now()) @map("created_at")
 
-  post  Post          @relation(fields: [postId], references: [id], onDelete: Cascade)
-  taxon TaxonomyTaxon @relation(fields: [taxonId], references: [id], onDelete: Cascade)
+  post   Post          @relation(fields: [tenantId, postId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
+  taxon  TaxonomyTaxon @relation(fields: [tenantId, taxonId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
+  tenant Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   // AR10 prune: dropped [postId] (prefix of the unique) and [addedBy]
   // (never queried).
   @@unique([postId, taxonId])
   @@index([taxonId])
+  @@index([tenantId])
   @@map("post_taxonomy_tags")
 }
 
 // Junction table for entity-taxonomy tag relationships
 model EntityTaxonomyTag {
   id        String   @id @default(cuid())
+  // Denormalized from the entity (P1 direct-RLS convention); both parents are
+  // tenant-qualified FKs.
+  tenantId  String   @map("tenant_id")
   entityId  String   @map("entity_id")
   taxonId   String   @map("taxon_id")
   createdAt DateTime @default(now()) @map("created_at")
 
-  entity Entity        @relation(fields: [entityId], references: [id], onDelete: Cascade)
-  taxon  TaxonomyTaxon @relation(fields: [taxonId], references: [id], onDelete: Cascade)
+  entity Entity        @relation(fields: [tenantId, entityId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
+  taxon  TaxonomyTaxon @relation(fields: [tenantId, taxonId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
+  tenant Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   // AR10 prune: dropped [entityId] (prefix of the unique).
   @@unique([entityId, taxonId])
   @@index([taxonId])
+  @@index([tenantId])
   @@map("entity_taxonomy_tags")
 }
 
@@ -2411,6 +2426,9 @@ model Tenant {
   postGeoIndexes      PostGeoIndex[]
   productTaxonomyTags ProductTaxonomyTag[]
   entityLocations     EntityLocation[]
+  postSubjects        PostSubject[]
+  postTaxonomyTags    PostTaxonomyTag[]
+  entityTaxonomyTags  EntityTaxonomyTag[]
 
   // Personal-tenant owner back-relation (uses @relation name to disambiguate)
   personalOwner User? @relation("PersonalTenantOwner", fields: [personalOwnerUserId], references: [id])

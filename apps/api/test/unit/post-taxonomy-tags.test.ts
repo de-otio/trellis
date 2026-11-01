@@ -62,8 +62,8 @@ describe("Post Taxonomy Tags", () => {
 
       expect(mockDb.postTaxonomyTag.createMany).toHaveBeenCalledWith({
         data: [
-          { postId, taxonId: "taxon-1", addedBy },
-          { postId, taxonId: "taxon-2", addedBy },
+          { tenantId, postId, taxonId: "taxon-1", addedBy },
+          { tenantId, postId, taxonId: "taxon-2", addedBy },
         ],
         skipDuplicates: true,
       });
@@ -117,7 +117,7 @@ describe("Post Taxonomy Tags", () => {
 
       expect(mockDb.postTaxonomyTag.createMany).toHaveBeenCalledTimes(2);
       expect(mockDb.postTaxonomyTag.createMany).toHaveBeenCalledWith({
-        data: [{ postId: "post-123", taxonId: "taxon-1", addedBy: "user-123" }],
+        data: [{ tenantId, postId: "post-123", taxonId: "taxon-1", addedBy: "user-123" }],
         skipDuplicates: true,
       });
     });
