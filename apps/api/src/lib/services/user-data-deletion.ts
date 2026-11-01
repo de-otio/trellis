@@ -137,6 +137,92 @@ export interface DeletionResult {
    *  model registry (design §6 / §12.4 item 1). Registry is empty until an
    *  extension declares a subject-scoped model, so this is 0 today. */
   extensionRowsErased: number;
+  /** The user's notification inbox rows (FK to User is RESTRICT). */
+  notifications: number;
+  /** The user's saved notification preferences (FK to User is RESTRICT). */
+  notificationPreferences: number;
+  /** Connection codes the user created (FK to User is RESTRICT). */
+  connectionCodes: number;
+  /** Redemptions by the user, and redemptions of the user's own codes. */
+  connectionCodeRedemptions: number;
+  /** Guardian/child links the user was either party to (both FKs RESTRICT). */
+  parentalLinks: number;
+  /** What happened to the user's personal tenant: deleted outright, kept with
+   *  its names anonymised (something in it belongs to someone else), or none. */
+  personalTenant: PersonalTenantOutcome;
+  /** Rows that reference the user (or the user's deleted entities) with NO
+   *  foreign key, so nothing cascades them — erased across all tenants. */
+  unlinkedReferences: {
+    relationshipEdges: number;
+    proposalsDeattributed: number;
+    events: number;
+    eventRsvps: number;
+    eventShiftSignups: number;
+    collections: number;
+    collectionItems: number;
+    groups: number;
+    groupMemberships: number;
+  };
+}
+
+export type PersonalTenantOutcome = "deleted" | "anonymised" | "none";
+
+/** Display name an anonymised personal tenant is left with. */
+export const ERASED_TENANT_DISPLAY_NAME = "Deleted account";
+
+/**
+ * Delete or anonymise the erased user's personal tenant (see step 15f).
+ * Runs after the user's own content is gone, so any row still counted here
+ * belongs to someone else.
+ */
+async function erasePersonalTenant(
+  db: PrismaClient,
+  userId: string,
+  personalTenantId: string | null,
+): Promise<PersonalTenantOutcome> {
+  // The link is two-sided and either side can be missing: the tenant's
+  // back-link (personalOwnerUserId) is ON DELETE SET NULL and may already be
+  // cleared, so the user's own pointer counts too — but only to a PERSONAL
+  // tenant that is not someone else's.
+  const tenant = await db.tenant.findFirst({
+    where: {
+      type: "PERSONAL",
+      OR: [
+        { personalOwnerUserId: userId },
+        ...(personalTenantId
+          ? [{ id: personalTenantId, personalOwnerUserId: null }]
+          : []),
+      ],
+    },
+    select: { id: true },
+  });
+  if (!tenant) return "none";
+  const tenantId = tenant.id;
+
+  const [otherMembers, posts, comments, entities, events, groups] = await Promise.all([
+    db.tenantMember.count({ where: { tenantId, userId: { not: userId } } }),
+    db.post.count({ where: { tenantId } }),
+    db.postComment.count({ where: { tenantId } }),
+    db.entity.count({ where: { tenantId } }),
+    db.event.count({ where: { tenantId } }),
+    db.group.count({ where: { tenantId } }),
+  ]);
+
+  if (otherMembers + posts + comments + entities + events + groups === 0) {
+    await db.tenant.delete({ where: { id: tenantId } });
+    return "deleted";
+  }
+
+  // Something in it is someone else's: keep the tenant, drop what identifies
+  // the erased user. The directory profile can hold a location and a
+  // self-description; a custom domain is often the person's own name.
+  await db.tenantDirectoryProfile.deleteMany({ where: { tenantId } });
+  await db.tenantDomain.deleteMany({ where: { tenantId } });
+  await db.tenant.update({
+    where: { id: tenantId },
+    data: { displayName: ERASED_TENANT_DISPLAY_NAME, slug: `deleted-${tenantId}` },
+  });
+  return "anonymised";
 }
 
 export interface DeleteUserDataOptions {
@@ -251,27 +337,105 @@ export async function deleteUserData(
   const { eraseUserMedia } = await import("./user-media-erasure.js");
   const mediaErasure = await eraseUserMedia(db, userId);
 
-  // 7. Delete entity-related records
-  const userEntities = await db.entity.findMany({
-    where: { owners: { some: { userId: userId, status: 'ACTIVE' } } },
-    select: { id: true },
-  });
-  if (userEntities.length > 0) {
-    const entityIds = userEntities.map((e) => e.id);
-    await db.entityTaxonomyTag.deleteMany({
-      where: { entityId: { in: entityIds } },
+  // 7. Entities this user owns ALONE: at least one ownership row, and every
+  //    ownership row (any status) is theirs. These — and only these — are
+  //    deleted; the previous `deleteMany({ owners: { none: {} } })` had no
+  //    scope and deleted every ownerless entity on the platform.
+  //
+  //    ORDER MATTERS FOR RETRY. Erasure is not one transaction, and a failed
+  //    account is simply re-run the next night, so each step must be finishable
+  //    from any state an earlier failure left behind. The entity is therefore
+  //    deleted BEFORE the user's ownership rows: if the ownerships went first
+  //    and anything after them failed, the retry could no longer tell which
+  //    entities were this user's, and those pets would survive forever.
+  //    Ownerships, taxonomy tags and post_subjects cascade from the entity.
+  const soleOwnedIds = (
+    await db.entity.findMany({
+      where: { owners: { some: { userId }, every: { userId } } },
+      select: { id: true },
+    })
+  ).map((e) => e.id);
+  let entities = { count: 0 };
+  let entityEdges = 0;
+  if (soleOwnedIds.length > 0) {
+    // Rows keyed by these entities with NO foreign key — nothing cascades
+    // them. Removed while the ids are still discoverable (i.e. before the
+    // entities go), for the same retry reason as above.
+    const { count: toEntityEdges } = await db.relationship.deleteMany({
+      where: { targetType: "entity", targetId: { in: soleOwnedIds } },
+    });
+    const { count: entityToEntityEdges } = await db.entityRelationship.deleteMany({
+      where: {
+        OR: [{ entityId: { in: soleOwnedIds } }, { relatedEntityId: { in: soleOwnedIds } }],
+      },
+    });
+    await db.collectionItem.deleteMany({
+      where: { targetType: "entity", targetId: { in: soleOwnedIds } },
+    });
+    // The pet's location (PostGIS, keyed by entity id) — often the owner's home.
+    await db.entityLocation.deleteMany({ where: { entityId: { in: soleOwnedIds } } });
+    entityEdges = toEntityEdges + entityToEntityEdges;
+    entities = await db.entity.deleteMany({
+      where: { id: { in: soleOwnedIds }, owners: { every: { userId } } },
     });
   }
 
-  // 8. Delete entity ownerships and entities
+  // 8. The user's remaining ownerships are of entities someone else also
+  //    owns: those entities stay (tags included), only the user's row goes.
   await db.entityOwnership.deleteMany({
     where: { userId: userId },
   });
-  const entities = await db.entity.deleteMany({
-    where: { owners: { none: {} } }, // Delete entities with no remaining owners
-  });
 
-  // 9. Follow relationships now handled by graph DB — no-op
+  // 9. References to the user with NO foreign key. Nothing cascades them off
+  //    the users row, so each is found by user id — across ALL tenants: a
+  //    user's edges, RSVPs and memberships live in other people's tenants.
+  //    (SyncOps.removeUser refuses to run without an ambient tenant because an
+  //    unscoped delete on a polymorphic target is dangerous as a FALLBACK;
+  //    erasure is the explicit, separately-authorised operation its comment
+  //    asks for, and every predicate here is pinned to this one user id —
+  //    guarded non-empty at the top of this function.)
+  const subject = await db.user.findUnique({
+    where: { id: userId },
+    select: { actorUri: true, personalTenantId: true },
+  });
+  // Relationship edges from the user, and pointing at the user.
+  const { count: userEdges } = await db.relationship.deleteMany({
+    where: { OR: [{ userId }, { targetType: "user", targetId: userId }] },
+  });
+  // Entity↔entity edges the user proposed between entities that survive:
+  // the edge is the two owners' shared record, so it stays and only the
+  // attribution goes — replaced by the same keyed tombstone ACCOUNT reports
+  // get (15c), which keeps the column NOT NULL and the extension DTO
+  // (`proposedByUserId: string`) unchanged, and never matches a real user.
+  const { count: proposalsDeattributed } = await db.entityRelationship.updateMany({
+    where: { proposedByUserId: userId },
+    data: { proposedByUserId: pseudonymizeUserId(userId, pseudonymSecret) },
+  });
+  // Events the user created (RSVPs, shifts and signups cascade), and the
+  // user's RSVPs / shift signups on anyone else's events.
+  const { count: events } = await db.event.deleteMany({ where: { creatorId: userId } });
+  const { count: eventRsvps } = await db.rsvp.deleteMany({ where: { userId } });
+  const { count: eventShiftSignups } = await db.shiftSignup.deleteMany({ where: { userId } });
+  // The user's own lists (items cascade), and items in other people's lists
+  // that point at the user.
+  const { count: collections } = await db.collection.deleteMany({
+    where: { ownerUserId: userId },
+  });
+  const { count: collectionItems } = await db.collectionItem.deleteMany({
+    where: { targetType: "user", targetId: userId },
+  });
+  // Group membership is keyed by actor URI. Groups whose only member is the
+  // user go first (retry-safe, as with entities), then the user's other
+  // memberships.
+  let groups = 0;
+  let groupMemberships = 0;
+  if (subject?.actorUri) {
+    const actorUri = subject.actorUri;
+    ({ count: groups } = await db.group.deleteMany({
+      where: { members: { some: { actorUri }, every: { actorUri } } },
+    }));
+    ({ count: groupMemberships } = await db.groupMember.deleteMany({ where: { actorUri } }));
+  }
 
   // 10. Delete direct messages (sent and received)
   const directMessages = await db.directMessage.deleteMany({
@@ -348,6 +512,62 @@ export async function deleteUserData(
     });
   }
 
+  // 15e. Rows whose foreign key to User is ON DELETE RESTRICT and that no step
+  //      above removes. Any one of them left behind makes the final
+  //      user.delete() fail — AFTER every step above has run, since there is
+  //      no transaction — so the account is left half-erased, stays due, and
+  //      fails again on every nightly run while its identity is never
+  //      deleted. The notification inbox alone is enough: nearly every active
+  //      account has one row in it.
+  const notifications = await db.notification.deleteMany({ where: { userId } });
+  const notificationPreferences = await db.notificationPreference.deleteMany({
+    where: { userId },
+  });
+  // Codes the user created, and every redemption row pointing at them (the
+  // redemption → code FK is RESTRICT too), plus the user's own redemptions of
+  // other people's codes. The relationship a redemption created lives in the
+  // graph edge tables, not here.
+  const ownCodeIds = (
+    await db.connectionCode.findMany({
+      where: { creatorId: userId },
+      select: { id: true },
+    })
+  ).map((c) => c.id);
+  const connectionCodeRedemptions = await db.connectionCodeRedemption.deleteMany({
+    where:
+      ownCodeIds.length > 0
+        ? { OR: [{ userId }, { codeId: { in: ownCodeIds } }] }
+        : { userId },
+  });
+  const connectionCodes = await db.connectionCode.deleteMany({
+    where: { creatorId: userId },
+  });
+  // Guardian↔child links in either direction. A link is a relation between
+  // two accounts; with one of them erased it describes nobody, so it goes
+  // (both FKs are RESTRICT). The surviving account keeps its own age tier —
+  // this removes the pairing, not any age-based restriction.
+  const parentalLinks = await db.parentalLink.deleteMany({
+    where: { OR: [{ childId: userId }, { guardianId: userId }] },
+  });
+  // entity_ownerships.added_by_user_id and tenant_invitations.invited_by_user_id
+  // are ON DELETE SET NULL (migration 20260928120000): those rows belong to
+  // another owner / to the tenant, so the database nulls the reference rather
+  // than this service deleting someone else's data.
+
+  // 15f. The user's PERSONAL tenant. Its FK to the user is SET NULL, so it
+  //      used to survive erasure under its original name — the user's handle
+  //      (displayName) and `personal-<userId>` (slug). Delete it when nothing
+  //      in it belongs to anyone else; otherwise keep it (a tenant delete
+  //      CASCADES to every tenant-scoped row, e.g. a dog the user co-owned
+  //      with a friend lives in this tenant) and strip the identifying names.
+  //      MediaFile rows carry no FK to tenants, so soft-deleted media stays in
+  //      the GC purge either way.
+  const personalTenantOutcome = await erasePersonalTenant(
+    db,
+    userId,
+    subject?.personalTenantId ?? null,
+  );
+
   // 16. Delete the user (cascades to MfaEnrollment, Report (reporter side),
   //     and actor-side InteractionEvent rows)
   await db.user.delete({ where: { id: userId } });
@@ -371,5 +591,22 @@ export async function deleteUserData(
     mediaFilesRetainedShared: mediaErasure.retainedShared,
     mediaStagingKeys: mediaErasure.stagingKeys,
     extensionRowsErased,
+    notifications: notifications.count,
+    notificationPreferences: notificationPreferences.count,
+    connectionCodes: connectionCodes.count,
+    connectionCodeRedemptions: connectionCodeRedemptions.count,
+    parentalLinks: parentalLinks.count,
+    personalTenant: personalTenantOutcome,
+    unlinkedReferences: {
+      relationshipEdges: userEdges + entityEdges,
+      proposalsDeattributed,
+      events,
+      eventRsvps,
+      eventShiftSignups,
+      collections,
+      collectionItems,
+      groups,
+      groupMemberships,
+    },
   };
 }

@@ -236,8 +236,9 @@ export class SyncOps {
    * and let the computed score take over.
    *
    * @see uncertainty (4) in the report — `SyncOwnershipInput` carries no
-   *   `addedByUserId`; the schema requires it with no default. Defaulted to
-   *   `userId` (self-added). Confirm the DTO/schema should carry it explicitly.
+   *   `addedByUserId`. Defaulted to `userId` (self-added). The column is
+   *   nullable only so that erasing the granting user can null it (ON DELETE
+   *   SET NULL); a new ownership still records who granted it.
    */
   async syncOwnership(input: SyncOwnershipInput): Promise<void> {
     const { entityId, userId, role } = input;
