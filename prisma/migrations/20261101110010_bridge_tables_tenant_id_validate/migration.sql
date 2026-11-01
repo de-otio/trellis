@@ -27,6 +27,8 @@ ALTER TABLE "post_subjects" VALIDATE CONSTRAINT "post_subjects_tenant_id_fkey";
 ALTER TABLE "post_subjects" VALIDATE CONSTRAINT "post_subjects_tenant_id_post_id_fkey";
 -- squawk-ignore prefer-robust-stmts
 ALTER TABLE "post_subjects" VALIDATE CONSTRAINT "post_subjects_tenant_id_entity_id_fkey";
+-- SET NOT NULL on a column that already has it is a no-op, so this re-runs.
+-- squawk-ignore prefer-robust-stmts
 ALTER TABLE "post_subjects" ALTER COLUMN "tenant_id" SET NOT NULL;
 ALTER TABLE "post_subjects" DROP CONSTRAINT IF EXISTS "post_subjects_tenant_id_not_null";
 ALTER TABLE "post_subjects" DROP CONSTRAINT IF EXISTS "post_subjects_post_id_fkey";
@@ -49,6 +51,8 @@ ALTER TABLE "post_taxonomy_tags" VALIDATE CONSTRAINT "post_taxonomy_tags_tenant_
 ALTER TABLE "post_taxonomy_tags" VALIDATE CONSTRAINT "post_taxonomy_tags_tenant_id_post_id_fkey";
 -- squawk-ignore prefer-robust-stmts
 ALTER TABLE "post_taxonomy_tags" VALIDATE CONSTRAINT "post_taxonomy_tags_tenant_id_taxon_id_fkey";
+-- SET NOT NULL on a column that already has it is a no-op, so this re-runs.
+-- squawk-ignore prefer-robust-stmts
 ALTER TABLE "post_taxonomy_tags" ALTER COLUMN "tenant_id" SET NOT NULL;
 ALTER TABLE "post_taxonomy_tags" DROP CONSTRAINT IF EXISTS "post_taxonomy_tags_tenant_id_not_null";
 ALTER TABLE "post_taxonomy_tags" DROP CONSTRAINT IF EXISTS "post_taxonomy_tags_post_id_fkey";
@@ -71,6 +75,8 @@ ALTER TABLE "entity_taxonomy_tags" VALIDATE CONSTRAINT "entity_taxonomy_tags_ten
 ALTER TABLE "entity_taxonomy_tags" VALIDATE CONSTRAINT "entity_taxonomy_tags_tenant_id_entity_id_fkey";
 -- squawk-ignore prefer-robust-stmts
 ALTER TABLE "entity_taxonomy_tags" VALIDATE CONSTRAINT "entity_taxonomy_tags_tenant_id_taxon_id_fkey";
+-- SET NOT NULL on a column that already has it is a no-op, so this re-runs.
+-- squawk-ignore prefer-robust-stmts
 ALTER TABLE "entity_taxonomy_tags" ALTER COLUMN "tenant_id" SET NOT NULL;
 ALTER TABLE "entity_taxonomy_tags" DROP CONSTRAINT IF EXISTS "entity_taxonomy_tags_tenant_id_not_null";
 ALTER TABLE "entity_taxonomy_tags" DROP CONSTRAINT IF EXISTS "entity_taxonomy_tags_entity_id_fkey";
