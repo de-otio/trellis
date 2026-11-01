@@ -1,7 +1,8 @@
 -- Tenant-qualified foreign keys, part 2, step 3 of 4: validate existing rows.
 -- Same locking and re-run behaviour as part 1's step 3
--- (20261101090110_tenant_qualified_fks_validate). A failure names the key;
--- the add file's header shows how to find the rows.
+-- (20261101090110_tenant_qualified_fks_validate). Step 2b cleared missing
+-- targets, so a failure here names a key whose target sits in another
+-- tenant: find out how that row was written before repairing it by hand.
 --
 -- squawk's prefer-robust-stmts: VALIDATE is already idempotent.
 

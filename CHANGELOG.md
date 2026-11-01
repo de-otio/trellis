@@ -904,9 +904,13 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   `location`, `relationshipsFrom` and `relationshipsTo`, `Group` gains
   `events`, `Post` gains `announcedEvent`, and `EntityRelationship`,
   `EntityLocation` and `Event` gain the matching relation fields.
-  **Upgrading:** the pointers that had no FK may name rows that no longer
-  exist; `VALIDATE` refuses those, and the migration header shows how to find
-  them.
+  **Upgrading (data change):** the pointers that had no FK may name rows
+  that no longer exist, because not every delete path ran the app-code
+  cleanup. A migration step applies what the new FK would have done to
+  those rows only: it deletes edge and location rows whose entity is gone,
+  and nulls `events.group_id` / `announce_post_id` whose target is gone. A
+  row whose target exists in *another* tenant is left alone, and `VALIDATE`
+  then stops `migrate deploy` on it, naming the key.
 
 - **Foreign keys between tenant-holding tables are tenant-qualified.** Sixteen
   child FKs now reference `(tenant_id, id)` on their parent instead of `id`
