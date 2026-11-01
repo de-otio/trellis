@@ -39,10 +39,10 @@ const relationship = {
 const entityRelationship = { deleteMany: vi.fn() };
 const entityOwnership = { upsert: vi.fn(), deleteMany: vi.fn() };
 const postSubject = { deleteMany: vi.fn(), createMany: vi.fn() };
-// syncPostSubjects reads the post's own tenant; deliberately not the ambient
-// TENANT, so the tests show which one is written.
+// syncPostSubjects uses the tenant its caller passes; deliberately not the
+// ambient TENANT, so the tests show which one is used.
 const POST_TENANT = "tenant-of-the-post";
-const post = { findUnique: vi.fn() };
+const post = { findFirst: vi.fn() };
 
 // syncEntity owns the PostGIS location write (entity_location has no other
 // writer), so SyncOps is constructed with a geoLookup.
@@ -79,7 +79,7 @@ beforeEach(() => {
       ? (arg as (tx: unknown) => unknown)(txClient)
       : Promise.all(arg as Promise<unknown>[]),
   );
-  post.findUnique.mockResolvedValue({ tenantId: POST_TENANT });
+  post.findFirst.mockResolvedValue({ tenantId: POST_TENANT });
   ops = new SyncOps(prisma, geoLookup as unknown as EntityGeoLookup);
 });
 
@@ -235,6 +235,7 @@ describe("syncPostSubjects set-replace", () => {
     await withTenant(() =>
       ops.syncPostSubjects({
         postId: "post-1",
+        tenantId: POST_TENANT,
         entityIds: ["entity-1", "entity-2"],
         primaryEntityId: "entity-1",
       }),
@@ -254,7 +255,7 @@ describe("syncPostSubjects set-replace", () => {
 
   it("deletes only (no insert) when entityIds is empty", async () => {
     await withTenant(() =>
-      ops.syncPostSubjects({ postId: "post-1", entityIds: [] }),
+      ops.syncPostSubjects({ postId: "post-1", tenantId: POST_TENANT, entityIds: [] }),
     );
     expect(postSubject.deleteMany).toHaveBeenCalledWith({
       where: { postId: "post-1", tenantId: POST_TENANT },
@@ -266,6 +267,7 @@ describe("syncPostSubjects set-replace", () => {
     await withTenant(() =>
       ops.syncPostSubjects({
         postId: "post-1",
+        tenantId: POST_TENANT,
         entityIds: ["entity-1", "entity-1", "entity-2"],
         primaryEntityId: "entity-2",
       }),
@@ -279,10 +281,20 @@ describe("syncPostSubjects set-replace", () => {
     });
   });
 
-  it("writes nothing when the post does not exist", async () => {
-    post.findUnique.mockResolvedValue(null);
+  it("looks the post up within the caller's tenant, not the ambient one", async () => {
     await withTenant(() =>
-      ops.syncPostSubjects({ postId: "gone", entityIds: ["entity-1"] }),
+      ops.syncPostSubjects({ postId: "post-1", tenantId: POST_TENANT, entityIds: [] }),
+    );
+    expect(post.findFirst).toHaveBeenCalledWith({
+      where: { id: "post-1", tenantId: POST_TENANT },
+      select: { tenantId: true },
+    });
+  });
+
+  it("writes nothing when the post is missing or in another tenant", async () => {
+    post.findFirst.mockResolvedValue(null);
+    await withTenant(() =>
+      ops.syncPostSubjects({ postId: "elsewhere", tenantId: POST_TENANT, entityIds: ["entity-1"] }),
     );
     expect(postSubject.deleteMany).not.toHaveBeenCalled();
     expect(postSubject.createMany).not.toHaveBeenCalled();

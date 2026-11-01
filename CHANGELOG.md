@@ -905,14 +905,20 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   index, and tenant-qualified FKs to **both** parents, so a row can only join
   rows of one tenant. They also get the inert `tenant_isolation` RLS policy,
   and `prisma/rls/enable-rls.sql` / `disable-rls.sql` list them. Writers now
-  pass `tenantId`: `DataRouter.createPost` the new post's,
-  `TaxonomyHandler` its own, and `syncPostSubjects` the post row's (read in
-  its transaction, since the ambient tenant is unset in the default scope
-  mode). **Upgrading:** an existing row whose two parents are in different
-  tenants stops `migrate deploy` at `VALIDATE`, naming the key. From the
-  first of these migrations on, an application built against an older
-  release can no longer insert into these tables (it sends no `tenant_id`),
-  so roll the application out right after migrating. Generated types:
+  pass `tenantId`: `DataRouter.createPost` the new post's and
+  `TaxonomyHandler` its own. `SyncPostSubjectsInput` gains a required
+  `tenantId` (the ambient tenant is unset in the default scope mode), and
+  `syncPostSubjects` writes nothing unless the post is in it. Because two
+  discover-allow-listed models now carry `tenantId`, `discover()` rejects
+  every excluded column (`tenantId`, and `post`'s `authorId`/`geoData`/`uri`)
+  as a key in `where` (through relations too), `orderBy`, `cursor`,
+  `distinct`, `having` and the aggregate selections, not only in `select`
+  and `groupBy by`. **Upgrading:** an existing row whose two parents are in
+  different tenants stops `migrate deploy` at `VALIDATE`, naming the key.
+  The first migration adds a NOT VALID `CHECK (tenant_id IS NOT NULL)`
+  before backfilling, so from then on an application built against an older
+  release can no longer insert into these tables (it sends no `tenant_id`):
+  roll the application out right after migrating. Generated types:
   `tenantId` is required on these models' unchecked create inputs.
 
 - **The remaining pointers between tenant-holding tables are tenant-qualified

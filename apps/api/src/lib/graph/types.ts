@@ -469,6 +469,8 @@ export interface SyncPostInput {
 /** Data to sync PostSubject edges to the graph */
 export interface SyncPostSubjectsInput {
   postId: string;
+  /** The tenant the caller holds; the post must belong to it. */
+  tenantId: string;
   /** All entity IDs that this post is about */
   entityIds: string[];
   /** The primary entity ID (if any) */

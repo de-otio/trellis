@@ -19,10 +19,15 @@
 -- NULL) is added NOT VALID here and validated in step 2, after which SET NOT
 -- NULL uses it instead of scanning.
 --
--- Deploy note: a NOT VALID CHECK still applies to new rows, so from this file
--- on an application version that predates this release (it inserts these
--- rows without tenant_id) can no longer write these tables. Roll the
--- application out right after migrating.
+-- Order matters: the CHECK goes in BEFORE the backfill. A NOT VALID CHECK
+-- still applies to new rows, so once it exists an application version that
+-- predates this release (it inserts these rows without tenant_id) is refused
+-- at once, instead of writing a NULL after the backfill that would then stop
+-- step 2. Roll the application out right after migrating. Rows inserted in
+-- the moment between ADD COLUMN and the CHECK are caught by the backfill.
+--
+-- The backfill is one UPDATE per table, bounded by statement_timeout; on a
+-- large table, batch it by hand first (it skips rows already set).
 --
 -- Statements commit one at a time (see 20261101090100's header); each ADD is
 -- guarded by a pg_constraint lookup, so the file can be re-run.
@@ -32,10 +37,6 @@ SET statement_timeout = '5min';
 
 -- post_subjects
 ALTER TABLE "post_subjects" ADD COLUMN IF NOT EXISTS "tenant_id" TEXT;
-
-UPDATE "post_subjects" AS c SET "tenant_id" = p."tenant_id"
-  FROM "posts" AS p
- WHERE p."id" = c."post_id" AND c."tenant_id" IS NULL;
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint
@@ -45,6 +46,10 @@ BEGIN
   END IF;
 END
 $$;
+
+UPDATE "post_subjects" AS c SET "tenant_id" = p."tenant_id"
+  FROM "posts" AS p
+ WHERE p."id" = c."post_id" AND c."tenant_id" IS NULL;
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint
@@ -78,10 +83,6 @@ $$;
 
 -- post_taxonomy_tags
 ALTER TABLE "post_taxonomy_tags" ADD COLUMN IF NOT EXISTS "tenant_id" TEXT;
-
-UPDATE "post_taxonomy_tags" AS c SET "tenant_id" = p."tenant_id"
-  FROM "posts" AS p
- WHERE p."id" = c."post_id" AND c."tenant_id" IS NULL;
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint
@@ -91,6 +92,10 @@ BEGIN
   END IF;
 END
 $$;
+
+UPDATE "post_taxonomy_tags" AS c SET "tenant_id" = p."tenant_id"
+  FROM "posts" AS p
+ WHERE p."id" = c."post_id" AND c."tenant_id" IS NULL;
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint
@@ -124,10 +129,6 @@ $$;
 
 -- entity_taxonomy_tags
 ALTER TABLE "entity_taxonomy_tags" ADD COLUMN IF NOT EXISTS "tenant_id" TEXT;
-
-UPDATE "entity_taxonomy_tags" AS c SET "tenant_id" = p."tenant_id"
-  FROM "entities" AS p
- WHERE p."id" = c."entity_id" AND c."tenant_id" IS NULL;
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint
@@ -137,6 +138,10 @@ BEGIN
   END IF;
 END
 $$;
+
+UPDATE "entity_taxonomy_tags" AS c SET "tenant_id" = p."tenant_id"
+  FROM "entities" AS p
+ WHERE p."id" = c."entity_id" AND c."tenant_id" IS NULL;
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint
