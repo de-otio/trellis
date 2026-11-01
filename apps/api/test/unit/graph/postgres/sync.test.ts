@@ -39,6 +39,10 @@ const relationship = {
 const entityRelationship = { deleteMany: vi.fn() };
 const entityOwnership = { upsert: vi.fn(), deleteMany: vi.fn() };
 const postSubject = { deleteMany: vi.fn(), createMany: vi.fn() };
+// syncPostSubjects uses the tenant its caller passes; deliberately not the
+// ambient TENANT, so the tests show which one is used.
+const POST_TENANT = "tenant-of-the-post";
+const post = { findFirst: vi.fn() };
 
 // syncEntity owns the PostGIS location write (entity_location has no other
 // writer), so SyncOps is constructed with a geoLookup.
@@ -51,7 +55,7 @@ const geoLookup = {
 
 // $transaction supports BOTH forms: an array of promises and a callback that
 // receives the (same) mocked tx client.
-const txClient = { relationship, entityRelationship, entityOwnership, postSubject };
+const txClient = { relationship, entityRelationship, entityOwnership, postSubject, post };
 const $transaction = vi.fn((arg: unknown) =>
   typeof arg === "function"
     ? (arg as (tx: unknown) => unknown)(txClient)
@@ -75,6 +79,7 @@ beforeEach(() => {
       ? (arg as (tx: unknown) => unknown)(txClient)
       : Promise.all(arg as Promise<unknown>[]),
   );
+  post.findFirst.mockResolvedValue({ tenantId: POST_TENANT });
   ops = new SyncOps(prisma, geoLookup as unknown as EntityGeoLookup);
 });
 
@@ -230,18 +235,19 @@ describe("syncPostSubjects set-replace", () => {
     await withTenant(() =>
       ops.syncPostSubjects({
         postId: "post-1",
+        tenantId: POST_TENANT,
         entityIds: ["entity-1", "entity-2"],
         primaryEntityId: "entity-1",
       }),
     );
 
     expect(postSubject.deleteMany).toHaveBeenCalledWith({
-      where: { postId: "post-1" },
+      where: { postId: "post-1", tenantId: POST_TENANT },
     });
     expect(postSubject.createMany).toHaveBeenCalledWith({
       data: [
-        { postId: "post-1", entityId: "entity-1", isPrimary: true },
-        { postId: "post-1", entityId: "entity-2", isPrimary: false },
+        { tenantId: POST_TENANT, postId: "post-1", entityId: "entity-1", isPrimary: true },
+        { tenantId: POST_TENANT, postId: "post-1", entityId: "entity-2", isPrimary: false },
       ],
       skipDuplicates: true,
     });
@@ -249,10 +255,10 @@ describe("syncPostSubjects set-replace", () => {
 
   it("deletes only (no insert) when entityIds is empty", async () => {
     await withTenant(() =>
-      ops.syncPostSubjects({ postId: "post-1", entityIds: [] }),
+      ops.syncPostSubjects({ postId: "post-1", tenantId: POST_TENANT, entityIds: [] }),
     );
     expect(postSubject.deleteMany).toHaveBeenCalledWith({
-      where: { postId: "post-1" },
+      where: { postId: "post-1", tenantId: POST_TENANT },
     });
     expect(postSubject.createMany).not.toHaveBeenCalled();
   });
@@ -261,17 +267,37 @@ describe("syncPostSubjects set-replace", () => {
     await withTenant(() =>
       ops.syncPostSubjects({
         postId: "post-1",
+        tenantId: POST_TENANT,
         entityIds: ["entity-1", "entity-1", "entity-2"],
         primaryEntityId: "entity-2",
       }),
     );
     expect(postSubject.createMany).toHaveBeenCalledWith({
       data: [
-        { postId: "post-1", entityId: "entity-1", isPrimary: false },
-        { postId: "post-1", entityId: "entity-2", isPrimary: true },
+        { tenantId: POST_TENANT, postId: "post-1", entityId: "entity-1", isPrimary: false },
+        { tenantId: POST_TENANT, postId: "post-1", entityId: "entity-2", isPrimary: true },
       ],
       skipDuplicates: true,
     });
+  });
+
+  it("looks the post up within the caller's tenant, not the ambient one", async () => {
+    await withTenant(() =>
+      ops.syncPostSubjects({ postId: "post-1", tenantId: POST_TENANT, entityIds: [] }),
+    );
+    expect(post.findFirst).toHaveBeenCalledWith({
+      where: { id: "post-1", tenantId: POST_TENANT },
+      select: { tenantId: true },
+    });
+  });
+
+  it("writes nothing when the post is missing or in another tenant", async () => {
+    post.findFirst.mockResolvedValue(null);
+    await withTenant(() =>
+      ops.syncPostSubjects({ postId: "elsewhere", tenantId: POST_TENANT, entityIds: ["entity-1"] }),
+    );
+    expect(postSubject.deleteMany).not.toHaveBeenCalled();
+    expect(postSubject.createMany).not.toHaveBeenCalled();
   });
 });
 

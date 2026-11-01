@@ -892,6 +892,66 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   target with a tenant-scoped read first and refuses one outside the tenant
   with the same `GraphNotFoundError` as a missing one, before any write.
   User targets are unchanged.
+- **`tenant_id` is immutable in the database.** A `BEFORE UPDATE OF
+  tenant_id` trigger (`trellis_tenant_id_immutable()`) on every table with
+  the column raises when the value changes, through any client, raw SQL
+  included. The tenant-qualified FKs already stop a parent moving while it
+  has children; this covers rows with no children and tables outside an FK
+  pair. Writing back the same value passes. Nothing in trellis changes a
+  `tenant_id`. One consequence: a tenant's `id` can no longer change once
+  rows reference it, because the `ON UPDATE CASCADE` from `tenants` is
+  refused too. New tables with a `tenant_id` must add the trigger in their
+  migration; `tenant-id-immutable.integration.test.ts` fails otherwise.
+
+- **The join tables carry their own `tenant_id`.** `post_subjects`,
+  `post_taxonomy_tags` and `entity_taxonomy_tags` joined two tenant-holding
+  parents with no tenant of their own, so nothing stopped a row from joining
+  two tenants' rows. Each gains a NOT NULL `tenant_id` (backfilled from the
+  post, or the entity for `entity_taxonomy_tags`), a `Tenant` relation, an
+  index, and tenant-qualified FKs to **both** parents, so a row can only join
+  rows of one tenant. They also get the inert `tenant_isolation` RLS policy,
+  and `prisma/rls/enable-rls.sql` / `disable-rls.sql` list them. Writers now
+  pass `tenantId`: `DataRouter.createPost` the new post's and
+  `TaxonomyHandler` its own. `SyncPostSubjectsInput` gains a required
+  `tenantId` (the ambient tenant is unset in the default scope mode), and
+  `syncPostSubjects` writes nothing unless the post is in it. Because two
+  discover-allow-listed models now carry `tenantId`, `discover()` rejects
+  every excluded column (`tenantId`, and `post`'s `authorId`/`geoData`/`uri`)
+  as a key in `where` (through relations too), `orderBy`, `cursor`,
+  `distinct`, `having` and the aggregate selections, not only in `select`
+  and `groupBy by`. **Upgrading:** an existing row whose two parents are in
+  different tenants stops `migrate deploy` at `VALIDATE`, naming the key.
+  The first migration adds a NOT VALID `CHECK (tenant_id IS NOT NULL)`
+  before backfilling, so from then on an application built against an older
+  release can no longer insert into these tables (it sends no `tenant_id`):
+  roll the application out right after migrating. Generated types:
+  `tenantId` is required on these models' unchecked create inputs.
+
+- **The remaining pointers between tenant-holding tables are tenant-qualified
+  too.** The four `ON DELETE SET NULL` FKs (`posts.group_id`,
+  `posts.primary_entity_id`, `taxonomy_taxons.parent_taxon_id`,
+  `connection_codes.entity_id`) and five pointers that had no FK at all
+  (`events.group_id`, `events.announce_post_id`, both ends of
+  `entity_relationships`, `entity_location.entity_id`) now reference
+  `(tenant_id, id)`. The `SET NULL` ones are hand-written as
+  `ON DELETE SET NULL ("<col>")`, which nulls only the pointer: a plain
+  composite `SET NULL` would null `tenant_id` too and make the parent
+  undeletable. Prisma cannot express the column list, so `schema.prisma`
+  says `onDelete: SetNull` and `prisma generate` prints six warnings about
+  it; `tenant-qualified-fk-shape.integration.test.ts` fails if an FK loses
+  the list. Deleting a group now nulls `events.group_id` (a `GROUP_ONLY`
+  event then fails closed), and deleting an entity cascades to its edges and
+  location row as the app code already did. Generated types: `Entity` gains
+  `location`, `relationshipsFrom` and `relationshipsTo`, `Group` gains
+  `events`, `Post` gains `announcedEvent`, and `EntityRelationship`,
+  `EntityLocation` and `Event` gain the matching relation fields.
+  **Upgrading (data change):** the pointers that had no FK may name rows
+  that no longer exist, because not every delete path ran the app-code
+  cleanup. A migration step applies what the new FK would have done to
+  those rows only: it deletes edge and location rows whose entity is gone,
+  and nulls `events.group_id` / `announce_post_id` whose target is gone. A
+  row whose target exists in *another* tenant is left alone, and `VALIDATE`
+  then stops `migrate deploy` on it, naming the key.
 
 - **Foreign keys between tenant-holding tables are tenant-qualified.** Sixteen
   child FKs now reference `(tenant_id, id)` on their parent instead of `id`

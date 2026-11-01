@@ -179,6 +179,39 @@ describe("extension discover() — Part B", () => {
       await expect(d.post.groupBy({ by: ["tenantId"] } as any)).rejects.toThrow(DiscoverGuardError);
     });
 
+    // An excluded column must not be a filter, sort, cursor or aggregate key
+    // either: each is an oracle over the column (or, for _min/_max, a read).
+    it.each([
+      ["where", { where: { tenantId: "t1" } }],
+      ["where under AND", { where: { AND: [{ taxonId: "x" }, { tenantId: "t1" }] } }],
+      ["where through a relation", { where: { taxon: { is: { tenantId: "t1" } } } }],
+      ["orderBy", { orderBy: { tenantId: "asc" } }],
+      ["orderBy list", { orderBy: [{ createdAt: "desc" }, { tenantId: "asc" }] }],
+      ["cursor on a compound key", { cursor: { tenantId_id: { tenantId: "t1", id: "x" } } }],
+      ["distinct", { distinct: ["tenantId"] }],
+    ])("rejects an excluded column in %s", async (_label, args) => {
+      const raw = makeRawPrisma();
+      await expect(db(raw).postTaxonomyTag.findMany(args as any)).rejects.toThrow(DiscoverGuardError);
+      expect(raw.postTaxonomyTag.findMany).not.toHaveBeenCalled();
+    });
+
+    it("rejects an excluded column in an aggregate selection", async () => {
+      const d = db(makeRawPrisma());
+      await expect(d.postTaxonomyTag.aggregate({ _min: { tenantId: true } } as any)).rejects.toThrow(DiscoverGuardError);
+      await expect(
+        d.post.groupBy({ by: ["radius"], having: { authorId: { _count: { gt: 1 } } } } as any),
+      ).rejects.toThrow(DiscoverGuardError);
+    });
+
+    it("still allows permitted keys, and excluded names as filter values", async () => {
+      const raw = makeRawPrisma();
+      await db(raw).postTaxonomyTag.findMany({
+        where: { taxonId: "tenantId", OR: [{ postId: "p1" }] },
+        orderBy: { createdAt: "desc" },
+      } as any);
+      expect(raw.postTaxonomyTag.findMany).toHaveBeenCalledTimes(1);
+    });
+
     it("strips excluded columns from result rows (no-select case)", async () => {
       const raw = makeRawPrisma({
         post: [

@@ -10,8 +10,8 @@
  *
  * 1. Coverage, from the catalog: every FK between two tables that both hold
  *    `tenant_id` (parent other than `tenants`) leads with `tenant_id` on both
- *    sides and is ON UPDATE NO ACTION, unless listed in PENDING. A new FK that
- *    skips the tenant fails here.
+ *    sides and is ON UPDATE NO ACTION. A new FK that skips the tenant fails
+ *    here, and so does a SET NULL FK that would null tenant_id too.
  * 2. Behaviour, on one relation (event_shifts -> events): cross-tenant inserts
  *    are refused through Prisma and through raw SQL, same-tenant inserts work,
  *    and a parent's tenant_id cannot change while it has children.
@@ -24,18 +24,20 @@ import { buildEntityCreateData } from "../../../src/lib/entity-create-data.js";
 import { TEST_DB_URL } from "./_schema-helpers.js";
 
 /**
- * FKs between tenant-holding tables that are not tenant-qualified yet, keyed
- * `child.column`. All four are ON DELETE SET NULL: a plain composite SET NULL
- * would null `tenant_id` too, so they need the column-list form
- * (`SET NULL (<col>)`), which lands separately. Remove an entry when its FK is
- * qualified; the test fails until you do.
+ * The tenant-qualified FKs that are ON DELETE SET NULL, keyed `child.column`.
+ * Each must null only its pointer column: `SET NULL ("<col>")`. A plain
+ * composite SET NULL would null tenant_id as well, so deleting the parent
+ * would fail on NOT NULL. Prisma cannot express the column list and its diff
+ * ignores it, so this list is what notices a regenerated FK.
  */
-const PENDING: Readonly<Record<string, string>> = {
-  "connection_codes.entity_id": "ON DELETE SET NULL, needs the column-list form",
-  "posts.group_id": "ON DELETE SET NULL, needs the column-list form",
-  "posts.primary_entity_id": "ON DELETE SET NULL, needs the column-list form",
-  "taxonomy_taxons.parent_taxon_id": "ON DELETE SET NULL, needs the column-list form",
-};
+const SET_NULL_COLUMN: ReadonlySet<string> = new Set([
+  "connection_codes.entity_id",
+  "events.announce_post_id",
+  "events.group_id",
+  "posts.group_id",
+  "posts.primary_entity_id",
+  "taxonomy_taxons.parent_taxon_id",
+]);
 
 interface FkRow {
   conname: string;
@@ -132,15 +134,37 @@ describe("tenant-qualified foreign keys: coverage", () => {
     // Guards the query itself: an empty result would make the next test pass
     // vacuously.
     const fks = await tenantHoldingFks();
-    expect(fks.filter(isQualified).length).toBeGreaterThanOrEqual(16);
+    expect(fks.filter(isQualified).length).toBeGreaterThanOrEqual(25);
   });
 
-  it("every FK between tenant-holding tables leads with tenant_id and is ON UPDATE NO ACTION, or is PENDING", async () => {
+  it("every FK between tenant-holding tables leads with tenant_id and is ON UPDATE NO ACTION", async () => {
     const unqualified = (await tenantHoldingFks())
       .filter((fk) => !isQualified(fk))
       .map(keyOf)
       .sort();
-    expect(unqualified).toEqual(Object.keys(PENDING).sort());
+    expect(unqualified).toEqual([]);
+  });
+
+  it("every ON DELETE SET NULL FK nulls only its pointer column, never tenant_id", async () => {
+    // confdeltype/confdelsetcols: see tenantHoldingFks on the "char" cast.
+    const rows = await prisma.$queryRawUnsafe<{ key: string; set_cols: string[] }[]>(
+      `SELECT ch.relname || '.' || a.attname AS key,
+              ARRAY(SELECT s.attname::text
+                      FROM unnest(c.confdelsetcols) k(attnum)
+                      JOIN pg_attribute s ON s.attrelid = c.conrelid AND s.attnum = k.attnum) AS set_cols
+         FROM pg_constraint c
+         JOIN pg_class ch ON ch.oid = c.conrelid
+         JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = c.conkey[2]
+        WHERE c.contype = 'f'
+          AND c.confdeltype::text = 'n'
+          AND array_length(c.conkey, 1) = 2
+          AND c.conkey[1] = (SELECT attnum FROM pg_attribute
+                              WHERE attrelid = c.conrelid AND attname = 'tenant_id')`,
+    );
+    expect(rows.map((r) => r.key).sort()).toEqual([...SET_NULL_COLUMN].sort());
+    for (const r of rows) {
+      expect(r.set_cols, r.key).toEqual([r.key.split(".")[1]]);
+    }
   });
 
   it("every tenant-qualified FK pairs tenant_id with tenant_id", async () => {
@@ -204,17 +228,19 @@ describe("tenant-qualified foreign keys: behaviour (event_shifts -> events)", ()
     });
     await expect(
       prisma.eventShift.update({ where: { id: `${RUN}-sh-4` }, data: { tenantId: TENANT_B } }),
-    ).rejects.toMatchObject({ code: "P2003" });
+    ).rejects.toThrow(/tenant_id of a row in event_shifts cannot change/);
   });
 
-  it("refuses changing a parent's tenant_id while it has children (ON UPDATE NO ACTION)", async () => {
+  it("refuses changing a parent's tenant_id while it has children", async () => {
+    // The tenant_id trigger refuses before the FK runs; the FK's own ON UPDATE
+    // NO ACTION is pinned by the catalog test above.
     const event = await eventIn(TENANT_A, 5);
     await prisma.eventShift.create({
       data: { id: `${RUN}-sh-5`, tenantId: TENANT_A, eventId: event.id, title: "s", capacity: 1 },
     });
     await expect(
       prisma.event.update({ where: { id: event.id }, data: { tenantId: TENANT_B } }),
-    ).rejects.toMatchObject({ code: "P2003" });
+    ).rejects.toThrow(/tenant_id of a row in events cannot change/);
     const shift = await prisma.eventShift.findUniqueOrThrow({ where: { id: `${RUN}-sh-5` } });
     expect(shift.tenantId).toBe(TENANT_A);
   });
@@ -252,5 +278,48 @@ describe("tenant-qualified foreign keys: nested child creates", () => {
       userId: USER,
       role: "PRIMARY_OWNER",
     });
+  });
+});
+
+describe("tenant-qualified foreign keys: ON DELETE SET NULL (events.group_id -> groups)", () => {
+  const groupIn = (tenantId: string, n: number) =>
+    prisma.group.create({
+      data: {
+        id: `${RUN}-gr-${n}`,
+        tenantId,
+        name: "fixture",
+        actorUri: `https://example.com/groups/${RUN}-${n}`,
+        inboxUrl: "https://example.com/inbox",
+        outboxUrl: "https://example.com/outbox",
+        followersUrl: "https://example.com/followers",
+        publicKey: "fixture",
+        privateKey: "fixture",
+        privacy: "PUBLIC",
+      },
+    });
+  const eventFor = (tenantId: string, groupId: string, n: number) =>
+    prisma.event.create({
+      data: {
+        id: `${RUN}-gev-${n}`,
+        tenantId,
+        groupId,
+        creatorId: `${RUN}-creator`,
+        title: "fixture",
+        startsAt: new Date("2030-01-01T10:00:00Z"),
+      },
+    });
+
+  it("refuses an event that points at another tenant's group", async () => {
+    const group = await groupIn(TENANT_A, 1);
+    await expect(eventFor(TENANT_B, group.id, 1)).rejects.toMatchObject({ code: "P2003" });
+  });
+
+  it("deleting the group nulls only group_id; the event keeps its tenant", async () => {
+    const group = await groupIn(TENANT_A, 2);
+    const event = await eventFor(TENANT_A, group.id, 2);
+    await prisma.group.delete({ where: { id: group.id } });
+    const after = await prisma.event.findUniqueOrThrow({ where: { id: event.id } });
+    expect(after.groupId).toBeNull();
+    expect(after.tenantId).toBe(TENANT_A);
   });
 });

@@ -658,6 +658,7 @@ export class PostHandler {
         if (entityRefs.length > 0) {
           await graphService.syncPostSubjects({
             postId: post.id,
+            tenantId: activeTenantId,
             entityIds: entityRefs,
             primaryEntityId: entityRefs[0],
           });
