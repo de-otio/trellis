@@ -81,7 +81,7 @@ const relationship = {
   delete: vi.fn(),
 };
 const user = { findMany: vi.fn() };
-const entity = { findMany: vi.fn() };
+const entity = { findMany: vi.fn(), findFirst: vi.fn() };
 
 /**
  * The edge-list reads (getRelationships / getRelationshipGraph) issue ONE
@@ -121,6 +121,8 @@ beforeEach(() => {
   $transaction.mockImplementation(async (cb: (tx: unknown) => unknown) =>
     cb({ relationship }),
   );
+  // Default: an entity target exists in the tenant (createRelationship checks).
+  entity.findFirst.mockImplementation(async (args: { where: { id: string } }) => ({ id: args.where.id }));
   // Default: user is well below the per-user edge cap.
   relationship.count.mockResolvedValue(0);
   $queryRaw.mockResolvedValue([]);
@@ -293,6 +295,38 @@ describe("createRelationship", () => {
     // Only the existing-edge lookup ran — no reverse-edge lookup.
     expect(relationship.findUnique).toHaveBeenCalledTimes(1);
     expect(relationship.update).not.toHaveBeenCalled();
+  });
+
+  it("looks an entity target up within the active tenant", async () => {
+    relationship.findUnique.mockResolvedValueOnce(null);
+    relationship.create.mockResolvedValueOnce(makeRow());
+    await withTenant(() =>
+      ops.createRelationship({ userId: "user-1", targetType: "entity", targetId: "entity-1" }),
+    );
+    expect(entity.findFirst).toHaveBeenCalledWith({
+      where: { id: "entity-1", tenantId: TENANT },
+      select: { id: true },
+    });
+  });
+
+  it("refuses an entity target outside the active tenant, before any write", async () => {
+    entity.findFirst.mockResolvedValueOnce(null);
+    await expect(
+      withTenant(() =>
+        ops.createRelationship({ userId: "user-1", targetType: "entity", targetId: "foreign-entity" }),
+      ),
+    ).rejects.toThrow(GraphNotFoundError);
+    expect($transaction).not.toHaveBeenCalled();
+    expect(relationship.create).not.toHaveBeenCalled();
+  });
+
+  it("does not look up user targets as entities", async () => {
+    relationship.findUnique.mockResolvedValue(null);
+    relationship.create.mockResolvedValueOnce(makeRow());
+    await withTenant(() =>
+      ops.createRelationship({ userId: "user-1", targetType: "user", targetId: "user-2" }),
+    );
+    expect(entity.findFirst).not.toHaveBeenCalled();
   });
 
   it("is idempotent: returns the existing edge instead of creating a duplicate", async () => {

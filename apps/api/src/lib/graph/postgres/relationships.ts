@@ -231,6 +231,21 @@ export class RelationshipOps {
       );
     }
 
+    // An entity target must be in this tenant. targetId is polymorphic, so no
+    // FK can say so (the entity tables' tenant-qualified FKs do not reach
+    // here); without this read an edge could name another tenant's entity.
+    // Same uniform, id-free error as createEntityRelationship: a foreign
+    // entity is indistinguishable from a missing one.
+    if (targetType === "entity") {
+      const target = await this.prisma.entity.findFirst({
+        where: { id: targetId, tenantId },
+        select: { id: true },
+      });
+      if (!target) {
+        throw new GraphNotFoundError("Relationship target not found");
+      }
+    }
+
     // Initial score by connection method (from scoring engine constants).
     const initialScore = CONNECTION_BONUSES[connectionMethod] ?? 0.3;
 
