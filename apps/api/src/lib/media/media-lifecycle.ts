@@ -79,6 +79,8 @@ export type ModerationDecision = "approved" | "review" | "quarantine";
  *                      the shell deletes the staged bytes BEFORE moderation.
  * - `upload-failed`  — the session expired / was abandoned / was reaped
  *                      before the object became moderatable.
+ * - `automated-review` — an automated reviewer's decision on a held object.
+ *                      Illegal from every state for now.
  */
 export type MediaLifecycleEvent =
   | { readonly kind: "bytes-arrived" }
@@ -86,7 +88,8 @@ export type MediaLifecycleEvent =
   | { readonly kind: "human"; readonly action: "approve" | "reject" }
   | { readonly kind: "csam" }
   | { readonly kind: "over-duration" }
-  | { readonly kind: "upload-failed" };
+  | { readonly kind: "upload-failed" }
+  | { readonly kind: "automated-review"; readonly action: "approve" };
 
 /**
  * A transition that the state machine refuses. Returned (never thrown) so the
@@ -169,6 +172,11 @@ export function nextLifecycle(
   // absorbing/illegal rule below.
   if (event.kind === "csam") {
     return { ok: true, status: "REJECTED" };
+  }
+
+  // No state accepts an automated review yet.
+  if (event.kind === "automated-review") {
+    return illegal(current, event);
   }
 
   switch (current) {

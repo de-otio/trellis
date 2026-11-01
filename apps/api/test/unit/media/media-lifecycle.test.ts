@@ -49,6 +49,7 @@ const eventArb: fc.Arbitrary<MediaLifecycleEvent> = fc.oneof(
   fc.constant({ kind: "csam" } as const),
   fc.constant({ kind: "over-duration" } as const),
   fc.constant({ kind: "upload-failed" } as const),
+  fc.constant({ kind: "automated-review", action: "approve" } as const),
 );
 
 // Non-CSAM events only — used to prove absorbing states stay absorbing.
@@ -60,6 +61,7 @@ const nonCsamEventArb: fc.Arbitrary<MediaLifecycleEvent> = fc.oneof(
     .map((action) => ({ kind: "human", action }) as const),
   fc.constant({ kind: "over-duration" } as const),
   fc.constant({ kind: "upload-failed" } as const),
+  fc.constant({ kind: "automated-review", action: "approve" } as const),
 );
 
 /** Apply a sequence of events, stopping at the first illegal transition. */
@@ -501,4 +503,24 @@ describe("decisionToStatus — sync-image verdict mapping", () => {
   it("fails closed to REVIEW for an unexpected (widened) decision value", () => {
     expect(decisionToStatus("bogus" as ModerationDecision)).toBe("REVIEW");
   });
+});
+
+describe("nextLifecycle — automated-review", () => {
+  const event: MediaLifecycleEvent = {
+    kind: "automated-review",
+    action: "approve",
+  };
+
+  // Exhaustive over the state union: a state added later without a decision
+  // about automated review still lands here.
+  for (const from of ALL_MEDIA_LIFECYCLES) {
+    it(`is illegal from ${from}`, () => {
+      expect(nextLifecycle(from, event)).toEqual({
+        ok: false,
+        reason: "illegal-transition",
+        from,
+        event,
+      });
+    });
+  }
 });
