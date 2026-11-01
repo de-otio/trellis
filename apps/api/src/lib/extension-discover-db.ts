@@ -277,8 +277,78 @@ function guardRelationWhere(
   }
 }
 
-/** Reject `select`/`groupBy by` of an excluded column (§4.4(4b)). */
+/**
+ * Every column any discover model excludes. Used for the keys an extension
+ * filters, sorts, pages or aggregates on: a column it may not read must not be
+ * an oracle either (`where: { tenantId }` partitions rows by tenant;
+ * `aggregate({ _min: { tenantId: true } })` returns one outright). The union is
+ * stricter than per-model sets, and simpler to apply through relation filters.
+ */
+const ALL_EXCLUDED_COLUMNS: ReadonlySet<string> = new Set([
+  ...DEFAULT_EXCLUDED_COLUMNS,
+  ...Object.values(DISCOVER_EXCLUDED_COLUMNS).flatMap((s) => [...s]),
+]);
+
+/** A key names an excluded column directly or as part of a compound key (`tenantId_id`). */
+function namesExcludedColumn(key: string): boolean {
+  return (
+    ALL_EXCLUDED_COLUMNS.has(key) ||
+    key.split("_").some((part) => ALL_EXCLUDED_COLUMNS.has(part))
+  );
+}
+
+/**
+ * Reject an excluded column used as a KEY anywhere under `value`. Filter
+ * VALUES are user data and are not inspected.
+ */
+function guardExcludedKeys(model: string, argName: string, value: unknown): void {
+  if (Array.isArray(value)) {
+    for (const item of value) guardExcludedKeys(model, argName, item);
+    return;
+  }
+  if (!isPlainObject(value)) return;
+  for (const [key, sub] of Object.entries(value)) {
+    if (namesExcludedColumn(key)) {
+      throw new DiscoverGuardError(
+        `"${key}" in ${argName} is not permitted on discover("${model}")`,
+      );
+    }
+    guardExcludedKeys(model, argName, sub);
+  }
+}
+
+const KEYED_ARGS = [
+  "where",
+  "orderBy",
+  "cursor",
+  "having",
+  "_count",
+  "_min",
+  "_max",
+  "_avg",
+  "_sum",
+] as const;
+
+/**
+ * Reject an excluded column (§4.4(4b)) wherever an extension can name it:
+ * `select`, `groupBy by`, `distinct`, and as a key in the filter, sort,
+ * cursor and aggregate arguments.
+ */
 function guardColumns(model: string, args: Record<string, unknown>): void {
+  for (const argName of KEYED_ARGS) guardExcludedKeys(model, argName, args[argName]);
+  const distinct = args.distinct;
+  const distinctList = Array.isArray(distinct)
+    ? distinct
+    : typeof distinct === "string"
+      ? [distinct]
+      : [];
+  for (const col of distinctList) {
+    if (typeof col === "string" && namesExcludedColumn(col)) {
+      throw new DiscoverGuardError(
+        `distinct on "${col}" is not permitted on discover("${model}")`,
+      );
+    }
+  }
   const excluded = excludedColumnsFor(model);
   const select = args.select;
   if (isPlainObject(select)) {

@@ -11,8 +11,16 @@ SET lock_timeout = '1s';
 SET statement_timeout = '5min';
 
 -- post_subjects
--- squawk-ignore prefer-robust-stmts
-ALTER TABLE "post_subjects" VALIDATE CONSTRAINT "post_subjects_tenant_id_not_null";
+-- The CHECK is dropped further down once NOT NULL holds; guard its VALIDATE
+-- so a re-run after a part-way failure does not trip over its absence.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_constraint
+              WHERE conname = 'post_subjects_tenant_id_not_null' AND conrelid = '"post_subjects"'::regclass) THEN
+    ALTER TABLE "post_subjects" VALIDATE CONSTRAINT "post_subjects_tenant_id_not_null";
+  END IF;
+END
+$$;
 -- squawk-ignore prefer-robust-stmts
 ALTER TABLE "post_subjects" VALIDATE CONSTRAINT "post_subjects_tenant_id_fkey";
 -- squawk-ignore prefer-robust-stmts
@@ -25,8 +33,16 @@ ALTER TABLE "post_subjects" DROP CONSTRAINT IF EXISTS "post_subjects_post_id_fke
 ALTER TABLE "post_subjects" DROP CONSTRAINT IF EXISTS "post_subjects_entity_id_fkey";
 
 -- post_taxonomy_tags
--- squawk-ignore prefer-robust-stmts
-ALTER TABLE "post_taxonomy_tags" VALIDATE CONSTRAINT "post_taxonomy_tags_tenant_id_not_null";
+-- The CHECK is dropped further down once NOT NULL holds; guard its VALIDATE
+-- so a re-run after a part-way failure does not trip over its absence.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_constraint
+              WHERE conname = 'post_taxonomy_tags_tenant_id_not_null' AND conrelid = '"post_taxonomy_tags"'::regclass) THEN
+    ALTER TABLE "post_taxonomy_tags" VALIDATE CONSTRAINT "post_taxonomy_tags_tenant_id_not_null";
+  END IF;
+END
+$$;
 -- squawk-ignore prefer-robust-stmts
 ALTER TABLE "post_taxonomy_tags" VALIDATE CONSTRAINT "post_taxonomy_tags_tenant_id_fkey";
 -- squawk-ignore prefer-robust-stmts
@@ -39,8 +55,16 @@ ALTER TABLE "post_taxonomy_tags" DROP CONSTRAINT IF EXISTS "post_taxonomy_tags_p
 ALTER TABLE "post_taxonomy_tags" DROP CONSTRAINT IF EXISTS "post_taxonomy_tags_taxon_id_fkey";
 
 -- entity_taxonomy_tags
--- squawk-ignore prefer-robust-stmts
-ALTER TABLE "entity_taxonomy_tags" VALIDATE CONSTRAINT "entity_taxonomy_tags_tenant_id_not_null";
+-- The CHECK is dropped further down once NOT NULL holds; guard its VALIDATE
+-- so a re-run after a part-way failure does not trip over its absence.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_constraint
+              WHERE conname = 'entity_taxonomy_tags_tenant_id_not_null' AND conrelid = '"entity_taxonomy_tags"'::regclass) THEN
+    ALTER TABLE "entity_taxonomy_tags" VALIDATE CONSTRAINT "entity_taxonomy_tags_tenant_id_not_null";
+  END IF;
+END
+$$;
 -- squawk-ignore prefer-robust-stmts
 ALTER TABLE "entity_taxonomy_tags" VALIDATE CONSTRAINT "entity_taxonomy_tags_tenant_id_fkey";
 -- squawk-ignore prefer-robust-stmts
