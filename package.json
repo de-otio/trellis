@@ -20,6 +20,7 @@
     "test:graph:failover": "npm run test:graph:failover -w @de-otio/trellis",
     "lint": "npm run lint -w @de-otio/trellis",
     "format": "prettier --write \"**/*.{ts,tsx,dart,json,md}\" --ignore-path .gitignore",
+    "format:check:changed": "bash scripts/check-format-changed.sh",
     "prisma:generate": "npm run -w @de-otio/trellis prisma:generate",
     "prisma:migrate:dev": "npm run -w @de-otio/trellis prisma:migrate:dev",
     "prisma:migrate:deploy": "npm run -w @de-otio/trellis prisma:migrate:deploy",
