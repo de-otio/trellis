@@ -52,6 +52,9 @@ model Entity {
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
+  // Target of the tenant-qualified FKs: children reference (tenant_id, id),
+  // so a child row can only point at a parent in its own tenant.
+  @@unique([tenantId, id])
   // AR10 prune: dropped [tenantId] (prefix of the composite below), [status]
   // and [entityType, status] (all entity reads are tenant-scoped).
   @@index([tenantId, entityType, status])
@@ -715,13 +718,13 @@ enum TenantDisclosurePosture {
 
 // Post model (unified for all visibility levels)
 model Post {
-  id              String     @id @default(cuid())
+  id       String     @id @default(cuid())
   // Multi-tenancy (v0.7) — set to author's active tenant at write time.
-  tenantId        String     @map("tenant_id")
-  authorId        String     @map("author_id")
-  text            String     @db.Text
-  radius          PostRadius @default(NORMAL) // DEPRECATED — derived shadow of audienceScopes; see the enum's doc
-  geoData         Json?      @map("geo_data")
+  tenantId String     @map("tenant_id")
+  authorId String     @map("author_id")
+  text     String     @db.Text
+  radius   PostRadius @default(NORMAL) // DEPRECATED — derived shadow of audienceScopes; see the enum's doc
+  geoData  Json?      @map("geo_data")
 
   // ── The three audience axes ────────────────────────────────────────────────
   // Replacing `radius`. Separate columns because the three questions are not
@@ -775,14 +778,14 @@ model Post {
   // no relationship, score or tier — a strictly weaker bar than the local rule
   // it was supposed to mirror. Now an explicit author choice, defaulting off,
   // because delivery is irrevocable per post: a wrong `true` cannot be undone.
-  federate Boolean @default(false)
+  federate        Boolean   @default(false)
   uri             String? // ActivityPub URI (for public posts)
-  contentWarnings String[]   @map("content_warnings")
-  deletedAt       DateTime?  @map("deleted_at")
-  hiddenByAuthor  Boolean    @default(false) @map("hidden_by_author")
-  createdAt       DateTime   @default(now()) @map("created_at")
-  updatedAt       DateTime   @updatedAt @map("updated_at")
-  editedAt        DateTime?  @map("edited_at") // Timestamp of last user edit (null if never edited)
+  contentWarnings String[]  @map("content_warnings")
+  deletedAt       DateTime? @map("deleted_at")
+  hiddenByAuthor  Boolean   @default(false) @map("hidden_by_author")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+  editedAt        DateTime? @map("edited_at") // Timestamp of last user edit (null if never edited)
 
   author          User              @relation(fields: [authorId], references: [id])
   tenant          Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -841,6 +844,9 @@ model Post {
   // posts keep their old value unless explicitly backfilled.
   authorOrgRootCategoryCode String? @map("author_org_root_category_code") // PlatformCategory.code of the root ancestor
 
+  // Target of the tenant-qualified FKs: children reference (tenant_id, id),
+  // so a child row can only point at a parent in its own tenant.
+  @@unique([tenantId, id])
   // AR10 prune (posts is the hottest write path — 17 indexes reduced to 7):
   // dropped [activityId]/[objectId] (duplicate their @unique), [uri] (AP
   // object lookups go through the @unique objectId/activityId; nothing
@@ -944,7 +950,7 @@ model MediaFile {
   // ModerationResolvedPayload, not in any client response — the owner-scoped
   // disposition read exposes only a coarse `appealable` bit derived from it).
   // Nullable: set by the moderation pipeline / carve-out path, absent otherwise.
-  blockClass String? @map("block_class")
+  blockClass   String? @map("block_class")
   // `evidenceHold` marks content under a live legal/evidence hold (plan 08 §2.3
   // item 5). The hard-delete GC purge and the account-deletion cascade MUST skip
   // rows with a live hold so the original is never destroyed while a case is
@@ -1028,6 +1034,9 @@ model MediaFile {
   // flags are checked per-row after a tenant/hash lookup, never scanned), the
   // display-only [dateTaken], and the pruned reconciliation-column indexes.
   @@unique([tenantId, contentHash]) // Within-tenant dedup + the serve-path lookup index
+  // Target of the tenant-qualified FKs: children reference (tenant_id, id),
+  // so a child row can only point at a parent in its own tenant.
+  @@unique([tenantId, id])
   @@index([lifecycle]) // Gate + queue queries (moderation queue, stale-reap scope)
   @@index([createdAt]) // For chronological sorting + stale-reap cutoff
   @@index([uploadedBy]) // GDPR erasure: deleteMany({ where: { uploadedBy } })
@@ -1106,12 +1115,12 @@ enum ModerationJobPriority {
 // thresholdSnapshot captures the operative thresholds at job-submission time
 // so historical decisions remain auditable after a threshold change.
 model MediaModerationJob {
-  id                String          @id @default(cuid())
-  mediaId           String          @map("media_id")
-  media             MediaFile       @relation(fields: [mediaId], references: [id], onDelete: Cascade)
+  id                String                @id @default(cuid())
+  mediaId           String                @map("media_id")
+  media             MediaFile             @relation(fields: [mediaId], references: [id], onDelete: Cascade)
   track             ModerationTrack
   // jobId: the external provider's job identifier (unique per provider call).
-  jobId             String          @unique @map("job_id")
+  jobId             String                @unique @map("job_id")
   // decision: resolved ModerationDecision value, or null while the job is in flight.
   decision          String?
   // thresholdSnapshot: a copy of env.media.thresholds at submission time (JSON).
@@ -1119,7 +1128,7 @@ model MediaModerationJob {
   // the escalation runs a different model reporting a different taxonomy, so
   // interpreting its verdict through the inline snapshot would floor every
   // deferred verdict at `review` via the pin (plan 031 §status).
-  thresholdSnapshot Json            @map("threshold_snapshot")
+  thresholdSnapshot Json                  @map("threshold_snapshot")
   // priority: `interactive` for provider-submitted jobs, `deferred` for an
   // escalation row spawned by the cascade route (plan 031). The completion
   // worker re-fetches `deferred` rows from the escalation-result port instead
@@ -1130,9 +1139,9 @@ model MediaModerationJob {
   // which is what makes creating the escalation row idempotent (a retried
   // trigger finds the existing row instead of minting a second jobId, so the
   // engine's idempotency key stays stable).
-  parentJobId       String?         @unique @map("parent_job_id")
-  createdAt         DateTime        @default(now()) @map("created_at")
-  updatedAt         DateTime        @updatedAt @map("updated_at")
+  parentJobId       String?               @unique @map("parent_job_id")
+  createdAt         DateTime              @default(now()) @map("created_at")
+  updatedAt         DateTime              @updatedAt @map("updated_at")
 
   // AR10 prune: dropped [jobId] (duplicate of @unique).
   @@index([mediaId])
@@ -1180,8 +1189,8 @@ model PostMedia {
   declaredSourceType SyntheticSourceType @default(UNKNOWN) @map("declared_source_type")
   declaredBasis      SyntheticBasis?     @map("declared_basis")
 
-  post   Post      @relation(fields: [postId], references: [id], onDelete: Cascade)
-  media  MediaFile @relation(fields: [mediaId], references: [id], onDelete: Restrict)
+  post   Post      @relation(fields: [tenantId, postId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
+  media  MediaFile @relation(fields: [tenantId, mediaId], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction)
   tenant Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   // AR10 prune: dropped [postId] (prefix of the unique).
@@ -1209,7 +1218,7 @@ model PostSentiment {
   sentiment String
   createdAt DateTime @default(now()) @map("created_at")
 
-  post   Post   @relation(fields: [postId], references: [id], onDelete: Cascade)
+  post   Post   @relation(fields: [tenantId, postId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   // AR10 prune: dropped [postId] / [postUri] (prefixes of the composite
@@ -1263,12 +1272,15 @@ model PostComment {
 
   // AR10 prune: dormant classification columns removed (see Post model note).
 
-  post       Post               @relation(fields: [postId], references: [id], onDelete: Cascade)
+  post       Post               @relation(fields: [tenantId, postId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
   tenant     Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   media      PostCommentMedia[]
   sentiments CommentSentiment[]
   linkChecks LinkCheck[]
 
+  // Target of the tenant-qualified FKs: children reference (tenant_id, id),
+  // so a child row can only point at a parent in its own tenant.
+  @@unique([tenantId, id])
   // AR10 prune: dropped [hiddenByPostOwner] and [deletedAt] (low-cardinality
   // flags always combined with a selective postId predicate), [rootUri]
   // (prefix of [rootUri, createdAt]), and the dormant-classification indexes.
@@ -1504,6 +1516,9 @@ model TaxonomyDimension {
   // AR10 prune: dropped [tenantId] and [tenantId, code] (prefix/duplicate of
   // the composite unique).
   @@unique([tenantId, code])
+  // Target of the tenant-qualified FKs: children reference (tenant_id, id),
+  // so a child row can only point at a parent in its own tenant.
+  @@unique([tenantId, id])
   @@index([tenantId, isActive])
   @@map("taxonomy_dimensions")
 }
@@ -1521,12 +1536,15 @@ model TaxonomyCategory {
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
-  dimension TaxonomyDimension @relation(fields: [dimensionId], references: [id], onDelete: Cascade)
+  dimension TaxonomyDimension @relation(fields: [tenantId, dimensionId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
   taxons    TaxonomyTaxon[]
 
   // AR10 prune: dropped [tenantId] and [tenantId, dimensionId] (prefixes of
   // the composite unique).
   @@unique([tenantId, dimensionId, code])
+  // Target of the tenant-qualified FKs: children reference (tenant_id, id),
+  // so a child row can only point at a parent in its own tenant.
+  @@unique([tenantId, id])
   @@index([tenantId, isActive])
   @@map("taxonomy_categories")
 }
@@ -1557,7 +1575,7 @@ model TaxonomyTaxon {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  category    TaxonomyCategory     @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  category    TaxonomyCategory     @relation(fields: [tenantId, categoryId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
   tags        PostTaxonomyTag[]
   entityTags  EntityTaxonomyTag[]
   productTags ProductTaxonomyTag[]
@@ -1565,6 +1583,9 @@ model TaxonomyTaxon {
   // AR10 prune: dropped [tenantId] and [tenantId, taxonId] (prefix/duplicate
   // of the composite unique).
   @@unique([tenantId, taxonId])
+  // Target of the tenant-qualified FKs: children reference (tenant_id, id),
+  // so a child row can only point at a parent in its own tenant.
+  @@unique([tenantId, id])
   @@index([tenantId, categoryId])
   @@index([tenantId, isActive])
   @@index([parentTaxonId])
@@ -1618,7 +1639,7 @@ model ProductTaxonomyTag {
   taxonId   String   @map("taxon_id")
   createdAt DateTime @default(now()) @map("created_at")
 
-  taxon  TaxonomyTaxon @relation(fields: [taxonId], references: [id], onDelete: Cascade)
+  taxon  TaxonomyTaxon @relation(fields: [tenantId, taxonId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
   tenant Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@unique([productId, taxonId])
@@ -1651,7 +1672,7 @@ model EntityOwnership {
   status        OwnershipStatus @default(ACTIVE)
   removedAt     DateTime?       @map("removed_at")
 
-  entity  Entity @relation(fields: [entityId], references: [id], onDelete: Cascade)
+  entity  Entity @relation(fields: [tenantId, entityId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
   user    User   @relation("EntityOwners", fields: [userId], references: [id], onDelete: Cascade)
   tenant  Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   addedBy User   @relation("OwnershipAddedBy", fields: [addedByUserId], references: [id])
@@ -1748,6 +1769,9 @@ model Group {
   posts   Post[]
   tenant  Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
+  // Target of the tenant-qualified FKs: children reference (tenant_id, id),
+  // so a child row can only point at a parent in its own tenant.
+  @@unique([tenantId, id])
   // AR10 prune: dropped [actorUri] (duplicate of @unique).
   @@index([tenantId])
   @@index([privacy])
@@ -1764,7 +1788,7 @@ model GroupMember {
   role     GroupRole
   joinedAt DateTime  @default(now()) @map("joined_at")
 
-  group  Group  @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  group  Group  @relation(fields: [tenantId, groupId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   // AR10 prune: dropped [groupId] (prefix of the unique and of [groupId, role]).
@@ -1918,8 +1942,8 @@ model LinkCheck {
   checkedAt     DateTime? @map("checked_at")
 
   // Relations
-  post             Post?            @relation(fields: [postId], references: [id], onDelete: Cascade)
-  comment          PostComment?     @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  post             Post?            @relation(fields: [tenantId, postId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
+  comment          PostComment?     @relation(fields: [tenantId, commentId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
   domainReputation DomainReputation @relation(fields: [domain], references: [domain])
   tenant           Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
@@ -2272,6 +2296,9 @@ model ConnectionCode {
   tenant      Tenant                     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   redemptions ConnectionCodeRedemption[]
 
+  // Target of the tenant-qualified FKs: children reference (tenant_id, id),
+  // so a child row can only point at a parent in its own tenant.
+  @@unique([tenantId, id])
   @@index([tenantId])
   @@index([creatorId, expiresAt])
   @@index([entityId])
@@ -2286,7 +2313,7 @@ model ConnectionCodeRedemption {
   tenantId  String   @map("tenant_id")
   createdAt DateTime @default(now()) @map("created_at")
 
-  code   ConnectionCode @relation(fields: [codeId], references: [id])
+  code   ConnectionCode @relation(fields: [tenantId, codeId], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction)
   user   User           @relation(fields: [userId], references: [id])
   tenant Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
@@ -2622,6 +2649,9 @@ model TenantClassification {
 
   @@index([categoryId])
   @@index([verificationSource])
+  // Target of the tenant-qualified FKs: children reference (tenant_id, id),
+  // so a child row can only point at a parent in its own tenant.
+  @@unique([tenantId, id])
   @@map("tenant_classifications")
 }
 
@@ -2634,7 +2664,7 @@ model TenantClassificationTag {
   classificationId String @map("classification_id")
   categoryId       String @map("category_id")
 
-  classification TenantClassification @relation(fields: [classificationId], references: [id], onDelete: Cascade)
+  classification TenantClassification @relation(fields: [tenantId, classificationId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
   category       PlatformCategory     @relation("ClassificationTagCategory", fields: [categoryId], references: [id])
 
   @@unique([classificationId, categoryId])
@@ -2982,8 +3012,8 @@ model Event {
   // Capacity + waitlist. null capacity = unlimited. Counts are denormalized and
   // maintained in the handler via atomic conditional SQL (§4.3).
   capacity      Int?
-  rsvpCount     Int @default(0) @map("rsvp_count")
-  waitlistCount Int @default(0) @map("waitlist_count")
+  rsvpCount     Int  @default(0) @map("rsvp_count")
+  waitlistCount Int  @default(0) @map("waitlist_count")
 
   // Companion feed Post created through the PostHandler seam on publish
   // (FeedAnnouncer). Unique 1:1 back-reference; null when no companion exists
@@ -2998,6 +3028,9 @@ model Event {
   rsvps  Rsvp[]
   shifts EventShift[]
 
+  // Target of the tenant-qualified FKs: children reference (tenant_id, id),
+  // so a child row can only point at a parent in its own tenant.
+  @@unique([tenantId, id])
   @@index([tenantId, startsAt])
   @@index([tenantId, status, startsAt])
   @@index([groupId, startsAt])
@@ -3005,21 +3038,21 @@ model Event {
 }
 
 model Rsvp {
-  id String @id @default(cuid())
+  id       String     @id @default(cuid())
   // Denormalized from the parent event (P1 direct-RLS convention).
-  tenantId String @map("tenant_id")
-  eventId  String @map("event_id")
+  tenantId String     @map("tenant_id")
+  eventId  String     @map("event_id")
   // References User.id (bare scalar, app-code cascade).
-  userId   String @map("user_id")
+  userId   String     @map("user_id")
   status   RsvpStatus
   // Additional attendees the RSVP brings. Party size = 1 + guests; clamped at
   // the Zod boundary to env.event.maxGuestsPerRsvp (§4.3 SEC-1).
-  guests   Int    @default(0)
+  guests   Int        @default(0)
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  event Event @relation(fields: [tenantId, eventId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
 
   @@unique([eventId, userId])
   @@index([tenantId, eventId, status])
@@ -3028,41 +3061,44 @@ model Rsvp {
 }
 
 model EventShift {
-  id String @id @default(cuid())
+  id          String    @id @default(cuid())
   // Denormalized from the parent event (P1 direct-RLS convention).
-  tenantId String    @map("tenant_id")
-  eventId  String    @map("event_id")
-  title    String
-  startsAt DateTime? @map("starts_at")
-  endsAt   DateTime? @map("ends_at")
+  tenantId    String    @map("tenant_id")
+  eventId     String    @map("event_id")
+  title       String
+  startsAt    DateTime? @map("starts_at")
+  endsAt      DateTime? @map("ends_at")
   // Per-slot capacity. filledCount maintained in the handler via atomic
   // conditional SQL (same pattern as Event.rsvpCount).
   capacity    Int
-  filledCount Int @default(0) @map("filled_count")
+  filledCount Int       @default(0) @map("filled_count")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  event   Event         @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  event   Event         @relation(fields: [tenantId, eventId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
   signups ShiftSignup[]
 
+  // Target of the tenant-qualified FKs: children reference (tenant_id, id),
+  // so a child row can only point at a parent in its own tenant.
+  @@unique([tenantId, id])
   @@index([tenantId, eventId])
   @@map("event_shifts")
 }
 
 model ShiftSignup {
-  id String @id @default(cuid())
+  id       String            @id @default(cuid())
   // Denormalized from the parent shift's event (P1 direct-RLS convention).
-  tenantId String @map("tenant_id")
-  shiftId  String @map("shift_id")
+  tenantId String            @map("tenant_id")
+  shiftId  String            @map("shift_id")
   // References User.id (bare scalar, app-code cascade).
-  userId   String @map("user_id")
+  userId   String            @map("user_id")
   status   ShiftSignupStatus
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  shift EventShift @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  shift EventShift @relation(fields: [tenantId, shiftId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
 
   @@unique([shiftId, userId])
   @@index([tenantId, shiftId])
