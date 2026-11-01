@@ -132,8 +132,14 @@ suite("PostgresGraphService.DiscoveryOps (live CTE)", () => {
     await edge(C, D, "PACK_MATE", "CONFIRMED", TENANT); // hop 3 (unreachable at cap 2)
     await edge(A, P, "WALK_BUDDY", "PENDING", TENANT); // pending — not traversed
     await edge(A, HIDDEN, "PLAYMATE", "CONFIRMED", TENANT); // hop 1 but non-discoverable
-    // cross-tenant edge: A (this tenant) to OTHER_ENT, recorded under OTHER_TENANT.
-    await edge(A, OTHER_ENT, "PLAYMATE", "CONFIRMED", OTHER_TENANT);
+    // A cross-tenant edge (A in this tenant, OTHER_ENT in OTHER_TENANT) can no
+    // longer be stored: both ends are tenant-qualified FKs. Assert that, under
+    // either tenant, instead of seeding one for discovery to ignore.
+    for (const t of [TENANT, OTHER_TENANT]) {
+      await expect(edge(A, OTHER_ENT, "PLAYMATE", "CONFIRMED", t)).rejects.toMatchObject({
+        code: "P2003",
+      });
+    }
 
     // The user already relates to B → B must be excluded from discovery.
     await prisma.relationship.create({

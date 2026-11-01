@@ -167,9 +167,21 @@ class FakeFeedAnnouncer implements FeedAnnouncer {
     // Mirror the real PostFeedAnnouncer's GROUP_ONLY->no-companion-post rule
     // (planCompanionPost is the shared pure helper both sides use) so this
     // fake is a faithful stand-in for the production seam's return contract.
-    return planCompanionPost(input.visibility).kind === "post"
-      ? `post-${input.eventId}`
-      : null;
+    if (planCompanionPost(input.visibility).kind !== "post") return null;
+    // Persist the companion post like the real announcer does, in the event's
+    // tenant: events.announce_post_id is a tenant-qualified FK, so an id with
+    // no post row behind it is refused.
+    const post = await prisma.post.create({
+      data: {
+        id: `post-${input.eventId}`,
+        tenantId: input.tenantId,
+        authorId: input.creatorId,
+        text: input.title,
+        radius: "SHOUT",
+        dataRegion: "US",
+      },
+    });
+    return post.id;
   }
 
   async update(input: EventAnnouncementInput): Promise<void> {
@@ -349,6 +361,8 @@ afterAll(async () => {
   await prisma.eventShift.deleteMany({ where: { tenantId: { in: ALL_TENANT_IDS } } });
   await prisma.rsvp.deleteMany({ where: { tenantId: { in: ALL_TENANT_IDS } } });
   await prisma.event.deleteMany({ where: { tenantId: { in: ALL_TENANT_IDS } } });
+  // Companion posts from FakeFeedAnnouncer; before the users they belong to.
+  await prisma.post.deleteMany({ where: { tenantId: { in: ALL_TENANT_IDS } } });
   await prisma.groupMember.deleteMany({ where: { tenantId: { in: ALL_TENANT_IDS } } });
   await prisma.group.deleteMany({ where: { tenantId: { in: ALL_TENANT_IDS } } });
   await prisma.user.deleteMany({ where: { email: { startsWith: RUN } } });
