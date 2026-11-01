@@ -886,6 +886,12 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ### Changed
 
+- **A relationship to an entity must name an entity in the active tenant.**
+  `relationships.target_id` is polymorphic (user or entity), so no foreign
+  key can check it. `RelationshipOps.createRelationship` now loads an entity
+  target with a tenant-scoped read first and refuses one outside the tenant
+  with the same `GraphNotFoundError` as a missing one, before any write.
+  User targets are unchanged.
 - **`tenant_id` is immutable in the database.** A `BEFORE UPDATE OF
   tenant_id` trigger (`trellis_tenant_id_immutable()`) on every table with
   the column raises when the value changes, through any client, raw SQL
