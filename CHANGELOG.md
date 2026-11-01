@@ -886,6 +886,28 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ### Changed
 
+- **The remaining pointers between tenant-holding tables are tenant-qualified
+  too.** The four `ON DELETE SET NULL` FKs (`posts.group_id`,
+  `posts.primary_entity_id`, `taxonomy_taxons.parent_taxon_id`,
+  `connection_codes.entity_id`) and five pointers that had no FK at all
+  (`events.group_id`, `events.announce_post_id`, both ends of
+  `entity_relationships`, `entity_location.entity_id`) now reference
+  `(tenant_id, id)`. The `SET NULL` ones are hand-written as
+  `ON DELETE SET NULL ("<col>")`, which nulls only the pointer: a plain
+  composite `SET NULL` would null `tenant_id` too and make the parent
+  undeletable. Prisma cannot express the column list, so `schema.prisma`
+  says `onDelete: SetNull` and `prisma generate` prints six warnings about
+  it; `tenant-qualified-fk-shape.integration.test.ts` fails if an FK loses
+  the list. Deleting a group now nulls `events.group_id` (a `GROUP_ONLY`
+  event then fails closed), and deleting an entity cascades to its edges and
+  location row as the app code already did. Generated types: `Entity` gains
+  `location`, `relationshipsFrom` and `relationshipsTo`, `Group` gains
+  `events`, `Post` gains `announcedEvent`, and `EntityRelationship`,
+  `EntityLocation` and `Event` gain the matching relation fields.
+  **Upgrading:** the pointers that had no FK may name rows that no longer
+  exist; `VALIDATE` refuses those, and the migration header shows how to find
+  them.
+
 - **Foreign keys between tenant-holding tables are tenant-qualified.** Sixteen
   child FKs now reference `(tenant_id, id)` on their parent instead of `id`
   alone (`post_comments → posts`, `post_media → posts / media_files`,

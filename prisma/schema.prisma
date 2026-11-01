@@ -50,6 +50,12 @@ model Entity {
 
   connectionCodes ConnectionCode[]
 
+  // Back-relations of tenant-qualified FKs; reads go through GraphService and
+  // the geo repository, not these fields.
+  location          EntityLocation?
+  relationshipsFrom EntityRelationship[] @relation("EntityRelationshipsFrom")
+  relationshipsTo   EntityRelationship[] @relation("EntityRelationshipsTo")
+
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   // Target of the tenant-qualified FKs: children reference (tenant_id, id),
@@ -127,7 +133,11 @@ model EntityLocation {
   updatedAt DateTime                              @default(now()) @updatedAt @map("updated_at")
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  entity Entity @relation(fields: [tenantId, entityId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
 
+  // Prisma requires a one-to-one relation's fields to be unique as a set;
+  // entity_id alone already is (it is the key).
+  @@unique([tenantId, entityId])
   @@index([tenantId])
   @@map("entity_location")
 }
@@ -789,14 +799,15 @@ model Post {
 
   author          User              @relation(fields: [authorId], references: [id])
   tenant          Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  group           Group?            @relation(fields: [groupId], references: [id])
+  group           Group?            @relation(fields: [tenantId, groupId], references: [tenantId, id], onDelete: SetNull, onUpdate: NoAction)
   groupId         String?           @map("group_id") // Group this post belongs to
   media           PostMedia[]
   sentiments      PostSentiment[]
   comments        PostComment[]
   subjectEntities PostSubject[]
   primaryEntityId String?           @map("primary_entity_id")
-  primaryEntity   Entity?           @relation("PrimaryEntityPosts", fields: [primaryEntityId], references: [id])
+  primaryEntity   Entity?           @relation("PrimaryEntityPosts", fields: [tenantId, primaryEntityId], references: [tenantId, id], onDelete: SetNull, onUpdate: NoAction)
+  announcedEvent  Event? // the event this is the companion post of, if any
   taxonomyTags    PostTaxonomyTag[]
   linkChecks      LinkCheck[]
 
@@ -1566,7 +1577,7 @@ model TaxonomyTaxon {
 
   // Hierarchical support
   parentTaxonId String?         @map("parent_taxon_id")
-  parentTaxon   TaxonomyTaxon?  @relation("TaxonHierarchy", fields: [parentTaxonId], references: [id])
+  parentTaxon   TaxonomyTaxon?  @relation("TaxonHierarchy", fields: [tenantId, parentTaxonId], references: [tenantId, id], onDelete: SetNull, onUpdate: NoAction)
   childTaxons   TaxonomyTaxon[] @relation("TaxonHierarchy")
 
   // Translations (stored as JSON for now, can be normalized later)
@@ -1767,6 +1778,7 @@ model Group {
 
   members GroupMember[]
   posts   Post[]
+  events  Event[]
   tenant  Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   // Target of the tenant-qualified FKs: children reference (tenant_id, id),
@@ -2292,7 +2304,7 @@ model ConnectionCode {
   createdAt DateTime @default(now()) @map("created_at")
 
   creator     User                       @relation("ConnectionCodeCreator", fields: [creatorId], references: [id])
-  entity      Entity?                    @relation(fields: [entityId], references: [id])
+  entity      Entity?                    @relation(fields: [tenantId, entityId], references: [tenantId, id], onDelete: SetNull, onUpdate: NoAction)
   tenant      Tenant                     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   redemptions ConnectionCodeRedemption[]
 
@@ -2647,11 +2659,11 @@ model TenantClassification {
   category PlatformCategory          @relation(fields: [categoryId], references: [id])
   tags     TenantClassificationTag[]
 
-  @@index([categoryId])
-  @@index([verificationSource])
   // Target of the tenant-qualified FKs: children reference (tenant_id, id),
   // so a child row can only point at a parent in its own tenant.
   @@unique([tenantId, id])
+  @@index([categoryId])
+  @@index([verificationSource])
   @@map("tenant_classifications")
 }
 
@@ -2720,12 +2732,12 @@ model TenantDirectoryProfile {
 //
 // These two tables hold the relationship edges (user↔user and typed
 // entity-to-entity). OWNS (entity_ownerships) and
-// ABOUT (post_subjects) already existed in Postgres. Modeled as standalone
-// tables (no Prisma @relation) so the migration is self-contained and
-// non-breaking; targetId is polymorphic (user|entity) so it cannot carry a
-// single FK. Cascade-on-delete is enforced in app code by the GraphService
-// remove* methods, exactly as the graph layer did. Read by the Postgres
-// GraphService adapter (apps/api/src/lib/graph/postgres/).
+// ABOUT (post_subjects) already existed in Postgres. Relationship is a
+// standalone table (no Prisma @relation): targetId is polymorphic
+// (user|entity), so it cannot carry a single FK, and cascade-on-delete is
+// enforced in app code by the GraphService remove* methods. EntityRelationship
+// was standalone too, until both of its ends became tenant-qualified FKs.
+// Read by the Postgres GraphService adapter (apps/api/src/lib/graph/postgres/).
 // ============================================================================
 
 // RELATES_TO — a scored relationship from a user to a target (user or entity).
@@ -2802,6 +2814,12 @@ model EntityRelationship {
   since     DateTime @default(now())
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Both ends are tenant-qualified FKs, so an edge only joins entities of its
+  // own tenant. The GraphService remove* methods still delete edges first; the
+  // cascade covers every other path that deletes an entity.
+  entity        Entity @relation("EntityRelationshipsFrom", fields: [tenantId, entityId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
+  relatedEntity Entity @relation("EntityRelationshipsTo", fields: [tenantId, relatedEntityId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
 
   @@unique([entityId, relatedEntityId, type])
   @@index([entityId, type, status]) // discovery / list-by-entity
@@ -2982,8 +3000,10 @@ model Event {
   id          String          @id @default(cuid())
   // Multi-tenancy — event is owned by exactly one tenant (cascade on delete).
   tenantId    String          @map("tenant_id")
-  // Optional group ownership. Bare scalar (app-code cascade), mirroring the
-  // shape of Post.groupId; no Prisma relation to avoid a Group back-relation.
+  // Optional group ownership, mirroring Post.groupId: a tenant-qualified FK,
+  // so the group is in the event's tenant. Deleting the group nulls group_id
+  // (only that column), which leaves a GROUP_ONLY event visible to nobody
+  // (event-handler.ts canView fails closed on a null group).
   groupId     String?         @map("group_id")
   // Creator — references User.id. Bare scalar (denormalized, app-code cascade),
   // matching the recent Collection.ownerUserId convention.
@@ -3024,13 +3044,18 @@ model Event {
   updatedAt DateTime  @updatedAt @map("updated_at")
   deletedAt DateTime? @map("deleted_at")
 
-  tenant Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  rsvps  Rsvp[]
-  shifts EventShift[]
+  tenant       Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  group        Group?       @relation(fields: [tenantId, groupId], references: [tenantId, id], onDelete: SetNull, onUpdate: NoAction)
+  announcePost Post?        @relation(fields: [tenantId, announcePostId], references: [tenantId, id], onDelete: SetNull, onUpdate: NoAction)
+  rsvps        Rsvp[]
+  shifts       EventShift[]
 
   // Target of the tenant-qualified FKs: children reference (tenant_id, id),
   // so a child row can only point at a parent in its own tenant.
   @@unique([tenantId, id])
+  // Prisma requires a one-to-one relation's fields to be unique as a set;
+  // announce_post_id alone already is.
+  @@unique([tenantId, announcePostId])
   @@index([tenantId, startsAt])
   @@index([tenantId, status, startsAt])
   @@index([groupId, startsAt])
