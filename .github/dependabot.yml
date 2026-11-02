@@ -2,10 +2,9 @@
 # (supply-chain hardening) and 08-implementation-roadmap.md §E8.
 #
 # Dependabot PRs are gated on green CI only (.github/workflows/dependabot-auto-merge.yml)
-# and auto-merged. The org-shared Claude supply-chain check this comment used to describe
-# (.github/workflows/dependabot-handler.yml) is DISABLED (too expensive per PR, see that
-# file) — its `workflow_dispatch`-only trigger is retained for manual runs, but nothing
-# calls it automatically. Do not read the disabled trigger as an active gate.
+# and auto-merged. There is no per-PR AI supply-chain review: the former
+# dependabot-handler.yml (a Claude check, too expensive per PR) was disabled in
+# 2026-06 and deleted in 2026-11.
 #
 # `cooldown` below is the compensating control (HIGH-1, 2026-08 security review): a
 # hijacked upstream release has `default-days` to be caught/pulled/yanked before
@@ -34,6 +33,14 @@ updates:
           - "@aws-sdk/*"
       dev-dependencies:
         dependency-type: development
+      # Order matters: a dependency joins the first group it matches, so this
+      # catches only what aws-sdk and dev-dependencies did not. Patch and minor
+      # only; major bumps of production dependencies stay one PR each.
+      production-dependencies:
+        dependency-type: production
+        update-types:
+          - minor
+          - patch
 
   # Keeps the SHA-pinned actions in .github/workflows/ current (Dependabot
   # updates the pin and the trailing version comment together).
@@ -41,3 +48,9 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    groups:
+      # CodeQL init and analyze must move together; alone, each fails CI
+      # (#300, #306).
+      codeql:
+        patterns:
+          - "github/codeql-action*"
