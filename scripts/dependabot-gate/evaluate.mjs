@@ -15,9 +15,10 @@
 // unreviewed change on `main`.
 //
 // Rules (plans/pocock-brakes-and-dependabot-2026-11.md, W2 section 2):
-//   1. The PR author is `dependabot[bot]` and every commit is authored by
-//      Dependabot (and carries a valid signature, so a human cannot forge the
-//      author field).
+//   1. The PR author is `dependabot[bot]`, every commit is authored by
+//      Dependabot AND committed by GitHub's web-flow identity with a `valid`
+//      signature (the author field alone is forgeable), and the commit list is
+//      complete.
 //   2. `update-type` is a known non-major value.
 //   3. Changed paths are only `package.json`, `**/package.json`,
 //      `package-lock.json`, and `.github/workflows/*.yml` files in which every
@@ -27,6 +28,11 @@
 //   +  Any supply-chain flag from `scripts/supply-chain/flags.mjs`.
 
 export const BOT_LOGIN = "dependabot[bot]";
+// Real Dependabot commits (verified read-only on merged PRs, 2026-11-02): author
+// `dependabot[bot]`, committer login `web-flow` / email `noreply@github.com`,
+// verification `{verified: true, reason: "valid"}`.
+export const WEB_FLOW_LOGIN = "web-flow";
+export const WEB_FLOW_EMAIL = "noreply@github.com";
 export const HUMAN_REVIEW_LABEL = "needs-human-review";
 export const MAJOR = "version-update:semver-major";
 // A whitelist, not "anything but major": an empty or new value must not pass.
@@ -107,9 +113,10 @@ function clip(s) {
 /**
  * @typedef {object} GateInput
  * @property {string} author PR author login
- * @property {{authorLogin: string|null, verified: boolean}[]} commits every commit on the PR
+ * @property {{authorLogin: string|null, committerLogin: string|null, committerEmail: string|null, verified: boolean, verificationReason: string|null}[]} commits every commit on the PR
+ * @property {number} expectedCommitCount GitHub's `commits` for the PR; a shorter list means truncation
  * @property {{filename: string, status: string, patch?: string}[]} files every changed file
- * @property {number} [expectedFileCount] GitHub's `changed_files`; a shorter list means truncation
+ * @property {number} expectedFileCount GitHub's `changed_files`; a shorter list means truncation
  * @property {string[]} labels label names currently on the PR
  * @property {string} updateType `dependabot/fetch-metadata` `update-type` output
  * @property {{package: string, reason: string}[]} supplyChainFlags output of flags.mjs
@@ -131,13 +138,34 @@ export function evaluate(input) {
   if (!Array.isArray(commits) || commits.length === 0) {
     reasons.push("rule 1: no commits to inspect");
   } else {
+    // The commits endpoint is capped (250); a longer PR must not pass on a prefix.
+    if (
+      typeof input.expectedCommitCount !== "number" ||
+      input.expectedCommitCount !== commits.length
+    ) {
+      reasons.push(`rule 1: saw ${commits.length} of ${String(input.expectedCommitCount)} commits`);
+    }
     const foreign = commits.filter((c) => c?.authorLogin !== BOT_LOGIN).length;
     if (foreign > 0) {
       reasons.push(`rule 1: ${foreign} commit(s) not authored by ${BOT_LOGIN}`);
     }
-    const unsigned = commits.filter((c) => c?.verified !== true).length;
-    if (unsigned > 0) {
-      reasons.push(`rule 1: ${unsigned} commit(s) without a verified signature`);
+    // The author field is forgeable (GitHub resolves the login from the author
+    // EMAIL, and Dependabot's noreply address is public), and `verified` only
+    // says the signature matches the COMMITTER's key, which a forger can sign
+    // with their own. What a writer cannot fake with git alone is the committer
+    // being GitHub's own web-flow identity with a `valid` signature: that is how
+    // every real Dependabot commit looks (observed on merged Dependabot PRs).
+    const wrongCommitter = commits.filter(
+      (c) =>
+        c?.committerLogin !== WEB_FLOW_LOGIN ||
+        c?.committerEmail !== WEB_FLOW_EMAIL ||
+        c?.verified !== true ||
+        c?.verificationReason !== "valid",
+    ).length;
+    if (wrongCommitter > 0) {
+      reasons.push(
+        `rule 1: ${wrongCommitter} commit(s) not committed and validly signed by GitHub (${WEB_FLOW_LOGIN})`,
+      );
     }
   }
 
@@ -154,8 +182,10 @@ export function evaluate(input) {
   if (!Array.isArray(files) || files.length === 0) {
     reasons.push("rule 3: no changed files to inspect");
   } else {
-    if (typeof input.expectedFileCount === "number" && input.expectedFileCount !== files.length) {
-      reasons.push(`rule 3: saw ${files.length} of ${input.expectedFileCount} changed files`);
+    if (typeof input.expectedFileCount !== "number" || input.expectedFileCount !== files.length) {
+      reasons.push(
+        `rule 3: saw ${files.length} of ${String(input.expectedFileCount)} changed files`,
+      );
     }
     for (const f of files) {
       if (!isAllowedPath(f?.filename)) {

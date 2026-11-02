@@ -3,8 +3,11 @@
 # sure auto-merge is off.
 #
 # The gate (scripts/dependabot-gate/evaluate.mjs, unit-tested) passes only when
-#   1. the PR author is dependabot[bot] and every commit is authored by it
-#      (with a verified signature, so a human cannot forge the author field);
+#   1. the PR author is dependabot[bot], every commit is authored by it AND
+#      committed by GitHub's web-flow identity with a `valid` signature (the
+#      author field alone is forgeable: it is resolved from the author email,
+#      and `verified` only checks the committer's key), and the commit list is
+#      complete;
 #   2. `update-type` is patch or minor (majors are migrations, not bumps: the
 #      vitest 4 -> 5 group PR #252 on 2026-09-10 is the reason);
 #   3. changed paths are only package.json, **/package.json, package-lock.json
@@ -63,8 +66,10 @@ permissions: {}
 # (and with cancel-in-progress it cancelled them, see the skybber 2026-07-02
 # note). No cancel-in-progress: Dependabot labels each new PR several times,
 # and a `labeled` run that its own `if` skips would otherwise cancel the
-# `opened` run that matters. A stale run is harmless: gate.mjs rejects a run
-# whose head is no longer the PR head, and the merge is pinned to that head.
+# `opened` run that matters. A stale run cannot enable auto-merge on a newer
+# head: gate.mjs rejects a run whose head is no longer the PR head, and
+# `--match-head-commit` makes the enable request fail the same way. Turning
+# auto-merge OFF after a push is the `synchronize` run's job (see `merge`).
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
   cancel-in-progress: false
@@ -96,7 +101,7 @@ jobs:
       # v3 is the first major whose runs.using is node24; v2 is still node20.
       - name: Fetch Dependabot metadata
         id: meta
-        uses: dependabot/fetch-metadata@v3
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -165,7 +170,6 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-      issues: write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       REPO: ${{ github.repository }}
@@ -182,20 +186,15 @@ jobs:
       # No RESULT means the gate itself errored (API failure, bad lockfile):
       # auto-merge is off and the run is red, but a transient error is not a
       # reason to put a sticky label on the PR.
-      - name: Label and explain
+      #
+      # The labels `needs-human-review` and `major-bump` must already exist: this
+      # job has no `issues: write`, which creating a label may need, and
+      # `gh pr edit --add-label` fails on a missing label. The comment goes first
+      # so the explanation is posted even then.
+      - name: Explain and label
         if: ${{ needs.evaluate.outputs.result != '' }}
         run: |
           set -euo pipefail
-          ensure_label() {
-            gh api "repos/$REPO/labels/$1" --silent 2>/dev/null ||
-              gh label create "$1" --repo "$REPO" --color "$2" --description "$3"
-          }
-          ensure_label needs-human-review B60205 "Not eligible for automated merge; a human must review"
-          gh pr edit "$PR_URL" --add-label needs-human-review
-          if [ "$(jq -r .updateType <<<"$RESULT")" = "version-update:semver-major" ]; then
-            ensure_label major-bump D93F0B "Dependency major version bump"
-            gh pr edit "$PR_URL" --add-label major-bump
-          fi
           if [ "$(jq -r .alreadyLabeled <<<"$RESULT")" != "true" ]; then
             {
               echo "Not auto-merging: the merge gate did not pass."
@@ -204,6 +203,10 @@ jobs:
               echo
               echo "Review and merge by hand, or close the PR so Dependabot regenerates it."
             } | gh pr comment "$PR_URL" --body-file -
+          fi
+          gh pr edit "$PR_URL" --add-label needs-human-review
+          if [ "$(jq -r .updateType <<<"$RESULT")" = "version-update:semver-major" ]; then
+            gh pr edit "$PR_URL" --add-label major-bump
           fi
 
   # Gate passed: the ONLY job that holds the merge identity (see header).
@@ -216,8 +219,15 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      # `--match-head-commit` binds the auto-merge request to the exact commit
-      # that was evaluated: a later push cannot ride on this decision.
+      # `--match-head-commit` only makes THIS request fail if the head has
+      # already moved past the evaluated commit. It does NOT bind the merge to
+      # that commit afterwards: GitHub keeps auto-merge enabled when a user with
+      # write access pushes (it auto-disables only for pushes by users without
+      # write access). What stops a later push is the `synchronize` run's `flag`
+      # job, which turns auto-merge off. The assumption is therefore timing: a
+      # push can ride on this decision for the length of one gate run, and only
+      # if every required check also goes green on the pushed commit in that
+      # window (the checks restart on the new head).
       - name: Enable auto-merge (squash)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

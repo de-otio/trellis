@@ -18,9 +18,18 @@ import {
   isAllowedPath,
 } from "../../../../../scripts/dependabot-gate/evaluate.mjs";
 
+interface Commit {
+  authorLogin: string | null;
+  committerLogin: string | null;
+  committerEmail: string | null;
+  verified: boolean;
+  verificationReason: string | null;
+}
+
 interface Input {
   author: string;
-  commits: { authorLogin: string | null; verified: boolean }[];
+  commits: Commit[];
+  expectedCommitCount?: number;
   files: { filename: string; status: string; patch?: string }[];
   expectedFileCount?: number;
   labels: string[];
@@ -40,9 +49,21 @@ const pinPatch = (name = "github/codeql-action/analyze") =>
     "         with:",
   ].join("\n");
 
+// A real Dependabot commit as the commits API reports it (read from merged
+// Dependabot PRs): authored by the bot, committed and signed by GitHub.
+const botCommit = (over: Partial<Commit> = {}): Commit => ({
+  authorLogin: "dependabot[bot]",
+  committerLogin: "web-flow",
+  committerEmail: "noreply@github.com",
+  verified: true,
+  verificationReason: "valid",
+  ...over,
+});
+
 const ok = (): Input => ({
   author: "dependabot[bot]",
-  commits: [{ authorLogin: "dependabot[bot]", verified: true }],
+  commits: [botCommit()],
+  expectedCommitCount: 1,
   files: [
     { filename: "package.json", status: "modified", patch: '-  "a": "1"\n+  "a": "2"' },
     { filename: "package-lock.json", status: "modified" },
@@ -77,26 +98,78 @@ describe("rule 1: Dependabot is the author of the PR and of every commit", () =>
     failsWith({ ...ok(), author: "octocat" }, "rule 1: PR author");
   });
 
+  const withCommits = (commits: Commit[]): Input => ({
+    ...ok(),
+    commits,
+    expectedCommitCount: commits.length,
+  });
+  const COMMITTER_REASON = "rule 1: 1 commit(s) not committed and validly signed by GitHub";
+
   it("fails when one commit on a bot PR is by a human", () => {
-    const i = ok();
-    i.commits = [...i.commits, { authorLogin: "octocat", verified: true }];
-    failsWith(i, "rule 1: 1 commit(s) not authored");
+    failsWith(
+      withCommits([botCommit(), botCommit({ authorLogin: "octocat" })]),
+      "rule 1: 1 commit(s) not authored",
+    );
   });
 
   it("fails when a commit author does not resolve to a GitHub user", () => {
-    const i = ok();
-    i.commits = [{ authorLogin: null, verified: true }];
-    failsWith(i, "rule 1: 1 commit(s) not authored");
+    failsWith(withCommits([botCommit({ authorLogin: null })]), "rule 1: 1 commit(s) not authored");
   });
 
-  it("fails when a bot-authored commit is not signed (forged author field)", () => {
-    const i = ok();
-    i.commits = [{ authorLogin: "dependabot[bot]", verified: false }];
-    failsWith(i, "rule 1: 1 commit(s) without a verified signature");
+  it("fails an unsigned bot-authored commit", () => {
+    failsWith(
+      withCommits([botCommit({ verified: false, verificationReason: "unsigned" })]),
+      COMMITTER_REASON,
+    );
+  });
+
+  // The forgery the author field alone cannot stop: a writer sets the public
+  // Dependabot noreply email as author and signs with their own key, so GitHub
+  // reports author=dependabot[bot], verified=true, reason=valid.
+  it("fails a forged bot author with a human committer (valid signature of their own key)", () => {
+    const forged = botCommit({ committerLogin: "octocat", committerEmail: "octocat@example.com" });
+    const r = evaluate(withCommits([forged])) as { pass: boolean; reasons: string[] };
+    expect(r.pass).toBe(false);
+    expect(r.reasons).toContain(`${COMMITTER_REASON} (web-flow)`);
+    // ...and nothing else about the commit looks wrong, which is the point.
+    expect(r.reasons).toHaveLength(1);
+  });
+
+  it("fails a verified commit whose committer login is not web-flow", () => {
+    failsWith(
+      withCommits([botCommit({ committerLogin: "github-actions[bot]" })]),
+      COMMITTER_REASON,
+    );
+  });
+
+  it("fails web-flow's login with a committer email that is not GitHub's", () => {
+    failsWith(
+      withCommits([botCommit({ committerEmail: "octocat@example.com" })]),
+      COMMITTER_REASON,
+    );
+  });
+
+  it.each([null, "unsigned", "unknown_key", "bad_email", "expired_key", "invalid", "VALID"])(
+    "fails a web-flow commit whose verification reason is %j, even if verified is true",
+    (verificationReason) => {
+      failsWith(withCommits([botCommit({ verificationReason })]), COMMITTER_REASON);
+    },
+  );
+
+  it("fails when verified is false even with reason valid", () => {
+    failsWith(withCommits([botCommit({ verified: false })]), COMMITTER_REASON);
   });
 
   it("fails with no commits at all", () => {
     failsWith({ ...ok(), commits: [] }, "rule 1: no commits");
+  });
+
+  it("fails when GitHub reports more commits than the list holds (250-commit cap)", () => {
+    failsWith({ ...ok(), expectedCommitCount: 251 }, "rule 1: saw 1 of 251 commits");
+  });
+
+  it("fails when the expected commit count is not provided", () => {
+    failsWith({ ...ok(), expectedCommitCount: undefined }, "rule 1: saw 1 of undefined commits");
   });
 });
 
@@ -167,6 +240,10 @@ describe("rule 3: changed paths", () => {
 
   it("fails when GitHub reports more changed files than the list holds (truncation)", () => {
     failsWith({ ...ok(), expectedFileCount: 3000 }, "rule 3: saw 2 of 3000");
+  });
+
+  it("fails when the expected file count is not provided", () => {
+    failsWith({ ...ok(), expectedFileCount: undefined }, "rule 3: saw 2 of undefined");
   });
 
   it("fails with no changed files", () => {

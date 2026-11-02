@@ -62,7 +62,10 @@ function main() {
   const pull = JSON.parse(gh([`repos/${repo}/pulls/${pr}`]));
   const commits = ghPaginated(`repos/${repo}/pulls/${pr}/commits`).map((c) => ({
     authorLogin: c.author?.login ?? null,
+    committerLogin: c.committer?.login ?? null,
+    committerEmail: c.commit?.committer?.email ?? null,
     verified: c.commit?.verification?.verified === true,
+    verificationReason: c.commit?.verification?.reason ?? null,
   }));
   const files = ghPaginated(`repos/${repo}/pulls/${pr}/files`).map((f) => ({
     filename: f.filename,
@@ -81,6 +84,7 @@ function main() {
   const result = evaluate({
     author: pull.user?.login,
     commits,
+    expectedCommitCount: pull.commits,
     files,
     expectedFileCount: pull.changed_files,
     labels,
