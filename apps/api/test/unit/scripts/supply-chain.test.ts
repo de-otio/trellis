@@ -221,6 +221,36 @@ describe("registry-host", () => {
     expect(findRegistryOffenders(forged)).toHaveLength(1);
   });
 
+  it("does not let the root's bundleDependencies excuse a top-level entry from the rule", () => {
+    const rootBundles = (inner: Entry): Lock => ({
+      lockfileVersion: 3,
+      packages: {
+        "": { name: "root", bundleDependencies: ["inner"] },
+        "node_modules/inner": inner,
+      },
+    });
+    // npm writes inBundle for a root-bundled dependency but still pins it to the registry.
+    expect(
+      findRegistryOffenders(rootBundles({ ...pkg("inner", "1.0.0")[1], inBundle: true })),
+    ).toEqual([]);
+    expect(
+      findRegistryOffenders(rootBundles({ version: "1.0.0", inBundle: true })).map(
+        (o: { reason: string }) => o.reason,
+      ),
+    ).toEqual(["missing-resolved"]);
+  });
+
+  it("flags a path that names no package", () => {
+    const empty = { version: "1.0.0", resolved: `${NPM}//-/-1.0.0.tgz`, integrity: "sha512-x" };
+    const offenders = findRegistryOffenders(
+      lock(pkg("a", "1.0.0"), ["node_modules/", empty], ["node_modules/a/node_modules/", empty]),
+    );
+    expect(offenders.map((o: { path: string; reason: string }) => [o.path, o.reason])).toEqual([
+      ["node_modules/", "empty-path-name"],
+      ["node_modules/a/node_modules/", "empty-path-name"],
+    ]);
+  });
+
   it("refuses a lockfile shape it cannot read instead of passing it", () => {
     expect(() => findRegistryOffenders({ lockfileVersion: 1, dependencies: {} })).toThrow(
       /packages/,
@@ -520,6 +550,25 @@ describe("provenance", () => {
     );
     const fetchMeta = table({ "foo@0.9.0": plain, "foo@1.0.0": attested, "foo@3.0.0": plain });
     expect(await findProvenanceDrops(base, head, fetchMeta)).toHaveLength(1);
+  });
+
+  it("checks a bundled copy of a known name, and leaves an unchanged bundled copy alone", async () => {
+    const host = (bundled: string): [string, Entry] => [
+      "node_modules/host/node_modules/foo",
+      { version: bundled, inBundle: true },
+    ];
+    const base = lock(pkg("foo", "1.0.0"), pkg("host", "1.0.0"), host("1.0.0"));
+    const fetchMeta = table({ "foo@1.0.0": attested, "foo@6.6.6": plain });
+    expect(
+      await findProvenanceDrops(
+        base,
+        lock(pkg("foo", "1.0.0"), pkg("host", "1.0.0"), host("6.6.6")),
+        fetchMeta,
+      ),
+    ).toEqual([{ name: "foo", version: "6.6.6", replaced: ["1.0.0"] }]);
+    const unchanged = table({});
+    expect(await findProvenanceDrops(base, base, unchanged)).toEqual([]);
+    expect(unchanged).not.toHaveBeenCalled();
   });
 });
 

@@ -19,13 +19,17 @@ export function hasProvenance(meta) {
   return typeof predicate === "string" && predicate.length > 0;
 }
 
-/** name -> Set of versions installed from the public registry. */
+/**
+ * name -> Set of versions installed from the public registry, plus bundled
+ * copies. A bundled copy has no `resolved` (its bytes come from the parent's
+ * tarball), but it claims a `name@version` that the registry can vouch for, so
+ * a bundle that swaps in an unattested version of a known name is caught too.
+ */
 function registryVersions(lock) {
   const byName = new Map();
   for (const { name, version, entry, isLink } of listPackages(lock)) {
-    if (isLink || version === null || !isPublicRegistryUrl(entry.resolved)) {
-      continue;
-    }
+    if (isLink || version === null) continue;
+    if (!isPublicRegistryUrl(entry.resolved) && entry.inBundle !== true) continue;
     if (!byName.has(name)) byName.set(name, new Set());
     byName.get(name).add(version);
   }
