@@ -1,58 +1,98 @@
-# Auto-merge Dependabot PRs once CI is green — except semver-majors.
+# Dependabot merge gate: enable auto-merge on a Dependabot PR only when a
+# deterministic gate passes; otherwise label it `needs-human-review` and make
+# sure auto-merge is off.
 #
-# Green CI is the gate for patch and minor bumps: there is no manual review of
-# routine dependency updates (see CONTRIBUTING.md). This enables GitHub's native
-# auto-merge on those; the merge happens only after the required status checks
-# (the CI workflow's lanes) pass. Branch protection on `main` defines those
-# required checks, and "Allow auto-merge" must be enabled on the repo.
+# The gate (scripts/dependabot-gate/evaluate.mjs, unit-tested) passes only when
+#   1. the PR author is dependabot[bot] and every commit is authored by it
+#      (with a verified signature, so a human cannot forge the author field);
+#   2. `update-type` is patch or minor (majors are migrations, not bumps: the
+#      vitest 4 -> 5 group PR #252 on 2026-09-10 is the reason);
+#   3. changed paths are only package.json, **/package.json, package-lock.json
+#      and .github/workflows/*.yml files where every changed line only moves an
+#      action pin (`uses: owner/repo@ref`, trailing version comment);
+#   4. required checks are green. NOT re-implemented here: GitHub's auto-merge
+#      and the merge queue complete only after the required status checks pass,
+#      so the gate decides whether auto-merge may be ENABLED, and GitHub decides
+#      when it fires. Required checks (ci-required, both CodeQL analyses, and
+#      the supply-chain checks once they land) are configured in the ruleset,
+#      not here;
+#   5. the PR does not carry `needs-human-review`;
+#   plus: no supply-chain flag (scripts/supply-chain/flags.mjs, W3), which is run
+#   only if that file exists on the base branch.
+# Any failure of 1, 2, 3, 5 or a flag labels the PR `needs-human-review` (added
+# to `major-bump` for majors) and disables auto-merge if it was on.
 #
-# Majors are different, and 2026-09-10 showed why. Dependabot grouped four
-# routine bumps with a vitest 4 → 5 major into one "dev-dependencies" PR (#252).
-# Vitest 5 requires Node 22 + Vite 6.4, drops `sequential` in favour of
-# `concurrent`, inlines `@vitest/runner`, makes `toHaveTextContent` strict, and
-# throws when hoistable methods sit outside the top-level scope — a migration,
-# not a bump. Green CI is not a sufficient gate for a change like that, and in
-# that instance CI was red anyway for an unrelated workspace-hoisting reason,
-# which is exactly the kind of noise that hides the real question.
+# WHY pull_request_target
+# -----------------------
+# Dependabot-triggered `pull_request` runs get a read-only GITHUB_TOKEN and no
+# secrets, so they cannot label or enable auto-merge. `pull_request_target` runs
+# the workflow from the BASE branch with a write-capable token. That is only
+# safe if no PR-controlled code ever executes, so:
+#   - the only checkout is the base commit (sparse: `scripts/`), never the head;
+#   - the PR is read as DATA through the API (commits, files, patches, and the
+#     two lockfiles via the contents API); no `npm install`, no `npm ci`, no
+#     script from the PR runs;
+#   - PR-derived text (reasons, file names) reaches shell steps through `env:`
+#     only, never `${{ }}` inside a `run:` body;
+#   - the job holding write permission (`flag`, `merge`) checks out nothing and
+#     runs no repository script; it only consumes the evaluate job's output.
 #
-# So: patch/minor auto-merge as before; majors get labelled and left for a
-# human. `update-type` is the HIGHEST semver change in the PR, so a grouped PR
-# containing a single major is flagged even when everything else in it is
-# routine — which is what #252 needed.
+# WHO MERGES is deliberately not decided here. Only the `merge` job holds the
+# merge identity. Today it uses GITHUB_TOKEN. To plug in another identity (a
+# merger GitHub App, or whatever the held-bypass test supports), change that
+# job only: add `environment:` (secret scoped to `main`), mint the token in a
+# step before "Enable auto-merge", and point GH_TOKEN at it. The gate, the
+# labelling and the tests do not change.
 #
-# Note: enabling auto-merge with the default GITHUB_TOKEN is intentional. The
-# subsequent merge to `main` is what dependabot-release.yml keys off; if the
-# release chain ever stops firing, wire a GitHub App / PAT here instead of
-# GITHUB_TOKEN so the merge push triggers downstream workflows.
+# Note: auto-merge enabled with GITHUB_TOKEN does not trigger downstream
+# workflows on the merge push; dependabot-release.yml keys off the push to
+# `main`, so if that chain stops firing, switch the merge identity as above.
 
 name: Dependabot auto-merge
 
 on:
   pull_request_target:
-    types: [opened, reopened, synchronize]
+    # `labeled` so a human adding `needs-human-review` turns auto-merge off.
+    types: [opened, reopened, synchronize, labeled]
 
-permissions:
-  contents: write
-  pull-requests: write
-  issues: write
+# Nothing by default; each job asks for what it needs.
+permissions: {}
 
-# Scoped by PR number, not github.ref: for pull_request_target, github.ref
-# resolves to the BASE branch for every PR against it, not the PR's head —
-# grouping on it cancels every open Dependabot PR's run whenever another one
-# lands close together (same bug found and fixed in skybber's
-# dependabot-handler.yml and dependabot-auto-merge.yml, 2026-07-02; this repo's
-# copy had the identical pattern, unexercised until now because trellis rarely
-# has multiple Dependabot PRs land simultaneously).
+# Scoped by PR number, not github.ref: for pull_request_target, github.ref is
+# the BASE branch for every PR, so grouping on it serialises all Dependabot PRs
+# (and with cancel-in-progress it cancelled them, see the skybber 2026-07-02
+# note). No cancel-in-progress: Dependabot labels each new PR several times,
+# and a `labeled` run that its own `if` skips would otherwise cancel the
+# `opened` run that matters. A stale run is harmless: gate.mjs rejects a run
+# whose head is no longer the PR head, and the merge is pinned to that head.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
+  cancel-in-progress: false
 
 jobs:
-  auto-merge:
+  evaluate:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    if: >-
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      (github.event.action != 'labeled' ||
+       github.event.label.name == 'needs-human-review')
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      pass: ${{ steps.gate.outputs.pass }}
+      result: ${{ steps.gate.outputs.result }}
     steps:
+      # Base commit only. For pull_request_target the default ref is the base
+      # branch; it is pinned explicitly so nobody edits this to the PR head.
+      - name: Check out the BASE branch scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          sparse-checkout: scripts
+          persist-credentials: false
+
       # v3 is the first major whose runs.using is node24; v2 is still node20.
       - name: Fetch Dependabot metadata
         id: meta
@@ -60,33 +100,127 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Enable auto-merge (squash)
-        if: steps.meta.outputs.update-type != 'version-update:semver-major'
+      # Supply-chain flags (W3). The script is the base branch's own copy and
+      # reads the two lockfiles as JSON data. Absent before W3 lands: then there
+      # are no flags to raise, and this PR works either way. A script that runs
+      # but fails is itself a flag (fail closed).
+      - name: Supply-chain flags
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
-        run: gh pr merge --auto --squash "$PR_URL"
-
-      # `gh pr edit --add-label` fails on a label that does not exist, so
-      # `needs-human-review` and `major-bump` must stay present on the repo.
-      - name: Flag semver-majors for a human
-        if: steps.meta.outputs.update-type == 'version-update:semver-major'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          DEPS: ${{ steps.meta.outputs.dependency-names }}
-          # A block scalar so the comment body carries no leading indentation:
-          # four leading spaces would render the whole thing as a code block.
-          BODY: |
-            Not auto-merging: this PR carries a **semver-major** update.
-
-            Majors are migrations rather than bumps, so green CI is not a
-            sufficient gate — review the upstream breaking changes and merge by
-            hand. If the major is bundled with routine updates, closing this PR
-            lets Dependabot regenerate the group without it.
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          gh pr edit "$PR_URL" --add-label needs-human-review --add-label major-bump
+          set -euo pipefail
+          if [ ! -f scripts/supply-chain/flags.mjs ]; then
+            echo '{"flags":[]}' > "$RUNNER_TEMP/flags.json"
+            echo "scripts/supply-chain/flags.mjs not on base; no supply-chain flags raised"
+            exit 0
+          fi
+          # Compare against the merge base, not the tip: a PR that is behind
+          # `main` would otherwise show main's own newer changes as diff.
+          MERGE_BASE=$(gh api "repos/$REPO/compare/$BASE_SHA...$HEAD_SHA" --jq .merge_base_commit.sha)
+          fetch_lock() {
+            gh api -H "Accept: application/vnd.github.raw" \
+              "repos/$REPO/contents/package-lock.json?ref=$1" > "$2"
+          }
+          fetch_lock "$MERGE_BASE" "$RUNNER_TEMP/base-lock.json"
+          fetch_lock "$HEAD_SHA" "$RUNNER_TEMP/head-lock.json"
+          if node scripts/supply-chain/flags.mjs "$RUNNER_TEMP/base-lock.json" "$RUNNER_TEMP/head-lock.json" > "$RUNNER_TEMP/flags.json"; then
+            :
+          else
+            echo '{"flags":[{"package":"(supply-chain check)","reason":"flags-script-failed"}]}' > "$RUNNER_TEMP/flags.json"
+          fi
+
+      - name: Evaluate the gate
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
+        run: |
+          set -euo pipefail
+          node scripts/dependabot-gate/gate.mjs \
+            --repo "$REPO" --pr "$PR_NUMBER" --expected-head "$HEAD_SHA" \
+            --update-type "$UPDATE_TYPE" --flags-file "$RUNNER_TEMP/flags.json" \
+            > "$RUNNER_TEMP/gate.json"
           {
-            printf '%s\n' "$BODY"
-            printf 'Updated: %s\n' "$DEPS"
-          } | gh pr comment "$PR_URL" --body-file -
+            echo "pass=$(jq -r .pass "$RUNNER_TEMP/gate.json")"
+            echo "result=$(jq -c . "$RUNNER_TEMP/gate.json")"
+          } >> "$GITHUB_OUTPUT"
+          jq -r '.reasons[]' "$RUNNER_TEMP/gate.json" | sed 's/^/gate: /' || true
+
+  # Gate failed (or could not run): label, explain once, make sure auto-merge is
+  # off. No checkout, no PR code. `contents: write` is what GitHub requires to
+  # toggle auto-merge with GITHUB_TOKEN.
+  flag:
+    needs: evaluate
+    # always(): an evaluate job that ERRORED must still switch auto-merge off.
+    # A skipped (not a Dependabot PR) or cancelled run decides nothing.
+    if: ${{ always() && contains(fromJSON('["success","failure"]'), needs.evaluate.result) && needs.evaluate.outputs.pass != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+      PR_URL: ${{ github.event.pull_request.html_url }}
+      RESULT: ${{ needs.evaluate.outputs.result }}
+    steps:
+      - name: Turn auto-merge off if it is on
+        run: |
+          set -euo pipefail
+          if [ "$(gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest != null')" = "true" ]; then
+            gh pr merge --disable-auto "$PR_URL"
+          fi
+
+      # No RESULT means the gate itself errored (API failure, bad lockfile):
+      # auto-merge is off and the run is red, but a transient error is not a
+      # reason to put a sticky label on the PR.
+      - name: Label and explain
+        if: ${{ needs.evaluate.outputs.result != '' }}
+        run: |
+          set -euo pipefail
+          ensure_label() {
+            gh api "repos/$REPO/labels/$1" --silent 2>/dev/null ||
+              gh label create "$1" --repo "$REPO" --color "$2" --description "$3"
+          }
+          ensure_label needs-human-review B60205 "Not eligible for automated merge; a human must review"
+          gh pr edit "$PR_URL" --add-label needs-human-review
+          if [ "$(jq -r .updateType <<<"$RESULT")" = "version-update:semver-major" ]; then
+            ensure_label major-bump D93F0B "Dependency major version bump"
+            gh pr edit "$PR_URL" --add-label major-bump
+          fi
+          if [ "$(jq -r .alreadyLabeled <<<"$RESULT")" != "true" ]; then
+            {
+              echo "Not auto-merging: the merge gate did not pass."
+              echo
+              jq -r '.reasons[] | "- " + .' <<<"$RESULT"
+              echo
+              echo "Review and merge by hand, or close the PR so Dependabot regenerates it."
+            } | gh pr comment "$PR_URL" --body-file -
+          fi
+
+  # Gate passed: the ONLY job that holds the merge identity (see header).
+  merge:
+    needs: evaluate
+    if: ${{ needs.evaluate.outputs.pass == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      # `--match-head-commit` binds the auto-merge request to the exact commit
+      # that was evaluated: a later push cannot ride on this decision.
+      - name: Enable auto-merge (squash)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: gh pr merge --auto --squash --match-head-commit "$HEAD_SHA" "$PR_URL"
