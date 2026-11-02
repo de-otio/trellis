@@ -523,6 +523,97 @@ jobs:
           AWS_SECRET_ACCESS_KEY: test
 
   # ===========================================================================
+  # Dependency supply-chain checks (plan W3). Reports on EVERY run, so it is
+  # safe to name in `ci-required`: the job is never path-filtered or skipped.
+  # Only the expensive steps are conditional, and a skipped step is a green job.
+  #
+  #   - npm-config + registry-host: no tracked .npmrc / npm-shrinkwrap.json, and
+  #     every installable lockfile entry has the `resolved` (on registry.npmjs.org,
+  #     matching its own path) and `integrity` npm would have written. Need no
+  #     install, take under a second, always run, and run before any install.
+  #   - npm audit signatures: verifies registry signatures and provenance of the
+  #     INSTALLED tree, so it needs node_modules (`npm ci --ignore-scripts`: no
+  #     install script of an untrusted lockfile runs here). Exit 1 on any invalid
+  #     or missing signature. Runs only when package-lock.json changed.
+  #   - flags.mjs: new packages, new install scripts and dropped provenance against the base
+  #     lockfile. Informational here (log only): labelling a PR is the merge
+  #     gate's job, because a Dependabot pull_request token is read-only.
+  #
+  # The checks run from the checkout under test, so a PR that edits
+  # scripts/supply-chain/ is judged by its own edit. Dependabot PRs cannot
+  # (the merge gate only accepts lockfile, package.json and action-pin changes);
+  # human PRs that touch these files are reviewed like any other code.
+  # ===========================================================================
+  supply-chain:
+    name: supply-chain
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      # Beats any project-level .npmrc for the default registry, so `npm ci` and
+      # `npm audit signatures` cannot be pointed elsewhere by a file in the PR.
+      # The step below refuses tracked .npmrc files outright, which also covers
+      # scoped registries and other settings this variable does not.
+      NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Depth 2 so HEAD^1 (the base tip, on pull_request and merge_group)
+          # exists for the lockfile comparison.
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      # Both checks below must stay BEFORE `npm ci`: a git or file dependency
+      # (rejected by registry-host) can run its `prepare` script at install, and
+      # a tracked .npmrc changes what the install does.
+      - name: No tracked .npmrc or npm-shrinkwrap.json
+        timeout-minutes: 2
+        run: node scripts/supply-chain/npm-config.mjs
+
+      - name: Lockfile resolves only from registry.npmjs.org, pinned per entry
+        timeout-minutes: 2
+        run: node scripts/supply-chain/registry-host.mjs package-lock.json
+
+      - name: Did package-lock.json change?
+        id: lock
+        run: |
+          set -euo pipefail
+          # Any failure to diff (no parent commit) counts as "changed".
+          if git diff --quiet HEAD^1 HEAD -- package-lock.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "package-lock.json is unchanged: skipping install, signature audit and flags."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install dependencies (no install scripts)
+        if: steps.lock.outputs.changed == 'true'
+        timeout-minutes: 5
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Verify registry signatures and provenance
+        if: steps.lock.outputs.changed == 'true'
+        timeout-minutes: 5
+        run: npm audit signatures
+
+      - name: Supply-chain flags vs base (informational)
+        if: steps.lock.outputs.changed == 'true' && github.event_name == 'pull_request'
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          git show HEAD^1:package-lock.json > "$RUNNER_TEMP/base-package-lock.json"
+          if ! node scripts/supply-chain/flags.mjs "$RUNNER_TEMP/base-package-lock.json" package-lock.json; then
+            echo "::warning::flags.mjs could not run; the merge gate treats that as not safe to merge unattended."
+          fi
+
+  # ===========================================================================
   # D1 — the aggregating gate.
   #
   # This job exists so the repo's required-check list can stay STABLE while the
@@ -566,6 +657,7 @@ jobs:
       - schema-drift
       - schema
       - integration
+      - supply-chain
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -581,6 +673,7 @@ jobs:
             schema-drift=${{ needs.schema-drift.result }}
             schema=${{ needs.schema.result }}
             integration=${{ needs.integration.result }}
+            supply-chain=${{ needs.supply-chain.result }}
         run: |
           set -euo pipefail
           echo "results: $RESULTS"

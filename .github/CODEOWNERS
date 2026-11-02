@@ -66,3 +66,7 @@
 /GOVERNANCE.md          @de-otio/founders
 /LICENSE                @de-otio/founders
 /CLA.md                 @de-otio/founders
+# The dependency supply-chain checks and their tests: a change here changes what
+# the merge gate trusts about a Dependabot bump.
+/scripts/supply-chain/  @de-otio/founders
+/apps/api/test/unit/scripts/supply-chain.test.ts  @de-otio/founders
