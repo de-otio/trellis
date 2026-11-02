@@ -16,7 +16,7 @@
 # look like one."
 #
 # The compensating supply-chain review this repo used to call
-# (dependabot-handler.yml → the org's `dependabot-claude-review.yml`) was
+# (the former dependabot-handler.yml → the org's `dependabot-claude-review.yml`) was
 # rewritten in 2026-08 upstream to drop the Claude/Bedrock review entirely
 # (see de-otio/.github's workflow header) — that reusable workflow is now
 # plain semver auto-merge, so re-pointing at it is not an available fix.
