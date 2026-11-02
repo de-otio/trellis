@@ -224,7 +224,10 @@ describe("registry-host", () => {
   it("does not let the root's bundleDependencies excuse a top-level entry from the rule", () => {
     const rootBundles = (inner: Entry): Lock => ({
       lockfileVersion: 3,
-      packages: { "": { name: "root", bundleDependencies: ["inner"] }, "node_modules/inner": inner },
+      packages: {
+        "": { name: "root", bundleDependencies: ["inner"] },
+        "node_modules/inner": inner,
+      },
     });
     // npm writes inBundle for a root-bundled dependency but still pins it to the registry.
     expect(
@@ -557,7 +560,11 @@ describe("provenance", () => {
     const base = lock(pkg("foo", "1.0.0"), pkg("host", "1.0.0"), host("1.0.0"));
     const fetchMeta = table({ "foo@1.0.0": attested, "foo@6.6.6": plain });
     expect(
-      await findProvenanceDrops(base, lock(pkg("foo", "1.0.0"), pkg("host", "1.0.0"), host("6.6.6")), fetchMeta),
+      await findProvenanceDrops(
+        base,
+        lock(pkg("foo", "1.0.0"), pkg("host", "1.0.0"), host("6.6.6")),
+        fetchMeta,
+      ),
     ).toEqual([{ name: "foo", version: "6.6.6", replaced: ["1.0.0"] }]);
     const unchanged = table({});
     expect(await findProvenanceDrops(base, base, unchanged)).toEqual([]);
