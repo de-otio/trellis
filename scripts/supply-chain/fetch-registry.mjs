@@ -62,7 +62,7 @@ export async function fetchVersionMeta(name, version, fetchImpl = fetch) {
   if (!VERSION.test(version) || version.length > 128) {
     throw new Error(`refusing to look up odd version: ${name}@${version}`);
   }
-  const url = `${REGISTRY_ORIGIN}/${name.replace("/", "%2F")}/${encodeURIComponent(version)}`;
+  const url = `${REGISTRY_ORIGIN}/${name.replaceAll("/", "%2F")}/${encodeURIComponent(version)}`;
 
   let lastError;
   for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
