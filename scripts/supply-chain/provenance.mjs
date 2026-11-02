@@ -33,10 +33,12 @@ function registryVersions(lock) {
 }
 
 /**
- * The version changes between two lockfiles: for each package present in both
- * whose version set changed, the versions that went away and the ones that
- * arrived. A brand-new package, or an extra copy at the same version, is not a
- * version change (install-scripts covers new packages).
+ * For each package the base lockfile already had: every version the base had
+ * (`baseVersions`) and every version the head has that the base did not
+ * (`added`). A version that arrives next to an unchanged one (a new nested
+ * copy) counts as much as a replacement: it is a new artifact under a name the
+ * base trusted. A brand-new name has nothing to compare with (new-packages.mjs
+ * flags it).
  */
 export function changedVersions(baseLock, headLock) {
   const base = registryVersions(baseLock);
@@ -45,25 +47,24 @@ export function changedVersions(baseLock, headLock) {
   for (const [name, headSet] of [...head].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
     const baseSet = base.get(name);
     if (!baseSet) continue;
-    const removed = [...baseSet].filter((v) => !headSet.has(v)).sort();
     const added = [...headSet].filter((v) => !baseSet.has(v)).sort();
-    if (removed.length > 0 && added.length > 0) {
-      changes.push({ name, removed, added });
+    if (added.length > 0) {
+      changes.push({ name, baseVersions: [...baseSet].sort(), added });
     }
   }
   return changes;
 }
 
 /**
- * `name@version` of every new version without provenance whose replaced
- * version had it. Lookups are sequential and lazy: the new version is only
- * fetched when an old one was attested.
+ * `name@version` of every added version without provenance where ANY version
+ * the base had of that name was attested. Lookups are sequential and lazy: the
+ * added versions are only fetched when a base version was attested.
  */
 export async function findProvenanceDrops(baseLock, headLock, fetchMeta) {
   const dropped = [];
-  for (const { name, removed, added } of changedVersions(baseLock, headLock)) {
+  for (const { name, baseVersions, added } of changedVersions(baseLock, headLock)) {
     let previouslyAttested = false;
-    for (const v of removed) {
+    for (const v of baseVersions) {
       if (hasProvenance(await fetchMeta(name, v))) {
         previouslyAttested = true;
         break;
@@ -72,7 +73,7 @@ export async function findProvenanceDrops(baseLock, headLock, fetchMeta) {
     if (!previouslyAttested) continue;
     for (const v of added) {
       if (!hasProvenance(await fetchMeta(name, v))) {
-        dropped.push({ name, version: v, replaced: removed });
+        dropped.push({ name, version: v, replaced: baseVersions });
       }
     }
   }

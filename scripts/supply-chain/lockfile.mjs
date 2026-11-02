@@ -36,6 +36,15 @@ export function isPublicRegistryUrl(resolved) {
   );
 }
 
+/**
+ * The tarball URL npm records for `name@version` on the public registry:
+ * `https://registry.npmjs.org/@s/pkg/-/pkg-1.2.3.tgz`.
+ */
+export function expectedTarballUrl(name, version) {
+  const base = name.slice(name.lastIndexOf("/") + 1);
+  return `${REGISTRY_PREFIX}${name}/-/${base}-${version}.tgz`;
+}
+
 /** `node_modules/a/node_modules/@s/b` -> `@s/b`; null when there is no such segment. */
 export function nameFromPath(path) {
   const marker = "node_modules/";
@@ -50,8 +59,15 @@ export function nameFromPath(path) {
  * which has no `packages` map): a check that silently saw zero packages would
  * pass on exactly the file it cannot read.
  *
- * `name` prefers the entry's own `name` (set for `npm:` aliases), then the
- * path, then the path itself (workspace source directories).
+ * Identity. `name` is what the package is called on the registry. The entry's
+ * own `name` field exists only for `npm:` aliases (`node_modules/alias` that is
+ * really `real-pkg`), and the lockfile is attacker-controlled, so that field is
+ * believed only when `resolved` corroborates it: the tarball URL must be the
+ * one `entry.name@version` would have. Otherwise identity falls back to the
+ * node_modules PATH (`pathName`), which npm itself uses. A spoofed `name` can
+ * therefore never make one package pass as another, and registry-host.mjs
+ * additionally fails the mismatch outright. Workspace source directories have
+ * no node_modules segment; their `name` is the directory path.
  */
 export function listPackages(lock) {
   if (
@@ -69,10 +85,17 @@ export function listPackages(lock) {
     if (typeof entry !== "object" || entry === null) {
       throw new Error(`malformed lockfile entry: ${path}`);
     }
+    const pathName = nameFromPath(path);
+    const version = typeof entry.version === "string" ? entry.version : null;
+    const aliasCorroborated =
+      typeof entry.name === "string" &&
+      version !== null &&
+      entry.resolved === expectedTarballUrl(entry.name, version);
     out.push({
       path,
-      name: typeof entry.name === "string" ? entry.name : (nameFromPath(path) ?? path),
-      version: typeof entry.version === "string" ? entry.version : null,
+      pathName,
+      name: aliasCorroborated ? entry.name : (pathName ?? path),
+      version,
       isLink: entry.link === true,
       entry,
     });

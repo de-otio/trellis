@@ -7,6 +7,15 @@
 // Comparison is by package NAME, not name@version: esbuild already has an
 // install script, so esbuild 0.28.2 -> 0.28.3 is not news, while a package the
 // base lockfile never had with a script is. Pure: takes two parsed lockfiles.
+//
+// KNOWN LIMIT. Because the check is name-keyed, a package that ALREADY has an
+// install script (about six in this tree today: esbuild, fsevents, prisma, ...)
+// can ship a new version with a different or malicious script without being
+// flagged here. The lockfile records only that a script exists, not what it
+// does. For those packages the remaining signals are provenance.mjs (a version
+// that loses its attestation) and a human reading the bump. A brand-new
+// package is caught separately by new-packages.mjs, whether or not it has a
+// script.
 
 import { listPackages } from "./lockfile.mjs";
 

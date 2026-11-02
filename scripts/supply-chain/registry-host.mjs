@@ -1,38 +1,96 @@
 #!/usr/bin/env node
-// Fail when any `resolved` URL in package-lock.json is not on the public npm
-// registry.
+// Fail when package-lock.json resolves anything from somewhere other than the
+// public npm registry, or when an installable entry is not pinned the way npm
+// pins a registry package.
 //
 // WHY THIS EXISTS
 // ---------------
-// `npm install` through a private registry (a corporate artifact proxy, a
-// company mirror) bakes that registry's host into every `resolved` field of the
-// lockfile. The lockfile is committed, so a private hostname leaks into a
-// public repo and every consumer's `npm ci` starts talking to a host that is
-// not theirs. Nothing else in CI looks at those fields.
+// 1. `npm install` through a private registry (a corporate artifact proxy, a
+//    company mirror) bakes that registry's host into every `resolved` field of
+//    the lockfile. The lockfile is committed, so a private hostname leaks into a
+//    public repo and every consumer's `npm ci` starts talking to a host that is
+//    not theirs. Nothing else in CI looks at those fields.
+// 2. The lockfile is attacker-controlled input to every other supply-chain
+//    check. An entry with no `resolved` or no `integrity` is skipped by
+//    `npm audit signatures`, and an entry whose `name` field disagrees with its
+//    path can pass as another package. One canonical rule closes both: an
+//    installable entry carries exactly the `resolved` and `integrity` npm would
+//    have written for its own path.
 //
-// Rule: every non-link entry that has a `resolved` must start with
-// `https://registry.npmjs.org/`. Entries without `resolved` (the root, bundled
-// dependencies, workspace source directories) are fine, and so are `link: true`
-// entries, whose `resolved` is a workspace path rather than a URL.
+// THE RULE
+// --------
+// Link entries (`link: true`, whose `resolved` is a workspace path) and
+// workspace source directories (a path with no `node_modules/` segment) are
+// exempt. Every other entry must have:
+//   - `resolved` that is a public-registry URL (`https://registry.npmjs.org/…`),
+//     and, unless the entry is `inBundle`, exactly
+//     `https://registry.npmjs.org/<name>/-/<basename>-<version>.tgz`, where
+//     <name> comes from the node_modules PATH (the last `node_modules/`
+//     segment, scoped names included). An `npm:` alias is the one case where
+//     `entry.name` differs from the path; there <name> is `entry.name`, and it
+//     is `resolved` that has to agree, so a lone spoofed `name` never passes;
+//   - `integrity`, a non-empty string.
+// An `inBundle` entry is extracted from its parent's tarball and has no
+// `resolved`; it is accepted only if the parent entry declares bundled
+// dependencies that include it.
+//
+// A git or file dependency fails here, before `npm ci` could run its `prepare`.
 //
 // Usage: node scripts/supply-chain/registry-host.mjs [package-lock.json]
 // Exit:  0 clean, 1 offenders found, 2 could not read or parse the lockfile.
 
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { isPublicRegistryUrl, listPackages } from "./lockfile.mjs";
+import { expectedTarballUrl, isPublicRegistryUrl, listPackages } from "./lockfile.mjs";
+
+function declaresBundled(lock, path, pathName) {
+  const parentPath = path
+    .slice(0, path.length - "node_modules/".length - pathName.length)
+    .replace(/\/$/, "");
+  if (!Object.hasOwn(lock.packages, parentPath)) return false;
+  const parent = lock.packages[parentPath];
+  const declared = parent.bundleDependencies ?? parent.bundledDependencies;
+  return declared === true || (Array.isArray(declared) && declared.includes(pathName));
+}
 
 /**
- * Entries whose `resolved` is present but not a public-registry tarball URL.
- * Pure: takes the parsed lockfile, returns `{ path, resolved }[]`.
+ * Entries that break the rule above, as `{ path, reason, resolved }[]` with
+ * `reason` one of: `resolved-not-public-registry`, `missing-resolved`,
+ * `missing-integrity`, `missing-version`, `resolved-mismatch`,
+ * `unbundled-inbundle`. Pure: takes the parsed lockfile.
  */
 export function findRegistryOffenders(lock) {
   const offenders = [];
-  for (const { path, entry, isLink } of listPackages(lock)) {
+  const add = (path, reason, entry) => offenders.push({ path, reason, resolved: entry.resolved });
+
+  for (const { path, pathName, version, entry, isLink } of listPackages(lock)) {
     if (isLink) continue;
-    if (!("resolved" in entry)) continue;
-    if (!isPublicRegistryUrl(entry.resolved)) {
-      offenders.push({ path, resolved: entry.resolved });
+    const hasResolved = "resolved" in entry;
+
+    if (hasResolved && !isPublicRegistryUrl(entry.resolved)) {
+      add(path, "resolved-not-public-registry", entry);
+      continue;
+    }
+    if (pathName === null) continue; // workspace source directory
+
+    if (entry.inBundle === true) {
+      if (!declaresBundled(lock, path, pathName)) add(path, "unbundled-inbundle", entry);
+      continue;
+    }
+    if (!hasResolved) {
+      add(path, "missing-resolved", entry);
+      continue;
+    }
+    if (typeof entry.integrity !== "string" || entry.integrity === "") {
+      add(path, "missing-integrity", entry);
+    }
+    if (version === null) {
+      add(path, "missing-version", entry);
+      continue;
+    }
+    const tarballName = typeof entry.name === "string" ? entry.name : pathName;
+    if (entry.resolved !== expectedTarballUrl(tarballName, version)) {
+      add(path, "resolved-mismatch", entry);
     }
   }
   return offenders;
@@ -48,17 +106,17 @@ function main(argv) {
     return 2;
   }
   for (const o of offenders) {
-    console.log(`${o.path}  resolved=${JSON.stringify(o.resolved)}`);
+    console.log(`${o.path}  ${o.reason}  resolved=${JSON.stringify(o.resolved)}`);
   }
   if (offenders.length > 0) {
     console.log(
-      `\nregistry-host: ${offenders.length} lockfile entr${offenders.length === 1 ? "y does" : "ies do"} not resolve from https://registry.npmjs.org/.\n` +
-        "Regenerate the lockfile against the public registry:\n" +
+      `\nregistry-host: ${offenders.length} lockfile entr${offenders.length === 1 ? "y breaks" : "ies break"} the registry rule (see header of scripts/supply-chain/registry-host.mjs).\n` +
+        "If the host is wrong, regenerate against the public registry:\n" +
         "  npm install --registry=https://registry.npmjs.org/ --package-lock-only",
     );
     return 1;
   }
-  console.log(`registry-host: ${file}: every resolved URL is on registry.npmjs.org.`);
+  console.log(`registry-host: ${file}: every installable entry resolves from registry.npmjs.org.`);
   return 0;
 }
 

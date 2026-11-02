@@ -527,13 +527,15 @@ jobs:
   # safe to name in `ci-required`: the job is never path-filtered or skipped.
   # Only the expensive steps are conditional, and a skipped step is a green job.
   #
-  #   - registry-host:  every `resolved` in package-lock.json is on
-  #     registry.npmjs.org. Needs no install, takes under a second, always runs.
+  #   - npm-config + registry-host: no tracked .npmrc / npm-shrinkwrap.json, and
+  #     every installable lockfile entry has the `resolved` (on registry.npmjs.org,
+  #     matching its own path) and `integrity` npm would have written. Need no
+  #     install, take under a second, always run, and run before any install.
   #   - npm audit signatures: verifies registry signatures and provenance of the
   #     INSTALLED tree, so it needs node_modules (`npm ci --ignore-scripts`: no
   #     install script of an untrusted lockfile runs here). Exit 1 on any invalid
   #     or missing signature. Runs only when package-lock.json changed.
-  #   - flags.mjs: new install scripts and dropped provenance against the base
+  #   - flags.mjs: new packages, new install scripts and dropped provenance against the base
   #     lockfile. Informational here (log only): labelling a PR is the merge
   #     gate's job, because a Dependabot pull_request token is read-only.
   #
@@ -548,6 +550,12 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+    env:
+      # Beats any project-level .npmrc for the default registry, so `npm ci` and
+      # `npm audit signatures` cannot be pointed elsewhere by a file in the PR.
+      # The step below refuses tracked .npmrc files outright, which also covers
+      # scoped registries and other settings this variable does not.
+      NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -562,7 +570,14 @@ jobs:
           node-version: "22"
           cache: "npm"
 
-      - name: Lockfile resolves only from registry.npmjs.org
+      # Both checks below must stay BEFORE `npm ci`: a git or file dependency
+      # (rejected by registry-host) can run its `prepare` script at install, and
+      # a tracked .npmrc changes what the install does.
+      - name: No tracked .npmrc or npm-shrinkwrap.json
+        timeout-minutes: 2
+        run: node scripts/supply-chain/npm-config.mjs
+
+      - name: Lockfile resolves only from registry.npmjs.org, pinned per entry
         timeout-minutes: 2
         run: node scripts/supply-chain/registry-host.mjs package-lock.json
 
