@@ -5,16 +5,16 @@
 # is exactly the thing the daily posture check exists to notice.
 #
 # ---------------------------------------------------------------------------
-# WHAT THIS IS AND IS NOT, TODAY
+# WHAT THIS IS, TODAY
 # ---------------------------------------------------------------------------
-# The rulesets do NOT require code-owner review, because the org has one filled
-# seat: catch-all CODEOWNERS + required code-owner review + bypass_actors:[] +
-# one human = human-authored pull requests become unmergeable, and the fix
-# reached for under deadline pressure is a bypass actor. See dot-work
-# rulesets/README.md, "The N=1 policy". So this file DEFINES ownership and does
-# not yet REQUIRE anything — committed now so that turning the requirement on
-# later is one setting rather than an archaeology exercise, and so the daily
-# assertion has something to assert.
+# The `byo-full-public` ruleset REQUIRES one approving code-owner review, from
+# someone other than the last pusher (the D5 "N=1" policy; see dot-work
+# rulesets/README.md, "The N=1 policy"). This file is what gives that
+# requirement something to bite on, and the daily assertion checks it exists.
+# The org's one filled seat merges its own pull requests through the recorded
+# `OrganizationAdmin` bypass (pull requests only), not through a bot owner.
+# Consequence: a bot-authored pull request, Dependabot's included, has no
+# approver by default, so its auto-merge waits until a founder approves it.
 #
 # ---------------------------------------------------------------------------
 # THREE THINGS THAT MUST NOT CHANGE
