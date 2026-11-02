@@ -32,7 +32,12 @@
 //   - `integrity`, a non-empty string.
 // An `inBundle` entry is extracted from its parent's tarball and has no
 // `resolved`; it is accepted only if the parent entry declares bundled
-// dependencies that include it.
+// dependencies that include it. The root project never counts as that parent:
+// npm also writes `inBundle` for the root's own bundleDependencies, but those
+// install from the registry (Arborist's `inDepBundle` excludes the root), so a
+// top-level `inBundle` entry gets the full rule above, `resolved` included.
+// A path whose last segment is empty (`node_modules/`) names no package and
+// always fails.
 //
 // A git or file dependency fails here, before `npm ci` could run its `prepare`.
 //
@@ -43,10 +48,11 @@ import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { expectedTarballUrl, isPublicRegistryUrl, listPackages } from "./lockfile.mjs";
 
-function declaresBundled(lock, path, pathName) {
-  const parentPath = path
-    .slice(0, path.length - "node_modules/".length - pathName.length)
-    .replace(/\/$/, "");
+function parentPathOf(path, pathName) {
+  return path.slice(0, path.length - "node_modules/".length - pathName.length).replace(/\/$/, "");
+}
+
+function declaresBundled(lock, parentPath, pathName) {
   if (!Object.hasOwn(lock.packages, parentPath)) return false;
   const parent = lock.packages[parentPath];
   const declared = parent.bundleDependencies ?? parent.bundledDependencies;
@@ -57,7 +63,7 @@ function declaresBundled(lock, path, pathName) {
  * Entries that break the rule above, as `{ path, reason, resolved }[]` with
  * `reason` one of: `resolved-not-public-registry`, `missing-resolved`,
  * `missing-integrity`, `missing-version`, `resolved-mismatch`,
- * `unbundled-inbundle`. Pure: takes the parsed lockfile.
+ * `unbundled-inbundle`, `empty-path-name`. Pure: takes the parsed lockfile.
  */
 export function findRegistryOffenders(lock) {
   const offenders = [];
@@ -72,9 +78,14 @@ export function findRegistryOffenders(lock) {
       continue;
     }
     if (pathName === null) continue; // workspace source directory
+    if (pathName === "") {
+      add(path, "empty-path-name", entry);
+      continue;
+    }
 
-    if (entry.inBundle === true) {
-      if (!declaresBundled(lock, path, pathName)) add(path, "unbundled-inbundle", entry);
+    const parentPath = parentPathOf(path, pathName);
+    if (entry.inBundle === true && parentPath !== "") {
+      if (!declaresBundled(lock, parentPath, pathName)) add(path, "unbundled-inbundle", entry);
       continue;
     }
     if (!hasResolved) {
