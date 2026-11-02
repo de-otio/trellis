@@ -23,7 +23,10 @@
 #   plus: no supply-chain flag (scripts/supply-chain/flags.mjs, W3), which is run
 #   only if that file exists on the base branch.
 # Any failure of 1, 2, 3, 5 or a flag labels the PR `needs-human-review` (added
-# to `major-bump` for majors) and disables auto-merge if it was on.
+# to `major-bump` for majors) and disables auto-merge if it was on. A push to a
+# Dependabot PR by anyone other than Dependabot skips the evaluation and does the
+# same at once (writers should comment `@dependabot rebase`, not click "Update
+# branch": that commit would fail rule 1, which is safe but noisy).
 #
 # WHY pull_request_target
 # -----------------------
@@ -69,7 +72,8 @@ permissions: {}
 # `opened` run that matters. A stale run cannot enable auto-merge on a newer
 # head: gate.mjs rejects a run whose head is no longer the PR head, and
 # `--match-head-commit` makes the enable request fail the same way. Turning
-# auto-merge OFF after a push is the `synchronize` run's job (see `merge`).
+# auto-merge OFF after a push is the `synchronize` run's job (see `merge`);
+# note that these runs queue per PR, one at a time.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
   cancel-in-progress: false
@@ -81,7 +85,9 @@ jobs:
     if: >-
       github.event.pull_request.user.login == 'dependabot[bot]' &&
       (github.event.action != 'labeled' ||
-       github.event.label.name == 'needs-human-review')
+       github.event.label.name == 'needs-human-review') &&
+      (github.event.action != 'synchronize' ||
+       github.event.sender.login == 'dependabot[bot]')
     permissions:
       contents: read
       pull-requests: read
@@ -163,8 +169,20 @@ jobs:
   flag:
     needs: evaluate
     # always(): an evaluate job that ERRORED must still switch auto-merge off.
-    # A skipped (not a Dependabot PR) or cancelled run decides nothing.
-    if: ${{ always() && contains(fromJSON('["success","failure"]'), needs.evaluate.result) && needs.evaluate.outputs.pass != 'true' }}
+    # Two ways in:
+    #   - evaluate ran (success or failure) and did not pass;
+    #   - evaluate was skipped on purpose because someone other than Dependabot
+    #     pushed to a Dependabot PR: auto-merge goes off at once, unevaluated.
+    # Any other skipped (not a Dependabot PR) or cancelled run decides nothing.
+    # The second clause names the PR author too, so a human's push to a human's
+    # PR never reaches this job.
+    if: >-
+      ${{ always() && (
+      (contains(fromJSON('["success","failure"]'), needs.evaluate.result) &&
+       needs.evaluate.outputs.pass != 'true') ||
+      (github.event.action == 'synchronize' &&
+       github.event.pull_request.user.login == 'dependabot[bot]' &&
+       github.event.sender.login != 'dependabot[bot]')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -175,6 +193,7 @@ jobs:
       REPO: ${{ github.repository }}
       PR_URL: ${{ github.event.pull_request.html_url }}
       RESULT: ${{ needs.evaluate.outputs.result }}
+      SENDER: ${{ github.event.sender.login }}
     steps:
       - name: Turn auto-merge off if it is on
         run: |
@@ -209,6 +228,23 @@ jobs:
             gh pr edit "$PR_URL" --add-label major-bump
           fi
 
+      # The skipped-evaluate path: a push by someone other than Dependabot. Auto-merge
+      # is already off (first step); label so it stays out of automation. SENDER
+      # reaches the shell through `env:`, and a GitHub login is [A-Za-z0-9-] plus
+      # a `[bot]` suffix, but it is still never interpolated into the script.
+      - name: Explain and label (pushed by someone other than Dependabot)
+        if: ${{ needs.evaluate.result == 'skipped' }}
+        run: |
+          set -euo pipefail
+          if [ "$(gh pr view "$PR_URL" --json labels --jq '[.labels[].name] | index("needs-human-review") != null')" != "true" ]; then
+            printf '%s\n' \
+              "Not auto-merging: pushed by $SENDER, not Dependabot." \
+              "" \
+              "Review and merge by hand. To refresh a Dependabot PR, comment \`@dependabot rebase\` rather than using the Update branch button." |
+              gh pr comment "$PR_URL" --body-file -
+          fi
+          gh pr edit "$PR_URL" --add-label needs-human-review
+
   # Gate passed: the ONLY job that holds the merge identity (see header).
   merge:
     needs: evaluate
@@ -223,11 +259,17 @@ jobs:
       # already moved past the evaluated commit. It does NOT bind the merge to
       # that commit afterwards: GitHub keeps auto-merge enabled when a user with
       # write access pushes (it auto-disables only for pushes by users without
-      # write access). What stops a later push is the `synchronize` run's `flag`
-      # job, which turns auto-merge off. The assumption is therefore timing: a
-      # push can ride on this decision for the length of one gate run, and only
-      # if every required check also goes green on the pushed commit in that
-      # window (the checks restart on the new head).
+      # write access). What stops a later push is the `synchronize` run:
+      #   - a push by anyone other than Dependabot skips `evaluate` (see its
+      #     `if`) and goes straight to `flag`, which turns auto-merge off without
+      #     evaluating anything. That closes the window for writer pushes;
+      #   - a push by Dependabot itself (a rebase) is evaluated again, and the
+      #     evaluation-time head check in gate.mjs still applies.
+      # The remaining timing assumption: runs for one PR are serialised
+      # (`concurrency`), so the `synchronize` run can queue behind an in-flight
+      # run. In that gap a writer's push is still covered only by the required
+      # checks, which restart on the new head. Also assumed, not tested: the
+      # `sender` of a `@dependabot rebase` push is `dependabot[bot]`.
       - name: Enable auto-merge (squash)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
