@@ -1,8 +1,11 @@
 # Dependency monitoring — see doc/02-technical/surveillance-threat-model/09-public-project-exposure.md
 # (supply-chain hardening) and 08-implementation-roadmap.md §E8.
 #
-# Dependabot PRs are gated on green CI only (.github/workflows/dependabot-auto-merge.yml)
-# and auto-merged. There is no per-PR AI supply-chain review: the former
+# Dependabot PRs auto-merge only through the merge gate in
+# .github/workflows/dependabot-auto-merge.yml (scripts/dependabot-gate/): Dependabot-only
+# signed commits, no majors, dependency files and action pins only, no supply-chain
+# flags (scripts/supply-chain/), plus green required checks. Anything else is labelled
+# `needs-human-review`. There is no per-PR AI supply-chain review: the former
 # dependabot-handler.yml (a Claude check, too expensive per PR) was disabled in
 # 2026-06 and deleted in 2026-11.
 #
