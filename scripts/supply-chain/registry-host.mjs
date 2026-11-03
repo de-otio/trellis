@@ -32,7 +32,8 @@
 //   - `integrity`, a non-empty string.
 // An `inBundle` entry is extracted from its parent's tarball and has no
 // `resolved`; it is accepted only if the parent entry declares bundled
-// dependencies that include it. The root project never counts as that parent:
+// dependencies that include it, or (for a dependency of a bundled dependency) if
+// the nearest non-`inBundle` ancestor declares any bundled dependencies. The root project never counts as that parent:
 // npm also writes `inBundle` for the root's own bundleDependencies, but those
 // install from the registry (Arborist's `inDepBundle` excludes the root), so a
 // top-level `inBundle` entry gets the full rule above, `resolved` included.
@@ -57,6 +58,31 @@ function declaresBundled(lock, parentPath, pathName) {
   const parent = lock.packages[parentPath];
   const declared = parent.bundleDependencies ?? parent.bundledDependencies;
   return declared === true || (Array.isArray(declared) && declared.includes(pathName));
+}
+
+// npm also marks as `inBundle` the dependencies OF a bundled dependency (aws-cdk-lib
+// bundles `minimatch`, whose `balanced-match` lands at
+// `node_modules/aws-cdk-lib/node_modules/balanced-match` with `inBundle: true`
+// although aws-cdk-lib's own list does not name it). Every byte under a bundle
+// root comes from that root's tarball, which is itself registry-pinned and
+// integrity-checked by the rule above, so such an entry is accepted when the
+// nearest ancestor that is not itself `inBundle` declares any bundled
+// dependencies. The root project never counts, as before. Without this, every
+// repo that depends on aws-cdk-lib fails here and in flags.mjs (fail closed).
+function bundleRootDeclaresAny(lock, parentPath) {
+  let p = parentPath;
+  while (p !== "") {
+    if (!Object.hasOwn(lock.packages, p)) return false;
+    const e = lock.packages[p];
+    if (e.inBundle !== true) {
+      const declared = e.bundleDependencies ?? e.bundledDependencies;
+      return declared === true || (Array.isArray(declared) && declared.length > 0);
+    }
+    const idx = p.lastIndexOf("node_modules/");
+    if (idx <= 0) return false;
+    p = p.slice(0, idx).replace(/\/$/, "");
+  }
+  return false;
 }
 
 /**
@@ -85,7 +111,12 @@ export function findRegistryOffenders(lock) {
 
     const parentPath = parentPathOf(path, pathName);
     if (entry.inBundle === true && parentPath !== "") {
-      if (!declaresBundled(lock, parentPath, pathName)) add(path, "unbundled-inbundle", entry);
+      if (
+        !declaresBundled(lock, parentPath, pathName) &&
+        !bundleRootDeclaresAny(lock, parentPath)
+      ) {
+        add(path, "unbundled-inbundle", entry);
+      }
       continue;
     }
     if (!hasResolved) {

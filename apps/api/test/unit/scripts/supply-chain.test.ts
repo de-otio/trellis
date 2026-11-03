@@ -221,6 +221,83 @@ describe("registry-host", () => {
     expect(findRegistryOffenders(forged)).toHaveLength(1);
   });
 
+  // npm also marks as inBundle the dependencies OF a bundled dependency: aws-cdk-lib
+  // bundles `minimatch`, whose own dependency is hoisted next to it as
+  // node_modules/aws-cdk-lib/node_modules/balanced-match with inBundle and no resolved,
+  // although aws-cdk-lib's list does not name it.
+  describe("transitive inBundle entries of a registry-pinned bundler", () => {
+    const bundlerLock = (...extra: [string, Entry][]): Lock =>
+      lock(
+        [
+          "node_modules/aws-cdk-lib",
+          { ...pkg("aws-cdk-lib", "2.0.0")[1], bundleDependencies: ["minimatch"] },
+        ],
+        ["node_modules/aws-cdk-lib/node_modules/minimatch", { version: "9.0.0", inBundle: true }],
+        [
+          "node_modules/aws-cdk-lib/node_modules/balanced-match",
+          { version: "4.0.4", inBundle: true },
+        ],
+        [
+          "node_modules/aws-cdk-lib/node_modules/minimatch/node_modules/brace-expansion",
+          { version: "2.0.0", inBundle: true },
+        ],
+        ...extra,
+      );
+    const reasons = (l: Lock) => findRegistryOffenders(l).map((o: { reason: string }) => o.reason);
+
+    it("accepts them (the aws-cdk-lib shape)", () => {
+      expect(findRegistryOffenders(bundlerLock())).toEqual([]);
+    });
+
+    it("rejects them when the bundle root declares no bundled dependencies", () => {
+      const l = lock(
+        pkg("aws-cdk-lib", "2.0.0"),
+        [
+          "node_modules/aws-cdk-lib/node_modules/balanced-match",
+          { version: "4.0.4", inBundle: true },
+        ],
+        [
+          "node_modules/aws-cdk-lib/node_modules/minimatch/node_modules/brace-expansion",
+          { version: "2.0.0", inBundle: true },
+        ],
+      );
+      expect(reasons(l)).toEqual(["unbundled-inbundle", "unbundled-inbundle"]);
+    });
+
+    it("still gives a top-level inBundle entry the full rule", () => {
+      const l = bundlerLock(["node_modules/sneaky", { version: "1.0.0", inBundle: true }]);
+      expect(reasons(l)).toEqual(["missing-resolved"]);
+    });
+
+    it("still rejects a bundler that is not on the public registry", () => {
+      const l = lock(
+        [
+          "node_modules/aws-cdk-lib",
+          {
+            ...pkg("aws-cdk-lib", "2.0.0")[1],
+            bundleDependencies: ["minimatch"],
+            resolved: "https://registry.example.com/aws-cdk-lib/-/aws-cdk-lib-2.0.0.tgz",
+          },
+        ],
+        [
+          "node_modules/aws-cdk-lib/node_modules/balanced-match",
+          { version: "4.0.4", inBundle: true },
+        ],
+      );
+      expect(reasons(l)).toContain("resolved-not-public-registry");
+    });
+
+    it("still rejects a non-bundled entry without resolved next to a bundler", () => {
+      const l = bundlerLock(["node_modules/plain", { version: "1.0.0", integrity: "sha512-x" }]);
+      expect(reasons(l)).toEqual(["missing-resolved"]);
+    });
+
+    it("computeFlags accepts the aws-cdk-lib shape instead of failing closed", async () => {
+      const head = bundlerLock();
+      await expect(computeFlags(head, head, vi.fn())).resolves.toEqual({ flags: [], notes: [] });
+    });
+  });
+
   it("does not let the root's bundleDependencies excuse a top-level entry from the rule", () => {
     const rootBundles = (inner: Entry): Lock => ({
       lockfileVersion: 3,
