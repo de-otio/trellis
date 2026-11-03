@@ -77,20 +77,27 @@ with `STAGE=test` keeping the prod-refusal and wipe guards satisfied.
 - No Docker image build / ECR push (the consuming vertical builds the image).
 - No deploy, no post-deploy verification (no deployed environment to verify).
 
-## Dependency updates (`.github/workflows/dependabot-auto-merge.yml`)
+## Dependency updates (`.github/workflows/dependabot-auto-merge.yml`, `dependabot-stall-alarm.yml`)
 
-Dependabot PRs auto-merge once the required CI checks pass — no manual
-review, no semver distinction (patch, minor, and major bumps are all
-eligible). As of 2026-07-02, `lint-and-test` includes a repo-wide coverage
+`dependabot-auto-merge.yml` and `dependabot-stall-alarm.yml` are thin callers
+of the org's reusable workflows in `de-otio/.github` (pinned to a commit SHA
+through `scripts-ref`). The gate decides per Dependabot PR: a non-major bump
+that passes the supply-chain checks may auto-merge once the required CI checks
+pass; a major bump is labelled `major-bump` and anything the checks cannot
+vouch for is labelled `needs-human-review`, and both wait for a human. The
+stall alarm notifies when a Dependabot PR sits too long. The decision logic
+and its tests live in `de-otio/.github`, not in this repo.
+
+As of 2026-07-02, `lint-and-test` includes a repo-wide coverage
 gate (`npm run test:coverage -w @de-otio/trellis`, thresholds in
 `apps/api/vitest.config.ts`: branches ≥78%, lines/functions/statements
 ≥80%) in addition to the pre-existing scoped Phase-0 gate, so a dependency
 bump that silently regresses coverage anywhere in the suite — not just the
 3 allowlisted files — now fails the merge-gating check. This makes
-green-CI-only auto-merge a reasonably safe default, but it does not catch
+green CI a reasonably safe gate for non-major bumps, but it does not catch
 everything: mocked SDK tests (e.g. `aws-sdk-client-mock` on `@aws-sdk/*`
-clients) don't catch upstream wire-format drift, and a major-version bump
-that changes behavior in a way existing tests don't exercise can still land
+clients) don't catch upstream wire-format drift, and a minor bump that
+changes behavior in a way existing tests don't exercise can still land
 silently.
 
 ## Publish Workflow (`.github/workflows/publish.yml`)
