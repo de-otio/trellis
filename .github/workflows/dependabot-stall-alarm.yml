@@ -1,34 +1,16 @@
-# Daily alarm for stalled Dependabot PRs.
-#
-# Notifies (ntfy) when a Dependabot PR has been open for more than 7 days, or
-# has had auto-merge enabled for more than 48 hours.
-#
-# Why: dependabot-auto-merge.yml enables auto-merge, but the `byo-full-public`
-# ruleset also requires a code-owner approval, and a blocked auto-merge raises
-# no error. On 2026-10-31 the oldest of 26 open bot PRs had waited 45 days. The
-# same symptom appears when the Dependabot bypass regresses or a required check
-# is renamed (the check never reports, so the PR waits forever).
-#
-# Selection logic is a pure function: scripts/dependabot-stall/select-stalled.mjs
-# (tests: apps/api/test/unit/scripts/select-stalled.test.ts). The shell that
-# posts to ntfy is scripts/dependabot-stall/run.mjs.
-#
-# Owner setup: repository secret NTFY_TOPIC (the ntfy.sh topic name; it is a
-# secret because the repo is public and ntfy topics are unauthenticated). With
-# the secret unset the job fails on purpose, so a silent alarm shows up as a
-# red run. One notification per run; none when nothing is stalled.
-
+# Thin caller for the org's reusable Dependabot stall alarm.
+# DRAFT (brakes rollout, decision D7).
+# Owner setup: the secret NTFY_TOPIC must be available to this repo (repo or org secret).
+# PIN: e2edf79b86fd4684c1fa48473158a7250b07d2fa is filled with the merged de-otio/.github commit SHA by dependabot/scripts/pin-callers.sh; the reusable workflow refuses any other scripts-ref.
 name: Dependabot stall alarm
 
 on:
   schedule:
-    # Daily, off the top of the hour to dodge scheduler congestion.
+    # Daily; the minute differs per repo to dodge scheduler congestion.
     - cron: "17 6 * * *"
   workflow_dispatch:
 
-permissions:
-  contents: read
-  pull-requests: read
+permissions: {}
 
 concurrency:
   group: dependabot-stall-alarm
@@ -36,28 +18,11 @@ concurrency:
 
 jobs:
   alarm:
-    name: Check for stalled Dependabot PRs
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Setup Node.js
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: "22"
-
-      - name: List open PRs
-        timeout-minutes: 3
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: >
-          gh pr list --repo "$GITHUB_REPOSITORY" --state open --limit 500
-          --json number,title,url,createdAt,isDraft,state,author,autoMergeRequest
-          > "$RUNNER_TEMP/open-prs.json"
-
-      - name: Notify on stalled Dependabot PRs
-        timeout-minutes: 2
-        env:
-          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
-        run: node scripts/dependabot-stall/run.mjs "$RUNNER_TEMP/open-prs.json"
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: de-otio/.github/.github/workflows/dependabot-stall-alarm.yml@e2edf79b86fd4684c1fa48473158a7250b07d2fa
+    with:
+      scripts-ref: e2edf79b86fd4684c1fa48473158a7250b07d2fa
+    secrets:
+      NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
