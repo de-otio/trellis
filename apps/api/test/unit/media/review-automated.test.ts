@@ -20,10 +20,7 @@ import {
   type ReviewPromotionPort,
 } from "../../../src/lib/media/media-review-handler.js";
 import { MockStoragePort } from "../../../src/lib/media/media-ports.js";
-import type {
-  TrellisAuditLogger,
-  TrellisAuditLoggerEnv,
-} from "../../../src/lib/audit-composer.js";
+import type { TrellisAuditLogger, TrellisAuditLoggerEnv } from "../../../src/lib/audit-composer.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -304,9 +301,20 @@ describe("MediaReviewHandler.decide — an automated actor can only approve (com
       const out = spawnSync(
         tsc,
         [
-          "--ignoreConfig", "--noEmit", "--strict", "--skipLibCheck",
-          "--target", "es2022", "--module", "nodenext", "--moduleResolution", "nodenext",
-          "--types", "node", "--typeRoots", path.resolve(apiDir, "../../node_modules/@types"),
+          "--ignoreConfig",
+          "--noEmit",
+          "--strict",
+          "--skipLibCheck",
+          "--target",
+          "es2022",
+          "--module",
+          "nodenext",
+          "--moduleResolution",
+          "nodenext",
+          "--types",
+          "node",
+          "--typeRoots",
+          path.resolve(apiDir, "../../node_modules/@types"),
           file,
         ],
         { cwd: apiDir, encoding: "utf8" },

@@ -8,10 +8,7 @@ import {
   type ReviewPromotionPort,
 } from "../../../src/lib/media/media-review-handler.js";
 import { MockStoragePort } from "../../../src/lib/media/media-ports.js";
-import type {
-  TrellisAuditLogger,
-  TrellisAuditLoggerEnv,
-} from "../../../src/lib/audit-composer.js";
+import type { TrellisAuditLogger, TrellisAuditLoggerEnv } from "../../../src/lib/audit-composer.js";
 
 const TENANT = "c0000000000000000000000aa";
 const UPLOAD = "c1111111111111111111111bb";
@@ -146,13 +143,7 @@ describe("MediaReviewHandler.decide — approval promotes the bytes that were re
       deletedAt: null,
     });
 
-    await handler.decide(
-      db,
-      auditLogger,
-      auditEnv,
-      APPROVE_INPUT,
-      promotionPort(storage),
-    );
+    await handler.decide(db, auditLogger, auditEnv, APPROVE_INPUT, promotionPort(storage));
 
     expect((await storage.headObject(PENDING_KEY)).exists).toBe(false);
     expect((await storage.headObject(STAGING_KEY)).exists).toBe(false);
@@ -381,13 +372,7 @@ describe("the promotion capability is reachable from a real deployment", () => {
       deletedAt: null,
     });
 
-    await handler.decide(
-      db,
-      auditLogger,
-      auditEnv,
-      APPROVE_INPUT,
-      promotionPort(explicit),
-    );
+    await handler.decide(db, auditLogger, auditEnv, APPROVE_INPUT, promotionPort(explicit));
 
     expect((await explicit.headObject(CAS_KEY)).exists).toBe(true);
     expect((await injected.headObject(CAS_KEY)).exists).toBe(false);

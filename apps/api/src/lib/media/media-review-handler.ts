@@ -452,9 +452,7 @@ export class MediaReviewHandler {
     });
 
     await auditLogger.logSystemAction(
-      human.decision === "approve"
-        ? MEDIA_MODERATION_APPROVED
-        : MEDIA_MODERATION_REJECTED,
+      human.decision === "approve" ? MEDIA_MODERATION_APPROVED : MEDIA_MODERATION_REJECTED,
       {
         resource: "media",
         resourceId: human.mediaId,

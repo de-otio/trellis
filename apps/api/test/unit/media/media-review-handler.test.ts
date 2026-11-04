@@ -102,18 +102,12 @@ describe("moderator-serve-gate (pure)", () => {
       expect(moderatorCanServe(s)).toBe(expected);
     }
     // The reviewable tuple matches exactly.
-    expect([...MODERATOR_REVIEWABLE_LIFECYCLES].sort()).toEqual(
-      ["QUARANTINED", "REVIEW"].sort(),
-    );
+    expect([...MODERATOR_REVIEWABLE_LIFECYCLES].sort()).toEqual(["QUARANTINED", "REVIEW"].sort());
   });
   it("bypass still honours the deletedAt kill switch", () => {
     expect(isModeratorServable({ lifecycle: "REVIEW", deletedAt: null })).toBe(true);
-    expect(
-      isModeratorServable({ lifecycle: "REVIEW", deletedAt: new Date() }),
-    ).toBe(false);
-    expect(isModeratorServable({ lifecycle: "APPROVED", deletedAt: null })).toBe(
-      false,
-    );
+    expect(isModeratorServable({ lifecycle: "REVIEW", deletedAt: new Date() })).toBe(false);
+    expect(isModeratorServable({ lifecycle: "APPROVED", deletedAt: null })).toBe(false);
   });
 });
 
