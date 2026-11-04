@@ -119,9 +119,7 @@ function world(opts: {
     ...(opts.withCreateEscalationJob === false
       ? {}
       : {
-          async createEscalationJob(
-            spec: EscalationJobSpec,
-          ): Promise<CreatedEscalationJob> {
+          async createEscalationJob(spec: EscalationJobSpec): Promise<CreatedEscalationJob> {
             calls.push("createEscalationJob");
             escalationSpecs.push(spec);
             // parent_job_id-unique semantics: same parent → same row/jobId.
@@ -325,9 +323,7 @@ describe("processCompletion — the deferred lane's call site (plan 031 C1)", ()
     expect(w.triggers).toHaveLength(0);
     // Read-only fetch first, then the claim: a failed fetch must not burn the slot.
     expect(w.calls.indexOf("getVideoModeration")).toBeGreaterThanOrEqual(0);
-    expect(w.calls.indexOf("getVideoModeration")).toBeLessThan(
-      w.calls.indexOf("claimMessage"),
-    );
+    expect(w.calls.indexOf("getVideoModeration")).toBeLessThan(w.calls.indexOf("claimMessage"));
   });
 
   it("an unreadable provider verdict falls through to the errored settle path", async () => {
@@ -347,9 +343,7 @@ describe("processCompletion — the deferred lane's call site (plan 031 C1)", ()
   it("cascade configured without createEscalationJob throws — a wiring bug must surface", async () => {
     const w = world({ explanation: GREY_BAND, withCreateEscalationJob: false });
 
-    await expect(processCompletion(BODY, w.deps)).rejects.toThrow(
-      /createEscalationJob/,
-    );
+    await expect(processCompletion(BODY, w.deps)).rejects.toThrow(/createEscalationJob/);
     expect(w.claimed.size).toBe(0); // still pre-claim: the retry can escalate
   });
 

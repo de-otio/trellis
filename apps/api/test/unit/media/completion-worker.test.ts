@@ -13,10 +13,7 @@ import {
   type OtherTrackState,
   type RecordOutcome,
 } from "../../../src/lambda/media-completion-worker.js";
-import type {
-  ModerationDecision,
-  MediaLifecycle,
-} from "../../../src/lib/media/media-lifecycle.js";
+import type { ModerationDecision, MediaLifecycle } from "../../../src/lib/media/media-lifecycle.js";
 import type { Track } from "../../../src/lib/media/track-verdict.js";
 import type {
   MediaModerationProvider,
@@ -106,9 +103,7 @@ class FakeModeration implements MediaModerationProvider {
 }
 
 class FakeTranscribe implements TranscribePort {
-  constructor(
-    public result: { status: TranscriptionStatus; transcript?: string },
-  ) {}
+  constructor(public result: { status: TranscriptionStatus; transcript?: string }) {}
   async startTranscription(): Promise<{ jobId: string }> {
     return { jobId: "x" };
   }
@@ -182,16 +177,12 @@ function harness(opts: {
             uploadId: UPLOAD,
             contentHash: HASH,
             stagingVersionId:
-              opts.stagingVersionId === undefined
-                ? "v-pinned-1"
-                : opts.stagingVersionId,
+              opts.stagingVersionId === undefined ? "v-pinned-1" : opts.stagingVersionId,
           },
         },
       ],
     ]),
-    others: new Map(
-      opts.other ? [[`${mediaId}:${opts.track}`, opts.other]] : [],
-    ),
+    others: new Map(opts.other ? [[`${mediaId}:${opts.track}`, opts.other]] : []),
     calls: [],
   };
 
@@ -221,9 +212,7 @@ function harness(opts: {
   const deps: CompletionDeps = {
     store: makeStore(state),
     moderation: new FakeModeration(verdict(opts.videoVerdict ?? "review")),
-    transcribe: new FakeTranscribe(
-      opts.transcription ?? { status: "COMPLETED", transcript: "" },
-    ),
+    transcribe: new FakeTranscribe(opts.transcription ?? { status: "COMPLETED", transcript: "" }),
     textModeration: new FakeText(verdict(opts.textVerdict ?? "review")),
     storage,
     reinterpretVisual: (v, snapshot) => {
@@ -287,9 +276,7 @@ describe("extractJobPointer", () => {
   });
 
   it("ignores any verdict/status fields in the body (pointer only)", () => {
-    const p = extractJobPointer(
-      snsBody("rek-3", { decision: "approved", status: "APPROVED" }),
-    );
+    const p = extractJobPointer(snsBody("rek-3", { decision: "approved", status: "APPROVED" }));
     expect(p).toEqual({ jobId: "rek-3", track: "VISUAL" });
   });
 });
@@ -328,8 +315,7 @@ describe("processCompletion — dedupe before side effect", () => {
     expect(newStoreCalls).toEqual(["claimMessage"]);
     expect(h.emitted.length).toBe(emittedAfterFirst);
     // Reads (the pinned-source head) may repeat; no storage WRITE may.
-    const writes = (calls: string[]) =>
-      calls.filter((c) => c !== "headObject");
+    const writes = (calls: string[]) => calls.filter((c) => c !== "headObject");
     expect(writes(h.storageCalls)).toEqual(writes(storageAfterFirst));
   });
 
@@ -508,11 +494,9 @@ describe("processCompletion — fixed promote/persist/emit ordering", () => {
     };
 
     await processCompletion(snsBody("rek-1"), deps);
-    expect(
-      h.state.calls.filter((c) =>
-        ["persistMediaStatus", "copy", "emit"].includes(c),
-      ),
-    ).toEqual(["persistMediaStatus", "copy", "emit"]);
+    expect(h.state.calls.filter((c) => ["persistMediaStatus", "copy", "emit"].includes(c))).toEqual(
+      ["persistMediaStatus", "copy", "emit"],
+    );
   });
 
   it("deleteObject is best-effort: a delete failure does not fail the record", async () => {
@@ -578,7 +562,12 @@ describe("processCompletion — replay on terminal status", () => {
 // ---------------------------------------------------------------------------
 
 describe("processCompletion — emitted payload carries only ready|not-ready", () => {
-  const cases: { name: string; decision: ModerationDecision; other: OtherTrackState; expected: "ready" | "not-ready" }[] = [
+  const cases: {
+    name: string;
+    decision: ModerationDecision;
+    other: OtherTrackState;
+    expected: "ready" | "not-ready";
+  }[] = [
     {
       name: "both approved => ready",
       decision: "approved",
@@ -684,8 +673,7 @@ describe("makeHandler — SQS batch semantics", () => {
     };
     const handler = makeHandler(deps);
     const res = (await handler(sqsEvent([snsBody("rek-1")]), {} as any, () => {})) as
-      | { batchItemFailures: { itemIdentifier: string }[] }
-      | undefined;
+      { batchItemFailures: { itemIdentifier: string }[] } | undefined;
     expect(res?.batchItemFailures).toEqual([{ itemIdentifier: "m-0" }]);
   });
 });
@@ -694,11 +682,7 @@ describe("makeHandler — SQS batch semantics", () => {
 // Property: approval requires positive evidence on BOTH tracks
 // ---------------------------------------------------------------------------
 
-const decisionArb = fc.constantFrom<ModerationDecision>(
-  "approved",
-  "review",
-  "quarantine",
-);
+const decisionArb = fc.constantFrom<ModerationDecision>("approved", "review", "quarantine");
 const otherArb = fc.oneof(
   fc.record({
     state: fc.constant<"decided">("decided"),
@@ -711,43 +695,37 @@ const otherArb = fc.oneof(
 describe("property — APPROVED/ready iff both tracks positively approved", () => {
   it("ready is emitted iff this track AND the sibling are both decided-approved", async () => {
     await fc.assert(
-      fc.asyncProperty(
-        decisionArb,
-        otherArb,
-        async (thisDecision, other) => {
-          const h = harness({
-            jobId: "rek-1",
-            track: "VISUAL",
-            videoVerdict: thisDecision,
-            other,
-            currentStatus: "UPLOADED",
-          });
-          const out = await processCompletion(snsBody("rek-1"), h.deps);
-          // An undecided sibling makes a non-quarantine track wait for it; a
-          // quarantine settles at once. Everything else applies.
-          if (other.state === "pending" && thisDecision !== "quarantine") {
-            expect(out.kind).toBe("awaiting-sibling");
-            expect(h.emitted).toEqual([]);
-            expect(h.storageCalls).not.toContain("copyObject");
-            return;
-          }
-          expect(out.kind).toBe("applied");
-          const status = (out as { status: MediaLifecycle }).status;
-          const bothApproved =
-            thisDecision === "approved" &&
-            other.state === "decided" &&
-            other.decision === "approved";
-          if (bothApproved) {
-            expect(status).toBe("APPROVED");
-            expect(h.emitted[0].status).toBe("ready");
-            expect(h.storageCalls).toContain("copyObject");
-          } else {
-            expect(status).not.toBe("APPROVED");
-            expect(h.emitted[0].status).toBe("not-ready");
-            expect(h.storageCalls).not.toContain("copyObject");
-          }
-        },
-      ),
+      fc.asyncProperty(decisionArb, otherArb, async (thisDecision, other) => {
+        const h = harness({
+          jobId: "rek-1",
+          track: "VISUAL",
+          videoVerdict: thisDecision,
+          other,
+          currentStatus: "UPLOADED",
+        });
+        const out = await processCompletion(snsBody("rek-1"), h.deps);
+        // An undecided sibling makes a non-quarantine track wait for it; a
+        // quarantine settles at once. Everything else applies.
+        if (other.state === "pending" && thisDecision !== "quarantine") {
+          expect(out.kind).toBe("awaiting-sibling");
+          expect(h.emitted).toEqual([]);
+          expect(h.storageCalls).not.toContain("copyObject");
+          return;
+        }
+        expect(out.kind).toBe("applied");
+        const status = (out as { status: MediaLifecycle }).status;
+        const bothApproved =
+          thisDecision === "approved" && other.state === "decided" && other.decision === "approved";
+        if (bothApproved) {
+          expect(status).toBe("APPROVED");
+          expect(h.emitted[0].status).toBe("ready");
+          expect(h.storageCalls).toContain("copyObject");
+        } else {
+          expect(status).not.toBe("APPROVED");
+          expect(h.emitted[0].status).toBe("not-ready");
+          expect(h.storageCalls).not.toContain("copyObject");
+        }
+      }),
       { numRuns: 200 },
     );
   });
@@ -821,9 +799,7 @@ describe("T14 fail-closed — errored/timed-out moderation is HELD, never served
     // NEVER promoted: no bytes were copied toward the served cas/ prefix.
     expect(h.storageCalls).not.toContain("copyObject");
     // NEVER served: the serve gate denies the resulting state.
-    expect(
-      isServable({ lifecycle: "REVIEW", hidden: false, deletedAt: null }),
-    ).toBe(false);
+    expect(isServable({ lifecycle: "REVIEW", hidden: false, deletedAt: null })).toBe(false);
   });
 
   it("provider re-fetch THROWS (timeout) ⇒ retry with no claim, object stays UPLOADED, serve gate denies", async () => {
@@ -846,20 +822,16 @@ describe("T14 fail-closed — errored/timed-out moderation is HELD, never served
     const persisted = h.state.media.get("media-1")!.coords.lifecycle;
     expect(persisted).toBe("UPLOADED"); // never advanced toward APPROVED
     expect(h.storageCalls).not.toContain("copyObject");
-    expect(
-      isServable({ lifecycle: persisted, hidden: false, deletedAt: null }),
-    ).toBe(false);
+    expect(isServable({ lifecycle: persisted, hidden: false, deletedAt: null })).toBe(false);
   });
 
   it("moderation that never completes at all (no message) leaves UPLOADED — which the serve gate denies", () => {
     // The degenerate case: the completion message is simply never delivered.
     // The object sits at UPLOADED forever; the gate approves APPROVED only.
-    expect(
-      isServable({ lifecycle: "UPLOADED", hidden: false, deletedAt: null }),
-    ).toBe(false);
-    expect(
-      isServable({ lifecycle: "AWAITING_UPLOAD", hidden: false, deletedAt: null }),
-    ).toBe(false);
+    expect(isServable({ lifecycle: "UPLOADED", hidden: false, deletedAt: null })).toBe(false);
+    expect(isServable({ lifecycle: "AWAITING_UPLOAD", hidden: false, deletedAt: null })).toBe(
+      false,
+    );
   });
 });
 
@@ -894,9 +866,7 @@ describe("processCompletion — AR-SEC F3 version-pinned promotion", () => {
 
     const out = await processCompletion(snsBody("rek-1"), deps);
     expect((out as { status: MediaLifecycle }).status).toBe("APPROVED");
-    expect(copies).toEqual([
-      { from: STAGING_KEY, to: CAS_KEY, fromVersionId: "v-moderated-7" },
-    ]);
+    expect(copies).toEqual([{ from: STAGING_KEY, to: CAS_KEY, fromVersionId: "v-moderated-7" }]);
   });
 
   it("pin resolution consults the EXACT pinned version on the staging key", async () => {
@@ -997,22 +967,15 @@ describe("processCompletion — the envelope's track is a hint, the row decides"
 
   it("accepts a canonical envelope whose track matches the row", async () => {
     const h = harness({ jobId: "j-ok", track: "VISUAL", videoVerdict: "review" });
-    const out = await processCompletion(
-      JSON.stringify({ track: "VISUAL", jobId: "j-ok" }),
-      h.deps,
-    );
+    const out = await processCompletion(JSON.stringify({ track: "VISUAL", jobId: "j-ok" }), h.deps);
     expect(out.kind).toBe("applied");
   });
 
   it("still routes the historical wire shapes to the right track", async () => {
     const visual = harness({ jobId: "j-visual", track: "VISUAL" });
-    expect((await processCompletion(snsBody("j-visual"), visual.deps)).kind).toBe(
-      "applied",
-    );
+    expect((await processCompletion(snsBody("j-visual"), visual.deps)).kind).toBe("applied");
 
     const audio = harness({ jobId: "j-audio", track: "AUDIO" });
-    expect((await processCompletion(ebBody("j-audio"), audio.deps)).kind).toBe(
-      "applied",
-    );
+    expect((await processCompletion(ebBody("j-audio"), audio.deps)).kind).toBe("applied");
   });
 });

@@ -98,10 +98,7 @@ import {
   type MediaModerationProvider,
   type ModerationVerdict,
 } from "../media/moderation-provider.js";
-import type {
-  ModerationDecision,
-  MediaLifecycle,
-} from "../media/media-lifecycle.js";
+import type { ModerationDecision, MediaLifecycle } from "../media/media-lifecycle.js";
 
 // ---------------------------------------------------------------------------
 // Narrow data shapes the shell needs from persistence. These mirror the Prisma
@@ -171,10 +168,7 @@ export interface CompletionStore {
   readTrackDecision?(jobId: string): Promise<ModerationDecision | null>;
 
   /** Persist this track's resolved decision onto its job row. */
-  persistTrackDecision(
-    jobId: string,
-    decision: ModerationDecision,
-  ): Promise<void>;
+  persistTrackDecision(jobId: string, decision: ModerationDecision): Promise<void>;
 
   /**
    * Read the sibling track's resolved decision for a media object. Returns the
@@ -188,10 +182,7 @@ export interface CompletionStore {
    * same question; the interactive row it supersedes stays open (its decision
    * null) and must not be read as "pending" once the escalation has decided.
    */
-  readOtherTrack(
-    mediaId: string,
-    thisTrack: Track,
-  ): Promise<OtherTrackState>;
+  readOtherTrack(mediaId: string, thisTrack: Track): Promise<OtherTrackState>;
 
   /**
    * Create (or re-find) the escalation job row for `parentJobId` (plan 031 C1).
@@ -250,10 +241,7 @@ export interface CompletionStore {
    * `fn` may be run once per call and must stay free of side effects other than
    * through `tx`.
    */
-  inTransaction<T>(
-    mediaId: string,
-    fn: (tx: CompletionTransaction) => Promise<T>,
-  ): Promise<T>;
+  inTransaction<T>(mediaId: string, fn: (tx: CompletionTransaction) => Promise<T>): Promise<T>;
 }
 
 /**
@@ -262,10 +250,7 @@ export interface CompletionStore {
  */
 export type CompletionTransaction = Pick<
   CompletionStore,
-  | "claimMessage"
-  | "persistTrackDecision"
-  | "readOtherTrack"
-  | "persistMediaStatus"
+  "claimMessage" | "persistTrackDecision" | "readOtherTrack" | "persistMediaStatus"
 >;
 
 /**
@@ -405,9 +390,10 @@ export interface CompletionDeps {
   /** Re-interpret a visual verdict using the job's threshold snapshot. */
   readonly reinterpretVisual: VisualVerdictReinterpreter;
   /** Emit the anti-oracle resolved event. Best-effort; must not throw to ack. */
-  readonly emitResolved: (
-    payload: { readonly mediaId: string; readonly status: "ready" | "not-ready" },
-  ) => Promise<void>;
+  readonly emitResolved: (payload: {
+    readonly mediaId: string;
+    readonly status: "ready" | "not-ready";
+  }) => Promise<void>;
   /** Structured logger seam (defaults to a no-op in tests). */
   readonly log?: {
     info?: (msg: string, data?: unknown) => void;
@@ -667,10 +653,7 @@ export async function processCompletion(
   // A row that records the version it was submitted against must still match
   // the media's pin. Absent => the rule is skipped (the stock store has no such
   // column).
-  if (
-    job.pinnedVersion !== undefined &&
-    job.pinnedVersion !== media.stagingVersionId
-  ) {
+  if (job.pinnedVersion !== undefined && job.pinnedVersion !== media.stagingVersionId) {
     deps.log?.warn?.("completion: job row pinned to another version — dropping", {
       jobId: pointer.jobId,
     });
@@ -718,8 +701,7 @@ export async function processCompletion(
     // lane ships unable to approve"): approve survives only when the lane
     // config explicitly allows it. Same law as clampEscalatedDecision.
     const allowApprove = deps.cascade?.lane.allowApprove === true;
-    preDecision =
-      norm === "approved" && !allowApprove ? "review" : norm;
+    preDecision = norm === "approved" && !allowApprove ? "review" : norm;
   } else if (
     pointer.track === "VISUAL" &&
     deps.cascade !== undefined &&
@@ -938,10 +920,10 @@ export async function processCompletion(
       });
     } catch (err) {
       servable = false;
-      deps.log?.error?.(
-        "completion: promotion failed after commit — left for the recovery sweep",
-        { mediaId: job.mediaId, error: String(err) },
-      );
+      deps.log?.error?.("completion: promotion failed after commit — left for the recovery sweep", {
+        mediaId: job.mediaId,
+        error: String(err),
+      });
     }
   }
 

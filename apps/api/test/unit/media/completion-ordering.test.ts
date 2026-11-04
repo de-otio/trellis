@@ -17,10 +17,7 @@ import {
   type OtherTrackState,
   type RecordOutcome,
 } from "../../../src/lib/workers/media-completion.js";
-import type {
-  MediaLifecycle,
-  ModerationDecision,
-} from "../../../src/lib/media/media-lifecycle.js";
+import type { MediaLifecycle, ModerationDecision } from "../../../src/lib/media/media-lifecycle.js";
 import type { Track } from "../../../src/lib/media/track-verdict.js";
 import {
   ModerationJobPendingError,
@@ -69,8 +66,10 @@ class World {
   // Provider behaviour (each call may throw / pend).
   visual: () => Promise<ModerationVerdict> = async () => verdict("approved");
   visualCalls = 0;
-  transcript: () => Promise<{ status: "COMPLETED" | "FAILED" | "IN_PROGRESS"; transcript?: string }> =
-    async () => ({ status: "COMPLETED", transcript: "" });
+  transcript: () => Promise<{
+    status: "COMPLETED" | "FAILED" | "IN_PROGRESS";
+    transcript?: string;
+  }> = async () => ({ status: "COMPLETED", transcript: "" });
   text: () => Promise<ModerationVerdict> = async () => verdict("approved");
   copyFails = false;
   persistStatusFailsOnce = false;
@@ -97,10 +96,7 @@ class World {
         priority: "interactive",
         ...(opts.rowExtras ?? {}),
       } as ModerationJobRow);
-      this.decisions.set(
-        t === "VISUAL" ? JOB_V : JOB_A,
-        opts.decided?.[t] ?? null,
-      );
+      this.decisions.set(t === "VISUAL" ? JOB_V : JOB_A, opts.decided?.[t] ?? null);
     }
   }
 
@@ -110,10 +106,13 @@ class World {
     this.lifecycle = to;
   }
 
-  private siblingState(job: string, overlay: Map<string, ModerationDecision | null>): OtherTrackState {
+  private siblingState(
+    job: string,
+    overlay: Map<string, ModerationDecision | null>,
+  ): OtherTrackState {
     const other = job === JOB_V ? JOB_A : JOB_V;
     if (!this.jobs.has(other)) return { state: "absent" };
-    const d = overlay.has(other) ? overlay.get(other)! : this.decisions.get(other) ?? null;
+    const d = overlay.has(other) ? overlay.get(other)! : (this.decisions.get(other) ?? null);
     return d === null ? { state: "pending" } : { state: "decided", decision: d };
   }
 
@@ -659,7 +658,10 @@ describe("lifecycle write is a compare-and-set", () => {
     const origCopy = deps.storage.copyObject.bind(deps.storage);
     w.onStatusWrite = () => order.push("status");
     const origTx = w.store.inTransaction.bind(w.store);
-    (w.store as { inTransaction: CompletionStore["inTransaction"] }).inTransaction = async (id, fn) => {
+    (w.store as { inTransaction: CompletionStore["inTransaction"] }).inTransaction = async (
+      id,
+      fn,
+    ) => {
       const r = await origTx(id, fn);
       order.push("commit");
       return r;
@@ -709,7 +711,11 @@ describe("property — random interleavings never approve from a non-UPLOADED it
             external,
           ];
           let done = 0;
-          for (const t of tasks) t.then(() => done++, () => done++);
+          for (const t of tasks)
+            t.then(
+              () => done++,
+              () => done++,
+            );
 
           let i = 0;
           for (let guard = 0; done < tasks.length; guard++) {

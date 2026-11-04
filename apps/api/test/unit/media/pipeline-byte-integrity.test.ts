@@ -45,10 +45,7 @@ import {
 } from "../../../src/lib/media/media-ports.js";
 import { MockModerationProvider } from "../../../src/lib/media/moderation-provider.js";
 import { pendingKey, casKey, isCasKeyError } from "../../../src/lib/media/cas-keys.js";
-import type {
-  ModerationDecision,
-  MediaLifecycle,
-} from "../../../src/lib/media/media-lifecycle.js";
+import type { ModerationDecision, MediaLifecycle } from "../../../src/lib/media/media-lifecycle.js";
 import type { Track } from "../../../src/lib/media/track-verdict.js";
 import type {
   MediaModerationProvider,
@@ -93,7 +90,13 @@ interface SharedPersistence {
     stagingVersionId: string | null;
     lifecycle: MediaLifecycle;
   };
-  jobs: Array<{ mediaId: string; track: Track; jobId: string; decision: ModerationDecision | null; thresholdSnapshot: unknown }>;
+  jobs: Array<{
+    mediaId: string;
+    track: Track;
+    jobId: string;
+    decision: ModerationDecision | null;
+    thresholdSnapshot: unknown;
+  }>;
   claimed: Set<string>;
 }
 
@@ -181,10 +184,7 @@ describe("P0b pipeline — cross-worker byte integrity (APPROVED path)", () => {
         },
         async markMediaUploaded(mediaId) {
           // Conditional bytes-arrived write: only from AWAITING_UPLOAD.
-          if (
-            mediaId === shared.row.id &&
-            shared.row.lifecycle === "AWAITING_UPLOAD"
-          ) {
+          if (mediaId === shared.row.id && shared.row.lifecycle === "AWAITING_UPLOAD") {
             shared.row.lifecycle = "UPLOADED";
           }
         },
@@ -236,7 +236,9 @@ describe("P0b pipeline — cross-worker byte integrity (APPROVED path)", () => {
       },
       async findJobByJobId(jobId): Promise<ModerationJobRow | null> {
         const j = shared.jobs.find((x) => x.jobId === jobId);
-        return j ? { mediaId: MEDIA_ID, track: j.track, thresholdSnapshot: j.thresholdSnapshot } : null;
+        return j
+          ? { mediaId: MEDIA_ID, track: j.track, thresholdSnapshot: j.thresholdSnapshot }
+          : null;
       },
       async persistTrackDecision(jobId, decision) {
         const j = shared.jobs.find((x) => x.jobId === jobId);

@@ -7,9 +7,7 @@
 //    isolation and no rollback — suites that need real transaction semantics
 //    use the store in completion-ordering.test.ts instead.
 
-import type {
-  CompletionStore,
-} from "../../../../src/lib/workers/media-completion.js";
+import type { CompletionStore } from "../../../../src/lib/workers/media-completion.js";
 import type { MediaLifecycle } from "../../../../src/lib/media/media-lifecycle.js";
 
 export type LegacyCompletionStore = Omit<
