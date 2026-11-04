@@ -1,10 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { FrameSamplingVideoModerationAdapter } from "../../../src/lib/media/frame-sampling-adapter.js";
-import {
-  MockTranscodePort,
-  type TranscodePort,
-} from "../../../src/lib/media/media-ports.js";
+import { MockTranscodePort, type TranscodePort } from "../../../src/lib/media/media-ports.js";
 import {
   MockModerationProvider,
   moderationProviderName,
@@ -25,19 +22,20 @@ function verdict(decision: ModerationDecision): ModerationVerdict {
   return { decision, labels: [], provider: "mock" };
 }
 
-function makeAdapter(opts: {
-  duration?: number;
-  /** `null` means "the operator configured nothing" — distinct from omitted. */
-  framesPerSecond?: number | null;
-  maxFramesPerJob?: number | null;
-  maxDurationSeconds?: number | null;
-  extractable?: number;
-  transcode?: TranscodePort;
-  images?: MockModerationProvider;
-} = {}) {
+function makeAdapter(
+  opts: {
+    duration?: number;
+    /** `null` means "the operator configured nothing" — distinct from omitted. */
+    framesPerSecond?: number | null;
+    maxFramesPerJob?: number | null;
+    maxDurationSeconds?: number | null;
+    extractable?: number;
+    transcode?: TranscodePort;
+    images?: MockModerationProvider;
+  } = {},
+) {
   const images = opts.images ?? new MockModerationProvider();
-  const transcode =
-    opts.transcode ?? new MockTranscodePort({ duration: opts.duration ?? 4 });
+  const transcode = opts.transcode ?? new MockTranscodePort({ duration: opts.duration ?? 4 });
   if (transcode instanceof MockTranscodePort && opts.extractable !== undefined) {
     transcode.setExtractableFrames(opts.extractable);
   }
@@ -47,14 +45,10 @@ function makeAdapter(opts: {
     images,
     transcode,
     config: {
-      framesPerSecond:
-        opts.framesPerSecond === null ? undefined : (opts.framesPerSecond ?? 1),
-      maxFramesPerJob:
-        opts.maxFramesPerJob === null ? undefined : (opts.maxFramesPerJob ?? 10),
+      framesPerSecond: opts.framesPerSecond === null ? undefined : (opts.framesPerSecond ?? 1),
+      maxFramesPerJob: opts.maxFramesPerJob === null ? undefined : (opts.maxFramesPerJob ?? 10),
       maxDurationSeconds:
-        opts.maxDurationSeconds === null
-          ? undefined
-          : (opts.maxDurationSeconds ?? 60),
+        opts.maxDurationSeconds === null ? undefined : (opts.maxDurationSeconds ?? 60),
       frameConcurrency: 2,
     },
     frameDirFor: (jobId) => `processing/frames/${jobId}`,
@@ -291,9 +285,7 @@ describe("FrameSamplingVideoModerationAdapter — cleanup on every path", () => 
     const { adapter, images } = makeAdapter({ transcode: brittle });
     images.setImageVerdict(verdict("approved"));
 
-    expect((await adapter.startVideoModeration(REF)).initialDecision).toBe(
-      "approved",
-    );
+    expect((await adapter.startVideoModeration(REF)).initialDecision).toBe("approved");
   });
 });
 
@@ -324,9 +316,7 @@ describe("FrameSamplingVideoModerationAdapter — abort and polling", () => {
 
   it("fails closed when polled for an id it never minted", async () => {
     const { adapter } = makeAdapter();
-    expect((await adapter.getVideoModeration("someone-elses-job")).decision).toBe(
-      "review",
-    );
+    expect((await adapter.getVideoModeration("someone-elses-job")).decision).toBe("review");
   });
 
   it("mints job ids that carry no tenant, key, or upload material", async () => {
@@ -399,9 +389,7 @@ describe("FrameSamplingVideoModerationAdapter — the audit trail", () => {
       newJobId: () => "core-job-1",
     });
 
-    expect((await adapter.startVideoModeration(REF)).policyVersion).toBe(
-      "house-policy-2026-08",
-    );
+    expect((await adapter.startVideoModeration(REF)).policyVersion).toBe("house-policy-2026-08");
   });
 
   it("carries per-frame evidence, not just the collapsed decision", async () => {
@@ -480,9 +468,9 @@ describe("FrameSamplingVideoModerationAdapter — the operator's policy governs 
 
   const CATEGORIES = { category_a: { review: 0.5, quarantine: 0.9 } };
 
-  it("quarantines a video whose frames carry a category the operator never mapped", async () => {
-    // Without this, the policy's strongest rule would hold for a still and not
-    // for the same content inside a clip.
+  it("holds for review a video whose frames carry a category the operator never mapped", async () => {
+    // Without this, the policy's unmapped-category rule would hold for a still
+    // and not for the same content inside a clip.
     const { adapter, images } = withPolicy(
       createLabelPolicy({
         categories: CATEGORIES,
@@ -496,9 +484,7 @@ describe("FrameSamplingVideoModerationAdapter — the operator's policy governs 
       provider: "mock",
     });
 
-    expect((await adapter.startVideoModeration(REF)).initialDecision).toBe(
-      "quarantine",
-    );
+    expect((await adapter.startVideoModeration(REF)).initialDecision).toBe("review");
   });
 
   it("reviews a video whose frames come from a drifted taxonomy", async () => {

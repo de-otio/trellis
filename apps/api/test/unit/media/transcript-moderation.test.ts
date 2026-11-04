@@ -7,9 +7,10 @@
  *   3. Unknown/garbage decision from seam -> "review" (fail closed).
  *   4. Null/undefined verdict object     -> "review" (fail closed).
  *   5. No failure path returns "approved".
- *   6. Empty transcript is passed to the seam unchanged; the seam's decision
- *      is honoured (including "approved" when the seam explicitly approves it).
- *   7. Seam throws on empty input         -> "review".
+ *   6. Empty / whitespace-only transcript -> "approved" with reason
+ *      "no-speech"; the seam is not consulted.
+ *   7. Retryable / infraFault errors are re-thrown; other errors and malformed
+ *      verdicts -> "review".
  *
  * Properties (fast-check):
  *   A. For any non-throwing seam whose decision is one of the three known
@@ -20,10 +21,12 @@
 
 import { describe, expect, it } from "vitest";
 import * as fc from "fast-check";
-import { transcriptToModerationDecision } from "../../../src/lib/media/transcript-moderation.js";
 import {
-  MockTextModerationProvider,
-} from "../../../src/lib/media/text-moderation.js";
+  moderateTranscript,
+  transcriptToModerationDecision,
+} from "../../../src/lib/media/transcript-moderation.js";
+import { ModerationProviderError } from "../../../src/lib/media/moderation-provider.js";
+import { MockTextModerationProvider } from "../../../src/lib/media/text-moderation.js";
 import type { ModerationVerdict } from "../../../src/lib/media/moderation-provider.js";
 import type { ModerationDecision } from "../../../src/lib/media/media-lifecycle.js";
 import { ALL_MODERATION_DECISIONS } from "../../../src/lib/media/media-lifecycle.js";
@@ -183,45 +186,97 @@ describe("transcriptToModerationDecision — approved never from failure", () =>
 });
 
 // ---------------------------------------------------------------------------
-// Obligation 6: empty transcript is passed to the seam unchanged
+// Obligation 6: an empty / whitespace-only transcript is silence — approved
+// with reason `no-speech`, and the seam is not consulted
 // ---------------------------------------------------------------------------
 
-describe("transcriptToModerationDecision — empty transcript", () => {
-  it("passes the empty string to the seam as-is", async () => {
+describe("moderateTranscript — empty transcript", () => {
+  for (const blank of ["", "   ", "\n\t \r\n"]) {
+    it(`approves ${JSON.stringify(blank)} with reason no-speech`, async () => {
+      const seam = new RecordingProvider(verdict("quarantine"));
+      expect(await moderateTranscript(blank, seam)).toEqual({
+        decision: "approved",
+        reason: "no-speech",
+      });
+      // Nothing to classify, so nothing is sent to the provider.
+      expect(seam.calls).toHaveLength(0);
+    });
+  }
+
+  it("approves silence without reaching a seam that would have thrown", async () => {
+    const result = await moderateTranscript("", new ThrowingProvider());
+    expect(result).toEqual({ decision: "approved", reason: "no-speech" });
+  });
+
+  it("transcriptToModerationDecision returns the same approval", async () => {
+    expect(await transcriptToModerationDecision("  ", new ThrowingProvider())).toBe("approved");
+  });
+
+  it("a transcript with any text goes to the seam and carries no reason", async () => {
     const seam = new RecordingProvider(verdict("review"));
-    await transcriptToModerationDecision("", seam);
-    expect(seam.calls).toHaveLength(1);
-    expect(seam.calls[0]).toBe("");
-  });
-
-  it("honours approved when seam explicitly approves empty input", async () => {
-    const seam = new MockTextModerationProvider(verdict("approved"));
-    const result = await transcriptToModerationDecision("", seam);
-    expect(result).toBe("approved");
-  });
-
-  it("honours quarantine when seam flags empty input", async () => {
-    const seam = new MockTextModerationProvider(verdict("quarantine"));
-    const result = await transcriptToModerationDecision("", seam);
-    expect(result).toBe("quarantine");
-  });
-
-  it("honours review when seam is uncertain on empty input", async () => {
-    const seam = new MockTextModerationProvider(verdict("review"));
-    const result = await transcriptToModerationDecision("", seam);
-    expect(result).toBe("review");
+    const result = await moderateTranscript(" hi ", seam);
+    expect(seam.calls).toEqual([" hi "]);
+    expect(result).toEqual({ decision: "review" });
   });
 });
 
 // ---------------------------------------------------------------------------
-// Obligation 7: seam throws on empty input => "review"
+// Retryable / infrastructure faults propagate; malformed verdicts review
 // ---------------------------------------------------------------------------
 
-describe("transcriptToModerationDecision — seam throws on empty", () => {
-  it("returns review when seam throws on empty transcript", async () => {
-    const seam = new ThrowingProvider();
-    const result = await transcriptToModerationDecision("", seam);
-    expect(result).toBe("review");
+describe("moderateTranscript — whose fault the failure was", () => {
+  it("re-throws a retryable provider error", async () => {
+    const err = new ModerationProviderError("throttled", { retryable: true });
+    const seam = {
+      async moderateText(): Promise<ModerationVerdict> {
+        throw err;
+      },
+    };
+    await expect(moderateTranscript("hello", seam)).rejects.toBe(err);
+    await expect(transcriptToModerationDecision("hello", seam)).rejects.toBe(err);
+  });
+
+  it("re-throws an infrastructure fault even when it is not retryable", async () => {
+    const err = new ModerationProviderError("unattributable", {
+      retryable: false,
+      infraFault: true,
+    });
+    const seam = {
+      async moderateText(): Promise<ModerationVerdict> {
+        throw err;
+      },
+    };
+    await expect(moderateTranscript("hello", seam)).rejects.toBe(err);
+  });
+
+  it("re-throws a structurally-marked error from a foreign copy of the class", async () => {
+    const err = Object.assign(new Error("transient"), { retryable: true });
+    const seam = {
+      async moderateText(): Promise<ModerationVerdict> {
+        throw err;
+      },
+    };
+    await expect(moderateTranscript("hello", seam)).rejects.toBe(err);
+  });
+
+  it("reviews a permanent provider error", async () => {
+    const seam = {
+      async moderateText(): Promise<ModerationVerdict> {
+        throw new ModerationProviderError("rejected", { retryable: false });
+      },
+    };
+    expect(await moderateTranscript("hello", seam)).toEqual({ decision: "review" });
+  });
+
+  it("reviews a malformed verdict", async () => {
+    for (const bad of [null, undefined, "approved", { labels: [] }, { decision: "nope" }]) {
+      const seam = {
+        async moderateText(): Promise<ModerationVerdict> {
+          return bad as unknown as ModerationVerdict;
+        },
+      };
+      expect(await moderateTranscript("hello", seam)).toEqual({ decision: "review" });
+    }
   });
 });
 
@@ -233,7 +288,7 @@ describe("property A — known decision round-trips", () => {
   it("result === seam decision for any transcript and any known decision", async () => {
     await fc.assert(
       fc.asyncProperty(
-        fc.string(),
+        fc.string().filter((t) => t.trim().length > 0),
         fc.constantFrom<ModerationDecision>("approved", "review", "quarantine"),
         async (transcript, decision) => {
           const seam = new MockTextModerationProvider(verdict(decision));
@@ -252,11 +307,14 @@ describe("property A — known decision round-trips", () => {
 describe("property B — throw always resolves to review", () => {
   it("for any transcript, a throwing seam always returns review", async () => {
     await fc.assert(
-      fc.asyncProperty(fc.string(), async (transcript) => {
-        const seam = new ThrowingProvider();
-        const result = await transcriptToModerationDecision(transcript, seam);
-        return result === "review";
-      }),
+      fc.asyncProperty(
+        fc.string().filter((t) => t.trim().length > 0),
+        async (transcript) => {
+          const seam = new ThrowingProvider();
+          const result = await transcriptToModerationDecision(transcript, seam);
+          return result === "review";
+        },
+      ),
     );
   });
 });
@@ -271,7 +329,7 @@ describe("property C — result is always a known decision", () => {
   it("non-throwing seam returns a known decision for any transcript", async () => {
     await fc.assert(
       fc.asyncProperty(
-        fc.string(),
+        fc.string().filter((t) => t.trim().length > 0),
         fc.constantFrom<ModerationDecision>("approved", "review", "quarantine"),
         async (transcript, decision) => {
           const seam = new MockTextModerationProvider(verdict(decision));
@@ -298,11 +356,14 @@ describe("property C — result is always a known decision", () => {
 
   it("throwing seam always returns a known decision", async () => {
     await fc.assert(
-      fc.asyncProperty(fc.string(), async (transcript) => {
-        const seam = new ThrowingProvider();
-        const result = await transcriptToModerationDecision(transcript, seam);
-        return knownDecisions.has(result);
-      }),
+      fc.asyncProperty(
+        fc.string().filter((t) => t.trim().length > 0),
+        async (transcript) => {
+          const seam = new ThrowingProvider();
+          const result = await transcriptToModerationDecision(transcript, seam);
+          return knownDecisions.has(result);
+        },
+      ),
     );
   });
 });

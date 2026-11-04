@@ -166,9 +166,7 @@ function pipeline(
  */
 async function casKeyOf(storage: MockStoragePort): Promise<string | null> {
   const { createHash } = await import("node:crypto");
-  const hash = createHash("sha256")
-    .update(Buffer.from("cleaned bytes"))
-    .digest("hex");
+  const hash = createHash("sha256").update(Buffer.from("cleaned bytes")).digest("hex");
   const candidate = `cas/${TENANT}/${hash}`;
   return (await storage.headObject(candidate)).exists ? candidate : null;
 }
@@ -194,9 +192,7 @@ describe("moderation seam end-to-end — a silent video, frame-sampled", () => {
     expect(cas).not.toBeNull();
     expect((await storage.headObject(PENDING_KEY)).exists).toBe(false);
     expect((await storage.headObject(STAGING_KEY)).exists).toBe(false);
-    expect(
-      isServable({ lifecycle: "APPROVED", deletedAt: null, hidden: false }),
-    ).toBe(true);
+    expect(isServable({ lifecycle: "APPROVED", deletedAt: null, hidden: false })).toBe(true);
   });
 
   it("holds a video whose frames disagree, and serves nothing", async () => {
@@ -211,9 +207,7 @@ describe("moderation seam end-to-end — a silent video, frame-sampled", () => {
 
     expect(statuses).toEqual(["QUARANTINED"]);
     expect(await casKeyOf(storage)).toBeNull();
-    expect(
-      isServable({ lifecycle: "QUARANTINED", deletedAt: null, hidden: false }),
-    ).toBe(false);
+    expect(isServable({ lifecycle: "QUARANTINED", deletedAt: null, hidden: false })).toBe(false);
   });
 
   it("holds a video whose frames could not all be decoded", async () => {
@@ -253,11 +247,7 @@ describe("moderation seam end-to-end — a silent video, frame-sampled", () => {
   it("removes the poster still on the way out", async () => {
     const { deps, storage, images } = pipeline();
     images.setImageVerdict(verdict("approved"));
-    await storage.putObject(
-      `${STAGING_KEY}.poster`,
-      Buffer.from("poster"),
-      "image/jpeg",
-    );
+    await storage.putObject(`${STAGING_KEY}.poster`, Buffer.from("poster"), "image/jpeg");
 
     await processObjectKey(PENDING_KEY, deps);
 
@@ -272,9 +262,7 @@ describe("moderation seam end-to-end — a video WITH audio still waits for fan-
 
     await processObjectKey(PENDING_KEY, deps);
 
-    expect(jobs.find((j) => j.track === "VISUAL")?.initialDecision).toBe(
-      "approved",
-    );
+    expect(jobs.find((j) => j.track === "VISUAL")?.initialDecision).toBe("approved");
     // The audio track has a real job with no pre-resolved decision, so the
     // completion worker owns the final transition — nothing is settled here.
     const audio = jobs.find((j) => j.track === "AUDIO");
@@ -332,7 +320,7 @@ describe("moderation seam end-to-end — the deadline path", () => {
 });
 
 describe("moderation seam end-to-end — an operator policy overrides the provider", () => {
-  it("quarantines on an unmapped category even when the provider approved", async () => {
+  it("holds for review on an unmapped category even when the provider approved", async () => {
     const policy = createLabelPolicy({
       categories: THRESHOLDS,
       pinMode: "config",
@@ -348,7 +336,7 @@ describe("moderation seam end-to-end — an operator policy overrides the provid
       modelVersion: "mock-taxonomy-1",
     };
 
-    expect(policy.decide(providerVerdict)).toBe("quarantine");
+    expect(policy.decide(providerVerdict)).toBe("review");
   });
 
   it("reviews when the taxonomy the map was written for has moved", async () => {

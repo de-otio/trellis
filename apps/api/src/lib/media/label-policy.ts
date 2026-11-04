@@ -11,11 +11,14 @@
  *     tarball, and a threshold compiled into it is a published threshold. An
  *     operator who configures nothing gets a hard failure at wiring time, not a
  *     silent policy nobody chose.
- *  2. **An unmapped category quarantines.** A category the operator has not
- *     ruled on is not a category to shrug at: the provider is reporting
- *     something and the policy has no opinion, which is precisely when a human
- *     should look. It dominates — one unmapped label quarantines the object
- *     however benign every other label is.
+ *  2. **An unmapped category holds for review, whatever the version.** A
+ *     category the operator has not ruled on is the signature of a taxonomy
+ *     that moved: the provider is reporting something and the policy has no
+ *     opinion, which is precisely when a human should look. One unmapped label
+ *     floors the object at `review` with ground `taxonomy-drift`, however
+ *     benign every other label is and whether or not the version verified. It
+ *     never approves, and it never lowers a stronger signal: a mapped label at
+ *     its quarantine bar, or a provider `quarantine`, still quarantines.
  *  3. **Approval requires a verifiable taxonomy.** A category→action map is
  *     only meaningful against the taxonomy it was written for. If the provider
  *     silently reships its model under the same category names, the map keeps
@@ -23,6 +26,14 @@
  *     verdict must carry a `modelVersion` that matches what the operator
  *     pinned; drift or absence degrades to `review`. Pin failure FLOORS the
  *     decision at review — it never lifts a quarantine.
+ *
+ *     `"config"` mode accepts one version or a set of them (a rollout window
+ *     in which two versions are both known-good). What happens to a version
+ *     outside the set is the operator's choice, `onUnacceptedVersion`:
+ *     `"hold"` (default) floors at review; `"warn"` decides normally and flags
+ *     the result with `versionWarning` — but only while every label maps (rule
+ *     2) and at least one label was returned (rule 4). An absent version
+ *     always holds, and `"warn"` is refused outside `pinMode: "config"`.
  *  4. **No labels is not automatically approval.** Zero labels approves only
  *     when the pin verified. A provider that returns an empty label array
  *     because it errored internally, or because its taxonomy moved, must not
@@ -46,7 +57,7 @@
  */
 
 import type { ModerationDecision } from "./media-lifecycle.js";
-import type { ModerationVerdict } from "./moderation-provider.js";
+import type { HoldGround, ModerationVerdict } from "./moderation-provider.js";
 
 /** Severity ladder, shared with frame aggregation. Higher is worse. */
 const SEVERITY: Readonly<Record<ModerationDecision, number>> = {
@@ -97,18 +108,19 @@ export interface LabelPolicyConfig {
   readonly categories: Readonly<Record<string, CategoryPolicy>>;
   readonly pinMode: TaxonomyPinMode;
   /**
-   * The pinned taxonomy version. REQUIRED when `pinMode` is `"config"`.
-   *
-   * The list form is typed only: until a follow-up accepts it, a list is
-   * refused at construction under `"config"` mode, so it fails closed.
+   * The accepted taxonomy version(s): one string, or a set (a `Set` or an
+   * array) of them — a reported version matching ANY member is accepted.
+   * REQUIRED, and non-empty, when `pinMode` is `"config"`.
    */
-  readonly expectedModelVersion?: string | readonly string[];
+  readonly expectedModelVersion?: string | ReadonlySet<string> | readonly string[];
   /** Must be explicitly `true` when `pinMode` is `"none"`. */
   readonly acceptUnpinnedTaxonomy?: boolean;
   /**
    * What to do when a verdict reports a version outside the accepted set:
-   * hold the media, or count a warning and continue. Typed only; nothing
-   * reads it yet.
+   * `"hold"` (default) floors the decision at `review`; `"warn"` decides
+   * normally from the labels and sets `versionWarning` on the explanation.
+   * `"warn"` requires `pinMode: "config"`. An ABSENT version always holds,
+   * and so does an empty label array or an unmapped label under `"warn"`.
    */
   readonly onUnacceptedVersion?: "hold" | "warn";
 }
@@ -181,11 +193,22 @@ export function createLabelPolicy(config: LabelPolicyConfig): LabelPolicy {
   if (config.pinMode !== "response" && config.pinMode !== "config" && config.pinMode !== "none") {
     throw new LabelPolicyConfigError(`label policy pinMode must be "response", "config" or "none"`);
   }
+  if (config.pinMode === "config" && acceptedVersions(config).size === 0) {
+    throw new LabelPolicyConfigError(
+      'label policy pinMode "config" requires a non-empty expectedModelVersion',
+    );
+  }
   if (
-    config.pinMode === "config" &&
-    (typeof config.expectedModelVersion !== "string" || config.expectedModelVersion.length === 0)
+    config.onUnacceptedVersion !== undefined &&
+    config.onUnacceptedVersion !== "hold" &&
+    config.onUnacceptedVersion !== "warn"
   ) {
-    throw new LabelPolicyConfigError('label policy pinMode "config" requires expectedModelVersion');
+    throw new LabelPolicyConfigError('label policy onUnacceptedVersion must be "hold" or "warn"');
+  }
+  if (config.onUnacceptedVersion === "warn" && config.pinMode !== "config") {
+    throw new LabelPolicyConfigError(
+      'label policy onUnacceptedVersion "warn" requires pinMode "config"',
+    );
   }
   if (config.pinMode === "none" && config.acceptUnpinnedTaxonomy !== true) {
     throw new LabelPolicyConfigError(
@@ -197,7 +220,11 @@ export function createLabelPolicy(config: LabelPolicyConfig): LabelPolicy {
     categories: { ...config.categories },
     pinMode: config.pinMode,
     ...(config.expectedModelVersion !== undefined && {
-      expectedModelVersion: config.expectedModelVersion,
+      // Snapshot, so later mutation of a caller-held set cannot move the pin.
+      expectedModelVersion: acceptedVersions(config),
+    }),
+    ...(config.onUnacceptedVersion !== undefined && {
+      onUnacceptedVersion: config.onUnacceptedVersion,
     }),
     ...(config.acceptUnpinnedTaxonomy !== undefined && {
       acceptUnpinnedTaxonomy: config.acceptUnpinnedTaxonomy,
@@ -249,7 +276,7 @@ export function decideFromLabels(
 export type LabelPolicyGround =
   /** Nothing fired: approved on the merits. */
   | "clean"
-  /** A label the policy has no rule for (rule 2). Always `quarantine`. */
+  /** Retained for compatibility; no longer produced — see `taxonomy-drift`. */
   | "unmapped-category"
   /** A mapped label at or above its quarantine bar. */
   | "over-quarantine-bar"
@@ -259,6 +286,12 @@ export type LabelPolicyGround =
   | "unreadable-confidence"
   /** The taxonomy pin did not verify, so the decision was floored at `review`. */
   | "taxonomy-pin-failed"
+  /**
+   * A label the policy has no rule for (rule 2): the taxonomy has moved under
+   * the map. Floors at `review`, whatever the version. Takes precedence over
+   * `taxonomy-pin-failed`, because it is the more specific evidence.
+   */
+  | Extract<HoldGround, "taxonomy-drift">
   /** The provider's own decision dominated everything the labels said. */
   | "provider-floor"
   /** The verdict was not a usable object, or carried no label array. */
@@ -276,6 +309,13 @@ export interface LabelPolicyExplanation {
    * the absence of a usable number).
    */
   readonly drivingConfidence: number | null;
+  /**
+   * `true` only when `onUnacceptedVersion: "warn"` let a verdict through whose
+   * `modelVersion` is not among the accepted versions. Absent otherwise. The
+   * decision may still be `review` or `quarantine` for other reasons; the flag
+   * says the version was not what the operator pinned.
+   */
+  readonly versionWarning?: true;
 }
 
 /**
@@ -284,7 +324,8 @@ export interface LabelPolicyExplanation {
  * caller acts on is always the reason the decision was actually made.
  *
  * GROUND PRECEDENCE, where several apply to one `review`, is ordered by what a
- * caller must not spend money on: `taxonomy-pin-failed` first, because a policy
+ * caller must not spend money on: `taxonomy-drift` (an unmapped label), then
+ * `taxonomy-pin-failed`, because a policy
  * whose map may no longer mean what it says is a configuration fault and no
  * amount of re-classification fixes it. Then the label-derived grounds, then
  * the provider floor.
@@ -296,9 +337,16 @@ export function explainFromLabels(
   config: LabelPolicyConfig,
   context?: LabelPolicyContext,
 ): LabelPolicyExplanation {
-  const pinOk = verifyTaxonomyPin(verdict, config, context);
-  const floor: ModerationDecision = pinOk ? "approved" : "review";
+  const pin = verifyTaxonomyPin(verdict, config, context);
+  const explanation = explainWithPin(verdict, config, pin);
+  return pin.warn ? { ...explanation, versionWarning: true } : explanation;
+}
 
+function explainWithPin(
+  verdict: ModerationVerdict,
+  config: LabelPolicyConfig,
+  pin: PinCheck,
+): LabelPolicyExplanation {
   if (verdict === null || typeof verdict !== "object") {
     return { decision: "review", ground: "malformed-verdict", drivingConfidence: null };
   }
@@ -326,7 +374,17 @@ export function explainFromLabels(
     };
   }
 
+  // Rule 4 applies to a version we are only WARNING about as much as to a
+  // failed pin: an empty label array from a provider whose taxonomy is not the
+  // pinned one is not evidence of anything, so `"warn"` does not approve it.
+  const pinOk = pin.ok && !(pin.warn && labels.length === 0);
+  const floor: ModerationDecision = pinOk ? "approved" : "review";
+
   let decision: ModerationDecision = "approved";
+  // A label the policy has no rule for. Recorded, not returned from: the
+  // object is floored at `review`, but a mapped label elsewhere in the array
+  // that reaches its quarantine bar must still quarantine.
+  let sawUnmapped = false;
   // The strongest grey-band signal seen, and whether any mapped label came
   // with a confidence we could not read. Both are only consulted if the final
   // result is `review`; a `quarantine` returns early from inside the loop.
@@ -339,22 +397,18 @@ export function explainFromLabels(
         : null;
     if (category === null) {
       // A label we cannot even name is an unmapped label.
-      return {
-        decision: "quarantine",
-        ground: "unmapped-category",
-        drivingConfidence: null,
-      };
+      decision = worse(decision, "review");
+      sawUnmapped = true;
+      continue;
     }
     const policy = Object.prototype.hasOwnProperty.call(config.categories, category)
       ? config.categories[category]
       : undefined;
     if (policy === undefined) {
-      // Rule 2: unmapped dominates, whatever else is in the array.
-      return {
-        decision: "quarantine",
-        ground: "unmapped-category",
-        drivingConfidence: null,
-      };
+      // Rule 2: unmapped floors at review, whatever else is in the array.
+      decision = worse(decision, "review");
+      sawUnmapped = true;
+      continue;
     }
     const confidence =
       typeof label.confidence === "number" && Number.isFinite(label.confidence)
@@ -393,7 +447,11 @@ export function explainFromLabels(
 
   // A `review`, and possibly several grounds at once. Precedence per the
   // doc comment: the configuration fault first, then what the labels said,
-  // then the provider.
+  // then the provider. Drift outranks a failed pin: an unmapped label is
+  // direct evidence the taxonomy moved, where a pin failure only suggests it.
+  if (sawUnmapped) {
+    return { decision: result, ground: "taxonomy-drift", drivingConfidence: null };
+  }
   if (!pinOk) {
     return { decision: result, ground: "taxonomy-pin-failed", drivingConfidence: null };
   }
@@ -406,12 +464,35 @@ export function explainFromLabels(
   return { decision: result, ground: "provider-floor", drivingConfidence: null };
 }
 
+/** The accepted versions as a set; empty when none are configured. */
+function acceptedVersions(config: LabelPolicyConfig): ReadonlySet<string> {
+  const raw = config.expectedModelVersion;
+  const items: unknown[] =
+    typeof raw === "string"
+      ? [raw]
+      : raw instanceof Set || Array.isArray(raw)
+        ? [...(raw as Iterable<unknown>)]
+        : [];
+  return new Set(items.filter((v): v is string => typeof v === "string" && v.length > 0));
+}
+
+/** Outcome of the pin check. `warn` implies `ok`: accepted on sufferance. */
+interface PinCheck {
+  readonly ok: boolean;
+  readonly warn: boolean;
+}
+
+const PIN_OK: PinCheck = { ok: true, warn: false };
+const PIN_FAILED: PinCheck = { ok: false, warn: false };
+const PIN_WARN: PinCheck = { ok: true, warn: true };
+
 /**
  * Does the verdict's taxonomy match what the operator pinned?
  *
  * `"none"` always passes (that is what the opt-in bought). The pinned modes
  * require a self-reported version, and `"config"` additionally requires it to
- * equal the configured one. Under `"response"`, a caller-supplied
+ * be one of the accepted versions — or, under `onUnacceptedVersion: "warn"`,
+ * passes it with a warning. Under `"response"`, a caller-supplied
  * `pinnedModelVersion` (captured when an async job started) must also match —
  * that is the only way to notice a taxonomy that moved mid-job.
  */
@@ -419,8 +500,8 @@ function verifyTaxonomyPin(
   verdict: ModerationVerdict,
   config: LabelPolicyConfig,
   context?: LabelPolicyContext,
-): boolean {
-  if (config.pinMode === "none") return true;
+): PinCheck {
+  if (config.pinMode === "none") return PIN_OK;
 
   const reported =
     verdict !== null &&
@@ -429,17 +510,18 @@ function verifyTaxonomyPin(
     verdict.modelVersion.length > 0
       ? verdict.modelVersion
       : null;
-  if (reported === null) return false;
+  if (reported === null) return PIN_FAILED;
 
   if (config.pinMode === "config") {
-    return reported === config.expectedModelVersion;
+    if (acceptedVersions(config).has(reported)) return PIN_OK;
+    return config.onUnacceptedVersion === "warn" ? PIN_WARN : PIN_FAILED;
   }
 
   // "response": self-reporting is enough unless the caller knows what the job
   // started under, in which case it must not have changed underneath it.
   const started = context?.pinnedModelVersion;
   if (typeof started === "string" && started.length > 0) {
-    return reported === started;
+    return reported === started ? PIN_OK : PIN_FAILED;
   }
-  return true;
+  return PIN_OK;
 }

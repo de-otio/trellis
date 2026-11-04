@@ -71,10 +71,8 @@ describe("createLabelPolicy — refuses to construct without a policy", () => {
 
   it("accepts an EMPTY map — that is a coherent policy, not a missing one", () => {
     const policy = createLabelPolicy(config({ categories: {} }));
-    // Every reported category is therefore unmapped.
-    expect(policy.decide(verdictOf([{ category: MOCK_CATEGORY_A, confidence: 0 }]))).toBe(
-      "quarantine",
-    );
+    // Every reported category is therefore unmapped, and unmapped holds.
+    expect(policy.decide(verdictOf([{ category: MOCK_CATEGORY_A, confidence: 0 }]))).toBe("review");
     // ...but a verdict with no labels at all still approves.
     expect(policy.decide(verdictOf([]))).toBe("approved");
   });
@@ -92,9 +90,12 @@ describe("createLabelPolicy — refuses to construct without a policy", () => {
     ).toThrow(LabelPolicyConfigError);
   });
 
-  it('refuses a version list under "config" mode until a follow-up accepts one (fails closed)', () => {
+  it('accepts a version list under "config" mode, and refuses one that names no usable version', () => {
     expect(() =>
       createLabelPolicy(config({ pinMode: "config", expectedModelVersion: [MOCK_VERSION] })),
+    ).not.toThrow();
+    expect(() =>
+      createLabelPolicy(config({ pinMode: "config", expectedModelVersion: [] })),
     ).toThrow(LabelPolicyConfigError);
   });
 
@@ -170,22 +171,34 @@ describe("decideFromLabels — category mapping", () => {
     });
   }
 
-  it("quarantines an unmapped category even when every other label approves", () => {
+  it("holds an unmapped category for review even when every other label approves", () => {
     const labels = [
       { category: MOCK_CATEGORY_A, confidence: 0 },
       { category: "mock_category_unmapped", confidence: 0 },
       { category: MOCK_CATEGORY_B, confidence: 0 },
     ];
-    expect(decideFromLabels(verdictOf(labels), unpinned)).toBe("quarantine");
+    expect(decideFromLabels(verdictOf(labels), unpinned)).toBe("review");
+  });
+
+  it("an unmapped category never lowers a stronger signal", () => {
+    const mixed = [
+      { category: "mock_category_unmapped", confidence: 0 },
+      { category: MOCK_CATEGORY_A, confidence: 0.99 },
+    ];
+    expect(decideFromLabels(verdictOf(mixed), unpinned)).toBe("quarantine");
+    expect(
+      decideFromLabels(
+        verdictOf([{ category: "mock_category_unmapped", confidence: 0 }], undefined, "quarantine"),
+        unpinned,
+      ),
+    ).toBe("quarantine");
   });
 
   it("does not treat inherited object properties as a mapped category", () => {
     // "constructor" and "toString" exist on every object's prototype chain; a
     // naive lookup would read them as configured categories.
     for (const category of ["constructor", "toString", "__proto__"]) {
-      expect(decideFromLabels(verdictOf([{ category, confidence: 0 }]), unpinned)).toBe(
-        "quarantine",
-      );
+      expect(decideFromLabels(verdictOf([{ category, confidence: 0 }]), unpinned)).toBe("review");
     }
   });
 
@@ -308,7 +321,7 @@ describe("decideFromLabels — taxonomy pin modes", () => {
         verdictOf([{ category: "mock_category_unmapped", confidence: 0 }], undefined),
         cfg,
       ),
-    ).toBe("quarantine");
+    ).toBe("review");
   });
 
   it("a provider that says nothing cannot approve under a pinned mode", () => {
@@ -402,7 +415,7 @@ describe("decideFromLabels — the policy can only ever DEGRADE a verdict", () =
         verdictOf([{ category: "mock_category_unmapped", confidence: 0 }], MOCK_VERSION),
         config(),
       ),
-    ).toBe("quarantine");
+    ).toBe("review");
     expect(
       decideFromLabels(
         verdictOf([], undefined),

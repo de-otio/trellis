@@ -7,6 +7,11 @@
  *
  * Hardening applied unconditionally on every invocation:
  *   - "-protocol_whitelist","file,pipe"   blocks SSRF (no http/https/rtmp/etc.)
+ *   - "-format_whitelist","<containers>"  only the listed demuxers may probe the
+ *                                         input, so a crafted file cannot steer
+ *                                         ffmpeg into a playlist/concat-style
+ *                                         demuxer that opens other resources
+ *   - "-codec_whitelist","<codecs>"       OPTIONAL, caller-supplied (see below)
  *   - "-t", String(maxDurationSeconds)    bounds processing time (from spec; never a literal)
  *   - "-dn"                               drop data STREAMS
  *   - "-sn"                               drop subtitle streams
@@ -53,6 +58,64 @@
  */
 
 // ---------------------------------------------------------------------------
+// Input hardening shared by every builder
+// ---------------------------------------------------------------------------
+
+/**
+ * Container demuxers an input may be probed as. These are INPUT options and
+ * must precede `-i`. Containers and raw single-stream audio demuxers only — no
+ * playlist, concat or protocol-style demuxers — and that is a safety property
+ * of the list, not a tuning knob, so it is a constant here rather than config.
+ *
+ * The list must admit every container the media allowlists can let through, or
+ * the whitelist silently turns an accepted upload into a failed transcode: the
+ * default audio allowlist includes MP3, which is only demuxed by `mp3`; the
+ * mobile capture formats add `3g2` and Ogg/raw AAC audio. `mov` also covers
+ * QuickTime, and `matroska` also covers WebM.
+ */
+const FORMAT_WHITELIST = "mov,mp4,m4a,3gp,3g2,matroska,webm,ogg,aac,mp3";
+
+/** A codec name as ffmpeg spells it: no separators, so a list cannot be smuggled in one entry. */
+const CODEC_NAME = /^[A-Za-z0-9_]+$/;
+
+/**
+ * Caller-supplied hardening that has no default in core.
+ *
+ * `codecWhitelist` is the list of DECODERS ffmpeg may use on the input. Core
+ * ships none: which codecs are acceptable is an operator decision, and a list
+ * compiled into a public tarball is a published list. Absent => no
+ * `-codec_whitelist` flag. An EMPTY list is refused rather than ignored,
+ * because dropping the control the caller asked for would be silent.
+ */
+export interface InputHardeningOptions {
+  readonly codecWhitelist?: readonly string[];
+}
+
+/**
+ * The input-side flags every invocation carries, in order. Single definition so
+ * the three builders cannot drift apart.
+ */
+function inputHardeningArgs(options: InputHardeningOptions): string[] {
+  const args = [
+    // SSRF prevention: accept only file: and pipe: protocols. This blocks any
+    // attempt to use the ffmpeg process to reach http/https/rtmp/concat/subfile
+    // endpoints that an in-VPC worker could reach.
+    "-protocol_whitelist",
+    "file,pipe",
+    "-format_whitelist",
+    FORMAT_WHITELIST,
+  ];
+  const codecs = options.codecWhitelist;
+  if (codecs !== undefined) {
+    if (codecs.length === 0 || !codecs.every((c) => typeof c === "string" && CODEC_NAME.test(c))) {
+      throw new TypeError("codecWhitelist must be a non-empty list of plain codec names");
+    }
+    args.push("-codec_whitelist", codecs.join(","));
+  }
+  return args;
+}
+
+// ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
@@ -64,8 +127,9 @@
  * - `outputPath`         — absolute path for the transcoded output
  * - `posterPath`         — if set, {@link buildPosterArgs} targets this path
  * - `maxDurationSeconds` — duration cap sourced from Env.media; passed to -t
+ * - `codecWhitelist`     — optional, see {@link InputHardeningOptions}
  */
-export interface FfmpegJobSpec {
+export interface FfmpegJobSpec extends InputHardeningOptions {
   readonly kind: "video" | "audio";
   readonly inputPath: string;
   readonly outputPath: string;
@@ -90,11 +154,7 @@ export interface FfmpegJobSpec {
  */
 export function buildFfmpegArgs(spec: FfmpegJobSpec): string[] {
   const args: string[] = [
-    // SSRF prevention: accept only file: and pipe: protocols. This blocks any
-    // attempt to use the ffmpeg process to reach http/https/rtmp/concat/subfile
-    // endpoints that an in-VPC worker could reach.
-    "-protocol_whitelist",
-    "file,pipe",
+    ...inputHardeningArgs(spec),
 
     // Duration cap: sourced from spec (Env.media), never a compiled literal.
     "-t",
@@ -178,7 +238,7 @@ export function buildFfmpegArgs(spec: FfmpegJobSpec): string[] {
  * it caps paid classifier calls and temp files per job independently of what
  * rate × duration would ask for.
  */
-export interface FrameSamplingSpec {
+export interface FrameSamplingSpec extends InputHardeningOptions {
   readonly inputPath: string;
   /**
    * Output PATTERN, not a directory: ffmpeg's image muxer writes a numbered
@@ -208,8 +268,7 @@ export interface FrameSamplingSpec {
  */
 export function buildFrameSamplingArgs(spec: FrameSamplingSpec): string[] {
   return [
-    "-protocol_whitelist",
-    "file,pipe",
+    ...inputHardeningArgs(spec),
 
     "-t",
     String(spec.maxDurationSeconds),
@@ -239,12 +298,9 @@ export function buildFrameSamplingArgs(spec: FrameSamplingSpec): string[] {
   ];
 }
 
-export function buildPosterArgs(
-  spec: FfmpegJobSpec & { readonly posterPath: string },
-): string[] {
+export function buildPosterArgs(spec: FfmpegJobSpec & { readonly posterPath: string }): string[] {
   return [
-    "-protocol_whitelist",
-    "file,pipe",
+    ...inputHardeningArgs(spec),
 
     "-t",
     String(spec.maxDurationSeconds),

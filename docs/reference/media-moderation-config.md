@@ -24,8 +24,8 @@ Two consequences follow, and both are load-bearing:
 
 ## Verdict interpretation
 
-| Key | Type | Absence |
-|---|---|---|
+| Key                     | Type                                                                            | Absence                                                                        |
+| ----------------------- | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
 | `MEDIA_THRESHOLDS_JSON` | JSON object: `{ "<category-token>": { "review": <0–1>, "quarantine": <0–1> } }` | Required in prod (boot fails). In dev, every category fail-closes to `review`. |
 
 The category tokens are the opaque tokens your provider reports; they are not
@@ -35,35 +35,58 @@ human-readable category names and core never interprets them.
 
 Passed to `createLabelPolicy()` when the operator installs a label policy.
 
-| Field | Values | Meaning |
-|---|---|---|
-| `pinMode` | `"response"` | The provider must report a `modelVersion` on every verdict, and for an async video job it must still match the version the job started under. |
-| | `"config"` | The reported version must equal `expectedModelVersion`. |
-| | `"none"` | No taxonomy pin. Requires `acceptUnpinnedTaxonomy: true` and raises a standing `unpinnedTaxonomy` flag on the ops surface. |
-| `expectedModelVersion` | string | Required when `pinMode` is `"config"`; construction throws otherwise. |
-| `acceptUnpinnedTaxonomy` | `true` | Required when `pinMode` is `"none"`. Running unpinned is a decision, not a default. |
+| Field                    | Values                              | Meaning                                                                                                                                                                                                                |
+| ------------------------ | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pinMode`                | `"response"`                        | The provider must report a `modelVersion` on every verdict, and for an async video job it must still match the version the job started under.                                                                          |
+|                          | `"config"`                          | The reported version must be one of `expectedModelVersion`.                                                                                                                                                            |
+|                          | `"none"`                            | No taxonomy pin. Requires `acceptUnpinnedTaxonomy: true` and raises a standing `unpinnedTaxonomy` flag on the ops surface.                                                                                             |
+| `expectedModelVersion`   | string, or a set / array of strings | Required and non-empty when `pinMode` is `"config"`; construction throws otherwise. A reported version matching **any** member is accepted — use a set for a rollout window in which two versions are both known-good. |
+| `onUnacceptedVersion`    | `"hold"` (default)                  | A reported version outside the accepted set floors the result at `review` (ground `taxonomy-pin-failed`).                                                                                                              |
+|                          | `"warn"`                            | Decide normally from the labels and set `versionWarning: true` on the result of `policy.explain()`. Only valid with `pinMode: "config"`. See below.                                                                    |
+| `acceptUnpinnedTaxonomy` | `true`                              | Required when `pinMode` is `"none"`. Running unpinned is a decision, not a default.                                                                                                                                    |
 
 Under a pinned mode, a verdict whose version is missing or different is
 **unverifiable** and floors the result at `review`. It never lifts a
 quarantine.
 
+With `onUnacceptedVersion: "warn"`, a version that is _present but not
+accepted_ no longer floors the result; the labels decide, and the explanation
+carries `versionWarning: true` so the caller can log or count it. The warning
+is a field on the result rather than a logger so the policy stays pure — and
+`policy.decide()` returns only the decision, so read `policy.explain()` if you
+use `"warn"`. Three things still hold regardless:
+
+- A verdict that reports **no** version always holds.
+- An **empty label array** from an unaccepted version holds: silence from a
+  provider whose taxonomy is not the pinned one is not evidence.
+- An **unmapped label** holds (below).
+
+### Unmapped labels
+
+A label whose category the policy has no rule for is treated as **taxonomy
+drift**: the result is `review` with ground `taxonomy-drift`, whatever the
+version and in every pin mode. It never approves and never lowers a stronger
+signal — a mapped label at its quarantine bar, or a provider `quarantine`,
+still quarantines. The `taxonomy-drift` ground is not escalated to the deferred
+lane: re-classifying does not repair a map that no longer matches the provider.
+
 `createLabelPolicy` throws `LabelPolicyConfigError` rather than constructing a
-policy nobody configured. An *empty* category map is permitted and is not the
+policy nobody configured. An _empty_ category map is permitted and is not the
 same as a missing one — it is a coherent policy meaning "every category the
-provider can report is unmapped, therefore quarantine".
+provider can report is unmapped, therefore review".
 
 ## Frame sampling (video via an image-only classifier)
 
 Passed to `FrameSamplingVideoModerationAdapter`.
 
-| Key | Type | Absence |
-|---|---|---|
-| `framesPerSecond` | number > 0 | The adapter refuses to sample; the visual track is `review`. |
-| `maxFramesPerJob` | integer ≥ 1 | Same. An absolute per-job ceiling, independent of rate × duration. |
-| `maxDurationSeconds` | number > 0 | Same. Passed through to the extractor so one clip cannot run it unbounded. |
-| `policyVersion` | string | Optional. When absent, a digest of the effective parameters is recorded so the audit trail is never empty. That digest tells two policies APART; it does **not** conceal them (a small preimage space is trivially exhausted), so treat `policyVersion` as server-side-only either way. |
-| `policy` | `LabelPolicy` | Optional. Applies the operator's label policy to every sampled frame, so the video path is governed by the same rules as the image path. |
-| `frameConcurrency` | integer ≥ 1 | Optional; defaults to a conservative value. A *resource* bound (wall-clock vs. provider rate limits), not a moderation parameter, which is why it may have a default at all. |
+| Key                  | Type          | Absence                                                                                                                                                                                                                                                                                 |
+| -------------------- | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `framesPerSecond`    | number > 0    | The adapter refuses to sample; the visual track is `review`.                                                                                                                                                                                                                            |
+| `maxFramesPerJob`    | integer ≥ 1   | Same. An absolute per-job ceiling, independent of rate × duration.                                                                                                                                                                                                                      |
+| `maxDurationSeconds` | number > 0    | Same. Passed through to the extractor so one clip cannot run it unbounded.                                                                                                                                                                                                              |
+| `policyVersion`      | string        | Optional. When absent, a digest of the effective parameters is recorded so the audit trail is never empty. That digest tells two policies APART; it does **not** conceal them (a small preimage space is trivially exhausted), so treat `policyVersion` as server-side-only either way. |
+| `policy`             | `LabelPolicy` | Optional. Applies the operator's label policy to every sampled frame, so the video path is governed by the same rules as the image path.                                                                                                                                                |
+| `frameConcurrency`   | integer ≥ 1   | Optional; defaults to a conservative value. A _resource_ bound (wall-clock vs. provider rate limits), not a moderation parameter, which is why it may have a default at all.                                                                                                            |
 
 `maxFramesPerJob` is a cost and disk bound as much as a sampling one: without
 it, a long clip at a high rate turns one upload into an unbounded number of
@@ -84,8 +107,8 @@ afterwards would be indistinguishable from a decode failure.
 
 Passed to `withModerationDeadline`.
 
-| Key | Type | Absence |
-|---|---|---|
+| Key         | Type       | Absence                                                                            |
+| ----------- | ---------- | ---------------------------------------------------------------------------------- |
 | `timeoutMs` | number > 0 | `ModerationDeadlineConfigError` at wiring time — the wrapper refuses to construct. |
 
 A wiring-time throw rather than a per-call `review`, deliberately: an
@@ -100,11 +123,11 @@ into review.
 
 Passed to `ModerationMetrics`.
 
-| Key | Type | Notes |
-|---|---|---|
-| `declaredProviders` | string[] | The provider names permitted as metric dimensions. Anything else is recorded under `unknown` rather than becoming a new dimension. |
-| `windowMs` | number > 0 | Counter bucket width. Coarser means a smaller correlation window. |
-| `now` | `() => number` | Injected clock — no ambient time. |
+| Key                 | Type           | Notes                                                                                                                              |
+| ------------------- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `declaredProviders` | string[]       | The provider names permitted as metric dimensions. Anything else is recorded under `unknown` rather than becoming a new dimension. |
+| `windowMs`          | number > 0     | Counter bucket width. Coarser means a smaller correlation window.                                                                  |
+| `now`               | `() => number` | Injected clock — no ambient time.                                                                                                  |
 
 Snapshots report **closed** windows only; the window currently accumulating is
 withheld. That omission is the anti-oracle control, not a rounding detail: a
@@ -118,16 +141,16 @@ authenticated operations surface.
 
 Passed to `createMediaBytesAccess`.
 
-| Key | Type | Absence |
-|---|---|---|
+| Key        | Type       | Absence                                                    |
+| ---------- | ---------- | ---------------------------------------------------------- |
 | `maxBytes` | number > 0 | `MediaBytesAccessConfigError` — refuses to read unbounded. |
 
 ## Startup
 
-| Key | Values | Effect |
-|---|---|---|
-| `STAGE` | `dev`, `test`, `local` | The only stages where boot tolerates the fail-closed Null moderation provider. Anything else — **including an unset `STAGE`** — refuses to serve without a real provider. An absent stage is guarded rather than waved through: forgetting it is exactly the deployment mistake the check exists for. |
-| `MEDIA_MODERATION_ALLOW_NULL` | `"true"` | Permits the Null provider anyway, with a loud warning. Every upload will land in review with no path to approval. |
+| Key                           | Values                 | Effect                                                                                                                                                                                                                                                                                                |
+| ----------------------------- | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `STAGE`                       | `dev`, `test`, `local` | The only stages where boot tolerates the fail-closed Null moderation provider. Anything else — **including an unset `STAGE`** — refuses to serve without a real provider. An absent stage is guarded rather than waved through: forgetting it is exactly the deployment mistake the check exists for. |
+| `MEDIA_MODERATION_ALLOW_NULL` | `"true"`               | Permits the Null provider anyway, with a loud warning. Every upload will land in review with no path to approval.                                                                                                                                                                                     |
 
 ## What is deliberately not configurable
 

@@ -12,14 +12,12 @@ import {
   type OtherTrackState,
   type RecordOutcome,
 } from "../../../src/lambda/media-completion-worker.js";
-import type {
-  ModerationDecision,
-  MediaLifecycle,
-} from "../../../src/lib/media/media-lifecycle.js";
+import type { ModerationDecision, MediaLifecycle } from "../../../src/lib/media/media-lifecycle.js";
 import type { Track } from "../../../src/lib/media/track-verdict.js";
-import type {
-  MediaModerationProvider,
-  ModerationVerdict,
+import {
+  ModerationProviderError,
+  type MediaModerationProvider,
+  type ModerationVerdict,
 } from "../../../src/lib/media/moderation-provider.js";
 import type {
   StoragePort,
@@ -58,7 +56,7 @@ interface StoreState {
   calls: string[];
 }
 
-function makeStore(state: StoreState): CompletionStore {
+function makeStore(state: StoreState, withRelease = false): CompletionStore {
   return {
     async claimMessage(dedupeKey) {
       state.calls.push("claimMessage");
@@ -79,6 +77,14 @@ function makeStore(state: StoreState): CompletionStore {
     async findMedia(mediaId) {
       return state.media.get(mediaId)?.coords ?? null;
     },
+    ...(withRelease
+      ? {
+          async releaseClaim(dedupeKey: string) {
+            state.calls.push("releaseClaim");
+            state.claimed.delete(dedupeKey);
+          },
+        }
+      : {}),
     async persistMediaStatus(mediaId, status) {
       state.calls.push("persistMediaStatus");
       const m = state.media.get(mediaId);
@@ -105,9 +111,7 @@ class FakeModeration implements MediaModerationProvider {
 }
 
 class FakeTranscribe implements TranscribePort {
-  constructor(
-    public result: { status: TranscriptionStatus; transcript?: string },
-  ) {}
+  constructor(public result: { status: TranscriptionStatus; transcript?: string }) {}
   async startTranscription(): Promise<{ jobId: string }> {
     return { jobId: "x" };
   }
@@ -151,6 +155,10 @@ function harness(opts: {
   // audio path
   transcription?: { status: TranscriptionStatus; transcript?: string };
   textVerdict?: ModerationDecision;
+  /** Replaces the text provider (e.g. one that throws). */
+  textProvider?: TextModerationProvider;
+  /** Give the store a `releaseClaim`. */
+  withReleaseClaim?: boolean;
   // sibling
   other?: OtherTrackState;
 }): Harness {
@@ -181,16 +189,12 @@ function harness(opts: {
             uploadId: UPLOAD,
             contentHash: HASH,
             stagingVersionId:
-              opts.stagingVersionId === undefined
-                ? "v-pinned-1"
-                : opts.stagingVersionId,
+              opts.stagingVersionId === undefined ? "v-pinned-1" : opts.stagingVersionId,
           },
         },
       ],
     ]),
-    others: new Map(
-      opts.other ? [[`${mediaId}:${opts.track}`, opts.other]] : [],
-    ),
+    others: new Map(opts.other ? [[`${mediaId}:${opts.track}`, opts.other]] : []),
     calls: [],
   };
 
@@ -218,12 +222,10 @@ function harness(opts: {
   };
 
   const deps: CompletionDeps = {
-    store: makeStore(state),
+    store: makeStore(state, opts.withReleaseClaim === true),
     moderation: new FakeModeration(verdict(opts.videoVerdict ?? "review")),
-    transcribe: new FakeTranscribe(
-      opts.transcription ?? { status: "COMPLETED", transcript: "" },
-    ),
-    textModeration: new FakeText(verdict(opts.textVerdict ?? "review")),
+    transcribe: new FakeTranscribe(opts.transcription ?? { status: "COMPLETED", transcript: "" }),
+    textModeration: opts.textProvider ?? new FakeText(verdict(opts.textVerdict ?? "review")),
     storage,
     reinterpretVisual: (v, snapshot) => {
       reinterpretArgs.push({ verdict: v, snapshot });
@@ -286,9 +288,7 @@ describe("extractJobPointer", () => {
   });
 
   it("ignores any verdict/status fields in the body (pointer only)", () => {
-    const p = extractJobPointer(
-      snsBody("rek-3", { decision: "approved", status: "APPROVED" }),
-    );
+    const p = extractJobPointer(snsBody("rek-3", { decision: "approved", status: "APPROVED" }));
     expect(p).toEqual({ jobId: "rek-3", track: "VISUAL" });
   });
 });
@@ -396,6 +396,78 @@ describe("processCompletion — re-fetch authoritative (body verdict ignored)", 
     expect(out.kind).toBe("applied");
     expect((out as { status: MediaLifecycle }).status).toBe("REVIEW");
     expect(h.emitted).toEqual([{ mediaId: "media-1", status: "not-ready" }]);
+  });
+});
+
+describe("processCompletion — AUDIO transcript lane", () => {
+  const transient = {
+    async moderateText(): Promise<ModerationVerdict> {
+      throw new ModerationProviderError("throttled", { retryable: true });
+    },
+  };
+
+  it("a retryable text-provider fault propagates, so the delivery is retried", async () => {
+    const h = harness({
+      jobId: "tr-1",
+      track: "AUDIO",
+      transcription: { status: "COMPLETED", transcript: "hello there" },
+      textProvider: transient,
+      withReleaseClaim: true,
+    });
+    await expect(processCompletion(ebBody("tr-1"), h.deps)).rejects.toThrow("throttled");
+    // Nothing was decided or persisted for the media.
+    expect(h.state.calls).not.toContain("persistTrackDecision");
+    expect(h.state.calls).not.toContain("persistMediaStatus");
+  });
+
+  it("releases the claim on that fault, so the retry is not ack-dropped as a duplicate", async () => {
+    const h = harness({
+      jobId: "tr-1",
+      track: "AUDIO",
+      transcription: { status: "COMPLETED", transcript: "hello there" },
+      textProvider: transient,
+      withReleaseClaim: true,
+    });
+    await expect(processCompletion(ebBody("tr-1"), h.deps)).rejects.toThrow();
+    expect(h.state.claimed.size).toBe(0);
+
+    // Redelivery with a healthy provider now processes instead of "duplicate".
+    h.deps.textModeration = new FakeText(verdict("approved"));
+    const again = await processCompletion(ebBody("tr-1"), h.deps);
+    expect(again.kind).not.toBe("duplicate");
+  });
+
+  it("still propagates the fault when the store has no releaseClaim", async () => {
+    const h = harness({
+      jobId: "tr-1",
+      track: "AUDIO",
+      transcription: { status: "COMPLETED", transcript: "hello there" },
+      textProvider: transient,
+    });
+    await expect(processCompletion(ebBody("tr-1"), h.deps)).rejects.toThrow("throttled");
+  });
+
+  it("a silent track (empty transcript) counts as approved on the audio side", async () => {
+    const h = harness({
+      jobId: "tr-1",
+      track: "AUDIO",
+      transcription: { status: "COMPLETED", transcript: "  " },
+      textVerdict: "quarantine", // would quarantine if it were consulted
+      other: { state: "decided", decision: "approved" },
+    });
+    const out = await processCompletion(ebBody("tr-1"), h.deps);
+    expect((out as { status: MediaLifecycle }).status).toBe("APPROVED");
+  });
+
+  it("a COMPLETED transcription with NO transcript field is errored, not silence", async () => {
+    const h = harness({
+      jobId: "tr-1",
+      track: "AUDIO",
+      transcription: { status: "COMPLETED" },
+      other: { state: "decided", decision: "approved" },
+    });
+    const out = await processCompletion(ebBody("tr-1"), h.deps);
+    expect((out as { status: MediaLifecycle }).status).toBe("REVIEW");
   });
 });
 
@@ -570,7 +642,12 @@ describe("processCompletion — replay on terminal status", () => {
 // ---------------------------------------------------------------------------
 
 describe("processCompletion — emitted payload carries only ready|not-ready", () => {
-  const cases: { name: string; decision: ModerationDecision; other: OtherTrackState; expected: "ready" | "not-ready" }[] = [
+  const cases: {
+    name: string;
+    decision: ModerationDecision;
+    other: OtherTrackState;
+    expected: "ready" | "not-ready";
+  }[] = [
     {
       name: "both approved => ready",
       decision: "approved",
@@ -676,8 +753,7 @@ describe("makeHandler — SQS batch semantics", () => {
     };
     const handler = makeHandler(deps);
     const res = (await handler(sqsEvent([snsBody("rek-1")]), {} as any, () => {})) as
-      | { batchItemFailures: { itemIdentifier: string }[] }
-      | undefined;
+      { batchItemFailures: { itemIdentifier: string }[] } | undefined;
     expect(res?.batchItemFailures).toEqual([{ itemIdentifier: "m-0" }]);
   });
 });
@@ -686,11 +762,7 @@ describe("makeHandler — SQS batch semantics", () => {
 // Property: approval requires positive evidence on BOTH tracks
 // ---------------------------------------------------------------------------
 
-const decisionArb = fc.constantFrom<ModerationDecision>(
-  "approved",
-  "review",
-  "quarantine",
-);
+const decisionArb = fc.constantFrom<ModerationDecision>("approved", "review", "quarantine");
 const otherArb = fc.oneof(
   fc.record({
     state: fc.constant<"decided">("decided"),
@@ -703,36 +775,30 @@ const otherArb = fc.oneof(
 describe("property — APPROVED/ready iff both tracks positively approved", () => {
   it("ready is emitted iff this track AND the sibling are both decided-approved", async () => {
     await fc.assert(
-      fc.asyncProperty(
-        decisionArb,
-        otherArb,
-        async (thisDecision, other) => {
-          const h = harness({
-            jobId: "rek-1",
-            track: "VISUAL",
-            videoVerdict: thisDecision,
-            other,
-            currentStatus: "UPLOADED",
-          });
-          const out = await processCompletion(snsBody("rek-1"), h.deps);
-          // PENDING always permits a legal transition, so the record applies.
-          expect(out.kind).toBe("applied");
-          const status = (out as { status: MediaLifecycle }).status;
-          const bothApproved =
-            thisDecision === "approved" &&
-            other.state === "decided" &&
-            other.decision === "approved";
-          if (bothApproved) {
-            expect(status).toBe("APPROVED");
-            expect(h.emitted[0].status).toBe("ready");
-            expect(h.storageCalls).toContain("copyObject");
-          } else {
-            expect(status).not.toBe("APPROVED");
-            expect(h.emitted[0].status).toBe("not-ready");
-            expect(h.storageCalls).not.toContain("copyObject");
-          }
-        },
-      ),
+      fc.asyncProperty(decisionArb, otherArb, async (thisDecision, other) => {
+        const h = harness({
+          jobId: "rek-1",
+          track: "VISUAL",
+          videoVerdict: thisDecision,
+          other,
+          currentStatus: "UPLOADED",
+        });
+        const out = await processCompletion(snsBody("rek-1"), h.deps);
+        // PENDING always permits a legal transition, so the record applies.
+        expect(out.kind).toBe("applied");
+        const status = (out as { status: MediaLifecycle }).status;
+        const bothApproved =
+          thisDecision === "approved" && other.state === "decided" && other.decision === "approved";
+        if (bothApproved) {
+          expect(status).toBe("APPROVED");
+          expect(h.emitted[0].status).toBe("ready");
+          expect(h.storageCalls).toContain("copyObject");
+        } else {
+          expect(status).not.toBe("APPROVED");
+          expect(h.emitted[0].status).toBe("not-ready");
+          expect(h.storageCalls).not.toContain("copyObject");
+        }
+      }),
       { numRuns: 200 },
     );
   });
@@ -806,9 +872,7 @@ describe("T14 fail-closed — errored/timed-out moderation is HELD, never served
     // NEVER promoted: no bytes were copied toward the served cas/ prefix.
     expect(h.storageCalls).not.toContain("copyObject");
     // NEVER served: the serve gate denies the resulting state.
-    expect(
-      isServable({ lifecycle: "REVIEW", hidden: false, deletedAt: null }),
-    ).toBe(false);
+    expect(isServable({ lifecycle: "REVIEW", hidden: false, deletedAt: null })).toBe(false);
   });
 
   it("provider re-fetch THROWS (timeout) ⇒ record retried, object stays UPLOADED, serve gate denies", async () => {
@@ -829,20 +893,16 @@ describe("T14 fail-closed — errored/timed-out moderation is HELD, never served
     const persisted = h.state.media.get("media-1")!.coords.lifecycle;
     expect(persisted).toBe("UPLOADED"); // never advanced toward APPROVED
     expect(h.storageCalls).not.toContain("copyObject");
-    expect(
-      isServable({ lifecycle: persisted, hidden: false, deletedAt: null }),
-    ).toBe(false);
+    expect(isServable({ lifecycle: persisted, hidden: false, deletedAt: null })).toBe(false);
   });
 
   it("moderation that never completes at all (no message) leaves UPLOADED — which the serve gate denies", () => {
     // The degenerate case: the completion message is simply never delivered.
     // The object sits at UPLOADED forever; the gate approves APPROVED only.
-    expect(
-      isServable({ lifecycle: "UPLOADED", hidden: false, deletedAt: null }),
-    ).toBe(false);
-    expect(
-      isServable({ lifecycle: "AWAITING_UPLOAD", hidden: false, deletedAt: null }),
-    ).toBe(false);
+    expect(isServable({ lifecycle: "UPLOADED", hidden: false, deletedAt: null })).toBe(false);
+    expect(isServable({ lifecycle: "AWAITING_UPLOAD", hidden: false, deletedAt: null })).toBe(
+      false,
+    );
   });
 });
 
@@ -877,9 +937,7 @@ describe("processCompletion — AR-SEC F3 version-pinned promotion", () => {
 
     const out = await processCompletion(snsBody("rek-1"), deps);
     expect((out as { status: MediaLifecycle }).status).toBe("APPROVED");
-    expect(copies).toEqual([
-      { from: STAGING_KEY, to: CAS_KEY, fromVersionId: "v-moderated-7" },
-    ]);
+    expect(copies).toEqual([{ from: STAGING_KEY, to: CAS_KEY, fromVersionId: "v-moderated-7" }]);
   });
 
   it("pin resolution consults the EXACT pinned version on the staging key", async () => {
@@ -980,22 +1038,15 @@ describe("processCompletion — the envelope's track is a hint, the row decides"
 
   it("accepts a canonical envelope whose track matches the row", async () => {
     const h = harness({ jobId: "j-ok", track: "VISUAL", videoVerdict: "review" });
-    const out = await processCompletion(
-      JSON.stringify({ track: "VISUAL", jobId: "j-ok" }),
-      h.deps,
-    );
+    const out = await processCompletion(JSON.stringify({ track: "VISUAL", jobId: "j-ok" }), h.deps);
     expect(out.kind).toBe("applied");
   });
 
   it("still routes the historical wire shapes to the right track", async () => {
     const visual = harness({ jobId: "j-visual", track: "VISUAL" });
-    expect((await processCompletion(snsBody("j-visual"), visual.deps)).kind).toBe(
-      "applied",
-    );
+    expect((await processCompletion(snsBody("j-visual"), visual.deps)).kind).toBe("applied");
 
     const audio = harness({ jobId: "j-audio", track: "AUDIO" });
-    expect((await processCompletion(ebBody("j-audio"), audio.deps)).kind).toBe(
-      "applied",
-    );
+    expect((await processCompletion(ebBody("j-audio"), audio.deps)).kind).toBe("applied");
   });
 });

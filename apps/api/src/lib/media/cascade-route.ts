@@ -59,11 +59,12 @@
  *     guaranteed content loss.
  *
  * DOES NOT ESCALATE — and each of these is a decision, not an omission:
- *   - `taxonomy-pin-failed`. A configuration fault, and re-classifying does not
- *     fix it. Worse, it CANNOT: see the pin trap below.
+ *   - `taxonomy-pin-failed` and `taxonomy-drift`. A configuration fault (the
+ *     map no longer matches the provider's taxonomy), and re-classifying does
+ *     not fix it. Worse, it CANNOT: see the pin trap below.
  *   - `malformed-verdict`. Poison-shaped. Nothing about paying more to re-read
  *     the same unusable bytes changes them.
- *   - `unmapped-category` / `over-quarantine-bar` — already `quarantine`. The
+ *   - `over-quarantine-bar` (and the legacy `unmapped-category`) — already `quarantine`. The
  *     lane cannot approve (plan 031 §7.2), so escalating a quarantine could only
  *     ever confirm it: pure cost, no possible change in outcome.
  *   - `clean` — `approved` is not a dead end, and the lane exists for dead ends.
@@ -284,6 +285,7 @@ function escalatableCause(ground: LabelPolicyGround): EscalationCause | null {
     case "provider-floor":
       return "provider-abstained";
     case "taxonomy-pin-failed":
+    case "taxonomy-drift":
     case "malformed-verdict":
     // `clean`, `unmapped-category` and `over-quarantine-bar` never reach here
     // (their decisions are not `review`), but they are listed so the switch is

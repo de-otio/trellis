@@ -1891,11 +1891,12 @@ export declare function generateRequestId(): string;
  *     guaranteed content loss.
  *
  * DOES NOT ESCALATE — and each of these is a decision, not an omission:
- *   - `taxonomy-pin-failed`. A configuration fault, and re-classifying does not
- *     fix it. Worse, it CANNOT: see the pin trap below.
+ *   - `taxonomy-pin-failed` and `taxonomy-drift`. A configuration fault (the
+ *     map no longer matches the provider's taxonomy), and re-classifying does
+ *     not fix it. Worse, it CANNOT: see the pin trap below.
  *   - `malformed-verdict`. Poison-shaped. Nothing about paying more to re-read
  *     the same unusable bytes changes them.
- *   - `unmapped-category` / `over-quarantine-bar` — already `quarantine`. The
+ *   - `over-quarantine-bar` (and the legacy `unmapped-category`) — already `quarantine`. The
  *     lane cannot approve (plan 031 §7.2), so escalating a quarantine could only
  *     ever confirm it: pure cost, no possible change in outcome.
  *   - `clean` — `approved` is not a dead end, and the lane exists for dead ends.
@@ -2698,11 +2699,14 @@ export declare class FrameSamplingVideoModerationAdapter implements MediaModerat
  *     tarball, and a threshold compiled into it is a published threshold. An
  *     operator who configures nothing gets a hard failure at wiring time, not a
  *     silent policy nobody chose.
- *  2. **An unmapped category quarantines.** A category the operator has not
- *     ruled on is not a category to shrug at: the provider is reporting
- *     something and the policy has no opinion, which is precisely when a human
- *     should look. It dominates — one unmapped label quarantines the object
- *     however benign every other label is.
+ *  2. **An unmapped category holds for review, whatever the version.** A
+ *     category the operator has not ruled on is the signature of a taxonomy
+ *     that moved: the provider is reporting something and the policy has no
+ *     opinion, which is precisely when a human should look. One unmapped label
+ *     floors the object at `review` with ground `taxonomy-drift`, however
+ *     benign every other label is and whether or not the version verified. It
+ *     never approves, and it never lowers a stronger signal: a mapped label at
+ *     its quarantine bar, or a provider `quarantine`, still quarantines.
  *  3. **Approval requires a verifiable taxonomy.** A category→action map is
  *     only meaningful against the taxonomy it was written for. If the provider
  *     silently reships its model under the same category names, the map keeps
@@ -2710,6 +2714,14 @@ export declare class FrameSamplingVideoModerationAdapter implements MediaModerat
  *     verdict must carry a `modelVersion` that matches what the operator
  *     pinned; drift or absence degrades to `review`. Pin failure FLOORS the
  *     decision at review — it never lifts a quarantine.
+ *
+ *     `"config"` mode accepts one version or a set of them (a rollout window
+ *     in which two versions are both known-good). What happens to a version
+ *     outside the set is the operator's choice, `onUnacceptedVersion`:
+ *     `"hold"` (default) floors at review; `"warn"` decides normally and flags
+ *     the result with `versionWarning` — but only while every label maps (rule
+ *     2) and at least one label was returned (rule 4). An absent version
+ *     always holds, and `"warn"` is refused outside `pinMode: "config"`.
  *  4. **No labels is not automatically approval.** Zero labels approves only
  *     when the pin verified. A provider that returns an empty label array
  *     because it errored internally, or because its taxonomy moved, must not
@@ -2732,7 +2744,7 @@ export declare class FrameSamplingVideoModerationAdapter implements MediaModerat
  * PURITY: no I/O, no clock, no randomness, and no numbers of its own.
  */
 import type { ModerationDecision } from "./media-lifecycle.js";
-import type { ModerationVerdict } from "./moderation-provider.js";
+import type { HoldGround, ModerationVerdict } from "./moderation-provider.js";
 /**
  * How the taxonomy behind the category map is pinned.
  *
@@ -2769,18 +2781,19 @@ export interface LabelPolicyConfig {
     readonly categories: Readonly<Record<string, CategoryPolicy>>;
     readonly pinMode: TaxonomyPinMode;
     /**
-     * The pinned taxonomy version. REQUIRED when `pinMode` is `"config"`.
-     *
-     * The list form is typed only: until a follow-up accepts it, a list is
-     * refused at construction under `"config"` mode, so it fails closed.
+     * The accepted taxonomy version(s): one string, or a set (a `Set` or an
+     * array) of them — a reported version matching ANY member is accepted.
+     * REQUIRED, and non-empty, when `pinMode` is `"config"`.
      */
-    readonly expectedModelVersion?: string | readonly string[];
+    readonly expectedModelVersion?: string | ReadonlySet<string> | readonly string[];
     /** Must be explicitly `true` when `pinMode` is `"none"`. */
     readonly acceptUnpinnedTaxonomy?: boolean;
     /**
      * What to do when a verdict reports a version outside the accepted set:
-     * hold the media, or count a warning and continue. Typed only; nothing
-     * reads it yet.
+     * `"hold"` (default) floors the decision at `review`; `"warn"` decides
+     * normally from the labels and sets `versionWarning` on the explanation.
+     * `"warn"` requires `pinMode: "config"`. An ABSENT version always holds,
+     * and so does an empty label array or an unmapped label under `"warn"`.
      */
     readonly onUnacceptedVersion?: "hold" | "warn";
 }
@@ -2860,7 +2873,7 @@ export declare function decideFromLabels(verdict: ModerationVerdict, config: Lab
 export type LabelPolicyGround = 
 /** Nothing fired: approved on the merits. */
 "clean"
-/** A label the policy has no rule for (rule 2). Always `quarantine`. */
+/** Retained for compatibility; no longer produced — see `taxonomy-drift`. */
  | "unmapped-category"
 /** A mapped label at or above its quarantine bar. */
  | "over-quarantine-bar"
@@ -2870,6 +2883,12 @@ export type LabelPolicyGround =
  | "unreadable-confidence"
 /** The taxonomy pin did not verify, so the decision was floored at `review`. */
  | "taxonomy-pin-failed"
+/**
+ * A label the policy has no rule for (rule 2): the taxonomy has moved under
+ * the map. Floors at `review`, whatever the version. Takes precedence over
+ * `taxonomy-pin-failed`, because it is the more specific evidence.
+ */
+ | Extract<HoldGround, "taxonomy-drift">
 /** The provider's own decision dominated everything the labels said. */
  | "provider-floor"
 /** The verdict was not a usable object, or carried no label array. */
@@ -2886,6 +2905,13 @@ export interface LabelPolicyExplanation {
      * the absence of a usable number).
      */
     readonly drivingConfidence: number | null;
+    /**
+     * `true` only when `onUnacceptedVersion: "warn"` let a verdict through whose
+     * `modelVersion` is not among the accepted versions. Absent otherwise. The
+     * decision may still be `review` or `quarantine` for other reasons; the flag
+     * says the version was not what the operator pinned.
+     */
+    readonly versionWarning?: true;
 }
 /**
  * The decision function, with its reasoning. {@link decideFromLabels} is this
@@ -2893,7 +2919,8 @@ export interface LabelPolicyExplanation {
  * caller acts on is always the reason the decision was actually made.
  *
  * GROUND PRECEDENCE, where several apply to one `review`, is ordered by what a
- * caller must not spend money on: `taxonomy-pin-failed` first, because a policy
+ * caller must not spend money on: `taxonomy-drift` (an unmapped label), then
+ * `taxonomy-pin-failed`, because a policy
  * whose map may no longer mean what it says is a configuration fault and no
  * amount of re-classification fixes it. Then the label-derived grounds, then
  * the provider floor.
