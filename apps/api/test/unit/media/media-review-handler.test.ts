@@ -48,6 +48,7 @@ function makeDb(overrides: Partial<ReviewPrismaLike> = {}): ReviewPrismaLike & {
     findMany: ReturnType<typeof vi.fn>;
     findUnique: ReturnType<typeof vi.fn>;
     update: ReturnType<typeof vi.fn>;
+    updateMany: ReturnType<typeof vi.fn>;
   };
   user: { findUnique: ReturnType<typeof vi.fn> };
 } {
@@ -56,6 +57,7 @@ function makeDb(overrides: Partial<ReviewPrismaLike> = {}): ReviewPrismaLike & {
       findMany: vi.fn(),
       findUnique: vi.fn(),
       update: vi.fn().mockResolvedValue({}),
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
     user: { findUnique: vi.fn() },
     ...overrides,
@@ -100,18 +102,12 @@ describe("moderator-serve-gate (pure)", () => {
       expect(moderatorCanServe(s)).toBe(expected);
     }
     // The reviewable tuple matches exactly.
-    expect([...MODERATOR_REVIEWABLE_LIFECYCLES].sort()).toEqual(
-      ["QUARANTINED", "REVIEW"].sort(),
-    );
+    expect([...MODERATOR_REVIEWABLE_LIFECYCLES].sort()).toEqual(["QUARANTINED", "REVIEW"].sort());
   });
   it("bypass still honours the deletedAt kill switch", () => {
     expect(isModeratorServable({ lifecycle: "REVIEW", deletedAt: null })).toBe(true);
-    expect(
-      isModeratorServable({ lifecycle: "REVIEW", deletedAt: new Date() }),
-    ).toBe(false);
-    expect(isModeratorServable({ lifecycle: "APPROVED", deletedAt: null })).toBe(
-      false,
-    );
+    expect(isModeratorServable({ lifecycle: "REVIEW", deletedAt: new Date() })).toBe(false);
+    expect(isModeratorServable({ lifecycle: "APPROVED", deletedAt: null })).toBe(false);
   });
 });
 
@@ -225,7 +221,7 @@ describe("MediaReviewHandler.decide", () => {
     const result = await handler.decide(db, audit, env, {
       mediaId: "m1",
       decision: "approve",
-      moderatorUserId: "mod-1",
+      actor: { kind: "human" as const, userId: "mod-1" },
       region: "EU",
     });
 
@@ -262,7 +258,7 @@ describe("MediaReviewHandler.decide", () => {
     const result = await handler.decide(db, audit, env, {
       mediaId: "m2",
       decision: "approve",
-      moderatorUserId: "mod-1",
+      actor: { kind: "human" as const, userId: "mod-1" },
       region: "EU",
     });
 
@@ -286,7 +282,7 @@ describe("MediaReviewHandler.decide", () => {
     const result = await handler.decide(db, audit, env, {
       mediaId: "m3",
       decision: "reject",
-      moderatorUserId: "mod-1",
+      actor: { kind: "human" as const, userId: "mod-1" },
       region: "EU",
     });
 
@@ -310,7 +306,7 @@ describe("MediaReviewHandler.decide", () => {
     const result = await handler.decide(db, audit, env, {
       mediaId: "m4",
       decision: "reject",
-      moderatorUserId: "mod-1",
+      actor: { kind: "human" as const, userId: "mod-1" },
       region: "EU",
     });
     expect(result).toEqual({ ok: true, status: "REJECTED", promoted: false });
@@ -328,7 +324,7 @@ describe("MediaReviewHandler.decide", () => {
     const result = await handler.decide(db, audit, env, {
       mediaId: "m5",
       decision: "reject",
-      moderatorUserId: "mod-1",
+      actor: { kind: "human" as const, userId: "mod-1" },
       region: "EU",
     });
     expect(result).toEqual({ ok: false, code: "ILLEGAL_STATE", from: "APPROVED" });
@@ -342,7 +338,7 @@ describe("MediaReviewHandler.decide", () => {
     const result = await handler.decide(db, audit, env, {
       mediaId: "gone",
       decision: "approve",
-      moderatorUserId: "mod-1",
+      actor: { kind: "human" as const, userId: "mod-1" },
       region: "EU",
     });
     expect(result).toEqual({ ok: false, code: "NOT_FOUND" });

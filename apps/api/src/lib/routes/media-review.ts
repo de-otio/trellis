@@ -75,15 +75,10 @@ async function requireModerator(
   requestContext: { region?: string } | undefined,
   securityHeaders: SecurityHeaders,
 ): Promise<
-  | { ok: true; userId: string; region: Region; db: any }
-  | { ok: false; response: Response }
+  { ok: true; userId: string; region: Region; db: any } | { ok: false; response: Response }
 > {
   const sessionManager = new SessionManager();
-  const session = await sessionManager.getSession(
-    request,
-    env.SESSION_SECRET,
-    env,
-  );
+  const session = await sessionManager.getSession(request, env.SESSION_SECRET, env);
   if (!session) {
     return {
       ok: false,
@@ -191,7 +186,7 @@ export const mediaReviewRoutes: Route[] = [
           {
             mediaId,
             decision: validation.data.decision,
-            moderatorUserId: gate.userId,
+            actor: { kind: "human", userId: gate.userId },
             region: gate.region,
             ipAddress: clientIp(request),
             userAgent: request.headers.get("user-agent") || undefined,

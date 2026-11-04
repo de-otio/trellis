@@ -73,6 +73,45 @@ export type ReviewActor =
       readonly modelId: string;
     };
 
+/** The human arm of {@link ReviewActor}. */
+export type HumanReviewActor = Extract<ReviewActor, { kind: "human" }>;
+
+/**
+ * The automated arm of {@link ReviewActor}.
+ *
+ * TRUST BOUNDARY: this carries no session and no role, so `decide()` performs
+ * no role check for it. It must therefore only ever be constructed by
+ * composition-root code (server-side wiring a deployment owns) — never from a
+ * request body, a header, a session, or anything a client can influence. The
+ * HTTP moderator routes build a human actor and cannot build this one.
+ */
+export type AutomatedReviewActor = Extract<ReviewActor, { kind: "automated" }>;
+
+interface DecideInputBase {
+  mediaId: string;
+  region: Region;
+  ipAddress?: string;
+  userAgent?: string;
+}
+
+/** A human moderator's decision: approve or reject, role-checked by the caller. */
+export interface HumanDecideInput extends DecideInputBase {
+  actor: HumanReviewActor;
+  decision: ModeratorDecision;
+}
+
+/**
+ * An automated reviewer's decision. `decision` is the literal `"approve"`: an
+ * automated actor can clear an item held in REVIEW and do nothing else, so
+ * "reject" with an automated actor does not compile.
+ */
+export interface AutomatedDecideInput extends DecideInputBase {
+  actor: AutomatedReviewActor;
+  decision: "approve";
+}
+
+export type DecideInput = HumanDecideInput | AutomatedDecideInput;
+
 /** The media "kind" derived from its stored mimeType (drives the client view). */
 export type MediaKind = "image" | "video" | "audio" | "other";
 
@@ -124,6 +163,11 @@ export interface ReviewPrismaLike {
     findMany: (args: unknown) => Promise<Array<Record<string, unknown>>>;
     findUnique: (args: unknown) => Promise<Record<string, unknown> | null>;
     update: (args: unknown) => Promise<Record<string, unknown>>;
+    /**
+     * Conditional write, used for the compare-and-set on the automated path:
+     * applies only where `where` still matches and reports how many rows moved.
+     */
+    updateMany: (args: unknown) => Promise<{ count: number }>;
   };
   user: {
     findUnique: (args: unknown) => Promise<{ role: string } | null>;
@@ -305,7 +349,9 @@ export class MediaReviewHandler {
   }
 
   /**
-   * Apply a human approve/reject to a review item. The transition is decided by
+   * Apply an approve/reject to a review item. A human actor goes through the
+   * path below; an automated actor (approve-only, REVIEW-only) goes through
+   * {@link decideAutomated}. The human transition is decided by
    * the pure `nextLifecycle` machine (`human` event); this shell only persists
    * the resulting lifecycle, performs the promotion the machine implies, and
    * writes the audit row.
@@ -329,14 +375,7 @@ export class MediaReviewHandler {
     db: ReviewPrismaLike,
     auditLogger: TrellisAuditLogger,
     env: TrellisAuditLoggerEnv,
-    input: {
-      mediaId: string;
-      decision: ModeratorDecision;
-      moderatorUserId: string;
-      region: Region;
-      ipAddress?: string;
-      userAgent?: string;
-    },
+    input: DecideInput,
     promotion: ReviewPromotionPort | undefined = getMediaReviewPromotion(),
   ): Promise<DecisionResult> {
     const media = await db.mediaFile.findUnique({
@@ -351,10 +390,29 @@ export class MediaReviewHandler {
     });
     if (!media || media.deletedAt) return { ok: false, code: "NOT_FOUND" };
 
+    // Dispatch on the actor kind explicitly. The union is closed by type, but
+    // an unrecognised kind at runtime must never fall through into the human
+    // path (which would audit it as a moderator with no userId).
+    const actorKind: string = input.actor?.kind;
+    if (actorKind !== "automated" && actorKind !== "human") {
+      throw new TypeError("decide: unknown review actor kind");
+    }
+    if (actorKind === "automated") {
+      return this.decideAutomated(
+        db,
+        auditLogger,
+        env,
+        input as AutomatedDecideInput,
+        media,
+        promotion,
+      );
+    }
+    const human = input as HumanDecideInput;
+
     const from = media.lifecycle as MediaLifecycle;
     const transition = nextLifecycle(from, {
       kind: "human",
-      action: input.decision,
+      action: human.decision,
     });
     if (transition.ok === false) {
       // Not a REVIEW/QUARANTINED item (terminal or pre-moderation) — illegal.
@@ -373,12 +431,12 @@ export class MediaReviewHandler {
         // this approval made anything servable.
         promotionLog(promotion).warn?.(
           "review: approving without a promotion capability — the reviewed bytes are not being copied to the serve prefix",
-          { mediaId: input.mediaId },
+          { mediaId: human.mediaId },
         );
       } else {
         bytesCertified = await this.promoteReviewed(
           promotion,
-          input.mediaId,
+          human.mediaId,
           media.originalKey as string,
         );
       }
@@ -389,16 +447,117 @@ export class MediaReviewHandler {
     const promoted = targetStatus === "APPROVED";
 
     await db.mediaFile.update({
-      where: { id: input.mediaId },
+      where: { id: human.mediaId },
       data: { lifecycle: targetStatus },
     });
 
     await auditLogger.logSystemAction(
-      input.decision === "approve" ? MEDIA_MODERATION_APPROVED : MEDIA_MODERATION_REJECTED,
+      human.decision === "approve" ? MEDIA_MODERATION_APPROVED : MEDIA_MODERATION_REJECTED,
+      {
+        resource: "media",
+        resourceId: human.mediaId,
+        userId: human.actor.userId,
+        region: human.region,
+        success: true,
+        severity: "high",
+        ...(human.ipAddress !== undefined && { ipAddress: human.ipAddress }),
+        ...(human.userAgent !== undefined && { userAgent: human.userAgent }),
+        metadata: {
+          fromLifecycle: from,
+          toLifecycle: targetStatus,
+          decision: human.decision,
+          promoted,
+          casObjectPresent,
+          tenantId: media.tenantId as string,
+        },
+      },
+      env,
+    );
+
+    return { ok: true, status: targetStatus, promoted };
+  }
+
+  /**
+   * The automated-reviewer path: clear an item held in REVIEW, nothing else.
+   *
+   * Differences from the human path, all deliberate:
+   *  - No role check — see {@link AutomatedReviewActor}'s trust boundary.
+   *  - The write is a COMPARE-AND-SET from the lifecycle we read (`REVIEW`),
+   *    made BEFORE promotion. If another writer moved the row in between
+   *    (count 0) we report ILLEGAL_STATE and promote nothing, so a stale read
+   *    can never make bytes servable.
+   *  - If promotion then fails, the item is put back to REVIEW with a second
+   *    compare-and-set from APPROVED, so a failed promotion still holds REVIEW.
+   *    In the window between the two, the serve key is content-addressed: it
+   *    either does not exist yet (nothing to serve) or already holds identical
+   *    bytes, so unreviewed bytes are never reachable.
+   *  - The audit row reuses the approve action and adds the actor fields.
+   */
+  private async decideAutomated(
+    db: ReviewPrismaLike,
+    auditLogger: TrellisAuditLogger,
+    env: TrellisAuditLoggerEnv,
+    input: AutomatedDecideInput,
+    media: Record<string, unknown>,
+    promotion: ReviewPromotionPort | undefined,
+  ): Promise<DecisionResult> {
+    const from = media.lifecycle as MediaLifecycle;
+    const transition = nextLifecycle(from, {
+      kind: "automated-review",
+      action: input.decision,
+    });
+    if (transition.ok === false) {
+      return { ok: false, code: "ILLEGAL_STATE", from };
+    }
+
+    const casObjectPresent = Boolean(media.originalKey);
+    let targetStatus: MediaLifecycle = from;
+
+    if (casObjectPresent) {
+      const claimed = await db.mediaFile.updateMany({
+        where: { id: input.mediaId, lifecycle: from },
+        data: { lifecycle: transition.status },
+      });
+      if (claimed.count === 0) {
+        return { ok: false, code: "ILLEGAL_STATE", from };
+      }
+      targetStatus = transition.status;
+
+      if (promotion === undefined) {
+        promotionLog(promotion).warn?.(
+          "review: approving without a promotion capability — the reviewed bytes are not being copied to the serve prefix",
+          { mediaId: input.mediaId },
+        );
+      } else {
+        const certified = await this.promoteReviewed(
+          promotion,
+          input.mediaId,
+          media.originalKey as string,
+        );
+        if (!certified) {
+          targetStatus = from;
+          const reverted = await db.mediaFile.updateMany({
+            where: { id: input.mediaId, lifecycle: transition.status },
+            data: { lifecycle: from },
+          });
+          if (reverted.count === 0) {
+            promotionLog(promotion).error?.(
+              "review: promotion failed and the item could not be returned to REVIEW — needs a human",
+              { mediaId: input.mediaId },
+            );
+          }
+        }
+      }
+    }
+
+    const promoted = targetStatus === "APPROVED";
+
+    await auditLogger.logSystemAction(
+      MEDIA_MODERATION_APPROVED,
       {
         resource: "media",
         resourceId: input.mediaId,
-        userId: input.moderatorUserId,
+        userId: input.actor.reviewerId,
         region: input.region,
         success: true,
         severity: "high",
@@ -411,6 +570,9 @@ export class MediaReviewHandler {
           promoted,
           casObjectPresent,
           tenantId: media.tenantId as string,
+          actorKind: "automated",
+          reviewerId: input.actor.reviewerId,
+          modelId: input.actor.modelId,
         },
       },
       env,

@@ -486,15 +486,65 @@ describe("nextLifecycle — automated-review", () => {
   };
 
   // Exhaustive over the state union: a state added later without a decision
-  // about automated review still lands here.
+  // about automated review still lands here and must be illegal by default.
   for (const from of ALL_MEDIA_LIFECYCLES) {
-    it(`is illegal from ${from}`, () => {
-      expect(nextLifecycle(from, event)).toEqual({
-        ok: false,
-        reason: "illegal-transition",
-        from,
-        event,
+    if (from === "REVIEW") {
+      it("is legal from REVIEW and yields APPROVED", () => {
+        expect(nextLifecycle(from, event)).toEqual({
+          ok: true,
+          status: "APPROVED",
+        });
       });
-    });
+    } else {
+      it(`is illegal from ${from}`, () => {
+        expect(nextLifecycle(from, event)).toEqual({
+          ok: false,
+          reason: "illegal-transition",
+          from,
+          event,
+        });
+      });
+    }
   }
+
+  it("a non-approve action is illegal from every state, even REVIEW (the type is erased at runtime)", () => {
+    for (const action of ["reject", "bogus", undefined]) {
+      const forged = { kind: "automated-review", action } as unknown as MediaLifecycleEvent;
+      for (const from of ALL_MEDIA_LIFECYCLES) {
+        const result = nextLifecycle(from, forged);
+        expect(result.ok, `${from}/${String(action)}`).toBe(false);
+      }
+    }
+  });
+
+  it("property: legal only from REVIEW, and then only to APPROVED", () => {
+    fc.assert(
+      fc.property(statusArb, (status) => {
+        const result = nextLifecycle(status, event);
+        expect(result.ok).toBe(status === "REVIEW");
+        if (result.ok) expect(result.status).toBe("APPROVED");
+      }),
+      FC,
+    );
+  });
+
+  it("property: it can never leave QUARANTINED, and never moves anything to REJECTED", () => {
+    fc.assert(
+      fc.property(fc.array(nonCsamEventArb, { maxLength: 12 }), (events) => {
+        const onlyAutomated = events.map(() => event);
+        expect(run("QUARANTINED", onlyAutomated).status).toBe("QUARANTINED");
+        for (const start of ALL_MEDIA_LIFECYCLES) {
+          const r = nextLifecycle(start, event);
+          if (r.ok) expect(r.status).not.toBe("REJECTED");
+        }
+      }),
+      FC,
+    );
+  });
+
+  it("property: an automated approve is a one-shot — a second one is illegal", () => {
+    const first = nextLifecycle("REVIEW", event);
+    expect(first.ok).toBe(true);
+    if (first.ok) expect(nextLifecycle(first.status, event).ok).toBe(false);
+  });
 });
