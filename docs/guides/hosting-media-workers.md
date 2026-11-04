@@ -20,14 +20,14 @@ their dependencies. See [Stock worker queue selection](#stock-worker-queue-selec
 
 All from the package root, `@de-otio/trellis`:
 
-| Export | Kind | Purpose |
-|---|---|---|
-| `processMediaMessage(record, deps)` | function | Process one `media-processing` message. |
-| `MediaProcessingDeps` | type | Everything the processing core needs, injected. |
-| `MediaProcessingRecordOutcome` | type | `ack` (optionally `poison`) or `fail`. |
-| `handleMediaCompletion(body, deps)` | function | Process one `media-completion` message. |
-| `CompletionDeps`, `CompletionStore` | types | Everything the completion core needs, injected. |
-| `MediaCompletionRecordOutcome` | type | `applied`, `escalated`, `not-terminal`, `awaiting-sibling`, `lost-race`, `duplicate`, `unroutable`, `illegal-transition` or `retry`. |
+| Export                              | Kind     | Purpose                                                                                                                              |
+| ----------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `processMediaMessage(record, deps)` | function | Process one `media-processing` message.                                                                                              |
+| `MediaProcessingDeps`               | type     | Everything the processing core needs, injected.                                                                                      |
+| `MediaProcessingRecordOutcome`      | type     | `ack` (optionally `poison`) or `fail`.                                                                                               |
+| `handleMediaCompletion(body, deps)` | function | Process one `media-completion` message.                                                                                              |
+| `CompletionDeps`, `CompletionStore` | types    | Everything the completion core needs, injected.                                                                                      |
+| `MediaCompletionRecordOutcome`      | type     | `applied`, `escalated`, `not-terminal`, `awaiting-sibling`, `lost-race`, `duplicate`, `unroutable`, `illegal-transition` or `retry`. |
 
 Supporting types for building the dependency bags: `QueueRecordLike`,
 `MediaProcessingConfig`, `MediaPersistencePort`, `MediaFileRow`,
@@ -45,14 +45,14 @@ your dependencies as arguments; do not rely on process-wide injection.
 
 ## Mapping an outcome to a queue action
 
-| Outcome | Host action |
-|---|---|
-| processing `ack` (incl. `poison`) | Delete the message. |
-| processing `fail` | Do **not** delete. Leave it for redelivery (with backoff, below). |
-| completion `applied`, `escalated`, `not-terminal`, `awaiting-sibling`, `lost-race` | Delete the message. |
-| completion `duplicate`, `unroutable`, `illegal-transition` | Delete the message — terminal, and must never loop to the dead-letter queue. |
-| completion `retry` | Do **not** delete. Leave it for redelivery. |
-| the core **throws** | Treat as `fail`. Never convert a throw into a delete. |
+| Outcome                                                                            | Host action                                                                  |
+| ---------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| processing `ack` (incl. `poison`)                                                  | Delete the message.                                                          |
+| processing `fail`                                                                  | Do **not** delete. Leave it for redelivery (with backoff, below).            |
+| completion `applied`, `escalated`, `not-terminal`, `awaiting-sibling`, `lost-race` | Delete the message.                                                          |
+| completion `duplicate`, `unroutable`, `illegal-transition`                         | Delete the message — terminal, and must never loop to the dead-letter queue. |
+| completion `retry`                                                                 | Do **not** delete. Leave it for redelivery.                                  |
+| the core **throws**                                                                | Treat as `fail`. Never convert a throw into a delete.                        |
 
 A message that you cannot parse or route at all is the cores' business, not the
 host's — hand it over and act on the outcome.
@@ -61,18 +61,18 @@ host's — hand it over and act on the outcome.
 
 ### Backoff
 
-The cores say *whether* to retry, never *when*. A host that redelivers a failed
+The cores say _whether_ to retry, never _when_. A host that redelivers a failed
 message immediately will hammer a struggling dependency. Provide backoff: on
 `fail`/`retry`, extend the message's visibility timeout so the next attempt
 happens after a delay that grows with the number of attempts, with jitter and a
-ceiling. Do the same for your *receive* loop when the queue itself is
+ceiling. Do the same for your _receive_ loop when the queue itself is
 unreachable, so a broken connection does not become a hot loop.
 
 ### Deferral is a re-send with a delay, not an attempt
 
 If the host decides a message is not ready to be processed yet (a dependency
 is down, a circuit breaker is open, you are draining), that is a **deferral**,
-not a failure. Implement it by sending a *new* copy of the message with a
+not a failure. Implement it by sending a _new_ copy of the message with a
 delivery delay and then deleting the original. Do not return it to the queue
 via a visibility change or a failed handler: that raises the receive count and
 walks a perfectly good message toward the dead-letter queue.

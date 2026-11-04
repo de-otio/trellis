@@ -9,14 +9,20 @@ const none = {};
 const both = { "media-processing": true, "media-completion": true } as const;
 
 describe("resolveEnabledQueues", () => {
-  it.each([undefined, "", "  ", " , "])("unset/blank (%j) ⇒ all but unwired media queues", (raw) => {
-    const sel = resolveEnabledQueues({ raw, depsAvailable: none });
-    expect(sel.explicit).toBe(false);
-    expect([...sel.queues].sort()).toEqual(
-      ALL_QUEUES.filter((q) => !q.startsWith("media-")).sort(),
-    );
-    expect([...sel.skippedForMissingDeps].sort()).toEqual(["media-completion", "media-processing"]);
-  });
+  it.each([undefined, "", "  ", " , "])(
+    "unset/blank (%j) ⇒ all but unwired media queues",
+    (raw) => {
+      const sel = resolveEnabledQueues({ raw, depsAvailable: none });
+      expect(sel.explicit).toBe(false);
+      expect([...sel.queues].sort()).toEqual(
+        ALL_QUEUES.filter((q) => !q.startsWith("media-")).sort(),
+      );
+      expect([...sel.skippedForMissingDeps].sort()).toEqual([
+        "media-completion",
+        "media-processing",
+      ]);
+    },
+  );
 
   it("unset with deps wired ⇒ every queue", () => {
     const sel = resolveEnabledQueues({ raw: undefined, depsAvailable: both });
@@ -51,9 +57,9 @@ describe("resolveEnabledQueues", () => {
     expect(() =>
       resolveEnabledQueues({ raw: "link-check,media-processing", depsAvailable: none }),
     ).toThrow(QueueSelectionError);
-    expect(() =>
-      resolveEnabledQueues({ raw: "media-processing", depsAvailable: none }),
-    ).toThrow(/media-processing/);
+    expect(() => resolveEnabledQueues({ raw: "media-processing", depsAvailable: none })).toThrow(
+      /media-processing/,
+    );
   });
 
   it("unknown name ⇒ config error naming it and listing valid names", () => {
