@@ -1019,6 +1019,24 @@ tenant_id` trigger (`trellis_tenant_id_immutable()`) on every table with
   `domain_events`, and `prisma/rls/enable-rls.sql` / `disable-rls.sql` now
   list it; `rls-guc-name.test.ts` fails if a table-backed tenant-scoped model
   has no policy.
+- **Media completion is ordered so a failure can no longer strand a track or
+  approve over a newer decision.** `processCompletion` now runs a rows-only
+  pre-check, a read-only re-fetch, then one store transaction (claim, persist the
+  track decision, read the sibling, fan in, compare-and-set the lifecycle), and
+  promotes only after the commit. A re-fetch that throws is a `retry` with
+  nothing claimed; a pending job is `not-terminal`; a pending sibling is
+  `awaiting-sibling` rather than being counted as errored; an errored track
+  persists a terminal `review` marker and waits for its sibling too, so a
+  sibling quarantine still wins (quarantine beats review) and a sibling approval
+  still yields `REVIEW`; a lost
+  compare-and-set is `lost-race` and promotes nothing. A promotion failure after
+  commit is logged and left for the recovery sweep.
+  **Breaking for custom `CompletionStore` implementers** (the stock package ships
+  none): `inTransaction` is required, and `persistMediaStatus` takes
+  `{ expectedFrom }` and returns `{ count }`. `readTrackDecision` is optional.
+  `ModerationJobRow` gains the optional `pinnedVersion` and `superseded`; a row
+  that carries neither behaves as before.
+
 - **Accounts are 18+, enforced server-side; the CHILD/TEEN machinery is
   quarantined — BREAKING for the parental-control endpoints.** `session.ageTier`
   was never populated in production: the Cognito claim narrowing dropped

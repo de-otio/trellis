@@ -1,3 +1,4 @@
+import { adaptLegacyStore } from "./support/legacy-completion-store.js";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import fc from "fast-check";
 
@@ -12,10 +13,7 @@ import {
   type OtherTrackState,
   type RecordOutcome,
 } from "../../../src/lambda/media-completion-worker.js";
-import type {
-  ModerationDecision,
-  MediaLifecycle,
-} from "../../../src/lib/media/media-lifecycle.js";
+import type { ModerationDecision, MediaLifecycle } from "../../../src/lib/media/media-lifecycle.js";
 import type { Track } from "../../../src/lib/media/track-verdict.js";
 import type {
   MediaModerationProvider,
@@ -59,7 +57,7 @@ interface StoreState {
 }
 
 function makeStore(state: StoreState): CompletionStore {
-  return {
+  return adaptLegacyStore({
     async claimMessage(dedupeKey) {
       state.calls.push("claimMessage");
       if (state.claimed.has(dedupeKey)) return false;
@@ -88,7 +86,7 @@ function makeStore(state: StoreState): CompletionStore {
         });
       }
     },
-  };
+  });
 }
 
 class FakeModeration implements MediaModerationProvider {
@@ -105,9 +103,7 @@ class FakeModeration implements MediaModerationProvider {
 }
 
 class FakeTranscribe implements TranscribePort {
-  constructor(
-    public result: { status: TranscriptionStatus; transcript?: string },
-  ) {}
+  constructor(public result: { status: TranscriptionStatus; transcript?: string }) {}
   async startTranscription(): Promise<{ jobId: string }> {
     return { jobId: "x" };
   }
@@ -181,16 +177,12 @@ function harness(opts: {
             uploadId: UPLOAD,
             contentHash: HASH,
             stagingVersionId:
-              opts.stagingVersionId === undefined
-                ? "v-pinned-1"
-                : opts.stagingVersionId,
+              opts.stagingVersionId === undefined ? "v-pinned-1" : opts.stagingVersionId,
           },
         },
       ],
     ]),
-    others: new Map(
-      opts.other ? [[`${mediaId}:${opts.track}`, opts.other]] : [],
-    ),
+    others: new Map(opts.other ? [[`${mediaId}:${opts.track}`, opts.other]] : []),
     calls: [],
   };
 
@@ -220,9 +212,7 @@ function harness(opts: {
   const deps: CompletionDeps = {
     store: makeStore(state),
     moderation: new FakeModeration(verdict(opts.videoVerdict ?? "review")),
-    transcribe: new FakeTranscribe(
-      opts.transcription ?? { status: "COMPLETED", transcript: "" },
-    ),
+    transcribe: new FakeTranscribe(opts.transcription ?? { status: "COMPLETED", transcript: "" }),
     textModeration: new FakeText(verdict(opts.textVerdict ?? "review")),
     storage,
     reinterpretVisual: (v, snapshot) => {
@@ -286,9 +276,7 @@ describe("extractJobPointer", () => {
   });
 
   it("ignores any verdict/status fields in the body (pointer only)", () => {
-    const p = extractJobPointer(
-      snsBody("rek-3", { decision: "approved", status: "APPROVED" }),
-    );
+    const p = extractJobPointer(snsBody("rek-3", { decision: "approved", status: "APPROVED" }));
     expect(p).toEqual({ jobId: "rek-3", track: "VISUAL" });
   });
 });
@@ -299,16 +287,19 @@ describe("extractJobPointer", () => {
 
 describe("processCompletion — dedupe before side effect", () => {
   it("duplicate delivery is a no-op: no persist, no storage write, no emit", async () => {
+    // The sibling is still pending, so the first delivery records its decision
+    // and waits; the item stays UPLOADED, which is what lets the second
+    // delivery reach (and lose) the claim. (Once an item has settled, the
+    // pre-check drops a redelivery before the claim — see the replay tests.)
     const h = harness({
       jobId: "rek-1",
       track: "VISUAL",
       videoVerdict: "approved",
-      other: { state: "decided", decision: "approved" },
+      other: { state: "pending" },
     });
 
-    // First delivery applies.
     const first = await processCompletion(snsBody("rek-1"), h.deps);
-    expect(first.kind).toBe("applied");
+    expect(first.kind).toBe("awaiting-sibling");
 
     const callsAfterFirst = [...h.state.calls];
     const emittedAfterFirst = h.emitted.length;
@@ -323,7 +314,9 @@ describe("processCompletion — dedupe before side effect", () => {
     const newStoreCalls = h.state.calls.slice(callsAfterFirst.length);
     expect(newStoreCalls).toEqual(["claimMessage"]);
     expect(h.emitted.length).toBe(emittedAfterFirst);
-    expect(h.storageCalls).toEqual(storageAfterFirst);
+    // Reads (the pinned-source head) may repeat; no storage WRITE may.
+    const writes = (calls: string[]) => calls.filter((c) => c !== "headObject");
+    expect(writes(h.storageCalls)).toEqual(writes(storageAfterFirst));
   });
 
   it("claimMessage precedes every side effect on first delivery", async () => {
@@ -417,7 +410,7 @@ describe("processCompletion — both tracks required for approval", () => {
     expect(h.storageCalls).not.toContain("copyObject");
   });
 
-  it("visual approved + audio PENDING (job exists, unresolved) => NOT approved", async () => {
+  it("visual approved + audio PENDING (job exists, unresolved) => waits, NOT approved", async () => {
     const h = harness({
       jobId: "rek-1",
       track: "VISUAL",
@@ -425,8 +418,12 @@ describe("processCompletion — both tracks required for approval", () => {
       other: { state: "pending" },
     });
     const out = await processCompletion(snsBody("rek-1"), h.deps);
-    expect((out as { status: MediaLifecycle }).status).toBe("REVIEW");
+    // A pending sibling is not an errored one: the item is not held, it waits
+    // for the sibling's own completion to finish it.
+    expect(out.kind).toBe("awaiting-sibling");
+    expect(h.state.media.get("media-1")!.coords.lifecycle).toBe("UPLOADED");
     expect(h.storageCalls).not.toContain("copyObject");
+    expect(h.emitted).toEqual([]);
   });
 
   it("visual approved + audio decided-approved => APPROVED + ready + promotion", async () => {
@@ -469,8 +466,7 @@ describe("processCompletion — both tracks required for approval", () => {
 // ---------------------------------------------------------------------------
 
 describe("processCompletion — fixed promote/persist/emit ordering", () => {
-  it("copyObject precedes persistMediaStatus precedes emit on approval", async () => {
-    const order: string[] = [];
+  it("persistMediaStatus precedes copyObject precedes emit on approval (promotion only after the commit)", async () => {
     const h = harness({
       jobId: "rek-1",
       track: "VISUAL",
@@ -478,34 +474,29 @@ describe("processCompletion — fixed promote/persist/emit ordering", () => {
       other: { state: "decided", decision: "approved" },
     });
 
-    // Wrap the side-effecting deps to record a global ordering.
+    // The store fake already logs its status write into state.calls; thread the
+    // storage copy and the emit into the same log to get one global order.
     const origCopy = h.deps.storage.copyObject.bind(h.deps.storage);
-    const origPersist = h.deps.store.persistMediaStatus.bind(h.deps.store);
     const origEmit = h.deps.emitResolved;
     const deps: CompletionDeps = {
       ...h.deps,
       storage: {
         ...h.deps.storage,
-        copyObject: async (a, b) => {
-          order.push("copy");
-          return origCopy(a, b);
-        },
-      },
-      store: {
-        ...h.deps.store,
-        persistMediaStatus: async (m, s) => {
-          order.push("persist");
-          return origPersist(m, s);
+        copyObject: async (a, b, c) => {
+          h.state.calls.push("copy");
+          return origCopy(a, b, c);
         },
       },
       emitResolved: async (p) => {
-        order.push("emit");
+        h.state.calls.push("emit");
         return origEmit(p);
       },
     };
 
     await processCompletion(snsBody("rek-1"), deps);
-    expect(order).toEqual(["copy", "persist", "emit"]);
+    expect(h.state.calls.filter((c) => ["persistMediaStatus", "copy", "emit"].includes(c))).toEqual(
+      ["persistMediaStatus", "copy", "emit"],
+    );
   });
 
   it("deleteObject is best-effort: a delete failure does not fail the record", async () => {
@@ -535,7 +526,7 @@ describe("processCompletion — fixed promote/persist/emit ordering", () => {
 // ---------------------------------------------------------------------------
 
 describe("processCompletion — replay on terminal status", () => {
-  it("a fresh (non-deduped) decision on an already-APPROVED object is an ack-drop no-op", async () => {
+  it("a delivery for an already-APPROVED object is an ack-drop no-op (dropped before any claim)", async () => {
     const h = harness({
       jobId: "rek-1",
       track: "VISUAL",
@@ -544,8 +535,9 @@ describe("processCompletion — replay on terminal status", () => {
       other: { state: "decided", decision: "approved" },
     });
     const out = await processCompletion(snsBody("rek-1"), h.deps);
-    expect(out.kind).toBe("illegal-transition");
-    // No status persisted, no promotion, no emit.
+    expect(out.kind).toBe("duplicate");
+    // Nothing claimed, no status persisted, no promotion, no emit.
+    expect(h.state.calls).not.toContain("claimMessage");
     expect(h.state.calls).not.toContain("persistMediaStatus");
     expect(h.storageCalls).not.toContain("copyObject");
     expect(h.emitted).toEqual([]);
@@ -560,7 +552,7 @@ describe("processCompletion — replay on terminal status", () => {
       other: { state: "decided", decision: "approved" },
     });
     const out = await processCompletion(snsBody("rek-1"), h.deps);
-    expect(out.kind).toBe("illegal-transition");
+    expect(out.kind).toBe("duplicate");
     expect(out.kind).not.toBe("retry");
   });
 });
@@ -570,7 +562,12 @@ describe("processCompletion — replay on terminal status", () => {
 // ---------------------------------------------------------------------------
 
 describe("processCompletion — emitted payload carries only ready|not-ready", () => {
-  const cases: { name: string; decision: ModerationDecision; other: OtherTrackState; expected: "ready" | "not-ready" }[] = [
+  const cases: {
+    name: string;
+    decision: ModerationDecision;
+    other: OtherTrackState;
+    expected: "ready" | "not-ready";
+  }[] = [
     {
       name: "both approved => ready",
       decision: "approved",
@@ -676,8 +673,7 @@ describe("makeHandler — SQS batch semantics", () => {
     };
     const handler = makeHandler(deps);
     const res = (await handler(sqsEvent([snsBody("rek-1")]), {} as any, () => {})) as
-      | { batchItemFailures: { itemIdentifier: string }[] }
-      | undefined;
+      { batchItemFailures: { itemIdentifier: string }[] } | undefined;
     expect(res?.batchItemFailures).toEqual([{ itemIdentifier: "m-0" }]);
   });
 });
@@ -686,11 +682,7 @@ describe("makeHandler — SQS batch semantics", () => {
 // Property: approval requires positive evidence on BOTH tracks
 // ---------------------------------------------------------------------------
 
-const decisionArb = fc.constantFrom<ModerationDecision>(
-  "approved",
-  "review",
-  "quarantine",
-);
+const decisionArb = fc.constantFrom<ModerationDecision>("approved", "review", "quarantine");
 const otherArb = fc.oneof(
   fc.record({
     state: fc.constant<"decided">("decided"),
@@ -703,36 +695,37 @@ const otherArb = fc.oneof(
 describe("property — APPROVED/ready iff both tracks positively approved", () => {
   it("ready is emitted iff this track AND the sibling are both decided-approved", async () => {
     await fc.assert(
-      fc.asyncProperty(
-        decisionArb,
-        otherArb,
-        async (thisDecision, other) => {
-          const h = harness({
-            jobId: "rek-1",
-            track: "VISUAL",
-            videoVerdict: thisDecision,
-            other,
-            currentStatus: "UPLOADED",
-          });
-          const out = await processCompletion(snsBody("rek-1"), h.deps);
-          // PENDING always permits a legal transition, so the record applies.
-          expect(out.kind).toBe("applied");
-          const status = (out as { status: MediaLifecycle }).status;
-          const bothApproved =
-            thisDecision === "approved" &&
-            other.state === "decided" &&
-            other.decision === "approved";
-          if (bothApproved) {
-            expect(status).toBe("APPROVED");
-            expect(h.emitted[0].status).toBe("ready");
-            expect(h.storageCalls).toContain("copyObject");
-          } else {
-            expect(status).not.toBe("APPROVED");
-            expect(h.emitted[0].status).toBe("not-ready");
-            expect(h.storageCalls).not.toContain("copyObject");
-          }
-        },
-      ),
+      fc.asyncProperty(decisionArb, otherArb, async (thisDecision, other) => {
+        const h = harness({
+          jobId: "rek-1",
+          track: "VISUAL",
+          videoVerdict: thisDecision,
+          other,
+          currentStatus: "UPLOADED",
+        });
+        const out = await processCompletion(snsBody("rek-1"), h.deps);
+        // An undecided sibling makes a non-quarantine track wait for it; a
+        // quarantine settles at once. Everything else applies.
+        if (other.state === "pending" && thisDecision !== "quarantine") {
+          expect(out.kind).toBe("awaiting-sibling");
+          expect(h.emitted).toEqual([]);
+          expect(h.storageCalls).not.toContain("copyObject");
+          return;
+        }
+        expect(out.kind).toBe("applied");
+        const status = (out as { status: MediaLifecycle }).status;
+        const bothApproved =
+          thisDecision === "approved" && other.state === "decided" && other.decision === "approved";
+        if (bothApproved) {
+          expect(status).toBe("APPROVED");
+          expect(h.emitted[0].status).toBe("ready");
+          expect(h.storageCalls).toContain("copyObject");
+        } else {
+          expect(status).not.toBe("APPROVED");
+          expect(h.emitted[0].status).toBe("not-ready");
+          expect(h.storageCalls).not.toContain("copyObject");
+        }
+      }),
       { numRuns: 200 },
     );
   });
@@ -806,12 +799,10 @@ describe("T14 fail-closed — errored/timed-out moderation is HELD, never served
     // NEVER promoted: no bytes were copied toward the served cas/ prefix.
     expect(h.storageCalls).not.toContain("copyObject");
     // NEVER served: the serve gate denies the resulting state.
-    expect(
-      isServable({ lifecycle: "REVIEW", hidden: false, deletedAt: null }),
-    ).toBe(false);
+    expect(isServable({ lifecycle: "REVIEW", hidden: false, deletedAt: null })).toBe(false);
   });
 
-  it("provider re-fetch THROWS (timeout) ⇒ record retried, object stays UPLOADED, serve gate denies", async () => {
+  it("provider re-fetch THROWS (timeout) ⇒ retry with no claim, object stays UPLOADED, serve gate denies", async () => {
     const h = harness({
       jobId: "rek-timeout",
       track: "VISUAL",
@@ -822,27 +813,25 @@ describe("T14 fail-closed — errored/timed-out moderation is HELD, never served
       throw new Error("ETIMEDOUT");
     };
 
-    // processCompletion propagates (the SQS handler converts it to a retry) —
-    // the object's persisted state is untouched.
-    await expect(processCompletion(snsBody("rek-timeout"), h.deps)).rejects.toThrow();
+    // A failed re-fetch is returned as a retry (the SQS handler surfaces it as
+    // a batch-item failure) — nothing claimed, the object's state untouched.
+    const out = await processCompletion(snsBody("rek-timeout"), h.deps);
+    expect(out.kind).toBe("retry");
+    expect(h.state.claimed.size).toBe(0);
 
     const persisted = h.state.media.get("media-1")!.coords.lifecycle;
     expect(persisted).toBe("UPLOADED"); // never advanced toward APPROVED
     expect(h.storageCalls).not.toContain("copyObject");
-    expect(
-      isServable({ lifecycle: persisted, hidden: false, deletedAt: null }),
-    ).toBe(false);
+    expect(isServable({ lifecycle: persisted, hidden: false, deletedAt: null })).toBe(false);
   });
 
   it("moderation that never completes at all (no message) leaves UPLOADED — which the serve gate denies", () => {
     // The degenerate case: the completion message is simply never delivered.
     // The object sits at UPLOADED forever; the gate approves APPROVED only.
-    expect(
-      isServable({ lifecycle: "UPLOADED", hidden: false, deletedAt: null }),
-    ).toBe(false);
-    expect(
-      isServable({ lifecycle: "AWAITING_UPLOAD", hidden: false, deletedAt: null }),
-    ).toBe(false);
+    expect(isServable({ lifecycle: "UPLOADED", hidden: false, deletedAt: null })).toBe(false);
+    expect(isServable({ lifecycle: "AWAITING_UPLOAD", hidden: false, deletedAt: null })).toBe(
+      false,
+    );
   });
 });
 
@@ -877,9 +866,7 @@ describe("processCompletion — AR-SEC F3 version-pinned promotion", () => {
 
     const out = await processCompletion(snsBody("rek-1"), deps);
     expect((out as { status: MediaLifecycle }).status).toBe("APPROVED");
-    expect(copies).toEqual([
-      { from: STAGING_KEY, to: CAS_KEY, fromVersionId: "v-moderated-7" },
-    ]);
+    expect(copies).toEqual([{ from: STAGING_KEY, to: CAS_KEY, fromVersionId: "v-moderated-7" }]);
   });
 
   it("pin resolution consults the EXACT pinned version on the staging key", async () => {
@@ -980,22 +967,15 @@ describe("processCompletion — the envelope's track is a hint, the row decides"
 
   it("accepts a canonical envelope whose track matches the row", async () => {
     const h = harness({ jobId: "j-ok", track: "VISUAL", videoVerdict: "review" });
-    const out = await processCompletion(
-      JSON.stringify({ track: "VISUAL", jobId: "j-ok" }),
-      h.deps,
-    );
+    const out = await processCompletion(JSON.stringify({ track: "VISUAL", jobId: "j-ok" }), h.deps);
     expect(out.kind).toBe("applied");
   });
 
   it("still routes the historical wire shapes to the right track", async () => {
     const visual = harness({ jobId: "j-visual", track: "VISUAL" });
-    expect((await processCompletion(snsBody("j-visual"), visual.deps)).kind).toBe(
-      "applied",
-    );
+    expect((await processCompletion(snsBody("j-visual"), visual.deps)).kind).toBe("applied");
 
     const audio = harness({ jobId: "j-audio", track: "AUDIO" });
-    expect((await processCompletion(ebBody("j-audio"), audio.deps)).kind).toBe(
-      "applied",
-    );
+    expect((await processCompletion(ebBody("j-audio"), audio.deps)).kind).toBe("applied");
   });
 });

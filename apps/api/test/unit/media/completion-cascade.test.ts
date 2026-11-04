@@ -13,6 +13,7 @@
 //  - A taxonomy-pin failure settles; it must never escalate (guaranteed-useless
 //    spend). A disabled lane settles everything ("lane-closed").
 
+import { adaptLegacyStore } from "./support/legacy-completion-store.js";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -86,7 +87,7 @@ function world(opts: {
     ],
   ]);
 
-  const store: CompletionStore = {
+  const store: CompletionStore = adaptLegacyStore({
     async claimMessage(key) {
       calls.push("claimMessage");
       if (claimed.has(key)) return false;
@@ -118,16 +119,14 @@ function world(opts: {
     ...(opts.withCreateEscalationJob === false
       ? {}
       : {
-          async createEscalationJob(
-            spec: EscalationJobSpec,
-          ): Promise<CreatedEscalationJob> {
+          async createEscalationJob(spec: EscalationJobSpec): Promise<CreatedEscalationJob> {
             calls.push("createEscalationJob");
             escalationSpecs.push(spec);
             // parent_job_id-unique semantics: same parent → same row/jobId.
             return { jobId: ESC_JOB };
           },
         }),
-  };
+  });
 
   const moderation: MediaModerationProvider = {
     async moderateImage() {
@@ -322,7 +321,9 @@ describe("processCompletion — the deferred lane's call site (plan 031 C1)", ()
 
     expect(outcome.kind).toBe("applied");
     expect(w.triggers).toHaveLength(0);
-    expect(w.calls[0]).toBe("claimMessage"); // original order: claim, then fetch
+    // Read-only fetch first, then the claim: a failed fetch must not burn the slot.
+    expect(w.calls.indexOf("getVideoModeration")).toBeGreaterThanOrEqual(0);
+    expect(w.calls.indexOf("getVideoModeration")).toBeLessThan(w.calls.indexOf("claimMessage"));
   });
 
   it("an unreadable provider verdict falls through to the errored settle path", async () => {
@@ -332,17 +333,17 @@ describe("processCompletion — the deferred lane's call site (plan 031 C1)", ()
 
     expect(outcome.kind).toBe("applied");
     expect(w.triggers).toHaveLength(0);
-    // errored ⇒ nothing persisted on the track, claim WAS burned (settle path).
+    // errored ⇒ a terminal `review` marker is persisted on the track (never an
+    // approval), and the claim is taken in the same transaction.
     expect(w.calls).toContain("claimMessage");
-    expect(w.calls).not.toContain("persistTrackDecision");
+    expect(w.calls).toContain("persistTrackDecision");
+    expect(w.trackDecisions.get(JOB)).toBe("review");
   });
 
   it("cascade configured without createEscalationJob throws — a wiring bug must surface", async () => {
     const w = world({ explanation: GREY_BAND, withCreateEscalationJob: false });
 
-    await expect(processCompletion(BODY, w.deps)).rejects.toThrow(
-      /createEscalationJob/,
-    );
+    await expect(processCompletion(BODY, w.deps)).rejects.toThrow(/createEscalationJob/);
     expect(w.claimed.size).toBe(0); // still pre-claim: the retry can escalate
   });
 
@@ -376,13 +377,13 @@ describe("processCompletion — the deferred lane's call site (plan 031 C1)", ()
       expect(w.trackDecisions.get(JOB)).toBe("quarantine");
     });
 
-    it("a missing result is errored — persisted as nothing, never approved", async () => {
+    it("a missing result is errored — persisted as a review marker, never approved", async () => {
       const w = world({ jobPriority: "deferred", escalationResult: null });
 
       const outcome = await processCompletion(BODY, w.deps);
 
       expect(outcome.kind).toBe("applied");
-      expect(w.trackDecisions.has(JOB)).toBe(false);
+      expect(w.trackDecisions.get(JOB)).toBe("review");
     });
 
     it("a missing port is errored too — fail closed, not a crash", async () => {
@@ -391,7 +392,7 @@ describe("processCompletion — the deferred lane's call site (plan 031 C1)", ()
       const outcome = await processCompletion(BODY, w.deps);
 
       expect(outcome.kind).toBe("applied");
-      expect(w.trackDecisions.has(JOB)).toBe(false);
+      expect(w.trackDecisions.get(JOB)).toBe("review");
     });
 
     it("never consults the media provider for a deferred row", async () => {
