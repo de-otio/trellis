@@ -25,13 +25,13 @@ consuming application supplies them.
 A media object's `moderationStatus` is one of five states, persisted on the
 `MediaFile` row:
 
-| State | Meaning |
-|-------|---------|
-| `PENDING` | Born here. Nothing serves until a verdict moves it forward. |
-| `APPROVED` | The **only** state that serves bytes. |
-| `REVIEW` | The classifier was uncertain — awaiting a human moderator. |
-| `QUARANTINED` | The classifier flagged it — awaiting a human moderator. |
-| `REJECTED` | Terminal. Never serves. |
+| State         | Meaning                                                     |
+| ------------- | ----------------------------------------------------------- |
+| `PENDING`     | Born here. Nothing serves until a verdict moves it forward. |
+| `APPROVED`    | The **only** state that serves bytes.                       |
+| `REVIEW`      | The classifier was uncertain — awaiting a human moderator.  |
+| `QUARANTINED` | The classifier flagged it — awaiting a human moderator.     |
+| `REJECTED`    | Terminal. Never serves.                                     |
 
 The legal transitions are a pure state machine (`media-lifecycle.ts`):
 
@@ -51,7 +51,7 @@ Properties enforced by the machine (and property-tested):
 - `APPROVED` and `REJECTED` are absorbing under ordinary events; only a human
   action moves a `REVIEW` / `QUARANTINED` object, and only a CSAM event can
   move a terminal object (to `REJECTED`).
-- An illegal transition is *reported*, never silently coerced into `APPROVED`.
+- An illegal transition is _reported_, never silently coerced into `APPROVED`.
 
 CSAM detection is deliberately **not** part of the classifier decision path:
 it is a separate, statutory provider with preserve-and-report duties, and it
@@ -201,7 +201,7 @@ that no completion message can reference. The VISUAL completion then fans in
 against this settled AUDIO decision.
 
 This is the one place a track is approved without an external verdict, and it
-is safe: it is a positive verdict on a track that has *no content*, not
+is safe: it is a positive verdict on a track that has _no content_, not
 approval-from-doubt. Fail-closed is preserved everywhere else — an errored or
 absent track still degrades the object to `REVIEW`. Before this handling, a
 no-audio video would start a transcription that failed, fault the AUDIO track,
@@ -250,29 +250,29 @@ doubt) without changing the decision core.
 
 ## Injected capability seams
 
-The moderation core binds no cloud SDK. It ships the *interfaces* plus a
+The moderation core binds no cloud SDK. It ships the _interfaces_ plus a
 fail-closed Null provider and in-memory Mocks; the consuming application injects
 the concrete cloud adapters at startup (mirroring the `RealtimeTransport`
 seam).
 
-| Seam | Responsibility | Shipped in core |
-|------|----------------|-----------------|
-| `MediaModerationProvider` | Image / video moderation (start → poll for video). | Interface + fail-closed `NullModerationProvider` + `MockModerationProvider`. |
-| `TextModerationProvider` | Classify free text (the AUDIO track's transcript) into a 3-value verdict. | Interface + `MockTextModerationProvider`. |
-| `TranscodePort` | Re-encode/normalize video & audio to a known-clean form, probe duration, and report `hasAudio`. | Interface + `MockTranscodePort`. |
-| `TranscribePort` | Async speech-to-text for the AUDIO track. | Interface + `MockTranscribePort`. |
-| `StoragePort` | Object storage (get/put/copy/delete/head). | Interface + `MockStoragePort`. |
+| Seam                      | Responsibility                                                                                  | Shipped in core                                                              |
+| ------------------------- | ----------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `MediaModerationProvider` | Image / video moderation (start → poll for video).                                              | Interface + fail-closed `NullModerationProvider` + `MockModerationProvider`. |
+| `TextModerationProvider`  | Classify free text (the AUDIO track's transcript) into a 3-value verdict.                       | Interface + `MockTextModerationProvider`.                                    |
+| `TranscodePort`           | Re-encode/normalize video & audio to a known-clean form, probe duration, and report `hasAudio`. | Interface + `MockTranscodePort`.                                             |
+| `TranscribePort`          | Async speech-to-text for the AUDIO track.                                                       | Interface + `MockTranscribePort`.                                            |
+| `StoragePort`             | Object storage (get/put/copy/delete/head).                                                      | Interface + `MockStoragePort`.                                               |
 
-Core also ships pieces that sit *between* the pipeline and a provider, so that
+Core also ships pieces that sit _between_ the pipeline and a provider, so that
 binding a backend does not mean re-implementing them:
 
-| Capability | What it does | Why it is in core |
-|------------|--------------|-------------------|
+| Capability                            | What it does                                                                                                          | Why it is in core                                                                                                                                         |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `FrameSamplingVideoModerationAdapter` | Turns an image-only classifier into a video one: samples frames, classifies each through `moderateImage`, aggregates. | Most classifiers have no video job model, and every implementor writing their own sampling loop would re-derive the same aggregation rules — differently. |
-| `createLabelPolicy` | Derives the decision from the provider's labels under the **operator's** category map and confidence bars. | Moves authorship of the policy from the vendor to the operator, who can audit and change it. |
-| `withModerationDeadline` | Bounds every seam call and commits the decision at the deadline. | A timeout that only stops waiting is not a timeout; the late-answer rule has to live somewhere both paths share. |
-| `createMediaBytesAccess` | Hands an adapter a size-capped, version-pinned `Buffer`. | A classifier that takes bytes in its request body otherwise needs its own storage credentials — a second identity with read access to all user media. |
-| `parseCompletionEnvelope` | Accepts the canonical `{ track, jobId }` completion body, and the historical wire shapes. | Signalling completion should not mean reproducing a particular vendor's notification JSON. |
+| `createLabelPolicy`                   | Derives the decision from the provider's labels under the **operator's** category map and confidence bars.            | Moves authorship of the policy from the vendor to the operator, who can audit and change it.                                                              |
+| `withModerationDeadline`              | Bounds every seam call and commits the decision at the deadline.                                                      | A timeout that only stops waiting is not a timeout; the late-answer rule has to live somewhere both paths share.                                          |
+| `createMediaBytesAccess`              | Hands an adapter a size-capped, version-pinned `Buffer`.                                                              | A classifier that takes bytes in its request body otherwise needs its own storage credentials — a second identity with read access to all user media.     |
+| `parseCompletionEnvelope`             | Accepts the canonical `{ track, jobId }` completion body, and the historical wire shapes.                             | Signalling completion should not mean reproducing a particular vendor's notification JSON.                                                                |
 
 Binding rules every provider must obey:
 
@@ -339,16 +339,16 @@ Rule of thumb: **enforcement in the core, intelligence behind a port.**
 
 ## Where to look in the code
 
-| Concern | Module |
-|---------|--------|
-| Lifecycle states + state machine | `apps/api/src/lib/media/media-lifecycle.ts` |
-| Serve gate predicate | `apps/api/src/lib/media/serve-gate.ts` |
-| Track fan-in | `apps/api/src/lib/media/track-verdict.ts` |
-| Promotion decision | `apps/api/src/lib/media/promote-decision.ts` |
-| Provider / text-moderation seams | `apps/api/src/lib/media/moderation-provider.ts`, `text-moderation.ts` |
-| Transcode / transcribe / storage seams | `apps/api/src/lib/media/media-ports.ts` |
-| Processing & completion workers | `apps/api/src/lambda/media-processing-worker.ts`, `media-completion-worker.ts` |
-| Canonical CAS keys | `apps/api/src/lib/media/cas-keys.ts` |
+| Concern                                | Module                                                                         |
+| -------------------------------------- | ------------------------------------------------------------------------------ |
+| Lifecycle states + state machine       | `apps/api/src/lib/media/media-lifecycle.ts`                                    |
+| Serve gate predicate                   | `apps/api/src/lib/media/serve-gate.ts`                                         |
+| Track fan-in                           | `apps/api/src/lib/media/track-verdict.ts`                                      |
+| Promotion decision                     | `apps/api/src/lib/media/promote-decision.ts`                                   |
+| Provider / text-moderation seams       | `apps/api/src/lib/media/moderation-provider.ts`, `text-moderation.ts`          |
+| Transcode / transcribe / storage seams | `apps/api/src/lib/media/media-ports.ts`                                        |
+| Processing & completion workers        | `apps/api/src/lambda/media-processing-worker.ts`, `media-completion-worker.ts` |
+| Canonical CAS keys                     | `apps/api/src/lib/media/cas-keys.ts`                                           |
 
 See also [Storage & CDN](storage-and-cdn.md) for the key prefixes and delivery
 path, and the [Media metadata API](../reference/media-api.md) for the media

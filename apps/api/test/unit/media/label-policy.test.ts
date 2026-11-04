@@ -72,9 +72,7 @@ describe("createLabelPolicy — refuses to construct without a policy", () => {
   it("accepts an EMPTY map — that is a coherent policy, not a missing one", () => {
     const policy = createLabelPolicy(config({ categories: {} }));
     // Every reported category is therefore unmapped, and unmapped holds.
-    expect(
-      policy.decide(verdictOf([{ category: MOCK_CATEGORY_A, confidence: 0 }])),
-    ).toBe("review");
+    expect(policy.decide(verdictOf([{ category: MOCK_CATEGORY_A, confidence: 0 }]))).toBe("review");
     // ...but a verdict with no labels at all still approves.
     expect(policy.decide(verdictOf([]))).toBe("approved");
   });
@@ -197,9 +195,7 @@ describe("decideFromLabels — category mapping", () => {
     // "constructor" and "toString" exist on every object's prototype chain; a
     // naive lookup would read them as configured categories.
     for (const category of ["constructor", "toString", "__proto__"]) {
-      expect(
-        decideFromLabels(verdictOf([{ category, confidence: 0 }]), unpinned),
-      ).toBe("review");
+      expect(decideFromLabels(verdictOf([{ category, confidence: 0 }]), unpinned)).toBe("review");
     }
   });
 

@@ -203,9 +203,7 @@ export function createLabelPolicy(config: LabelPolicyConfig): LabelPolicy {
     config.onUnacceptedVersion !== "hold" &&
     config.onUnacceptedVersion !== "warn"
   ) {
-    throw new LabelPolicyConfigError(
-      'label policy onUnacceptedVersion must be "hold" or "warn"',
-    );
+    throw new LabelPolicyConfigError('label policy onUnacceptedVersion must be "hold" or "warn"');
   }
   if (config.onUnacceptedVersion === "warn" && config.pinMode !== "config") {
     throw new LabelPolicyConfigError(
@@ -475,9 +473,7 @@ function acceptedVersions(config: LabelPolicyConfig): ReadonlySet<string> {
       : raw instanceof Set || Array.isArray(raw)
         ? [...(raw as Iterable<unknown>)]
         : [];
-  return new Set(
-    items.filter((v): v is string => typeof v === "string" && v.length > 0),
-  );
+  return new Set(items.filter((v): v is string => typeof v === "string" && v.length > 0));
 }
 
 /** Outcome of the pin check. `warn` implies `ok`: accepted on sufferance. */

@@ -26,9 +26,7 @@ import {
   transcriptToModerationDecision,
 } from "../../../src/lib/media/transcript-moderation.js";
 import { ModerationProviderError } from "../../../src/lib/media/moderation-provider.js";
-import {
-  MockTextModerationProvider,
-} from "../../../src/lib/media/text-moderation.js";
+import { MockTextModerationProvider } from "../../../src/lib/media/text-moderation.js";
 import type { ModerationVerdict } from "../../../src/lib/media/moderation-provider.js";
 import type { ModerationDecision } from "../../../src/lib/media/media-lifecycle.js";
 import { ALL_MODERATION_DECISIONS } from "../../../src/lib/media/media-lifecycle.js";
@@ -211,9 +209,7 @@ describe("moderateTranscript — empty transcript", () => {
   });
 
   it("transcriptToModerationDecision returns the same approval", async () => {
-    expect(await transcriptToModerationDecision("  ", new ThrowingProvider())).toBe(
-      "approved",
-    );
+    expect(await transcriptToModerationDecision("  ", new ThrowingProvider())).toBe("approved");
   });
 
   it("a transcript with any text goes to the seam and carries no reason", async () => {
@@ -311,11 +307,14 @@ describe("property A — known decision round-trips", () => {
 describe("property B — throw always resolves to review", () => {
   it("for any transcript, a throwing seam always returns review", async () => {
     await fc.assert(
-      fc.asyncProperty(fc.string().filter((t) => t.trim().length > 0), async (transcript) => {
-        const seam = new ThrowingProvider();
-        const result = await transcriptToModerationDecision(transcript, seam);
-        return result === "review";
-      }),
+      fc.asyncProperty(
+        fc.string().filter((t) => t.trim().length > 0),
+        async (transcript) => {
+          const seam = new ThrowingProvider();
+          const result = await transcriptToModerationDecision(transcript, seam);
+          return result === "review";
+        },
+      ),
     );
   });
 });
@@ -357,11 +356,14 @@ describe("property C — result is always a known decision", () => {
 
   it("throwing seam always returns a known decision", async () => {
     await fc.assert(
-      fc.asyncProperty(fc.string().filter((t) => t.trim().length > 0), async (transcript) => {
-        const seam = new ThrowingProvider();
-        const result = await transcriptToModerationDecision(transcript, seam);
-        return knownDecisions.has(result);
-      }),
+      fc.asyncProperty(
+        fc.string().filter((t) => t.trim().length > 0),
+        async (transcript) => {
+          const seam = new ThrowingProvider();
+          const result = await transcriptToModerationDecision(transcript, seam);
+          return knownDecisions.has(result);
+        },
+      ),
     );
   });
 });

@@ -36,10 +36,7 @@ const FC = { seed: 0xffaa, numRuns: 800 } as const;
 // Arbitraries
 // ---------------------------------------------------------------------------
 
-const kindArb: fc.Arbitrary<"video" | "audio"> = fc.constantFrom(
-  "video",
-  "audio",
-);
+const kindArb: fc.Arbitrary<"video" | "audio"> = fc.constantFrom("video", "audio");
 
 // Positive finite numbers for duration cap (realistic range + edge cases).
 // fc.float requires 32-bit float bounds — use Math.fround to satisfy the constraint.
@@ -70,14 +67,13 @@ const specArb: fc.Arbitrary<FfmpegJobSpec> = fc.record({
   maxDurationSeconds: durationArb,
 });
 
-const specWithPosterArb: fc.Arbitrary<FfmpegJobSpec & { posterPath: string }> =
-  fc.record({
-    kind: kindArb,
-    inputPath: pathArb,
-    outputPath: pathArb,
-    posterPath: pathArb,
-    maxDurationSeconds: durationArb,
-  });
+const specWithPosterArb: fc.Arbitrary<FfmpegJobSpec & { posterPath: string }> = fc.record({
+  kind: kindArb,
+  inputPath: pathArb,
+  outputPath: pathArb,
+  posterPath: pathArb,
+  maxDurationSeconds: durationArb,
+});
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -149,18 +145,14 @@ describe("buildFfmpegArgs", () => {
   // Property: cap TRACKS the spec — different durations yield different -t values
   it("-t value tracks spec.maxDurationSeconds (varying the cap changes the arg)", () => {
     fc.assert(
-      fc.property(
-        specArb,
-        fc.integer({ min: 1, max: 7200 }),
-        (spec, altDuration) => {
-          fc.pre(spec.maxDurationSeconds !== altDuration);
-          const args1 = buildFfmpegArgs(spec);
-          const args2 = buildFfmpegArgs({ ...spec, maxDurationSeconds: altDuration });
-          const cap1 = argAfter(args1, "-t");
-          const cap2 = argAfter(args2, "-t");
-          expect(cap1).not.toBe(cap2);
-        },
-      ),
+      fc.property(specArb, fc.integer({ min: 1, max: 7200 }), (spec, altDuration) => {
+        fc.pre(spec.maxDurationSeconds !== altDuration);
+        const args1 = buildFfmpegArgs(spec);
+        const args2 = buildFfmpegArgs({ ...spec, maxDurationSeconds: altDuration });
+        const cap1 = argAfter(args1, "-t");
+        const cap2 = argAfter(args2, "-t");
+        expect(cap1).not.toBe(cap2);
+      }),
       FC,
     );
   });
@@ -518,19 +510,12 @@ describe("buildPosterArgs", () => {
   // Property: cap tracks the spec
   it("-t value tracks spec.maxDurationSeconds", () => {
     fc.assert(
-      fc.property(
-        specWithPosterArb,
-        fc.integer({ min: 1, max: 7200 }),
-        (spec, altDuration) => {
-          fc.pre(spec.maxDurationSeconds !== altDuration);
-          const cap1 = argAfter(buildPosterArgs(spec), "-t");
-          const cap2 = argAfter(
-            buildPosterArgs({ ...spec, maxDurationSeconds: altDuration }),
-            "-t",
-          );
-          expect(cap1).not.toBe(cap2);
-        },
-      ),
+      fc.property(specWithPosterArb, fc.integer({ min: 1, max: 7200 }), (spec, altDuration) => {
+        fc.pre(spec.maxDurationSeconds !== altDuration);
+        const cap1 = argAfter(buildPosterArgs(spec), "-t");
+        const cap2 = argAfter(buildPosterArgs({ ...spec, maxDurationSeconds: altDuration }), "-t");
+        expect(cap1).not.toBe(cap2);
+      }),
       FC,
     );
   });
@@ -765,7 +750,18 @@ describe("input whitelists on every builder", () => {
     // capture formats need 3g2, Ogg and raw AAC. A whitelist missing one of
     // these turns an accepted upload into a failed transcode.
     const admitted = new Set(FORMATS.split(","));
-    for (const demuxer of ["mov", "mp4", "m4a", "3gp", "3g2", "matroska", "webm", "ogg", "aac", "mp3"]) {
+    for (const demuxer of [
+      "mov",
+      "mp4",
+      "m4a",
+      "3gp",
+      "3g2",
+      "matroska",
+      "webm",
+      "ogg",
+      "aac",
+      "mp3",
+    ]) {
       expect(admitted.has(demuxer), demuxer).toBe(true);
     }
     // And nothing that can open other resources.

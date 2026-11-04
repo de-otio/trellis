@@ -358,10 +358,7 @@ const arbVerdict = fc.record({
     fc.constant(undefined),
   ),
   provider: fc.constant("mock"),
-  modelVersion: fc.oneof(
-    fc.constantFrom(MOCK_VERSION, OTHER_VERSION),
-    fc.constant(undefined),
-  ),
+  modelVersion: fc.oneof(fc.constantFrom(MOCK_VERSION, OTHER_VERSION), fc.constant(undefined)),
 }) as unknown as fc.Arbitrary<ModerationVerdict>;
 
 const arbConfig = fc.oneof(

@@ -123,18 +123,12 @@ describe("routeOnConfidence — what escalates", () => {
   });
 
   it("settles a grey-band label AT τ — the bar is `>=`, like every other bar here", () => {
-    const r = routeOnConfidence(
-      explanation("over-review-bar", "review", MOCK_TAU),
-      routeConfig(),
-    );
+    const r = routeOnConfidence(explanation("over-review-bar", "review", MOCK_TAU), routeConfig());
     expect(r).toEqual({ kind: "settle", decision: "review", reason: "confident" });
   });
 
   it("escalates an unreadable confidence at q̂ = 0 — absence of a number, not a low one", () => {
-    const r = routeOnConfidence(
-      explanation("unreadable-confidence", "review"),
-      routeConfig(),
-    );
+    const r = routeOnConfidence(explanation("unreadable-confidence", "review"), routeConfig());
     expect(r).toEqual({ kind: "escalate", confidence: 0, cause: "unreadable-confidence" });
   });
 

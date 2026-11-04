@@ -107,13 +107,8 @@ function inputHardeningArgs(options: InputHardeningOptions): string[] {
   ];
   const codecs = options.codecWhitelist;
   if (codecs !== undefined) {
-    if (
-      codecs.length === 0 ||
-      !codecs.every((c) => typeof c === "string" && CODEC_NAME.test(c))
-    ) {
-      throw new TypeError(
-        "codecWhitelist must be a non-empty list of plain codec names",
-      );
+    if (codecs.length === 0 || !codecs.every((c) => typeof c === "string" && CODEC_NAME.test(c))) {
+      throw new TypeError("codecWhitelist must be a non-empty list of plain codec names");
     }
     args.push("-codec_whitelist", codecs.join(","));
   }
@@ -303,9 +298,7 @@ export function buildFrameSamplingArgs(spec: FrameSamplingSpec): string[] {
   ];
 }
 
-export function buildPosterArgs(
-  spec: FfmpegJobSpec & { readonly posterPath: string },
-): string[] {
+export function buildPosterArgs(spec: FfmpegJobSpec & { readonly posterPath: string }): string[] {
   return [
     ...inputHardeningArgs(spec),
 

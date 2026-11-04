@@ -18,10 +18,7 @@ import {
   type ModerationVerdict,
   NullModerationProvider,
 } from "./moderation-provider.js";
-import type {
-  LabelPolicy,
-  LabelPolicyContext,
-} from "./label-policy.js";
+import type { LabelPolicy, LabelPolicyContext } from "./label-policy.js";
 import type { ModerationDecision } from "./media-lifecycle.js";
 
 // ---------------------------------------------------------------------------
@@ -38,9 +35,7 @@ let injected: MediaModerationProvider | undefined;
  * provider (e.g. an AWS Rekognition adapter). MUST run before the upload route
  * serves. Re-exported from `@de-otio/trellis` (apps/api/src/index.ts).
  */
-export function setMediaModerationProvider(
-  provider: MediaModerationProvider,
-): void {
+export function setMediaModerationProvider(provider: MediaModerationProvider): void {
   injected = provider;
 }
 

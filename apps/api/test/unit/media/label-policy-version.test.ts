@@ -127,9 +127,9 @@ describe('onUnacceptedVersion: "warn"', () => {
   });
 
   it("refuses an unrecognised action", () => {
-    expect(() =>
-      createLabelPolicy(cfg({ onUnacceptedVersion: "ignore" as never })),
-    ).toThrow(LabelPolicyConfigError);
+    expect(() => createLabelPolicy(cfg({ onUnacceptedVersion: "ignore" as never }))).toThrow(
+      LabelPolicyConfigError,
+    );
   });
 });
 

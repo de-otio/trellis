@@ -429,10 +429,7 @@ export async function refetchTrackDecision(
   // so a missing field must not be coerced into one. Errored, fail closed.
   if (typeof res.transcript !== "string") return null;
   const transcript = res.transcript;
-  const decision = await transcriptToModerationDecision(
-    transcript,
-    deps.textModeration,
-  );
+  const decision = await transcriptToModerationDecision(transcript, deps.textModeration);
   return normalizeDecision(decision);
 }
 
