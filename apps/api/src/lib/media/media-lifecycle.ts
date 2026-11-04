@@ -180,8 +180,13 @@ export function nextLifecycle(
   // An automated reviewer may only clear an item held in REVIEW. It cannot
   // block (no reject form exists) and it cannot touch QUARANTINED or any other
   // state: everything but REVIEW is illegal, including states added later.
+  //
+  // `action` is `"approve"` by type, but this function is the last line of
+  // defence and the type is erased at runtime (JS callers, `as` casts, a
+  // value decoded from a queue). Anything other than the literal approve is
+  // illegal rather than being read as one.
   if (event.kind === "automated-review") {
-    return current === "REVIEW"
+    return current === "REVIEW" && event.action === "approve"
       ? { ok: true, status: "APPROVED" }
       : illegal(current, event);
   }

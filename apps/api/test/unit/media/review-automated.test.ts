@@ -215,6 +215,47 @@ describe("MediaReviewHandler.decide — automated actor", () => {
     expect(state.lifecycle).toBe("REVIEW");
   });
 
+  it("never rejects, even if the type is bypassed: a forged reject is illegal and changes nothing", async () => {
+    const { db, state, writes } = makeDb("REVIEW");
+    const { logger, logSystemAction } = makeAudit();
+    const { storage, port, coordsFor } = await world();
+
+    const result = await new MediaReviewHandler().decide(
+      db,
+      logger,
+      env,
+      { ...input, decision: "reject" } as never,
+      port,
+    );
+
+    expect(result).toEqual({ ok: false, code: "ILLEGAL_STATE", from: "REVIEW" });
+    expect(state.lifecycle).toBe("REVIEW");
+    expect(writes).toHaveLength(0);
+    expect(coordsFor).not.toHaveBeenCalled();
+    expect(logSystemAction).not.toHaveBeenCalled();
+    expect(await storage.getObject(CAS_KEY).catch(() => null)).toBeFalsy();
+  });
+
+  it("refuses an unrecognised actor kind rather than treating it as a human", async () => {
+    const { db, state, writes } = makeDb("REVIEW");
+    const { logger, logSystemAction } = makeAudit();
+    const { port } = await world();
+
+    await expect(
+      new MediaReviewHandler().decide(
+        db,
+        logger,
+        env,
+        { ...input, actor: { kind: "service" } } as never,
+        port,
+      ),
+    ).rejects.toThrow(TypeError);
+
+    expect(state.lifecycle).toBe("REVIEW");
+    expect(writes).toHaveLength(0);
+    expect(logSystemAction).not.toHaveBeenCalled();
+  });
+
   it("returns NOT_FOUND for a missing or deleted item", async () => {
     const { db } = makeDb("REVIEW");
     (db.mediaFile.findUnique as unknown) = async () => null;

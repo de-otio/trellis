@@ -507,6 +507,16 @@ describe("nextLifecycle — automated-review", () => {
     }
   }
 
+  it("a non-approve action is illegal from every state, even REVIEW (the type is erased at runtime)", () => {
+    for (const action of ["reject", "bogus", undefined]) {
+      const forged = { kind: "automated-review", action } as unknown as MediaLifecycleEvent;
+      for (const from of ALL_MEDIA_LIFECYCLES) {
+        const result = nextLifecycle(from, forged);
+        expect(result.ok, `${from}/${String(action)}`).toBe(false);
+      }
+    }
+  });
+
   it("property: legal only from REVIEW, and then only to APPROVED", () => {
     fc.assert(
       fc.property(statusArb, (status) => {

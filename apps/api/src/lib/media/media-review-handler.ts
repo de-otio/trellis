@@ -390,7 +390,14 @@ export class MediaReviewHandler {
     });
     if (!media || media.deletedAt) return { ok: false, code: "NOT_FOUND" };
 
-    if (input.actor.kind === "automated") {
+    // Dispatch on the actor kind explicitly. The union is closed by type, but
+    // an unrecognised kind at runtime must never fall through into the human
+    // path (which would audit it as a moderator with no userId).
+    const actorKind: string = input.actor?.kind;
+    if (actorKind !== "automated" && actorKind !== "human") {
+      throw new TypeError("decide: unknown review actor kind");
+    }
+    if (actorKind === "automated") {
       return this.decideAutomated(
         db,
         auditLogger,
