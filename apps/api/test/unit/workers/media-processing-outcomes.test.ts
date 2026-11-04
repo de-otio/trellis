@@ -265,7 +265,7 @@ describe("processMediaMessage — capacity is not an attempt", () => {
   it("defers, with nothing written as failed, when the provider is at capacity", async () => {
     const w = world({ deferDelaySeconds: 7 });
     w.startVideo.mockRejectedValueOnce(capacity());
-    const out = await processMediaMessage(BODY, w.deps, AT_BOUND);
+    const out = await processMediaMessage(BODY, w.deps, YOUNG);
     expect(out).toEqual({
       kind: "defer",
       delaySeconds: 7,
@@ -277,13 +277,33 @@ describe("processMediaMessage — capacity is not an attempt", () => {
     expect(w.state.lifecycle).toBe("UPLOADED");
   });
 
-  it("defers, even past the age bound, on the spend gate", async () => {
+  it("defers on the spend gate before the age bound", async () => {
     const w = world({ deferDelaySeconds: 7, spend: { current: 5, cap: 5 } });
-    const out = await processMediaMessage(BODY, w.deps, AT_BOUND);
+    const out = await processMediaMessage(BODY, w.deps, YOUNG);
     expect(out.kind).toBe("defer");
     expect(w.transcodeSpy).not.toHaveBeenCalled();
     expect(w.startVideo).not.toHaveBeenCalled();
     expect(w.holds).toEqual([]);
+  });
+
+  it("settles REVIEW on the technical ground, not defer, when the spend gate still refuses at the age bound", async () => {
+    const w = world({ deferDelaySeconds: 7, spend: { current: 5, cap: 5 } });
+    expect(await processMediaMessage(BODY, w.deps, AT_BOUND)).toEqual({
+      kind: "done",
+    });
+    expect(w.transcodeSpy).not.toHaveBeenCalled();
+    expect(w.startVideo).not.toHaveBeenCalled();
+    expect(w.holds).toEqual([{ ground: "technical", expectedFrom: "UPLOADED" }]);
+    expect(w.state.lifecycle).toBe("REVIEW");
+  });
+
+  it("settles REVIEW on the technical ground, not defer, when the provider still refuses at the age bound", async () => {
+    const w = world({ deferDelaySeconds: 7 });
+    w.startVideo.mockRejectedValueOnce(capacity());
+    expect(await processMediaMessage(BODY, w.deps, AT_BOUND)).toEqual({
+      kind: "done",
+    });
+    expect(w.holds).toEqual([{ ground: "technical", expectedFrom: "UPLOADED" }]);
   });
 
   it("treats capacity as a retryable fault when no delay is configured", async () => {

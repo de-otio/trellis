@@ -750,6 +750,11 @@ async function retryOrSettle(
  * A capacity refusal is not an attempt and not a fault: the caller comes back
  * after the configured delay. With no delay configured there is nothing to
  * defer BY, so it is handled like any other retryable fault.
+ *
+ * Deferring is bounded by the media's age, like every other way of waiting: at
+ * or past `maxMediaAgeSeconds` the object is settled to REVIEW on the
+ * `technical` ground instead of deferred again, so a refusal that never clears
+ * cannot keep a message circulating, whether or not a recovery sweep runs.
  */
 async function deferOrRetry(
   triggeringKey: string,
@@ -757,6 +762,9 @@ async function deferOrRetry(
   clock: ProcessingClock,
   reason: string,
 ): Promise<KeyResult> {
+  if (clock.mediaAgeSeconds >= clock.maxMediaAgeSeconds) {
+    return retryOrSettle(triggeringKey, deps, clock, reason);
+  }
   const delay = deps.config.deferDelaySeconds;
   if (typeof delay === "number" && Number.isFinite(delay) && delay > 0) {
     return {
