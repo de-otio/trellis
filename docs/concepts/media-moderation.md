@@ -110,11 +110,18 @@ track.
    staging bytes — exactly the bytes that will eventually be served. The worker
    only starts jobs; it never fetches verdicts.
 3. **Completion worker** (on each track's resolution): treats the incoming
-   message as an untrusted pointer, re-fetches authoritative state, dedupes,
-   combines both tracks, and — only on approval — promotes the cleaned staging
-   bytes to the served `cas/{tenant}/{hash}` prefix, then persists the new
-   status. The `cas/` prefix holds approved bytes only: **served bytes equal
-   moderated bytes equal cleaned bytes.**
+   message as an untrusted pointer and checks the job row first (unknown,
+   superseded or pinned to another version: dropped; item already settled or
+   track already decided: duplicate). It then re-fetches authoritative state
+   read-only; a job that has not finished is acknowledged, and a failed re-fetch
+   is retried, in both cases with nothing claimed. One store transaction then
+   claims the dedupe key, records this track's decision, reads the sibling and,
+   once both tracks (or a quarantine) are in, combines them and writes the new
+   status as a compare-and-set from `UPLOADED`; a lost race promotes nothing. Only
+   after that commit, and only on approval, are the cleaned staging bytes
+   promoted to the served `cas/{tenant}/{hash}` prefix; a promotion failure is
+   left for the recovery sweep. The `cas/` prefix holds approved bytes only:
+   **served bytes equal moderated bytes equal cleaned bytes.**
 
 Moderation always runs on the cleaned, transcoded output — never on the raw
 upload — so the bytes that are inspected are the bytes that are served.
