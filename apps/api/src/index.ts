@@ -265,3 +265,33 @@ export {
 // generic, truthful llms.txt default and NO security.txt default — an
 // unconfigured deployment 404s rather than serve a placeholder contact.
 export type { AgentSurfaceContent } from "./lib/routes/agent-surface.js";
+// Media worker cores: a host that runs its own queue consumer (any SQS-shaped
+// consumer library) binds these to its own dependencies. The cores take every
+// dependency by injection and return an outcome; they never ack, delete,
+// delay or retry a message themselves — that is the host's job (see
+// docs/guides/hosting-media-workers.md). No client and no module-global setter
+// is part of this surface.
+//
+// The two cores each define a `RecordOutcome`; they are re-exported under
+// distinct names so both can live at the package root.
+export { processRecord as processMediaMessage } from "./lib/workers/media-processing.js";
+export type {
+  MediaProcessingDeps,
+  MediaProcessingConfig,
+  MediaPersistencePort,
+  MediaFileRow,
+  MediaWorkerLogger,
+  QueueRecordLike,
+  RecordOutcome as MediaProcessingRecordOutcome,
+} from "./lib/workers/media-processing.js";
+export { processCompletion as handleMediaCompletion } from "./lib/workers/media-completion.js";
+export type {
+  CompletionDeps,
+  CompletionStore,
+  CompletionCascade,
+  EscalationResultPort,
+  RecordOutcome as MediaCompletionRecordOutcome,
+} from "./lib/workers/media-completion.js";
+export type { StoragePort, TranscodePort, TranscribePort } from "./lib/media/media-ports.js";
+export type { MediaSpendGuardPort } from "./lib/media/spend-guard.js";
+export type { MetricsPort } from "./lib/workers/metrics-port.js";

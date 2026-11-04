@@ -113,11 +113,20 @@ const EXPECTED_EXPORTS = [
   "dispositionForDeadlineBreach",
   "DeferredLaneConfigError",
   "DEFERRED_LANE_RETRIES",
+  // Media worker cores a host binds to its own queue consumer. The type-level
+  // half of this contract is test/types/media-cores.types.ts (run by `lint`).
+  "processMediaMessage",
+  "handleMediaCompletion",
 ].sort();
 
 describe("public API surface (@de-otio/trellis)", () => {
   it("exports exactly the documented names", () => {
     expect(Object.keys(publicApi).sort()).toEqual(EXPECTED_EXPORTS);
+  });
+
+  it("exposes the media worker cores as callables", () => {
+    expect(typeof publicApi.processMediaMessage).toBe("function");
+    expect(typeof publicApi.handleMediaCompletion).toBe("function");
   });
 
   it("exposes the registration + boot functions as callables", () => {
