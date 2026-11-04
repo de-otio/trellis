@@ -51,6 +51,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     groups:
       # CodeQL init and analyze must move together; alone, each fails CI
       # (#300, #306).
