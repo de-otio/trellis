@@ -37,6 +37,7 @@ function makeDb(row: Record<string, unknown>): {
         updates.push((args as { data: Record<string, unknown> }).data);
         return row;
       },
+      updateMany: async () => ({ count: 1 }),
     },
     user: { findUnique: async () => ({ role: "MODERATOR" }) },
   };
@@ -51,7 +52,7 @@ const auditEnv = {} as TrellisAuditLoggerEnv;
 const APPROVE_INPUT = {
   mediaId: MEDIA_ID,
   decision: "approve" as const,
-  moderatorUserId: "moderator-1",
+  actor: { kind: "human" as const, userId: "moderator-1" },
   region: "eu" as never,
 };
 

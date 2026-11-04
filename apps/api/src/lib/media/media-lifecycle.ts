@@ -79,8 +79,10 @@ export type ModerationDecision = "approved" | "review" | "quarantine";
  *                      the shell deletes the staged bytes BEFORE moderation.
  * - `upload-failed`  — the session expired / was abandoned / was reaped
  *                      before the object became moderatable.
- * - `automated-review` — an automated reviewer's decision on a held object.
- *                      Illegal from every state for now.
+ * - `automated-review` — an automated second-opinion reviewer CLEARING an
+ *                      object held in REVIEW. Approve-only by construction
+ *                      (the event has no reject form), legal from REVIEW and
+ *                      nowhere else — in particular never from QUARANTINED.
  */
 export type MediaLifecycleEvent =
   | { readonly kind: "bytes-arrived" }
@@ -146,6 +148,7 @@ function statusForDecision(decision: ModerationDecision): MediaLifecycle {
  * UPLOADED           --upload-failed-->        UPLOAD_FAILED  (stuck-pipeline reap)
  * REVIEW|QUARANTINED --human approve-->        APPROVED
  * REVIEW|QUARANTINED --human reject-->         REJECTED
+ * REVIEW             --automated-review approve--> APPROVED  (REVIEW only)
  * (any)              --csam-->                 REJECTED    (terminal; from any state)
  * ```
  *
@@ -153,7 +156,8 @@ function statusForDecision(decision: ModerationDecision): MediaLifecycle {
  * - `APPROVED`, `REJECTED`, and `UPLOAD_FAILED` are absorbing under non-CSAM
  *   events.
  * - A CSAM event drives any state to `REJECTED`.
- * - `QUARANTINED`/`REJECTED` never reach `APPROVED` without a human approve.
+ * - `QUARANTINED`/`REJECTED` never reach `APPROVED` without a human approve
+ *   (an automated review acts on REVIEW only).
  * - A `decision` is never legal from `AWAITING_UPLOAD` — unconfirmed bytes
  *   cannot acquire a verdict.
  * - `bytes-arrived` never leaves the {AWAITING_UPLOAD, UPLOADED} pair — a
@@ -173,9 +177,13 @@ export function nextLifecycle(
     return { ok: true, status: "REJECTED" };
   }
 
-  // No state accepts an automated review yet.
+  // An automated reviewer may only clear an item held in REVIEW. It cannot
+  // block (no reject form exists) and it cannot touch QUARANTINED or any other
+  // state: everything but REVIEW is illegal, including states added later.
   if (event.kind === "automated-review") {
-    return illegal(current, event);
+    return current === "REVIEW"
+      ? { ok: true, status: "APPROVED" }
+      : illegal(current, event);
   }
 
   switch (current) {

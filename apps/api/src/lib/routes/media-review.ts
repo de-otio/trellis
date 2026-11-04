@@ -191,7 +191,7 @@ export const mediaReviewRoutes: Route[] = [
           {
             mediaId,
             decision: validation.data.decision,
-            moderatorUserId: gate.userId,
+            actor: { kind: "human", userId: gate.userId },
             region: gate.region,
             ipAddress: clientIp(request),
             userAgent: request.headers.get("user-agent") || undefined,

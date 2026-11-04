@@ -3034,8 +3034,10 @@ export type ModerationDecision = "approved" | "review" | "quarantine";
  *                      the shell deletes the staged bytes BEFORE moderation.
  * - `upload-failed`  — the session expired / was abandoned / was reaped
  *                      before the object became moderatable.
- * - `automated-review` — an automated reviewer's decision on a held object.
- *                      Illegal from every state for now.
+ * - `automated-review` — an automated second-opinion reviewer CLEARING an
+ *                      object held in REVIEW. Approve-only by construction
+ *                      (the event has no reject form), legal from REVIEW and
+ *                      nowhere else — in particular never from QUARANTINED.
  */
 export type MediaLifecycleEvent = {
     readonly kind: "bytes-arrived";
@@ -3088,6 +3090,7 @@ export type TransitionResult = {
  * UPLOADED           --upload-failed-->        UPLOAD_FAILED  (stuck-pipeline reap)
  * REVIEW|QUARANTINED --human approve-->        APPROVED
  * REVIEW|QUARANTINED --human reject-->         REJECTED
+ * REVIEW             --automated-review approve--> APPROVED  (REVIEW only)
  * (any)              --csam-->                 REJECTED    (terminal; from any state)
  * ```
  *
@@ -3095,7 +3098,8 @@ export type TransitionResult = {
  * - `APPROVED`, `REJECTED`, and `UPLOAD_FAILED` are absorbing under non-CSAM
  *   events.
  * - A CSAM event drives any state to `REJECTED`.
- * - `QUARANTINED`/`REJECTED` never reach `APPROVED` without a human approve.
+ * - `QUARANTINED`/`REJECTED` never reach `APPROVED` without a human approve
+ *   (an automated review acts on REVIEW only).
  * - A `decision` is never legal from `AWAITING_UPLOAD` — unconfirmed bytes
  *   cannot acquire a verdict.
  * - `bytes-arrived` never leaves the {AWAITING_UPLOAD, UPLOADED} pair — a
@@ -3510,6 +3514,43 @@ export type ReviewActor = {
     readonly reviewerId: string;
     readonly modelId: string;
 };
+/** The human arm of {@link ReviewActor}. */
+export type HumanReviewActor = Extract<ReviewActor, {
+    kind: "human";
+}>;
+/**
+ * The automated arm of {@link ReviewActor}.
+ *
+ * TRUST BOUNDARY: this carries no session and no role, so `decide()` performs
+ * no role check for it. It must therefore only ever be constructed by
+ * composition-root code (server-side wiring a deployment owns) — never from a
+ * request body, a header, a session, or anything a client can influence. The
+ * HTTP moderator routes build a human actor and cannot build this one.
+ */
+export type AutomatedReviewActor = Extract<ReviewActor, {
+    kind: "automated";
+}>;
+interface DecideInputBase {
+    mediaId: string;
+    region: Region;
+    ipAddress?: string;
+    userAgent?: string;
+}
+/** A human moderator's decision: approve or reject, role-checked by the caller. */
+export interface HumanDecideInput extends DecideInputBase {
+    actor: HumanReviewActor;
+    decision: ModeratorDecision;
+}
+/**
+ * An automated reviewer's decision. `decision` is the literal `"approve"`: an
+ * automated actor can clear an item held in REVIEW and do nothing else, so
+ * "reject" with an automated actor does not compile.
+ */
+export interface AutomatedDecideInput extends DecideInputBase {
+    actor: AutomatedReviewActor;
+    decision: "approve";
+}
+export type DecideInput = HumanDecideInput | AutomatedDecideInput;
 /** The media "kind" derived from its stored mimeType (drives the client view). */
 export type MediaKind = "image" | "video" | "audio" | "other";
 /** Derive the coarse media kind from a mimeType. Total; unknown → "other". */
@@ -3550,6 +3591,13 @@ export interface ReviewPrismaLike {
         findMany: (args: unknown) => Promise<Array<Record<string, unknown>>>;
         findUnique: (args: unknown) => Promise<Record<string, unknown> | null>;
         update: (args: unknown) => Promise<Record<string, unknown>>;
+        /**
+         * Conditional write, used for the compare-and-set on the automated path:
+         * applies only where `where` still matches and reports how many rows moved.
+         */
+        updateMany: (args: unknown) => Promise<{
+            count: number;
+        }>;
     };
     user: {
         findUnique: (args: unknown) => Promise<{
@@ -3635,7 +3683,9 @@ export declare class MediaReviewHandler {
     }): Promise<ReviewQueuePage>;
     private toQueueItem;
     /**
-     * Apply a human approve/reject to a review item. The transition is decided by
+     * Apply an approve/reject to a review item. A human actor goes through the
+     * path below; an automated actor (approve-only, REVIEW-only) goes through
+     * {@link decideAutomated}. The human transition is decided by
      * the pure `nextLifecycle` machine (`human` event); this shell only persists
      * the resulting lifecycle, performs the promotion the machine implies, and
      * writes the audit row.
@@ -3655,14 +3705,24 @@ export declare class MediaReviewHandler {
      * Returns a DecisionResult; the route maps it to HTTP. Audit is written for
      * every APPLIED decision (success), before returning.
      */
-    decide(db: ReviewPrismaLike, auditLogger: TrellisAuditLogger, env: TrellisAuditLoggerEnv, input: {
-        mediaId: string;
-        decision: ModeratorDecision;
-        moderatorUserId: string;
-        region: Region;
-        ipAddress?: string;
-        userAgent?: string;
-    }, promotion?: ReviewPromotionPort | undefined): Promise<DecisionResult>;
+    decide(db: ReviewPrismaLike, auditLogger: TrellisAuditLogger, env: TrellisAuditLoggerEnv, input: DecideInput, promotion?: ReviewPromotionPort | undefined): Promise<DecisionResult>;
+    /**
+     * The automated-reviewer path: clear an item held in REVIEW, nothing else.
+     *
+     * Differences from the human path, all deliberate:
+     *  - No role check — see {@link AutomatedReviewActor}'s trust boundary.
+     *  - The write is a COMPARE-AND-SET from the lifecycle we read (`REVIEW`),
+     *    made BEFORE promotion. If another writer moved the row in between
+     *    (count 0) we report ILLEGAL_STATE and promote nothing, so a stale read
+     *    can never make bytes servable.
+     *  - If promotion then fails, the item is put back to REVIEW with a second
+     *    compare-and-set from APPROVED, so a failed promotion still holds REVIEW.
+     *    In the window between the two, the serve key is content-addressed: it
+     *    either does not exist yet (nothing to serve) or already holds identical
+     *    bytes, so unreviewed bytes are never reachable.
+     *  - The audit row reuses the approve action and adds the actor fields.
+     */
+    private decideAutomated;
     /**
      * Copy the version-pinned reviewed bytes to the serve prefix.
      *
@@ -3709,6 +3769,7 @@ export declare class MediaReviewHandler {
         mimeType: string;
     } | null>;
 }
+export {};
 
 // ===== lib/media/minimum-content-gate.d.ts =====
 import { type ImageRef, type MediaModerationProvider, type ModerationCallOptions, type ModerationDecision, type ModerationVerdict, type S3Ref, type VideoModerationStart } from "./moderation-provider.js";
