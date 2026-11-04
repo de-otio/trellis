@@ -183,6 +183,14 @@ export function buildDispatchTable(
           // Routed to the deferred lane (plan 031 C1): the escalation row +
           // workflow own the rest; this delivery's work is done.
           return "ack";
+        case "not-terminal":
+        case "awaiting-sibling":
+        case "lost-race":
+          // Documented acks: progress that is not a result, a sibling track
+          // still to finish the media object, or a concurrent delivery that
+          // already moved it. Explicit so a new kind can never fall through
+          // to the dispatcher's implicit-ack.
+          return "ack";
         case "duplicate":
         case "unroutable":
         case "illegal-transition":

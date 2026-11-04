@@ -27,13 +27,15 @@ All from the package root, `@de-otio/trellis`:
 | `MediaProcessingRecordOutcome` | type | `ack` (optionally `poison`) or `fail`. |
 | `handleMediaCompletion(body, deps)` | function | Process one `media-completion` message. |
 | `CompletionDeps`, `CompletionStore` | types | Everything the completion core needs, injected. |
-| `MediaCompletionRecordOutcome` | type | `applied`, `escalated`, `duplicate`, `unroutable`, `illegal-transition` or `retry`. |
+| `MediaCompletionRecordOutcome` | type | `applied`, `escalated`, `not-terminal`, `awaiting-sibling`, `lost-race`, `duplicate`, `unroutable`, `illegal-transition` or `retry`. |
 
 Supporting types for building the dependency bags: `QueueRecordLike`,
 `MediaProcessingConfig`, `MediaPersistencePort`, `MediaFileRow`,
 `MediaWorkerLogger`, `StoragePort`, `TranscodePort`, `TranscribePort`,
 `MediaSpendGuardPort`, `MetricsPort`, `CompletionCascade`,
 `EscalationResultPort`.
+
+The outcome and timing shapes a host can reason about without importing the cores are also at the root: `ProcessingOutcome` (`done` / `retry` / `defer`), `ProcessingClock`, and the recovery-sweep types (`MediaRecoverySweepConfig`, `RecoveryAction`, `RecoveryCandidate`, `RecoveryTrackState`, `CompletionQueueTiming`, with `validateRecoverySweepConfig`). These are types and a pure validator only; the orchestration still returns the record outcomes above.
 
 Both cores expose a record named `RecordOutcome` internally; they are exported
 under the two distinct names above so both fit at the package root.
@@ -47,7 +49,7 @@ your dependencies as arguments; do not rely on process-wide injection.
 |---|---|
 | processing `ack` (incl. `poison`) | Delete the message. |
 | processing `fail` | Do **not** delete. Leave it for redelivery (with backoff, below). |
-| completion `applied`, `escalated` | Delete the message. |
+| completion `applied`, `escalated`, `not-terminal`, `awaiting-sibling`, `lost-race` | Delete the message. |
 | completion `duplicate`, `unroutable`, `illegal-transition` | Delete the message — terminal, and must never loop to the dead-letter queue. |
 | completion `retry` | Do **not** delete. Leave it for redelivery. |
 | the core **throws** | Treat as `fail`. Never convert a throw into a delete. |
