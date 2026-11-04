@@ -188,6 +188,29 @@ For completeness, the media routes also include:
 > not serve until the asynchronous moderation pipeline approves it. See
 > [Media Moderation](../concepts/media-moderation.md).
 
+> **Known-transient image-check failures return `503`, not a hold.** If the
+> synchronous image check fails for a reason that is known to be unrelated to
+> the image, `POST /api/media/upload` responds `503` with a `Retry-After`
+> header (seconds; operator-configured via
+> `MEDIA_MODERATION_RETRY_AFTER_SECONDS`, omitted when unset). "Known" means a
+> typed provider error flagged `retryable` or `capacity: true`, or an untyped
+> error that matches an explicit transient signal (throttling, a deadline, a
+> network error). Nothing is stored: no media row is created and the staged
+> bytes are discarded, so the client simply retries the upload.
+>
+> Anything else fails closed as before: an untyped error we cannot recognise, a
+> typed non-retryable error, or a failure about the media puts the upload in
+> `REVIEW`, as does a provider verdict that holds it. An oversize file or an
+> unsupported format is refused before the check runs.
+
+> **Presigned upload sessions can be refused with `429`.** When the deployment
+> registers an upload quota (`setUploadQuotaPort`), `POST /api/upload-sessions`
+> with `{ mimeType, sizeBytes }` consults it before issuing the presigned POST.
+> A refusal returns `429` with a `Retry-After` header (seconds) and creates
+> nothing: no session row, no media row, no signed grant. If the quota check
+> itself fails the response is `503`. With no quota registered, behaviour is
+> unchanged.
+
 ## Response example (image details)
 
 ```json

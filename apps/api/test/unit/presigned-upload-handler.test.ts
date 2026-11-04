@@ -130,8 +130,7 @@ const fakeDb = {
     updateMany: async ({ where, data }: any) => {
       const hits = state.media.filter(
         (m) =>
-          m.id === where.id &&
-          (where.lifecycle === undefined || m.lifecycle === where.lifecycle),
+          m.id === where.id && (where.lifecycle === undefined || m.lifecycle === where.lifecycle),
       );
       for (const h of hits) Object.assign(h, data);
       return { count: hits.length };
@@ -158,8 +157,7 @@ const fakeDb = {
     }),
   },
   tenant: {
-    findUnique: async () =>
-      state.tenantOverride === null ? null : { ...state.tenantOverride },
+    findUnique: async () => (state.tenantOverride === null ? null : { ...state.tenantOverride }),
   },
   // WS-2 §4: the hardened idempotent early-return checks for an existing
   // moderation job before self-heal re-enqueueing.
@@ -204,6 +202,7 @@ import {
   type PresignPort,
 } from "../../src/lib/presigned-upload-handler.js";
 import type { Env } from "../../src/env.js";
+import { setUploadQuotaPort } from "../../src/lib/media/upload-quota.js";
 
 // ---------------------------------------------------------------------------
 // Env + port fixtures
@@ -482,12 +481,7 @@ describe("PresignedUploadHandler.completeSession", () => {
     const created = await createHappySession(handler, env);
 
     mockHead.mockResolvedValue({ size: 5_000_000 });
-    const res = await handler.completeSession(
-      created.session.sessionId,
-      OTHER_USER,
-      "US",
-      env,
-    );
+    const res = await handler.completeSession(created.session.sessionId, OTHER_USER, "US", env);
     expect(res.ok).toBe(false);
     if (res.ok) return;
     expect(res.status).toBe(404);
@@ -502,12 +496,7 @@ describe("PresignedUploadHandler.completeSession", () => {
     const created = await createHappySession(handler, env);
 
     mockHead.mockResolvedValue(null);
-    const res = await handler.completeSession(
-      created.session.sessionId,
-      USER,
-      "US",
-      env,
-    );
+    const res = await handler.completeSession(created.session.sessionId, USER, "US", env);
     expect(res.ok).toBe(false);
     if (res.ok) return;
     expect(res.status).toBe(409);
@@ -520,12 +509,7 @@ describe("PresignedUploadHandler.completeSession", () => {
     const created = await createHappySession(handler, env);
 
     mockHead.mockResolvedValue({ size: 4_900_000 });
-    const res = await handler.completeSession(
-      created.session.sessionId,
-      USER,
-      "US",
-      env,
-    );
+    const res = await handler.completeSession(created.session.sessionId, USER, "US", env);
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     expect(res.media.lifecycle).toBe("UPLOADED"); // never APPROVED from here
@@ -540,19 +524,9 @@ describe("PresignedUploadHandler.completeSession", () => {
     const created = await createHappySession(handler, env);
 
     mockHead.mockResolvedValue({ size: 100 });
-    const first = await handler.completeSession(
-      created.session.sessionId,
-      USER,
-      "US",
-      env,
-    );
+    const first = await handler.completeSession(created.session.sessionId, USER, "US", env);
     expect(first.ok).toBe(true);
-    const second = await handler.completeSession(
-      created.session.sessionId,
-      USER,
-      "US",
-      env,
-    );
+    const second = await handler.completeSession(created.session.sessionId, USER, "US", env);
     expect(second.ok).toBe(true);
     expect(state.media[0].lifecycle).toBe("UPLOADED");
   });
@@ -569,12 +543,7 @@ describe("PresignedUploadHandler.completeSession", () => {
     state.media[0].size = 1;
     mockHead.mockResolvedValue({ size: 4_900_000 });
 
-    const res = await handler.completeSession(
-      created.session.sessionId,
-      USER,
-      "US",
-      env,
-    );
+    const res = await handler.completeSession(created.session.sessionId, USER, "US", env);
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     expect(res.media.lifecycle).toBe("UPLOADED");
@@ -592,12 +561,7 @@ describe("PresignedUploadHandler.completeSession", () => {
     state.media[0].lifecycle = "REVIEW";
     mockHead.mockResolvedValue({ size: 100 });
 
-    const res = await handler.completeSession(
-      created.session.sessionId,
-      USER,
-      "US",
-      env,
-    );
+    const res = await handler.completeSession(created.session.sessionId, USER, "US", env);
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     // The verdict stands; completion reports it and cannot rewind it.
@@ -611,20 +575,13 @@ describe("PresignedUploadHandler.completeSession", () => {
     const created = await createHappySession(handler, env);
     state.sessions[0].expiresAt = new Date(Date.now() - 1000);
 
-    const res = await handler.completeSession(
-      created.session.sessionId,
-      USER,
-      "US",
-      env,
-    );
+    const res = await handler.completeSession(created.session.sessionId, USER, "US", env);
     expect(res.ok).toBe(false);
     if (res.ok) return;
     expect(res.status).toBe(410);
     expect(state.media[0].lifecycle).toBe("UPLOAD_FAILED");
     expect(state.sessions[0].status).toBe("expired");
-    expect(mockDelete).toHaveBeenCalledWith(
-      `pending/${TENANT}/${created.session.sessionId}`,
-    );
+    expect(mockDelete).toHaveBeenCalledWith(`pending/${TENANT}/${created.session.sessionId}`);
   });
 });
 
@@ -638,12 +595,7 @@ describe("PresignedUploadHandler.abandonSession", () => {
     const handler = new PresignedUploadHandler(env, makePort().port);
     const created = await createHappySession(handler, env);
 
-    const res = await handler.abandonSession(
-      created.session.sessionId,
-      OTHER_USER,
-      "US",
-      env,
-    );
+    const res = await handler.abandonSession(created.session.sessionId, OTHER_USER, "US", env);
     expect(res.ok).toBe(false);
     if (res.ok) return;
     expect(res.status).toBe(404);
@@ -655,18 +607,11 @@ describe("PresignedUploadHandler.abandonSession", () => {
     const handler = new PresignedUploadHandler(env, makePort().port);
     const created = await createHappySession(handler, env);
 
-    const res = await handler.abandonSession(
-      created.session.sessionId,
-      USER,
-      "US",
-      env,
-    );
+    const res = await handler.abandonSession(created.session.sessionId, USER, "US", env);
     expect(res.ok).toBe(true);
     expect(state.sessions[0].status).toBe("abandoned");
     expect(state.media[0].lifecycle).toBe("UPLOAD_FAILED");
-    expect(mockDelete).toHaveBeenCalledWith(
-      `pending/${TENANT}/${created.session.sessionId}`,
-    );
+    expect(mockDelete).toHaveBeenCalledWith(`pending/${TENANT}/${created.session.sessionId}`);
   });
 
   it("refuses (409) once the pipeline has resolved a verdict — abandon cannot destroy audit state", async () => {
@@ -675,12 +620,7 @@ describe("PresignedUploadHandler.abandonSession", () => {
     const created = await createHappySession(handler, env);
     state.media[0].lifecycle = "APPROVED";
 
-    const res = await handler.abandonSession(
-      created.session.sessionId,
-      USER,
-      "US",
-      env,
-    );
+    const res = await handler.abandonSession(created.session.sessionId, USER, "US", env);
     expect(res.ok).toBe(false);
     if (res.ok) return;
     expect(res.status).toBe(409);
@@ -694,12 +634,7 @@ describe("PresignedUploadHandler.abandonSession", () => {
     const created = await createHappySession(handler, env);
 
     await handler.abandonSession(created.session.sessionId, USER, "US", env);
-    const res = await handler.abandonSession(
-      created.session.sessionId,
-      USER,
-      "US",
-      env,
-    );
+    const res = await handler.abandonSession(created.session.sessionId, USER, "US", env);
     expect(res.ok).toBe(true);
   });
 });
@@ -781,12 +716,7 @@ describe("AR-SEC F2 — combined video+audio track budgets on the byte rail", ()
 
     // The staged object is the same legitimate muxed clip.
     mockHead.mockResolvedValue({ size: 250_000_000 });
-    const res = await handler.completeSession(
-      created.session.sessionId,
-      USER,
-      "US",
-      env,
-    );
+    const res = await handler.completeSession(created.session.sessionId, USER, "US", env);
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     expect(res.media.lifecycle).toBe("UPLOADED");
@@ -804,12 +734,7 @@ describe("AR-SEC F2 — combined video+audio track budgets on the byte rail", ()
     if (!created.ok) return;
 
     mockHead.mockResolvedValue({ size: 300_000_001 }); // > combined budgets
-    const res = await handler.completeSession(
-      created.session.sessionId,
-      USER,
-      "US",
-      env,
-    );
+    const res = await handler.completeSession(created.session.sessionId, USER, "US", env);
     expect(res.ok).toBe(false);
     if (res.ok) return;
     expect(res.status).toBe(413);
@@ -987,5 +912,106 @@ describe("WS-2 §4 media control inversion (MEDIA_ENQUEUE_ON_COMPLETE)", () => {
     expect(res.ok).toBe(false);
     if (res.ok) return;
     expect(res.status).toBe(503);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Optional per-user upload quota (UploadQuotaPort)
+// ---------------------------------------------------------------------------
+
+describe("PresignedUploadHandler.createSession — upload quota port", () => {
+  const input = { mimeType: "video/mp4", sizeBytes: 5_000_000 };
+
+  it("denies with 429 + retryAfterSeconds and creates nothing (no rows, no presign)", async () => {
+    const env = makeEnv();
+    const { port, calls } = makePort();
+    const check = vi.fn(async () => ({ ok: false as const, retryAfterSeconds: 42 }));
+    const handler = new PresignedUploadHandler(env, port, { check });
+
+    const res = await handler.createSession(USER, "US", env, input);
+
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.status).toBe(429);
+    expect(res.retryAfterSeconds).toBe(42);
+    expect(state.sessions).toHaveLength(0);
+    expect(state.media).toHaveLength(0);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("is asked with the user and a kind derived from the mime type", async () => {
+    const env = makeEnv();
+    const check = vi.fn(async () => ({ ok: true as const }));
+    const handler = new PresignedUploadHandler(env, makePort().port, { check });
+
+    await handler.createSession(USER, "US", env, input);
+    await handler.createSession(USER, "US", env, { mimeType: "Image/PNG", sizeBytes: 10 });
+    await handler.createSession(USER, "US", env, { mimeType: "audio/mpeg", sizeBytes: 10 });
+
+    expect(check.mock.calls.map((c: any[]) => c[0])).toEqual([
+      { userId: USER, kind: "video" },
+      { userId: USER, kind: "image" },
+      { userId: USER, kind: "video" },
+    ]);
+  });
+
+  it("allows → today's flow (grant issued)", async () => {
+    const env = makeEnv();
+    const { port, calls } = makePort();
+    const handler = new PresignedUploadHandler(env, port, {
+      check: async () => ({ ok: true }),
+    });
+    const res = await handler.createSession(USER, "US", env, input);
+    expect(res.ok).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(state.sessions).toHaveLength(1);
+  });
+
+  it("no port → today's flow", async () => {
+    const env = makeEnv();
+    const { port, calls } = makePort();
+    const res = await new PresignedUploadHandler(env, port).createSession(USER, "US", env, input);
+    expect(res.ok).toBe(true);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("uses the registered port when none is passed, and unregistering restores today's flow", async () => {
+    const env = makeEnv();
+    const check = vi.fn(async () => ({ ok: false as const, retryAfterSeconds: 5 }));
+    setUploadQuotaPort({ check });
+    try {
+      const denied = await new PresignedUploadHandler(env, makePort().port).createSession(
+        USER,
+        "US",
+        env,
+        input,
+      );
+      expect(denied.ok).toBe(false);
+      expect(check).toHaveBeenCalledTimes(1);
+    } finally {
+      setUploadQuotaPort(undefined);
+    }
+    const allowed = await new PresignedUploadHandler(env, makePort().port).createSession(
+      USER,
+      "US",
+      env,
+      input,
+    );
+    expect(allowed.ok).toBe(true);
+  });
+
+  it("fails closed with 503 (no retryAfter) when the port throws, creating nothing", async () => {
+    const env = makeEnv();
+    const handler = new PresignedUploadHandler(env, makePort().port, {
+      check: async () => {
+        throw new Error("down");
+      },
+    });
+    const res = await handler.createSession(USER, "US", env, input);
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.status).toBe(503);
+    expect(res.retryAfterSeconds).toBeUndefined();
+    expect(state.sessions).toHaveLength(0);
   });
 });

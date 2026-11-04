@@ -253,9 +253,7 @@ export interface WorkerErrorClassification {
  *     retryable-on-unknown default, which stays because an unrecognised error
  *     is more often transient than not and the delivery limit bounds the cost.
  */
-export function classifyWorkerErrorDetailed(
-  err: unknown,
-): WorkerErrorClassification {
+export function classifyWorkerErrorDetailed(err: unknown): WorkerErrorClassification {
   if (isModerationProviderError(err)) {
     // `infraFault` is read on BOTH branches, and that is the fix rather than a
     // tidy-up. It used to be hard-coded `false` here, which meant a fault that
@@ -294,8 +292,39 @@ export function classifyWorkerError(err: unknown): ErrorClass {
   return classifyWorkerErrorDetailed(err).klass;
 }
 
+/**
+ * What the heuristic could say about an untyped error. `"unknown"` means no
+ * poison or transient signal matched at all; the worker classifier turns that
+ * into `"retryable"` (see the default rule), but a caller that must not guess
+ * can tell the two apart.
+ */
+type HeuristicSignal = "poison" | "retryable" | "unknown";
+
 /** The legacy name/message/status heuristic, for errors that carry no type. */
 function classifyByHeuristic(err: unknown): ErrorClass {
+  const signal = heuristicSignal(err);
+  // --- 4. Unknown — default to retryable (see module-level docstring). ---
+  return signal === "unknown" ? "retryable" : signal;
+}
+
+/**
+ * True only when an UNTYPED error matched an explicit transient signal: a
+ * retryable HTTP status, a known transient error name or code, or a transient
+ * message fragment, with no poison signal. An error that matched nothing is NOT
+ * known-transient, even though {@link classifyWorkerError} defaults it to
+ * `"retryable"`. That default is right for a queue worker (a delivery limit
+ * bounds the cost); it is wrong for a caller that would otherwise stop holding
+ * the item, which must fail closed on anything it cannot recognise.
+ *
+ * A typed provider error is never known-transient by this predicate: the typed
+ * path is decided by the adapter's own flags, not by name matching.
+ */
+export function isKnownTransientByHeuristic(err: unknown): boolean {
+  if (isModerationProviderError(err)) return false;
+  return heuristicSignal(err) === "retryable";
+}
+
+function heuristicSignal(err: unknown): HeuristicSignal {
   // --- 1. Pull every signal we can out of the value, safely. ---
 
   const name = safeString(extractName(err));
@@ -324,8 +353,7 @@ function classifyByHeuristic(err: unknown): ErrorClass {
     return "retryable";
   }
 
-  // --- 4. Unknown — default to retryable (see module-level docstring). ---
-  return "retryable";
+  return "unknown";
 }
 
 // ---------------------------------------------------------------------------

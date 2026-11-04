@@ -15,11 +15,7 @@ import {
 import { PostgresKv } from "./lib/kv/postgres-kv-namespace.js";
 import { S3Storage, createDefaultS3Client } from "@de-otio/saas-foundation/storage";
 import { SqsQueue, createDefaultSqsClient } from "@de-otio/saas-foundation/queue";
-import {
-  resolveSecret,
-  secretRef,
-  type ResolveContext,
-} from "@de-otio/saas-foundation/secrets";
+import { resolveSecret, secretRef, type ResolveContext } from "@de-otio/saas-foundation/secrets";
 import type {
   KVNamespace,
   CloudflareQueue,
@@ -42,10 +38,7 @@ import { resolveDirectoryProfileConfig } from "./lib/org-category/directory-prof
 import type { DirectorySearchConfig } from "./lib/org-category/directory-search-config.js";
 import { resolveDirectorySearchEnv } from "./lib/org-category/directory-search-config.js";
 import type { DisclosurePosture } from "./lib/provenance/posture.js";
-import {
-  DEFAULT_DISCLOSURE_POSTURE,
-  parseDisclosurePosture,
-} from "./lib/provenance/posture.js";
+import { DEFAULT_DISCLOSURE_POSTURE, parseDisclosurePosture } from "./lib/provenance/posture.js";
 import { validateEmailEnv } from "./lib/email-provider.js";
 import { buildSqsUrl } from "./lib/sqs-url.js";
 import type { AgentSurfaceContent } from "./lib/routes/agent-surface.js";
@@ -565,6 +558,13 @@ export interface Env {
      */
     reviewRateCap: number;
     /**
+     * Seconds advertised in `Retry-After` when the synchronous image check
+     * fails for a transient reason and the upload is answered 503. Source:
+     * MEDIA_MODERATION_RETRY_AFTER_SECONDS. NO default: when unset, the 503 is
+     * sent without a `Retry-After` header (the value is operator policy).
+     */
+    moderationRetryAfterSeconds?: number;
+    /**
      * Per-tenant upload quota DEFAULTS (the free tier): maximum number of
      * stored objects and total bytes. Enforcement is LIVE and fail-closed —
      * both upload gates (routes/media.ts and presigned-upload-handler.ts)
@@ -772,9 +772,7 @@ export function resolveRealtimeEnv(): {
   realtimeTransport: RealtimeTransport;
 } {
   const transportKind =
-    process.env.REALTIME_TRANSPORT === "appsync-events"
-      ? "appsync-events"
-      : "poll";
+    process.env.REALTIME_TRANSPORT === "appsync-events" ? "appsync-events" : "poll";
   const realtimePush = process.env.REALTIME_PUSH_ENABLED === "true";
 
   // Minor-protection re-engagement denylist (runtime config; default empty).
@@ -796,20 +794,11 @@ export function resolveRealtimeEnv(): {
     ? configured
     : [...configured, KEYRING_NAMESPACE];
 
-  const maxBytesRaw = Number.parseInt(
-    process.env.REALTIME_SETTING_MAX_BYTES ?? "",
-    10,
-  );
-  const maxBytes = Number.isFinite(maxBytesRaw) && maxBytesRaw > 0
-    ? maxBytesRaw
-    : 65536; // 64 KiB default cap
+  const maxBytesRaw = Number.parseInt(process.env.REALTIME_SETTING_MAX_BYTES ?? "", 10);
+  const maxBytes = Number.isFinite(maxBytesRaw) && maxBytesRaw > 0 ? maxBytesRaw : 65536; // 64 KiB default cap
 
-  const retentionRaw = Number.parseInt(
-    process.env.REALTIME_CONN_LOG_RETENTION_DAYS ?? "",
-    10,
-  );
-  const connLogRetentionDays =
-    Number.isFinite(retentionRaw) && retentionRaw > 0 ? retentionRaw : 7;
+  const retentionRaw = Number.parseInt(process.env.REALTIME_CONN_LOG_RETENTION_DAYS ?? "", 10);
+  const connLogRetentionDays = Number.isFinite(retentionRaw) && retentionRaw > 0 ? retentionRaw : 7;
 
   // Default transport: in-memory store + calm-delivery resolver. Skybber injects
   // a push transport. Core never constructs an AppSync transport —
@@ -842,21 +831,24 @@ export function resolveRealtimeEnv(): {
  *
  * Absence of a threshold entry ⇒ fail-closed (treated as "review" by the gate).
  */
-export function resolveMediaEnv(): { media: {
-  maxBytes: { image: number; video: number; audio: number };
-  maxPixels: number;
-  rateLimits: { uploadPerMin: number; batchPerMin: number; servePerMin: number };
-  allowlist: { image: string[]; video: string[]; audio: string[] };
-  presets: string[];
-  thresholds: Record<string, { review: number; quarantine: number }>;
-  canonicalFormat: "jpeg" | "png" | "webp";
-  canonicalQuality: number;
-  maxDurationSeconds: number;
-  reviewRateCap: number;
-  uploadQuota: { maxObjects: number; maxBytes: number };
-  transcribe: { outputBucket?: string; languageCode: string };
-  presignExpirySeconds: number;
-} } {
+export function resolveMediaEnv(): {
+  media: {
+    maxBytes: { image: number; video: number; audio: number };
+    maxPixels: number;
+    rateLimits: { uploadPerMin: number; batchPerMin: number; servePerMin: number };
+    allowlist: { image: string[]; video: string[]; audio: string[] };
+    presets: string[];
+    thresholds: Record<string, { review: number; quarantine: number }>;
+    canonicalFormat: "jpeg" | "png" | "webp";
+    canonicalQuality: number;
+    maxDurationSeconds: number;
+    reviewRateCap: number;
+    moderationRetryAfterSeconds?: number;
+    uploadQuota: { maxObjects: number; maxBytes: number };
+    transcribe: { outputBucket?: string; languageCode: string };
+    presignExpirySeconds: number;
+  };
+} {
   // --- maxBytes: conservative dev defaults (10 MiB image, 100 MiB video/audio) ---
   // video/audio are PER-TRACK budgets (AR-SEC F2): the presigned byte rail
   // budgets a muxed video as video+audio combined — see presignByteCap()
@@ -868,27 +860,21 @@ export function resolveMediaEnv(): { media: {
 
   const maxBytesImage = parseBytes(
     process.env.MEDIA_MAX_BYTES_IMAGE,
-    10 * 1024 * 1024,   // 10 MiB (dev default; prod value injected via env)
+    10 * 1024 * 1024, // 10 MiB (dev default; prod value injected via env)
   );
   const maxBytesVideo = parseBytes(
     process.env.MEDIA_MAX_BYTES_VIDEO,
-    100 * 1024 * 1024,  // 100 MiB (dev default; prod value injected via env)
+    100 * 1024 * 1024, // 100 MiB (dev default; prod value injected via env)
   );
   const maxBytesAudio = parseBytes(
     process.env.MEDIA_MAX_BYTES_AUDIO,
-    100 * 1024 * 1024,  // 100 MiB (dev default; prod value injected via env)
+    100 * 1024 * 1024, // 100 MiB (dev default; prod value injected via env)
   );
 
   // --- maxPixels: decompression-bomb guard for sharp(limitInputPixels) ---
-  const maxPixelsRaw = Number.parseInt(
-    process.env.MEDIA_MAX_PIXELS ?? "",
-    10,
-  );
+  const maxPixelsRaw = Number.parseInt(process.env.MEDIA_MAX_PIXELS ?? "", 10);
   // 25 MP dev default — conservative; real limit injected via env
-  const maxPixels =
-    Number.isFinite(maxPixelsRaw) && maxPixelsRaw > 0
-      ? maxPixelsRaw
-      : 25_000_000;
+  const maxPixels = Number.isFinite(maxPixelsRaw) && maxPixelsRaw > 0 ? maxPixelsRaw : 25_000_000;
 
   // --- rate limits (requests per minute; conservative dev defaults) ---
   const parseRateLimit = (raw: string | undefined, fallback: number): number => {
@@ -913,18 +899,17 @@ export function resolveMediaEnv(): { media: {
     return fallback;
   };
 
-  const allowlistImage = parseJsonArray(
-    process.env.MEDIA_ALLOWLIST_IMAGE_JSON,
-    ["image/jpeg", "image/png", "image/webp", "image/gif"],
-  );
-  const allowlistVideo = parseJsonArray(
-    process.env.MEDIA_ALLOWLIST_VIDEO_JSON,
-    ["video/mp4"],
-  );
-  const allowlistAudio = parseJsonArray(
-    process.env.MEDIA_ALLOWLIST_AUDIO_JSON,
-    ["audio/mpeg", "audio/mp4"],
-  );
+  const allowlistImage = parseJsonArray(process.env.MEDIA_ALLOWLIST_IMAGE_JSON, [
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "image/gif",
+  ]);
+  const allowlistVideo = parseJsonArray(process.env.MEDIA_ALLOWLIST_VIDEO_JSON, ["video/mp4"]);
+  const allowlistAudio = parseJsonArray(process.env.MEDIA_ALLOWLIST_AUDIO_JSON, [
+    "audio/mpeg",
+    "audio/mp4",
+  ]);
 
   // --- presets: derivative variant identifiers (empty = no derivatives in P0a) ---
   const presets = parseJsonArray(process.env.MEDIA_PRESETS_JSON, []);
@@ -943,15 +928,10 @@ export function resolveMediaEnv(): { media: {
   // --- canonicalQuality: JPEG/WebP output quality (1-100) ---
   const rawQuality = Number.parseInt(process.env.MEDIA_CANONICAL_QUALITY ?? "", 10);
   const canonicalQuality =
-    Number.isFinite(rawQuality) && rawQuality >= 1 && rawQuality <= 100
-      ? rawQuality
-      : 85; // Conservative dev default
+    Number.isFinite(rawQuality) && rawQuality >= 1 && rawQuality <= 100 ? rawQuality : 85; // Conservative dev default
 
   // --- maxDurationSeconds: video clip cap ---
-  const maxDurationSecondsRaw = Number.parseInt(
-    process.env.MEDIA_MAX_DURATION_SECONDS ?? "",
-    10,
-  );
+  const maxDurationSecondsRaw = Number.parseInt(process.env.MEDIA_MAX_DURATION_SECONDS ?? "", 10);
   // 60 s conservative dev default; consumer injects operative value via env.
   const maxDurationSeconds =
     Number.isFinite(maxDurationSecondsRaw) && maxDurationSecondsRaw > 0
@@ -959,30 +939,23 @@ export function resolveMediaEnv(): { media: {
       : 60;
 
   // --- reviewRateCap: per-tenant REVIEW-generating upload cap ---
-  const reviewRateCapRaw = Number.parseInt(
-    process.env.MEDIA_REVIEW_RATE_CAP ?? "",
-    10,
-  );
+  const reviewRateCapRaw = Number.parseInt(process.env.MEDIA_REVIEW_RATE_CAP ?? "", 10);
   // 20 conservative dev default; consumer injects operative value via env.
   const reviewRateCap =
-    Number.isFinite(reviewRateCapRaw) && reviewRateCapRaw > 0
-      ? reviewRateCapRaw
-      : 20;
+    Number.isFinite(reviewRateCapRaw) && reviewRateCapRaw > 0 ? reviewRateCapRaw : 20;
+
+  // --- moderationRetryAfterSeconds: Retry-After for transient-check 503s ---
+  // No default: unset/invalid => the header is simply omitted.
+  const retryAfterRaw = Number.parseInt(process.env.MEDIA_MODERATION_RETRY_AFTER_SECONDS ?? "", 10);
+  const moderationRetryAfterSeconds =
+    Number.isFinite(retryAfterRaw) && retryAfterRaw > 0 ? retryAfterRaw : undefined;
 
   // --- uploadQuota: per-tenant object count + byte ceiling ---
-  const quotaMaxObjectsRaw = Number.parseInt(
-    process.env.MEDIA_QUOTA_MAX_OBJECTS ?? "",
-    10,
-  );
+  const quotaMaxObjectsRaw = Number.parseInt(process.env.MEDIA_QUOTA_MAX_OBJECTS ?? "", 10);
   const quotaMaxObjects =
-    Number.isFinite(quotaMaxObjectsRaw) && quotaMaxObjectsRaw > 0
-      ? quotaMaxObjectsRaw
-      : 1000; // 1 000 objects dev default
+    Number.isFinite(quotaMaxObjectsRaw) && quotaMaxObjectsRaw > 0 ? quotaMaxObjectsRaw : 1000; // 1 000 objects dev default
 
-  const quotaMaxBytesRaw = Number.parseInt(
-    process.env.MEDIA_QUOTA_MAX_BYTES ?? "",
-    10,
-  );
+  const quotaMaxBytesRaw = Number.parseInt(process.env.MEDIA_QUOTA_MAX_BYTES ?? "", 10);
   const quotaMaxBytes =
     Number.isFinite(quotaMaxBytesRaw) && quotaMaxBytesRaw > 0
       ? quotaMaxBytesRaw
@@ -998,14 +971,9 @@ export function resolveMediaEnv(): { media: {
   // --- presignExpirySeconds: lifetime of a presigned direct-upload grant ---
   // (T14). Conservative dev default (15 min); the planner clamps to
   // [60, 3600] regardless of what arrives here (presign-policy.ts).
-  const presignExpiryRaw = Number.parseInt(
-    process.env.MEDIA_PRESIGN_EXPIRY_SECONDS ?? "",
-    10,
-  );
+  const presignExpiryRaw = Number.parseInt(process.env.MEDIA_PRESIGN_EXPIRY_SECONDS ?? "", 10);
   const presignExpirySeconds =
-    Number.isFinite(presignExpiryRaw) && presignExpiryRaw > 0
-      ? presignExpiryRaw
-      : 900;
+    Number.isFinite(presignExpiryRaw) && presignExpiryRaw > 0 ? presignExpiryRaw : 900;
 
   return {
     media: {
@@ -1019,6 +987,7 @@ export function resolveMediaEnv(): { media: {
       canonicalQuality,
       maxDurationSeconds,
       reviewRateCap,
+      moderationRetryAfterSeconds,
       uploadQuota: { maxObjects: quotaMaxObjects, maxBytes: quotaMaxBytes },
       transcribe: { outputBucket: transcribeOutputBucket, languageCode: transcribeLanguageCode },
       presignExpirySeconds,
@@ -1050,9 +1019,7 @@ export function parseMediaThresholds(
     return {};
   }
   const result: Record<string, { review: number; quarantine: number }> = {};
-  for (const [category, value] of Object.entries(
-    parsed as Record<string, unknown>,
-  )) {
+  for (const [category, value] of Object.entries(parsed as Record<string, unknown>)) {
     if (
       typeof value === "object" &&
       value !== null &&
@@ -1096,9 +1063,7 @@ function parsePositiveInt(raw: string | undefined, fallback: number): number {
  * validateEnv()'s startup path (the feature is off by default via a toggle).
  * Design: open-social-web/01-follow-by-email.md §6.
  */
-export function resolveEmailSubscriptionEnv(
-  source: NodeJS.ProcessEnv = process.env,
-): {
+export function resolveEmailSubscriptionEnv(source: NodeJS.ProcessEnv = process.env): {
   emailSubscription: {
     confirmTokenTtlHours: number;
     pendingTtlHours: number;
@@ -1111,28 +1076,13 @@ export function resolveEmailSubscriptionEnv(
 } {
   return {
     emailSubscription: {
-      confirmTokenTtlHours: parsePositiveInt(
-        source.EMAIL_SUB_CONFIRM_TOKEN_TTL_HOURS,
-        48,
-      ),
+      confirmTokenTtlHours: parsePositiveInt(source.EMAIL_SUB_CONFIRM_TOKEN_TTL_HOURS, 48),
       pendingTtlHours: parsePositiveInt(source.EMAIL_SUB_PENDING_TTL_HOURS, 72),
       suppressionDays: parsePositiveInt(source.EMAIL_SUB_SUPPRESSION_DAYS, 180),
-      confirmedRetentionDays: parsePositiveInt(
-        source.EMAIL_SUB_CONFIRMED_RETENTION_DAYS,
-        400,
-      ),
-      ratePerIpPerHour: parsePositiveInt(
-        source.EMAIL_SUB_RATE_PER_IP_PER_HOUR,
-        10,
-      ),
-      ratePerTargetPerHour: parsePositiveInt(
-        source.EMAIL_SUB_RATE_PER_TARGET_PER_HOUR,
-        100,
-      ),
-      ratePerEmailPerHour: parsePositiveInt(
-        source.EMAIL_SUB_RATE_PER_EMAIL_PER_HOUR,
-        5,
-      ),
+      confirmedRetentionDays: parsePositiveInt(source.EMAIL_SUB_CONFIRMED_RETENTION_DAYS, 400),
+      ratePerIpPerHour: parsePositiveInt(source.EMAIL_SUB_RATE_PER_IP_PER_HOUR, 10),
+      ratePerTargetPerHour: parsePositiveInt(source.EMAIL_SUB_RATE_PER_TARGET_PER_HOUR, 100),
+      ratePerEmailPerHour: parsePositiveInt(source.EMAIL_SUB_RATE_PER_EMAIL_PER_HOUR, 5),
     },
   };
 }
@@ -1145,9 +1095,9 @@ export function resolveEmailSubscriptionEnv(
  * a compiled constant, so no number ships in the public tarball. Design:
  * open-social-web/03-collections.md §3.
  */
-export function resolveCollectionEnv(
-  source: NodeJS.ProcessEnv = process.env,
-): { collection: { maxItems: number; maxPerUser: number } } {
+export function resolveCollectionEnv(source: NodeJS.ProcessEnv = process.env): {
+  collection: { maxItems: number; maxPerUser: number };
+} {
   return {
     collection: {
       maxItems: parsePositiveInt(source.COLLECTION_MAX_ITEMS, 25),
@@ -1164,9 +1114,7 @@ export function resolveCollectionEnv(
  * per-post cooldown) so this is a config seam, not a policy change — except
  * `failMode`, which deliberately flips: see the middleware for why.
  */
-export function resolveCommentRateLimitEnv(
-  source: NodeJS.ProcessEnv = process.env,
-): {
+export function resolveCommentRateLimitEnv(source: NodeJS.ProcessEnv = process.env): {
   commentRateLimit: {
     perMinute: number;
     postCooldownSeconds: number;
@@ -1176,10 +1124,7 @@ export function resolveCommentRateLimitEnv(
   return {
     commentRateLimit: {
       perMinute: parsePositiveInt(source.COMMENT_RATE_LIMIT_PER_MINUTE, 10),
-      postCooldownSeconds: parsePositiveInt(
-        source.COMMENT_RATE_LIMIT_POST_COOLDOWN_SECONDS,
-        30,
-      ),
+      postCooldownSeconds: parsePositiveInt(source.COMMENT_RATE_LIMIT_POST_COOLDOWN_SECONDS, 30),
       // Anything other than an explicit "open" is closed. An unset, misspelt
       // or empty value must not silently disable the control — that is the
       // failure mode this whole change exists to remove.
@@ -1195,9 +1140,9 @@ export function resolveCommentRateLimitEnv(
  * unrecognised posture string resolves to {@link DEFAULT_DISCLOSURE_POSTURE}
  * rather than throwing — see the field doc on `Env.provenance`.
  */
-export function resolveProvenanceEnv(
-  source: NodeJS.ProcessEnv = process.env,
-): { provenance: { defaultDisclosurePosture: DisclosurePosture } } {
+export function resolveProvenanceEnv(source: NodeJS.ProcessEnv = process.env): {
+  provenance: { defaultDisclosurePosture: DisclosurePosture };
+} {
   return {
     provenance: {
       defaultDisclosurePosture:
@@ -1269,13 +1214,10 @@ async function resolveDatabaseUrl(): Promise<string> {
   const secretArn = process.env.DB_SECRET_ARN;
   if (secretArn) {
     const region = process.env.AWS_REGION ?? "eu-central-1";
-    const { SecretsManagerClient, GetSecretValueCommand } = await import(
-      "@aws-sdk/client-secrets-manager"
-    );
+    const { SecretsManagerClient, GetSecretValueCommand } =
+      await import("@aws-sdk/client-secrets-manager");
     const client = new SecretsManagerClient({ region });
-    const response = await client.send(
-      new GetSecretValueCommand({ SecretId: secretArn }),
-    );
+    const response = await client.send(new GetSecretValueCommand({ SecretId: secretArn }));
     if (!response.SecretString) {
       throw new Error(`Secret ${secretArn} has no SecretString value`);
     }
@@ -1518,9 +1460,7 @@ export function requireEmailSubEncKey(env: Env): Buffer {
   }
   const key = Buffer.from(raw, "base64");
   if (key.length !== 32) {
-    throw new Error(
-      `EMAIL_SUB_ENC_KEY must decode to exactly 32 bytes, got ${key.length}`,
-    );
+    throw new Error(`EMAIL_SUB_ENC_KEY must decode to exactly 32 bytes, got ${key.length}`);
   }
   return key;
 }
@@ -1721,8 +1661,7 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     RATE_LIMIT_TABLE: process.env.RATE_LIMIT_TABLE,
     RATE_LIMIT_NAMESPACE: process.env.RATE_LIMIT_NAMESPACE,
     AGENT_VERIFICATION_URI_BASE:
-      process.env.AGENT_VERIFICATION_URI_BASE ||
-      "https://example.com/agents/authorize",
+      process.env.AGENT_VERIFICATION_URI_BASE || "https://example.com/agents/authorize",
 
     // Email-subscription REQUIRED secrets — raw passthrough only, no default,
     // no ARN/Secrets-Manager path. Absence is fine here (feature is off by
@@ -1756,14 +1695,10 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
     // string "true" leaves federation disabled.
     ACTIVITYPUB_ENABLED: process.env.ACTIVITYPUB_ENABLED === "true",
     ACTIVITYPUB_BLOCKED_DOMAINS: process.env.ACTIVITYPUB_BLOCKED_DOMAINS,
-    ACTIVITYPUB_INSTANCE_RATE_LIMIT:
-      process.env.ACTIVITYPUB_INSTANCE_RATE_LIMIT,
-    ACTIVITYPUB_KEY_ENCRYPTION_KEY:
-      process.env.ACTIVITYPUB_KEY_ENCRYPTION_KEY,
-    ACTIVITYPUB_LEGACY_KEY_ENCRYPTION_KEY:
-      process.env.ACTIVITYPUB_LEGACY_KEY_ENCRYPTION_KEY,
-    ACTIVITYPUB_LEGACY_KEY_DECRYPT:
-      process.env.ACTIVITYPUB_LEGACY_KEY_DECRYPT,
+    ACTIVITYPUB_INSTANCE_RATE_LIMIT: process.env.ACTIVITYPUB_INSTANCE_RATE_LIMIT,
+    ACTIVITYPUB_KEY_ENCRYPTION_KEY: process.env.ACTIVITYPUB_KEY_ENCRYPTION_KEY,
+    ACTIVITYPUB_LEGACY_KEY_ENCRYPTION_KEY: process.env.ACTIVITYPUB_LEGACY_KEY_ENCRYPTION_KEY,
+    ACTIVITYPUB_LEGACY_KEY_DECRYPT: process.env.ACTIVITYPUB_LEGACY_KEY_DECRYPT,
 
     // Client version policy — raw passthrough; boot validation (env-schema.ts)
     // has already rejected malformed values, and resolveVersionPolicy() treats
@@ -1783,7 +1718,8 @@ export async function buildEnv(context?: ResolveContext): Promise<Env> {
 
     // Region
     IP_GEOLOCATION_API_KEY: process.env.IP_GEOLOCATION_API_KEY,
-    IP_GEOLOCATION_SERVICE: process.env.IP_GEOLOCATION_SERVICE as "ipapi" | "ip-api" | "cloudflare" | undefined,
+    IP_GEOLOCATION_SERVICE: process.env.IP_GEOLOCATION_SERVICE as
+      "ipapi" | "ip-api" | "cloudflare" | undefined,
     DEFAULT_REGION: process.env.DEFAULT_REGION || "EU",
     ENABLE_IP_GEOLOCATION: process.env.ENABLE_IP_GEOLOCATION,
     INTERNAL_EMAIL_DOMAINS: process.env.INTERNAL_EMAIL_DOMAINS,

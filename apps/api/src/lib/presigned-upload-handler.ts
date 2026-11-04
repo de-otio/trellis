@@ -40,15 +40,15 @@
 
 import type { Env } from "../env.js";
 import { getLogger, Logger } from "./logger.js";
+import { describeError } from "./media/describe-error.js";
+import type { UploadQuotaPort } from "./media/media-ports.js";
+import { getUploadQuotaPort, uploadQuotaKind } from "./media/upload-quota.js";
 import {
   planPresignedUpload,
   presignByteCap,
   type PresignPlanResult,
 } from "./media/presign-policy.js";
-import {
-  nextLifecycle,
-  type MediaLifecycle,
-} from "./media/media-lifecycle.js";
+import { nextLifecycle, type MediaLifecycle } from "./media/media-lifecycle.js";
 
 // ---------------------------------------------------------------------------
 // Presign port — the ONLY AWS seam in this module. Injected for tests;
@@ -88,11 +88,10 @@ export interface PresignPort {
 export function buildS3PresignPort(): PresignPort {
   return {
     async presignPost(input) {
-      const [{ createPresignedPost }, { createDefaultS3Client }] =
-        await Promise.all([
-          import("@aws-sdk/s3-presigned-post"),
-          import("@de-otio/saas-foundation/storage"),
-        ]);
+      const [{ createPresignedPost }, { createDefaultS3Client }] = await Promise.all([
+        import("@aws-sdk/s3-presigned-post"),
+        import("@de-otio/saas-foundation/storage"),
+      ]);
       const client = createDefaultS3Client();
       const { url, fields } = await createPresignedPost(client, {
         Bucket: input.bucket,
@@ -139,6 +138,8 @@ export type CreatePresignedResult =
       status: number;
       error: string;
       message: string;
+      /** Set on a quota refusal; the route sends it as `Retry-After`. */
+      retryAfterSeconds?: number;
     };
 
 export type CompletePresignedResult =
@@ -182,10 +183,13 @@ const SESSION_TTL_HOURS = 24;
 export class PresignedUploadHandler {
   private logger: Logger;
   private presignPort: PresignPort;
+  private uploadQuota: UploadQuotaPort | undefined;
 
-  constructor(env?: Env, presignPort?: PresignPort) {
+  constructor(env?: Env, presignPort?: PresignPort, uploadQuota?: UploadQuotaPort) {
     this.logger = env ? getLogger() : ({} as Logger);
     this.presignPort = presignPort ?? buildS3PresignPort();
+    // Optional port: absent means no per-user quota and unchanged behaviour.
+    this.uploadQuota = uploadQuota ?? getUploadQuotaPort();
   }
 
   /**
@@ -201,12 +205,42 @@ export class PresignedUploadHandler {
     env: Env,
     input: { mimeType: string; sizeBytes: number },
   ): Promise<CreatePresignedResult> {
-    const { sharedDatabaseConnectionManager } = await import(
-      "./database-connection-manager.js"
-    );
-    const { withQueryTimeoutAndRetry, QueryTimeoutPresets } = await import(
-      "./db-query-helper.js"
-    );
+    const { sharedDatabaseConnectionManager } = await import("./database-connection-manager.js");
+    const { withQueryTimeoutAndRetry, QueryTimeoutPresets } = await import("./db-query-helper.js");
+
+    // --- Per-user upload quota (optional port). ---
+    // Asked HERE, where the grant is issued, and before anything is created:
+    // a refusal leaves no session row, no media row and no signed POST. Fail
+    // closed if the adapter itself throws.
+    if (this.uploadQuota) {
+      let verdict: Awaited<ReturnType<UploadQuotaPort["check"]>>;
+      try {
+        verdict = await this.uploadQuota.check({
+          userId,
+          kind: uploadQuotaKind(input.mimeType),
+        });
+      } catch (error) {
+        this.logger.error("presigned.create: upload quota check failed", {
+          userId,
+          error: describeError(error),
+        });
+        return {
+          ok: false,
+          status: 503,
+          error: "Upload unavailable",
+          message: "Could not check the upload quota. Please try again.",
+        };
+      }
+      if (!verdict.ok) {
+        return {
+          ok: false,
+          status: 429,
+          error: "Upload quota exceeded",
+          message: "Too many uploads. Try again later.",
+          retryAfterSeconds: verdict.retryAfterSeconds,
+        };
+      }
+    }
 
     // --- Tenant resolution (same seam as the proxied path). ---
     const { resolveUploadTenantId } = await import("./routes/media.js");
@@ -225,22 +259,11 @@ export class PresignedUploadHandler {
     // AR-SEC F2: the SSM-fed maxBytes values are PER-TRACK budgets; a muxed
     // video carries BOTH tracks, so its rail is the COMBINED video+audio
     // budget (an audio-only file is railed at the single audio budget).
-    const maxBytes = presignByteCap(
-      isAudio ? "audio" : "video",
-      env.media.maxBytes,
-    );
-    const allowlist = isAudio
-      ? env.media.allowlist.audio
-      : env.media.allowlist.video;
+    const maxBytes = presignByteCap(isAudio ? "audio" : "video", env.media.maxBytes);
+    const allowlist = isAudio ? env.media.allowlist.audio : env.media.allowlist.video;
 
     // --- Quota (fail-closed, mirrors the proxied path). ---
-    const quota = await this.checkQuota(
-      tenantId,
-      userId,
-      input.sizeBytes,
-      region,
-      env,
-    );
+    const quota = await this.checkQuota(tenantId, userId, input.sizeBytes, region, env);
     if (!quota.ok) {
       return quota;
     }
@@ -434,12 +457,8 @@ export class PresignedUploadHandler {
           "Upload processing is misconfigured; the upload cannot be completed. Retry after the service is restored.",
       };
     }
-    const { sharedDatabaseConnectionManager } = await import(
-      "./database-connection-manager.js"
-    );
-    const { withQueryTimeoutAndRetry, QueryTimeoutPresets } = await import(
-      "./db-query-helper.js"
-    );
+    const { sharedDatabaseConnectionManager } = await import("./database-connection-manager.js");
+    const { withQueryTimeoutAndRetry, QueryTimeoutPresets } = await import("./db-query-helper.js");
 
     const session = await withQueryTimeoutAndRetry<PresignedSessionRow | null>(
       sharedDatabaseConnectionManager,
@@ -496,16 +515,16 @@ export class PresignedUploadHandler {
           } catch (err) {
             // Do NOT report success without a job enqueued: the client retry
             // re-enters this self-heal path.
-            this.logger.error(
-              "presigned.complete: self-heal re-enqueue failed",
-              { sessionId: session.id, mediaId, error: err },
-            );
+            this.logger.error("presigned.complete: self-heal re-enqueue failed", {
+              sessionId: session.id,
+              mediaId,
+              error: err,
+            });
             return {
               ok: false,
               status: 503,
               error: "Enqueue failed",
-              message:
-                "Upload received but processing could not be queued; retry complete.",
+              message: "Upload received but processing could not be queued; retry complete.",
             };
           }
         }
@@ -658,16 +677,16 @@ export class PresignedUploadHandler {
       } catch (err) {
         // Do NOT flip the session. Return an error; the session stays
         // "awaiting-upload" so the client retry re-enters the full path.
-        this.logger.error(
-          "presigned.complete: media enqueue failed — not flipping session",
-          { sessionId: session.id, mediaId, error: err },
-        );
+        this.logger.error("presigned.complete: media enqueue failed — not flipping session", {
+          sessionId: session.id,
+          mediaId,
+          error: err,
+        });
         return {
           ok: false,
           status: 503,
           error: "Enqueue failed",
-          message:
-            "Upload received but processing could not be queued; retry complete.",
+          message: "Upload received but processing could not be queued; retry complete.",
         };
       }
     }
@@ -716,12 +735,8 @@ export class PresignedUploadHandler {
     region: string,
     env: Env,
   ): Promise<AbandonPresignedResult> {
-    const { sharedDatabaseConnectionManager } = await import(
-      "./database-connection-manager.js"
-    );
-    const { withQueryTimeoutAndRetry, QueryTimeoutPresets } = await import(
-      "./db-query-helper.js"
-    );
+    const { sharedDatabaseConnectionManager } = await import("./database-connection-manager.js");
+    const { withQueryTimeoutAndRetry, QueryTimeoutPresets } = await import("./db-query-helper.js");
 
     const session = await withQueryTimeoutAndRetry<PresignedSessionRow | null>(
       sharedDatabaseConnectionManager,
@@ -742,9 +757,7 @@ export class PresignedUploadHandler {
 
     const failed = await this.failSession(session, "abandoned", region, env);
     if (!failed) {
-      return conflict(
-        "The upload has already been processed and can no longer be abandoned.",
-      );
+      return conflict("The upload has already been processed and can no longer be abandoned.");
     }
     return { ok: true, session: { sessionId: session.id, status: "abandoned" } };
   }
@@ -769,12 +782,8 @@ export class PresignedUploadHandler {
     region: string,
     env: Env,
   ): Promise<boolean> {
-    const { sharedDatabaseConnectionManager } = await import(
-      "./database-connection-manager.js"
-    );
-    const { withQueryTimeoutAndRetry, QueryTimeoutPresets } = await import(
-      "./db-query-helper.js"
-    );
+    const { sharedDatabaseConnectionManager } = await import("./database-connection-manager.js");
+    const { withQueryTimeoutAndRetry, QueryTimeoutPresets } = await import("./db-query-helper.js");
 
     // Drive the media row (if any) through the machine.
     if (session.mediaId) {
@@ -835,12 +844,8 @@ export class PresignedUploadHandler {
     env: Env,
   ): Promise<{ id: string; lifecycle: MediaLifecycle } | null> {
     if (!mediaId) return null;
-    const { sharedDatabaseConnectionManager } = await import(
-      "./database-connection-manager.js"
-    );
-    const { withQueryTimeoutAndRetry, QueryTimeoutPresets } = await import(
-      "./db-query-helper.js"
-    );
+    const { sharedDatabaseConnectionManager } = await import("./database-connection-manager.js");
+    const { withQueryTimeoutAndRetry, QueryTimeoutPresets } = await import("./db-query-helper.js");
     try {
       return await withQueryTimeoutAndRetry<MediaLifecycleRow | null>(
         sharedDatabaseConnectionManager,
@@ -864,12 +869,8 @@ export class PresignedUploadHandler {
     env: Env,
     mediaId?: string,
   ): Promise<void> {
-    const { sharedDatabaseConnectionManager } = await import(
-      "./database-connection-manager.js"
-    );
-    const { withQueryTimeoutAndRetry, QueryTimeoutPresets } = await import(
-      "./db-query-helper.js"
-    );
+    const { sharedDatabaseConnectionManager } = await import("./database-connection-manager.js");
+    const { withQueryTimeoutAndRetry, QueryTimeoutPresets } = await import("./db-query-helper.js");
     try {
       await withQueryTimeoutAndRetry(
         sharedDatabaseConnectionManager,
@@ -907,23 +908,15 @@ export class PresignedUploadHandler {
     sizeBytes: number,
     region: string,
     env: Env,
-  ): Promise<
-    | { ok: true }
-    | { ok: false; status: number; error: string; message: string }
-  > {
-    const { sharedDatabaseConnectionManager } = await import(
-      "./database-connection-manager.js"
-    );
-    const { withQueryTimeoutAndRetry, QueryTimeoutPresets } = await import(
-      "./db-query-helper.js"
-    );
+  ): Promise<{ ok: true } | { ok: false; status: number; error: string; message: string }> {
+    const { sharedDatabaseConnectionManager } = await import("./database-connection-manager.js");
+    const { withQueryTimeoutAndRetry, QueryTimeoutPresets } = await import("./db-query-helper.js");
     const { checkUploadQuota } = await import("./media/quota-check.js");
     const { resolveQuotaLimits } = await import("./media/quota-resolution.js");
     const { quotaUsageWhere } = await import("./media/storage-accounting.js");
     const { isOverReviewRateCap, reviewRateWhere, reviewRateWindowStart } =
       await import("./media/review-rate-cap.js");
-    type TenantQuotaOverride =
-      import("./media/quota-resolution.js").TenantQuotaOverride;
+    type TenantQuotaOverride = import("./media/quota-resolution.js").TenantQuotaOverride;
 
     let quotaState = { currentObjects: 0, currentBytes: 0 };
     let quotaOverride: TenantQuotaOverride | null = null;
@@ -1005,8 +998,7 @@ export class PresignedUploadHandler {
         ok: false,
         status: 429,
         error: "Upload rate limited",
-        message:
-          "Too many recent uploads required moderation review. Try again later.",
+        message: "Too many recent uploads required moderation review. Try again later.",
       };
     }
 
@@ -1069,8 +1061,7 @@ function refusalToResult(
         ok: false,
         status: 415,
         error: "Unsupported media type",
-        message:
-          "Only allowlisted video/audio types may use the presigned upload flow.",
+        message: "Only allowlisted video/audio types may use the presigned upload flow.",
       };
     case "invalid-declared-bytes":
       return {

@@ -35,7 +35,6 @@ vi.mock("../../../src/lib/rate-limit", () => ({
   },
 }));
 
-
 // Mock CorsHandler
 vi.mock("../../../src/lib/cors-handler", () => ({
   CorsHandler: {
@@ -110,9 +109,7 @@ describe("Upload Session Routes", () => {
 
     mockGetSession.mockResolvedValue(mockSession);
     mockApplyRateLimitKV.mockResolvedValue(null);
-    mockCreateSecureResponse.mockImplementation(
-      (body, options) => new Response(body, options),
-    );
+    mockCreateSecureResponse.mockImplementation((body, options) => new Response(body, options));
     mockAddSecurityHeaders.mockImplementation((response) => response);
     mockDetectRegion.mockResolvedValue("EU");
   });
@@ -163,21 +160,16 @@ describe("Upload Session Routes", () => {
         params: {},
       });
 
-      expect(mockCreateSession).toHaveBeenCalledWith(
-        "user-123",
-        "EU",
-        mockEnv,
-      );
+      expect(mockCreateSession).toHaveBeenCalledWith("user-123", "EU", mockEnv);
       expect(response.status).toBe(201);
       const body = await response.json();
       expect(body).toEqual(sessionResult);
     });
 
     it("should apply rate limiting (10/hour)", async () => {
-      const rateLimitResponse = new Response(
-        JSON.stringify({ error: "Rate limit exceeded" }),
-        { status: 429 },
-      );
+      const rateLimitResponse = new Response(JSON.stringify({ error: "Rate limit exceeded" }), {
+        status: 429,
+      });
       mockApplyRateLimitKV.mockResolvedValue(rateLimitResponse);
 
       const request = new Request("https://example.com/api/upload-sessions", {
@@ -216,11 +208,7 @@ describe("Upload Session Routes", () => {
         params: {},
       });
 
-      expect(mockDetectRegion).toHaveBeenCalledWith(
-        request,
-        undefined,
-        undefined,
-      );
+      expect(mockDetectRegion).toHaveBeenCalledWith(request, undefined, undefined);
       expect(mockCreateSession).toHaveBeenCalledWith("user-123", "US", mockEnv);
     });
 
@@ -240,13 +228,12 @@ describe("Upload Session Routes", () => {
       expect(response.status).toBe(500);
       const body = await response.json();
       expect(body).toEqual({ error: "Internal server error" });
-          });
+    });
   });
 
   describe("POST /api/upload-sessions/:id/media - Add media to session", () => {
     const route = uploadSessionRoutes.find(
-      (r) =>
-        r.method === "POST" && r.path === "/api/upload-sessions/:id/media",
+      (r) => r.method === "POST" && r.path === "/api/upload-sessions/:id/media",
     );
 
     it("should exist as a route", () => {
@@ -256,19 +243,14 @@ describe("Upload Session Routes", () => {
     it("should require authentication - return 401", async () => {
       mockGetSession.mockResolvedValue(null);
 
-      const request = new Request(
-        "https://example.com/api/upload-sessions/session-abc/media",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ mediaId: "media-123" }),
-        },
-      );
+      const request = new Request("https://example.com/api/upload-sessions/session-abc/media", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mediaId: "media-123" }),
+      });
 
       await route!.handler(request, mockEnv, {
-        url: new URL(
-          "https://example.com/api/upload-sessions/session-abc/media",
-        ),
+        url: new URL("https://example.com/api/upload-sessions/session-abc/media"),
         pathname: "/api/upload-sessions/session-abc/media",
         params: { id: "session-abc" },
       });
@@ -281,14 +263,11 @@ describe("Upload Session Routes", () => {
     });
 
     it("should return 400 when session ID is missing", async () => {
-      const request = new Request(
-        "https://example.com/api/upload-sessions//media",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ mediaId: "media-123" }),
-        },
-      );
+      const request = new Request("https://example.com/api/upload-sessions//media", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mediaId: "media-123" }),
+      });
 
       await route!.handler(request, mockEnv, {
         url: new URL("https://example.com/api/upload-sessions//media"),
@@ -303,19 +282,14 @@ describe("Upload Session Routes", () => {
     });
 
     it("should return 400 for invalid JSON body", async () => {
-      const request = new Request(
-        "https://example.com/api/upload-sessions/session-abc/media",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: "not-json",
-        },
-      );
+      const request = new Request("https://example.com/api/upload-sessions/session-abc/media", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "not-json",
+      });
 
       await route!.handler(request, mockEnv, {
-        url: new URL(
-          "https://example.com/api/upload-sessions/session-abc/media",
-        ),
+        url: new URL("https://example.com/api/upload-sessions/session-abc/media"),
         pathname: "/api/upload-sessions/session-abc/media",
         params: { id: "session-abc" },
       });
@@ -327,19 +301,14 @@ describe("Upload Session Routes", () => {
     });
 
     it("should return 400 when mediaId is missing from body", async () => {
-      const request = new Request(
-        "https://example.com/api/upload-sessions/session-abc/media",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({}),
-        },
-      );
+      const request = new Request("https://example.com/api/upload-sessions/session-abc/media", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
 
       await route!.handler(request, mockEnv, {
-        url: new URL(
-          "https://example.com/api/upload-sessions/session-abc/media",
-        ),
+        url: new URL("https://example.com/api/upload-sessions/session-abc/media"),
         pathname: "/api/upload-sessions/session-abc/media",
         params: { id: "session-abc" },
       });
@@ -356,19 +325,14 @@ describe("Upload Session Routes", () => {
         mediaId: "media-123",
       });
 
-      const request = new Request(
-        "https://example.com/api/upload-sessions/session-abc/media",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ mediaId: "media-123" }),
-        },
-      );
+      const request = new Request("https://example.com/api/upload-sessions/session-abc/media", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mediaId: "media-123" }),
+      });
 
       const response = await route!.handler(request, mockEnv, {
-        url: new URL(
-          "https://example.com/api/upload-sessions/session-abc/media",
-        ),
+        url: new URL("https://example.com/api/upload-sessions/session-abc/media"),
         pathname: "/api/upload-sessions/session-abc/media",
         params: { id: "session-abc" },
       });
@@ -389,19 +353,14 @@ describe("Upload Session Routes", () => {
         error: "Session not found",
       });
 
-      const request = new Request(
-        "https://example.com/api/upload-sessions/session-abc/media",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ mediaId: "media-123" }),
-        },
-      );
+      const request = new Request("https://example.com/api/upload-sessions/session-abc/media", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mediaId: "media-123" }),
+      });
 
       const response = await route!.handler(request, mockEnv, {
-        url: new URL(
-          "https://example.com/api/upload-sessions/session-abc/media",
-        ),
+        url: new URL("https://example.com/api/upload-sessions/session-abc/media"),
         pathname: "/api/upload-sessions/session-abc/media",
         params: { id: "session-abc" },
       });
@@ -414,19 +373,14 @@ describe("Upload Session Routes", () => {
     it("should return 500 on handler error", async () => {
       mockAddMediaToSession.mockRejectedValue(new Error("Unexpected error"));
 
-      const request = new Request(
-        "https://example.com/api/upload-sessions/session-abc/media",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ mediaId: "media-123" }),
-        },
-      );
+      const request = new Request("https://example.com/api/upload-sessions/session-abc/media", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mediaId: "media-123" }),
+      });
 
       const response = await route!.handler(request, mockEnv, {
-        url: new URL(
-          "https://example.com/api/upload-sessions/session-abc/media",
-        ),
+        url: new URL("https://example.com/api/upload-sessions/session-abc/media"),
         pathname: "/api/upload-sessions/session-abc/media",
         params: { id: "session-abc" },
       });
@@ -439,8 +393,7 @@ describe("Upload Session Routes", () => {
 
   describe("POST /api/upload-sessions/:id/complete - Complete upload session", () => {
     const route = uploadSessionRoutes.find(
-      (r) =>
-        r.method === "POST" && r.path === "/api/upload-sessions/:id/complete",
+      (r) => r.method === "POST" && r.path === "/api/upload-sessions/:id/complete",
     );
 
     it("should exist as a route", () => {
@@ -450,15 +403,12 @@ describe("Upload Session Routes", () => {
     it("should require authentication - return 401", async () => {
       mockGetSession.mockResolvedValue(null);
 
-      const request = new Request(
-        "https://example.com/api/upload-sessions/session-abc/complete",
-        { method: "POST" },
-      );
+      const request = new Request("https://example.com/api/upload-sessions/session-abc/complete", {
+        method: "POST",
+      });
 
       await route!.handler(request, mockEnv, {
-        url: new URL(
-          "https://example.com/api/upload-sessions/session-abc/complete",
-        ),
+        url: new URL("https://example.com/api/upload-sessions/session-abc/complete"),
         pathname: "/api/upload-sessions/session-abc/complete",
         params: { id: "session-abc" },
       });
@@ -471,10 +421,9 @@ describe("Upload Session Routes", () => {
     });
 
     it("should return 400 when session ID is missing", async () => {
-      const request = new Request(
-        "https://example.com/api/upload-sessions//complete",
-        { method: "POST" },
-      );
+      const request = new Request("https://example.com/api/upload-sessions//complete", {
+        method: "POST",
+      });
 
       await route!.handler(request, mockEnv, {
         url: new URL("https://example.com/api/upload-sessions//complete"),
@@ -494,25 +443,17 @@ describe("Upload Session Routes", () => {
         mediaCount: 3,
       });
 
-      const request = new Request(
-        "https://example.com/api/upload-sessions/session-abc/complete",
-        { method: "POST" },
-      );
+      const request = new Request("https://example.com/api/upload-sessions/session-abc/complete", {
+        method: "POST",
+      });
 
       const response = await route!.handler(request, mockEnv, {
-        url: new URL(
-          "https://example.com/api/upload-sessions/session-abc/complete",
-        ),
+        url: new URL("https://example.com/api/upload-sessions/session-abc/complete"),
         pathname: "/api/upload-sessions/session-abc/complete",
         params: { id: "session-abc" },
       });
 
-      expect(mockCompleteSession).toHaveBeenCalledWith(
-        "session-abc",
-        "user-123",
-        "EU",
-        mockEnv,
-      );
+      expect(mockCompleteSession).toHaveBeenCalledWith("session-abc", "user-123", "EU", mockEnv);
       expect(response.status).toBe(200);
     });
 
@@ -522,15 +463,12 @@ describe("Upload Session Routes", () => {
         error: "Session already completed",
       });
 
-      const request = new Request(
-        "https://example.com/api/upload-sessions/session-abc/complete",
-        { method: "POST" },
-      );
+      const request = new Request("https://example.com/api/upload-sessions/session-abc/complete", {
+        method: "POST",
+      });
 
       const response = await route!.handler(request, mockEnv, {
-        url: new URL(
-          "https://example.com/api/upload-sessions/session-abc/complete",
-        ),
+        url: new URL("https://example.com/api/upload-sessions/session-abc/complete"),
         pathname: "/api/upload-sessions/session-abc/complete",
         params: { id: "session-abc" },
       });
@@ -543,27 +481,23 @@ describe("Upload Session Routes", () => {
     it("should return 500 on handler error", async () => {
       mockCompleteSession.mockRejectedValue(new Error("DB timeout"));
 
-      const request = new Request(
-        "https://example.com/api/upload-sessions/session-abc/complete",
-        { method: "POST" },
-      );
+      const request = new Request("https://example.com/api/upload-sessions/session-abc/complete", {
+        method: "POST",
+      });
 
       const response = await route!.handler(request, mockEnv, {
-        url: new URL(
-          "https://example.com/api/upload-sessions/session-abc/complete",
-        ),
+        url: new URL("https://example.com/api/upload-sessions/session-abc/complete"),
         pathname: "/api/upload-sessions/session-abc/complete",
         params: { id: "session-abc" },
       });
 
       expect(response.status).toBe(500);
-          });
+    });
   });
 
   describe("POST /api/upload-sessions/:id/abandon - Abandon upload session", () => {
     const route = uploadSessionRoutes.find(
-      (r) =>
-        r.method === "POST" && r.path === "/api/upload-sessions/:id/abandon",
+      (r) => r.method === "POST" && r.path === "/api/upload-sessions/:id/abandon",
     );
 
     it("should exist as a route", () => {
@@ -573,15 +507,12 @@ describe("Upload Session Routes", () => {
     it("should require authentication - return 401", async () => {
       mockGetSession.mockResolvedValue(null);
 
-      const request = new Request(
-        "https://example.com/api/upload-sessions/session-abc/abandon",
-        { method: "POST" },
-      );
+      const request = new Request("https://example.com/api/upload-sessions/session-abc/abandon", {
+        method: "POST",
+      });
 
       await route!.handler(request, mockEnv, {
-        url: new URL(
-          "https://example.com/api/upload-sessions/session-abc/abandon",
-        ),
+        url: new URL("https://example.com/api/upload-sessions/session-abc/abandon"),
         pathname: "/api/upload-sessions/session-abc/abandon",
         params: { id: "session-abc" },
       });
@@ -594,10 +525,9 @@ describe("Upload Session Routes", () => {
     });
 
     it("should return 400 when session ID is missing", async () => {
-      const request = new Request(
-        "https://example.com/api/upload-sessions//abandon",
-        { method: "POST" },
-      );
+      const request = new Request("https://example.com/api/upload-sessions//abandon", {
+        method: "POST",
+      });
 
       await route!.handler(request, mockEnv, {
         url: new URL("https://example.com/api/upload-sessions//abandon"),
@@ -617,25 +547,17 @@ describe("Upload Session Routes", () => {
         orphanedCount: 2,
       });
 
-      const request = new Request(
-        "https://example.com/api/upload-sessions/session-abc/abandon",
-        { method: "POST" },
-      );
+      const request = new Request("https://example.com/api/upload-sessions/session-abc/abandon", {
+        method: "POST",
+      });
 
       const response = await route!.handler(request, mockEnv, {
-        url: new URL(
-          "https://example.com/api/upload-sessions/session-abc/abandon",
-        ),
+        url: new URL("https://example.com/api/upload-sessions/session-abc/abandon"),
         pathname: "/api/upload-sessions/session-abc/abandon",
         params: { id: "session-abc" },
       });
 
-      expect(mockAbandonSession).toHaveBeenCalledWith(
-        "session-abc",
-        "user-123",
-        "EU",
-        mockEnv,
-      );
+      expect(mockAbandonSession).toHaveBeenCalledWith("session-abc", "user-123", "EU", mockEnv);
       expect(response.status).toBe(200);
     });
 
@@ -645,15 +567,12 @@ describe("Upload Session Routes", () => {
         error: "Session not found",
       });
 
-      const request = new Request(
-        "https://example.com/api/upload-sessions/session-abc/abandon",
-        { method: "POST" },
-      );
+      const request = new Request("https://example.com/api/upload-sessions/session-abc/abandon", {
+        method: "POST",
+      });
 
       const response = await route!.handler(request, mockEnv, {
-        url: new URL(
-          "https://example.com/api/upload-sessions/session-abc/abandon",
-        ),
+        url: new URL("https://example.com/api/upload-sessions/session-abc/abandon"),
         pathname: "/api/upload-sessions/session-abc/abandon",
         params: { id: "session-abc" },
       });
@@ -666,21 +585,18 @@ describe("Upload Session Routes", () => {
     it("should return 500 on handler error", async () => {
       mockAbandonSession.mockRejectedValue(new Error("Network failure"));
 
-      const request = new Request(
-        "https://example.com/api/upload-sessions/session-abc/abandon",
-        { method: "POST" },
-      );
+      const request = new Request("https://example.com/api/upload-sessions/session-abc/abandon", {
+        method: "POST",
+      });
 
       const response = await route!.handler(request, mockEnv, {
-        url: new URL(
-          "https://example.com/api/upload-sessions/session-abc/abandon",
-        ),
+        url: new URL("https://example.com/api/upload-sessions/session-abc/abandon"),
         pathname: "/api/upload-sessions/session-abc/abandon",
         params: { id: "session-abc" },
       });
 
       expect(response.status).toBe(500);
-          });
+    });
   });
 });
 
@@ -772,6 +688,43 @@ describe("Upload Session Routes — presigned dispatch (T14)", () => {
     expect(body.upload.fields).toHaveProperty("x-amz-signature");
   });
 
+  it("a quota refusal maps to 429 with a Retry-After header; a refusal without one sends none", async () => {
+    const call = async () =>
+      createRoute!.handler(
+        new Request("https://example.com/api/upload-sessions", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ mimeType: "video/mp4", sizeBytes: 5000000 }),
+        }),
+        mockEnv,
+        {
+          url: new URL("https://example.com/api/upload-sessions"),
+          pathname: "/api/upload-sessions",
+          params: {},
+        },
+      );
+    mockPresignedCreate.mockResolvedValue({
+      ok: false,
+      status: 429,
+      error: "Upload quota exceeded",
+      message: "Too many uploads. Try again later.",
+      retryAfterSeconds: 42.2,
+    });
+    const limited = await call();
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("Retry-After")).toBe("43");
+
+    mockPresignedCreate.mockResolvedValue({
+      ok: false,
+      status: 503,
+      error: "Upload unavailable",
+      message: "x",
+    });
+    const unavailable = await call();
+    expect(unavailable.status).toBe(503);
+    expect(unavailable.headers.has("Retry-After")).toBe(false);
+  });
+
   it("a half-declared body (mimeType without sizeBytes) is a 400, never a silent legacy fallback", async () => {
     const request = new Request("https://example.com/api/upload-sessions", {
       method: "POST",
@@ -823,9 +776,7 @@ describe("Upload Session Routes — presigned dispatch (T14)", () => {
       { method: "POST" },
     );
     const response = await completeRoute!.handler(request, mockEnv, {
-      url: new URL(
-        "https://example.com/api/upload-sessions/csession000000000000000a1/complete",
-      ),
+      url: new URL("https://example.com/api/upload-sessions/csession000000000000000a1/complete"),
       pathname: "/api/upload-sessions/csession000000000000000a1/complete",
       params: { id: "csession000000000000000a1" },
     });
@@ -837,22 +788,16 @@ describe("Upload Session Routes — presigned dispatch (T14)", () => {
 
   it("complete falls through to the legacy handler on a presigned 404 miss", async () => {
     mockCompleteSession.mockResolvedValue({ success: true, mediaCount: 2 });
-    const request = new Request(
-      "https://example.com/api/upload-sessions/legacy-1/complete",
-      { method: "POST" },
-    );
+    const request = new Request("https://example.com/api/upload-sessions/legacy-1/complete", {
+      method: "POST",
+    });
     const response = await completeRoute!.handler(request, mockEnv, {
       url: new URL("https://example.com/api/upload-sessions/legacy-1/complete"),
       pathname: "/api/upload-sessions/legacy-1/complete",
       params: { id: "legacy-1" },
     });
     expect(mockPresignedComplete).toHaveBeenCalled();
-    expect(mockCompleteSession).toHaveBeenCalledWith(
-      "legacy-1",
-      "user-123",
-      "EU",
-      mockEnv,
-    );
+    expect(mockCompleteSession).toHaveBeenCalledWith("legacy-1", "user-123", "EU", mockEnv);
     expect(response.status).toBe(200);
   });
 
@@ -868,9 +813,7 @@ describe("Upload Session Routes — presigned dispatch (T14)", () => {
       { method: "POST" },
     );
     const response = await completeRoute!.handler(request, mockEnv, {
-      url: new URL(
-        "https://example.com/api/upload-sessions/csession000000000000000a1/complete",
-      ),
+      url: new URL("https://example.com/api/upload-sessions/csession000000000000000a1/complete"),
       pathname: "/api/upload-sessions/csession000000000000000a1/complete",
       params: { id: "csession000000000000000a1" },
     });

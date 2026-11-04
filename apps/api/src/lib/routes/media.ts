@@ -8,10 +8,7 @@
 import { resolveApiOrigin } from "../api-origin.js";
 import { CorsHandler } from "../cors-handler.js";
 import { sharedDatabaseConnectionManager } from "../database-connection-manager.js";
-import {
-  QueryTimeoutPresets,
-  withQueryTimeoutAndRetry,
-} from "../db-query-helper.js";
+import { QueryTimeoutPresets, withQueryTimeoutAndRetry } from "../db-query-helper.js";
 import { getLogger, Logger } from "../logger.js";
 import {
   c2paSidecarKey,
@@ -22,6 +19,7 @@ import {
 } from "../media/cas-keys.js";
 import { buildMediaUpsertArgs } from "../media/media-upsert.js";
 import { checkUploadQuota } from "../media/quota-check.js";
+import { isTransientModerationFailure } from "../media/transient-moderation-failure.js";
 import { resolveQuotaLimits, type TenantQuotaOverride } from "../media/quota-resolution.js";
 import {
   isOverReviewRateCap,
@@ -32,14 +30,8 @@ import { quotaUsageWhere } from "../media/storage-accounting.js";
 import { describeError } from "../media/describe-error.js";
 import { decisionToStatus } from "../media/media-lifecycle.js";
 import type { MediaLifecycle } from "../media/media-lifecycle.js";
-import {
-  getMediaModerationProvider,
-  interpretVerdict,
-} from "../media/request-moderation.js";
-import {
-  canonicalContentType,
-  isServable,
-} from "../media/serve-gate.js";
+import { getMediaModerationProvider, interpretVerdict } from "../media/request-moderation.js";
+import { canonicalContentType, isServable } from "../media/serve-gate.js";
 import { resolveMediaTenantId } from "../media/tenant-resolution.js";
 import { routeUpload } from "../media/route-upload.js";
 import { MediaHandler } from "../media-handler.js";
@@ -47,10 +39,7 @@ import { corsMiddleware, csrfMiddleware } from "../middleware.js";
 import { RateLimiter } from "../rate-limit.js";
 import { SecurityHeaders } from "../security-headers.js";
 import { SessionManager } from "../session-cookie.js";
-import {
-  REENCODABLE_IMAGE_TYPES,
-  reencodeImage,
-} from "../services/image-normalizer.js";
+import { REENCODABLE_IMAGE_TYPES, reencodeImage } from "../services/image-normalizer.js";
 import type { Route } from "./types.js";
 
 /**
@@ -68,9 +57,7 @@ export async function resolveUploadTenantId(
   region: string,
   env: any,
 ): Promise<string | null> {
-  const { getCurrentTenantId } = await import(
-    "@de-otio/saas-foundation/tenant"
-  );
+  const { getCurrentTenantId } = await import("@de-otio/saas-foundation/tenant");
   const { resolveTenantScopeMode } = await import("../tenant-scope.js");
   const scopeMode = resolveTenantScopeMode();
   const ambient = getCurrentTenantId();
@@ -135,10 +122,7 @@ function getExtensionFromMimeType(mimeType: string): string {
 /**
  * Validate magic numbers (file signatures) to ensure file type matches declared MIME type
  */
-function validateMagicNumbers(
-  bytes: Uint8Array,
-  declaredMimeType: string,
-): boolean {
+function validateMagicNumbers(bytes: Uint8Array, declaredMimeType: string): boolean {
   // JPEG: FF D8 FF
   if (declaredMimeType === "image/jpeg" || declaredMimeType === "image/jpg") {
     if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
@@ -164,12 +148,7 @@ function validateMagicNumbers(
 
   // GIF: 47 49 46 38 (GIF8)
   if (declaredMimeType === "image/gif") {
-    if (
-      bytes[0] === 0x47 &&
-      bytes[1] === 0x49 &&
-      bytes[2] === 0x46 &&
-      bytes[3] === 0x38
-    ) {
+    if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38) {
       return true;
     }
   }
@@ -207,12 +186,7 @@ function validateMagicNumbers(
 
   // WebM: starts with 1A 45 DF A3
   if (declaredMimeType === "video/webm") {
-    if (
-      bytes[0] === 0x1a &&
-      bytes[1] === 0x45 &&
-      bytes[2] === 0xdf &&
-      bytes[3] === 0xa3
-    ) {
+    if (bytes[0] === 0x1a && bytes[1] === 0x45 && bytes[2] === 0xdf && bytes[3] === 0xa3) {
       return true;
     }
   }
@@ -266,10 +240,7 @@ function validateMagicNumbers(
  */
 const MEDIA_DENY_BODY = JSON.stringify({ error: "Media not found" });
 
-async function mediaDenyResponse(
-  request: Request,
-  env: any,
-): Promise<Response> {
+async function mediaDenyResponse(request: Request, env: any): Promise<Response> {
   const response = new Response(MEDIA_DENY_BODY, {
     status: 404,
     headers: {
@@ -335,11 +306,7 @@ export async function serveMediaByHash(
     // hash is intentionally NOT supported here; that read-addressing belongs to
     // the P0c tenant-aware delivery seam (per-tenant domains, D9) or a
     // mediaId/post-scoped lookup that carries the owner's tenant.
-    const viewerTenantId = await resolveUploadTenantId(
-      session.userId,
-      region,
-      env,
-    );
+    const viewerTenantId = await resolveUploadTenantId(session.userId, region, env);
     if (!viewerTenantId) {
       return mediaDenyResponse(request, env);
     }
@@ -503,11 +470,7 @@ export const mediaRoutes: Route[] = [
         authScheme: authHeader ? authHeader.split(" ")[0] : "none",
       });
 
-      const session = await sessionManager.getSession(
-        request,
-        env.SESSION_SECRET,
-        env,
-      );
+      const session = await sessionManager.getSession(request, env.SESSION_SECRET, env);
 
       if (!session) {
         logger.warn("[Media Upload] Unauthorized - no valid session", {
@@ -594,9 +557,10 @@ export const mediaRoutes: Route[] = [
         // SVG is excluded — no safe raster transcode.
         // Video is accepted (stored PENDING, served only after P0b worker approves).
         const allowedImageTypes = Array.from(REENCODABLE_IMAGE_TYPES);
-        const allowedVideoTypes = env.media.allowlist.video.length > 0
-          ? env.media.allowlist.video
-          : ["video/mp4", "video/webm", "video/quicktime"];
+        const allowedVideoTypes =
+          env.media.allowlist.video.length > 0
+            ? env.media.allowlist.video
+            : ["video/mp4", "video/webm", "video/quicktime"];
 
         // Read file bytes first to detect MIME type if not provided
         let fileBuffer: ArrayBuffer;
@@ -640,12 +604,7 @@ export const mediaRoutes: Route[] = [
         // Always detect MIME type from magic numbers (trust the file, not the declared type)
         // This handles cases where the frontend compresses/converts images
         let detectedMimeType = "application/octet-stream";
-        if (
-          bytes.length >= 3 &&
-          bytes[0] === 0xff &&
-          bytes[1] === 0xd8 &&
-          bytes[2] === 0xff
-        ) {
+        if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
           detectedMimeType = "image/jpeg";
         } else if (
           bytes.length >= 8 &&
@@ -691,9 +650,7 @@ export const mediaRoutes: Route[] = [
           // mp4 is misdetected as image/heic and rejected once HEIC leaves the
           // re-encodable image allowlist (T7).
           const brand =
-            bytes.length >= 12
-              ? String.fromCharCode(bytes[8], bytes[9], bytes[10], bytes[11])
-              : "";
+            bytes.length >= 12 ? String.fromCharCode(bytes[8], bytes[9], bytes[10], bytes[11]) : "";
           const heifBrands = new Set([
             "heic",
             "heix",
@@ -720,9 +677,7 @@ export const mediaRoutes: Route[] = [
         // Use detected type if we found one, otherwise fall back to declared type
         const declaredMimeType = file.type || "application/octet-stream";
         let mimeType =
-          detectedMimeType !== "application/octet-stream"
-            ? detectedMimeType
-            : declaredMimeType;
+          detectedMimeType !== "application/octet-stream" ? detectedMimeType : declaredMimeType;
 
         // Log if declared type doesn't match detected type (frontend may have converted the image)
         if (
@@ -730,16 +685,13 @@ export const mediaRoutes: Route[] = [
           detectedMimeType !== "application/octet-stream" &&
           declaredMimeType !== detectedMimeType
         ) {
-          logger.info(
-            "Media upload: Declared MIME type differs from detected type",
-            {
-              userId: session.userId,
-              fileName: file.name,
-              declaredMimeType,
-              detectedMimeType,
-              usingDetectedType: true,
-            },
-          );
+          logger.info("Media upload: Declared MIME type differs from detected type", {
+            userId: session.userId,
+            fileName: file.name,
+            declaredMimeType,
+            detectedMimeType,
+            usingDetectedType: true,
+          });
         }
 
         const isImage = allowedImageTypes.includes(mimeType);
@@ -782,9 +734,7 @@ export const mediaRoutes: Route[] = [
           const errorResponse = securityHeaders.createSecureResponse(
             JSON.stringify({
               error: "File too large",
-              message: isImage
-                ? "Image must be 10MB or less"
-                : "Video must be 100MB or less",
+              message: isImage ? "Image must be 10MB or less" : "Video must be 100MB or less",
             }),
             { status: 400, headers: { "content-type": "application/json" } },
           );
@@ -797,10 +747,7 @@ export const mediaRoutes: Route[] = [
         // Validate magic numbers (file signatures)
         // Since we always detect from magic numbers and use the detected type,
         // we should always validate to ensure the file is what we think it is
-        if (
-          mimeType !== "application/octet-stream" &&
-          !validateMagicNumbers(bytes, mimeType)
-        ) {
+        if (mimeType !== "application/octet-stream" && !validateMagicNumbers(bytes, mimeType)) {
           logger.warn("Media upload failed: Invalid file signature", {
             userId: session.userId,
             fileName: file.name,
@@ -853,11 +800,7 @@ export const mediaRoutes: Route[] = [
         // Moved before quota check and route decision so both use the same
         // resolved tenantId.
         const uploadRegion = "US"; // TODO: Get from session or request
-        const tenantId = await resolveUploadTenantId(
-          session.userId,
-          uploadRegion,
-          env,
-        );
+        const tenantId = await resolveUploadTenantId(session.userId, uploadRegion, env);
         if (!tenantId) {
           logger.error("[Media Upload] No tenant context for upload", {
             userId: session.userId,
@@ -955,8 +898,7 @@ export const mediaRoutes: Route[] = [
             const errorResponse = securityHeaders.createSecureResponse(
               JSON.stringify({
                 error: "Upload rate limited",
-                message:
-                  "Too many recent uploads required moderation review. Try again later.",
+                message: "Too many recent uploads required moderation review. Try again later.",
               }),
               { status: 429, headers: { "content-type": "application/json" } },
             );
@@ -1062,15 +1004,10 @@ export const mediaRoutes: Route[] = [
         //
         // Neither throws — provenance is a disclosure, not a safety gate, so it
         // can never fail an upload. The strip itself is unchanged; we look first.
-        const { readProvenance } = await import(
-          "../metadata/provenance-reader.js"
-        );
+        const { readProvenance } = await import("../metadata/provenance-reader.js");
         const { extractC2pa } = await import("../metadata/c2pa-extractor.js");
         const c2paScan = extractC2pa(new Uint8Array(fileBuffer));
-        const provenance = await readProvenance(
-          new Uint8Array(fileBuffer),
-          mimeType,
-        );
+        const provenance = await readProvenance(new Uint8Array(fileBuffer), mimeType);
         if (provenance.examined) {
           // Structured events, following the image_reencode.* convention below.
           // `provenance.unrecognised` is the one worth alerting on once the
@@ -1124,9 +1061,7 @@ export const mediaRoutes: Route[] = [
         // dimensions from the clean output (EXIF orientation already baked).
         let extracted: any = {};
         try {
-          const { MetadataExtractor } = await import(
-            "../metadata/metadata-extractor.js"
-          );
+          const { MetadataExtractor } = await import("../metadata/metadata-extractor.js");
           const extractor = new MetadataExtractor(env);
           extracted = await extractor.extractAll(uploadBuffer, mimeType);
         } catch (metaError: any) {
@@ -1142,8 +1077,7 @@ export const mediaRoutes: Route[] = [
         // Prepare metadata for upload service
         const metadata = {
           width: extracted?.exifData?.width || extracted?.videoMetadata?.width,
-          height:
-            extracted?.exifData?.height || extracted?.videoMetadata?.height,
+          height: extracted?.exifData?.height || extracted?.videoMetadata?.height,
           duration: extracted?.videoMetadata?.duration,
         };
 
@@ -1176,16 +1110,14 @@ export const mediaRoutes: Route[] = [
           const errorResponse = securityHeaders.createSecureResponse(
             JSON.stringify({
               error: "Database error",
-              message:
-                "Failed to register uploaded media. Please try again.",
+              message: "Failed to register uploaded media. Please try again.",
             }),
             { status: 500, headers: { "content-type": "application/json" } },
           );
           return CorsHandler.addCorsHeaders(errorResponse, request, env);
         }
 
-        const mediaBucket =
-          (env as any).MEDIA_BUCKET_R2 || (env as any).R2_BUCKET;
+        const mediaBucket = (env as any).MEDIA_BUCKET_R2 || (env as any).R2_BUCKET;
         if (!mediaBucket) {
           // No object store to stage into — fail closed (cannot moderate, must
           // not serve). Mirrors the async-pending path's 503.
@@ -1242,13 +1174,53 @@ export const mediaRoutes: Route[] = [
           // can never make this path more permissive than it already was.
           decision = decisionToStatus(interpretVerdict(verdict));
         } catch (moderationError: any) {
-          logger.warn(
-            "[Media Upload] Image moderation failed — failing closed to REVIEW",
-            {
+          // A check that failed for a reason KNOWN to be unrelated to the image
+          // (a typed provider error flagged retryable or capacity, or an
+          // untyped error matching an explicit transient signal such as
+          // throttling, a deadline or a network error) is NOT a verdict.
+          // Holding it would turn an outage into a permanent block of a
+          // probably benign upload wherever no moderator is standing by, so
+          // answer 503 and let the client retry. Anything else, including an
+          // untyped error we cannot recognise, falls through to the fail-closed
+          // hold below.
+          //
+          // Client-retry contract: the MediaFile row is created only AFTER
+          // this step, so nothing exists yet to be servable. We drop the
+          // staged object (best effort; it is also lifecycle-expired) and
+          // create no row, so a retry is an ordinary fresh upload.
+          if (isTransientModerationFailure(moderationError)) {
+            logger.warn("[Media Upload] Image moderation unavailable — 503, no hold", {
               userId: session.userId,
               error: describeError(moderationError),
-            },
-          );
+            });
+            try {
+              await mediaBucket.delete(stagingKey);
+            } catch (deleteError: any) {
+              logger.warn("[Media Upload] Staging delete tolerated", {
+                userId: session.userId,
+                error: describeError(deleteError),
+              });
+            }
+            const retryAfter = env.media?.moderationRetryAfterSeconds;
+            const headers: Record<string, string> = {
+              "content-type": "application/json",
+            };
+            if (typeof retryAfter === "number" && Number.isFinite(retryAfter) && retryAfter > 0) {
+              headers["Retry-After"] = String(Math.ceil(retryAfter));
+            }
+            const errorResponse = securityHeaders.createSecureResponse(
+              JSON.stringify({
+                error: "Upload unavailable",
+                message: "Image checking is temporarily unavailable. Please retry the upload.",
+              }),
+              { status: 503, headers },
+            );
+            return CorsHandler.addCorsHeaders(errorResponse, request, env);
+          }
+          logger.warn("[Media Upload] Image moderation failed — failing closed to REVIEW", {
+            userId: session.userId,
+            error: describeError(moderationError),
+          });
           decision = "REVIEW";
         }
 
@@ -1405,9 +1377,7 @@ export const mediaRoutes: Route[] = [
                 kind: sidecarKey.kind,
               });
             } else {
-              const { recordC2paSidecar } = await import(
-                "../media/c2pa-sidecar.js"
-              );
+              const { recordC2paSidecar } = await import("../media/c2pa-sidecar.js");
               const writeSidecarColumns = async (
                 where: Record<string, unknown>,
                 data: Record<string, unknown>,
@@ -1466,18 +1436,14 @@ export const mediaRoutes: Route[] = [
         } catch (dbError: any) {
           // DB record is required for post creation to validate media ownership.
           // If this fails, the upload must fail so the frontend can retry.
-          logger.error(
-            "[Media Upload] Synchronous DB record creation failed",
-            {
-              contentHash,
-              error: dbError.message,
-            },
-          );
+          logger.error("[Media Upload] Synchronous DB record creation failed", {
+            contentHash,
+            error: dbError.message,
+          });
           const dbErrorResponse = securityHeaders.createSecureResponse(
             JSON.stringify({
               error: "Database error",
-              message:
-                "Failed to register uploaded media. Please try again.",
+              message: "Failed to register uploaded media. Please try again.",
             }),
             {
               status: 500,
@@ -1535,7 +1501,11 @@ export const mediaRoutes: Route[] = [
     },
     middleware: [corsMiddleware(), csrfMiddleware()],
     description:
-      "Upload media file (image or video) with content-addressed storage",
+      "Upload media file (image or video) with content-addressed storage. " +
+      "Responses: 200 stored (a provider verdict that holds the upload, or an image check that failed for a reason not known to be transient, is recorded as REVIEW and is not served); " +
+      "503 with an optional Retry-After (seconds, operator-configured) when the image check was known to be temporarily unavailable " +
+      "(a provider error flagged retryable or capacity, or throttling, a deadline or a network error) - nothing was stored, retry the upload; " +
+      "429 when a rate or quota limit applies.",
   },
   {
     // AR16: the legacy batch-upload path is intentionally NOT implemented.
@@ -1565,8 +1535,7 @@ export const mediaRoutes: Route[] = [
       return CorsHandler.addCorsHeaders(response, request, env);
     },
     middleware: [corsMiddleware(), csrfMiddleware()],
-    description:
-      "Batch media upload (not implemented — removed: bypassed moderation)",
+    description: "Batch media upload (not implemented — removed: bypassed moderation)",
   },
   {
     path: "/api/media/grouped",
@@ -1583,11 +1552,7 @@ export const mediaRoutes: Route[] = [
       const metrics = new MediaMetrics(env);
 
       // Check authentication
-      const session = await sessionManager.getSession(
-        request,
-        env.SESSION_SECRET,
-        env,
-      );
+      const session = await sessionManager.getSession(request, env.SESSION_SECRET, env);
 
       if (!session) {
         const errorResponse = securityHeaders.createSecureResponse(
@@ -1619,11 +1584,7 @@ export const mediaRoutes: Route[] = [
         if (!["month", "year"].includes(groupBy)) {
           const duration = Date.now() - startTime;
           const regionDetector = new RegionDetector(env);
-          const region = await regionDetector.detectRegion(
-            request,
-            undefined,
-            undefined,
-          );
+          const region = await regionDetector.detectRegion(request, undefined, undefined);
           metrics.trackOperation({
             operation: "grouped",
             endpoint: "/api/media/grouped",
@@ -1644,8 +1605,7 @@ export const mediaRoutes: Route[] = [
         }
 
         const includeHidden = url.searchParams.get("includeHidden") === "true";
-        const type =
-          (url.searchParams.get("type") as "photo" | "video" | "all") || "all";
+        const type = (url.searchParams.get("type") as "photo" | "video" | "all") || "all";
         const limit = url.searchParams.get("limit")
           ? parseInt(url.searchParams.get("limit")!, 10)
           : undefined;
@@ -1654,11 +1614,7 @@ export const mediaRoutes: Route[] = [
         if (limit !== undefined && (limit < 1 || limit > 10000)) {
           const duration = Date.now() - startTime;
           const regionDetector = new RegionDetector(env);
-          const region = await regionDetector.detectRegion(
-            request,
-            undefined,
-            undefined,
-          );
+          const region = await regionDetector.detectRegion(request, undefined, undefined);
           metrics.trackOperation({
             operation: "grouped",
             endpoint: "/api/media/grouped",
@@ -1692,17 +1648,10 @@ export const mediaRoutes: Route[] = [
 
         const duration = Date.now() - startTime;
         const regionDetector = new RegionDetector(env);
-        const region = await regionDetector.detectRegion(
-          request,
-          undefined,
-          undefined,
-        );
+        const region = await regionDetector.detectRegion(request, undefined, undefined);
 
         // Calculate total items across all groups
-        const totalItems = result.groups.reduce(
-          (sum, group) => sum + group.media.length,
-          0,
-        );
+        const totalItems = result.groups.reduce((sum, group) => sum + group.media.length, 0);
 
         // Track metrics
         metrics.trackGrouped(
@@ -1715,19 +1664,15 @@ export const mediaRoutes: Route[] = [
           session.userId,
         );
 
-        const response = securityHeaders.createSecureResponse(
-          JSON.stringify(result),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
+        const response = securityHeaders.createSecureResponse(JSON.stringify(result), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
         return CorsHandler.addCorsHeaders(response, request, env);
       } catch (error: any) {
         const duration = Date.now() - startTime;
         const regionDetector = new RegionDetector(env);
-        const region = await regionDetector.detectRegion(
-          request,
-          undefined,
-          undefined,
-        );
+        const region = await regionDetector.detectRegion(request, undefined, undefined);
         const statusCode = error.message === "Media not found" ? 404 : 500;
 
         // Track error metrics
@@ -1774,11 +1719,7 @@ export const mediaRoutes: Route[] = [
       const metrics = new MediaMetrics(env);
 
       // Check authentication
-      const session = await sessionManager.getSession(
-        request,
-        env.SESSION_SECRET,
-        env,
-      );
+      const session = await sessionManager.getSession(request, env.SESSION_SECRET, env);
 
       if (!session) {
         const errorResponse = securityHeaders.createSecureResponse(
@@ -1804,8 +1745,7 @@ export const mediaRoutes: Route[] = [
       try {
         const url = new URL(request.url);
         const includeHidden = url.searchParams.get("includeHidden") === "true";
-        const type =
-          (url.searchParams.get("type") as "photo" | "video" | "all") || "all";
+        const type = (url.searchParams.get("type") as "photo" | "video" | "all") || "all";
 
         const result = await mediaHandler.getUserMediaStats(
           session.userId,
@@ -1816,11 +1756,7 @@ export const mediaRoutes: Route[] = [
 
         const duration = Date.now() - startTime;
         const regionDetector = new RegionDetector(env);
-        const region = await regionDetector.detectRegion(
-          request,
-          undefined,
-          undefined,
-        );
+        const region = await regionDetector.detectRegion(request, undefined, undefined);
 
         // Track metrics
         metrics.trackStats(
@@ -1832,19 +1768,15 @@ export const mediaRoutes: Route[] = [
           session.userId,
         );
 
-        const response = securityHeaders.createSecureResponse(
-          JSON.stringify(result),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
+        const response = securityHeaders.createSecureResponse(JSON.stringify(result), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
         return CorsHandler.addCorsHeaders(response, request, env);
       } catch (error: any) {
         const duration = Date.now() - startTime;
         const regionDetector = new RegionDetector(env);
-        const region = await regionDetector.detectRegion(
-          request,
-          undefined,
-          undefined,
-        );
+        const region = await regionDetector.detectRegion(request, undefined, undefined);
         const statusCode = error.message === "Media not found" ? 404 : 500;
 
         // Track error metrics
@@ -1896,11 +1828,7 @@ export const mediaRoutes: Route[] = [
       const metrics = new MediaMetrics(env);
 
       // Check authentication
-      const session = await sessionManager.getSession(
-        request,
-        env.SESSION_SECRET,
-        env,
-      );
+      const session = await sessionManager.getSession(request, env.SESSION_SECRET, env);
 
       if (!session) {
         const errorResponse = securityHeaders.createSecureResponse(
@@ -1928,11 +1856,7 @@ export const mediaRoutes: Route[] = [
         if (!mediaId) {
           const duration = Date.now() - startTime;
           const regionDetector = new RegionDetector(env);
-          const region = await regionDetector.detectRegion(
-            request,
-            undefined,
-            undefined,
-          );
+          const region = await regionDetector.detectRegion(request, undefined, undefined);
           metrics.trackOperation({
             operation: "details",
             endpoint: "/api/media/:mediaId",
@@ -1967,22 +1891,15 @@ export const mediaRoutes: Route[] = [
         });
 
         if (mediaId.length === 64 && /^[0-9a-f]+$/i.test(mediaId)) {
-          logger.debug(
-            "MEDIA DEBUG: Detected content hash, delegating to serveMediaByHash",
-            {
-              mediaId,
-              variant: variant || "original", // Changed default from 'optimized' to 'original'
-            },
-          );
+          logger.debug("MEDIA DEBUG: Detected content hash, delegating to serveMediaByHash", {
+            mediaId,
+            variant: variant || "original", // Changed default from 'optimized' to 'original'
+          });
 
           // This is a content hash request - use shared hash serving function
           const duration = Date.now() - startTime;
           const regionDetector = new RegionDetector(env);
-          const region = await regionDetector.detectRegion(
-            request,
-            undefined,
-            undefined,
-          );
+          const region = await regionDetector.detectRegion(request, undefined, undefined);
           metrics.trackOperation({
             operation: "details",
             endpoint: "/api/media/:mediaId",
@@ -1994,37 +1911,19 @@ export const mediaRoutes: Route[] = [
           });
           // CRITICAL FIX: Default to 'original' variant instead of 'optimized'
           // This ensures media is always accessible even if optimized versions don't exist yet
-          return serveMediaByHash(
-            mediaId,
-            variant || "original",
-            request,
-            env,
-            session,
-          );
+          return serveMediaByHash(mediaId, variant || "original", request, env, session);
         }
 
-        logger.debug(
-          "MEDIA DEBUG: Not a content hash, proceeding with regular media details",
-          {
-            mediaId,
-          },
-        );
+        logger.debug("MEDIA DEBUG: Not a content hash, proceeding with regular media details", {
+          mediaId,
+        });
 
         // Get media details
-        const result = await mediaHandler.getMediaDetails(
-          mediaId,
-          session.userId,
-          env,
-          request,
-        );
+        const result = await mediaHandler.getMediaDetails(mediaId, session.userId, env, request);
 
         const duration = Date.now() - startTime;
         const regionDetector = new RegionDetector(env);
-        const region = await regionDetector.detectRegion(
-          request,
-          undefined,
-          undefined,
-        );
+        const region = await regionDetector.detectRegion(request, undefined, undefined);
 
         // Track metrics
         metrics.trackMediaAction(
@@ -2037,27 +1936,20 @@ export const mediaRoutes: Route[] = [
           session.userId,
         );
 
-        const response = securityHeaders.createSecureResponse(
-          JSON.stringify(result),
-          {
-            status: 200,
-            headers: {
-              "content-type": "application/json",
-              "cache-control": "private, max-age=300", // Cache for 5 minutes, private to this user
-              pragma: "no-cache",
-              expires: new Date(Date.now() + 5 * 60 * 1000).toUTCString(),
-            },
+        const response = securityHeaders.createSecureResponse(JSON.stringify(result), {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+            "cache-control": "private, max-age=300", // Cache for 5 minutes, private to this user
+            pragma: "no-cache",
+            expires: new Date(Date.now() + 5 * 60 * 1000).toUTCString(),
           },
-        );
+        });
         return CorsHandler.addCorsHeaders(response, request, env);
       } catch (error: any) {
         const duration = Date.now() - startTime;
         const regionDetector = new RegionDetector(env);
-        const region = await regionDetector.detectRegion(
-          request,
-          undefined,
-          undefined,
-        );
+        const region = await regionDetector.detectRegion(request, undefined, undefined);
 
         let status = 500;
         let message = "Failed to get media details";
@@ -2110,11 +2002,7 @@ export const mediaRoutes: Route[] = [
       const logger = getLogger();
 
       // Check authentication
-      const session = await sessionManager.getSession(
-        request,
-        env.SESSION_SECRET,
-        env,
-      );
+      const session = await sessionManager.getSession(request, env.SESSION_SECRET, env);
 
       if (!session) {
         const errorResponse = securityHeaders.createSecureResponse(
@@ -2181,11 +2069,7 @@ export const mediaRoutes: Route[] = [
       const startTime = Date.now();
 
       // Check authentication
-      const session = await sessionManager.getSession(
-        request,
-        env.SESSION_SECRET,
-        env,
-      );
+      const session = await sessionManager.getSession(request, env.SESSION_SECRET, env);
 
       if (!session) {
         const duration = Date.now() - startTime;
@@ -2225,13 +2109,10 @@ export const mediaRoutes: Route[] = [
           ? parseInt(url.searchParams.get("limit")!, 10)
           : 50;
         const cursor = url.searchParams.get("cursor") || undefined;
-        const sort =
-          (url.searchParams.get("sort") as "newest" | "oldest") || "newest";
+        const sort = (url.searchParams.get("sort") as "newest" | "oldest") || "newest";
         const includeHidden = url.searchParams.get("includeHidden") === "true";
-        const type =
-          (url.searchParams.get("type") as "photo" | "video" | "all") || "all";
-        const includeTotalCount =
-          url.searchParams.get("includeTotalCount") === "true";
+        const type = (url.searchParams.get("type") as "photo" | "video" | "all") || "all";
+        const includeTotalCount = url.searchParams.get("includeTotalCount") === "true";
 
         // Validate limit
         if (limit < 1 || limit > 100) {
@@ -2271,35 +2152,20 @@ export const mediaRoutes: Route[] = [
 
         const duration = Date.now() - startTime;
         const regionDetector = new RegionDetector(env);
-        const region = await regionDetector.detectRegion(
-          request,
-          undefined,
-          undefined,
-        );
+        const region = await regionDetector.detectRegion(request, undefined, undefined);
 
         // Track metrics
-        metrics.trackList(
-          "/api/media",
-          duration,
-          result.media.length,
-          200,
-          region,
-          session.userId,
-        );
+        metrics.trackList("/api/media", duration, result.media.length, 200, region, session.userId);
 
-        const response = securityHeaders.createSecureResponse(
-          JSON.stringify(result),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
+        const response = securityHeaders.createSecureResponse(JSON.stringify(result), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
         return CorsHandler.addCorsHeaders(response, request, env);
       } catch (error: any) {
         const duration = Date.now() - startTime;
         const regionDetector = new RegionDetector(env);
-        const region = await regionDetector.detectRegion(
-          request,
-          undefined,
-          undefined,
-        );
+        const region = await regionDetector.detectRegion(request, undefined, undefined);
         const statusCode = error.message === "Media not found" ? 404 : 500;
 
         // Track error metrics
@@ -2346,11 +2212,7 @@ export const mediaRoutes: Route[] = [
       const metrics = new MediaMetrics(env);
 
       // Check authentication
-      const session = await sessionManager.getSession(
-        request,
-        env.SESSION_SECRET,
-        env,
-      );
+      const session = await sessionManager.getSession(request, env.SESSION_SECRET, env);
 
       if (!session) {
         const errorResponse = securityHeaders.createSecureResponse(
@@ -2378,11 +2240,7 @@ export const mediaRoutes: Route[] = [
         if (!mediaId) {
           const duration = Date.now() - startTime;
           const regionDetector = new RegionDetector(env);
-          const region = await regionDetector.detectRegion(
-            request,
-            undefined,
-            undefined,
-          );
+          const region = await regionDetector.detectRegion(request, undefined, undefined);
           metrics.trackOperation({
             operation: "hide",
             endpoint: "/api/media/:mediaId/hide",
@@ -2403,20 +2261,11 @@ export const mediaRoutes: Route[] = [
         }
 
         // Hide media
-        const result = await mediaHandler.hideMedia(
-          mediaId,
-          session.userId,
-          env,
-          request,
-        );
+        const result = await mediaHandler.hideMedia(mediaId, session.userId, env, request);
 
         const duration = Date.now() - startTime;
         const regionDetector = new RegionDetector(env);
-        const region = await regionDetector.detectRegion(
-          request,
-          undefined,
-          undefined,
-        );
+        const region = await regionDetector.detectRegion(request, undefined, undefined);
 
         // Track metrics
         metrics.trackMediaAction(
@@ -2440,11 +2289,7 @@ export const mediaRoutes: Route[] = [
       } catch (error: any) {
         const duration = Date.now() - startTime;
         const regionDetector = new RegionDetector(env);
-        const region = await regionDetector.detectRegion(
-          request,
-          undefined,
-          undefined,
-        );
+        const region = await regionDetector.detectRegion(request, undefined, undefined);
 
         let status = 500;
         let message = "Failed to hide media";
@@ -2458,10 +2303,7 @@ export const mediaRoutes: Route[] = [
           status = 403;
           message = "Forbidden";
           errorType = "ForbiddenError";
-        } else if (
-          error.message.includes("already hidden") ||
-          error.message.includes("deleted")
-        ) {
+        } else if (error.message.includes("already hidden") || error.message.includes("deleted")) {
           status = 400;
           message = error.message;
           errorType = "ValidationError";
@@ -2509,11 +2351,7 @@ export const mediaRoutes: Route[] = [
       const metrics = new MediaMetrics(env);
 
       // Check authentication
-      const session = await sessionManager.getSession(
-        request,
-        env.SESSION_SECRET,
-        env,
-      );
+      const session = await sessionManager.getSession(request, env.SESSION_SECRET, env);
 
       if (!session) {
         const errorResponse = securityHeaders.createSecureResponse(
@@ -2541,11 +2379,7 @@ export const mediaRoutes: Route[] = [
         if (!mediaId) {
           const duration = Date.now() - startTime;
           const regionDetector = new RegionDetector(env);
-          const region = await regionDetector.detectRegion(
-            request,
-            undefined,
-            undefined,
-          );
+          const region = await regionDetector.detectRegion(request, undefined, undefined);
           metrics.trackOperation({
             operation: "unhide",
             endpoint: "/api/media/:mediaId/unhide",
@@ -2566,20 +2400,11 @@ export const mediaRoutes: Route[] = [
         }
 
         // Unhide media
-        const result = await mediaHandler.unhideMedia(
-          mediaId,
-          session.userId,
-          env,
-          request,
-        );
+        const result = await mediaHandler.unhideMedia(mediaId, session.userId, env, request);
 
         const duration = Date.now() - startTime;
         const regionDetector = new RegionDetector(env);
-        const region = await regionDetector.detectRegion(
-          request,
-          undefined,
-          undefined,
-        );
+        const region = await regionDetector.detectRegion(request, undefined, undefined);
 
         // Track metrics
         metrics.trackMediaAction(
@@ -2603,11 +2428,7 @@ export const mediaRoutes: Route[] = [
       } catch (error: any) {
         const duration = Date.now() - startTime;
         const regionDetector = new RegionDetector(env);
-        const region = await regionDetector.detectRegion(
-          request,
-          undefined,
-          undefined,
-        );
+        const region = await regionDetector.detectRegion(request, undefined, undefined);
 
         let status = 500;
         let message = "Failed to unhide media";
@@ -2621,10 +2442,7 @@ export const mediaRoutes: Route[] = [
           status = 403;
           message = "Forbidden";
           errorType = "ForbiddenError";
-        } else if (
-          error.message.includes("not hidden") ||
-          error.message.includes("deleted")
-        ) {
+        } else if (error.message.includes("not hidden") || error.message.includes("deleted")) {
           status = 400;
           message = error.message;
           errorType = "ValidationError";
@@ -2672,11 +2490,7 @@ export const mediaRoutes: Route[] = [
       const metrics = new MediaMetrics(env);
 
       // Check authentication
-      const session = await sessionManager.getSession(
-        request,
-        env.SESSION_SECRET,
-        env,
-      );
+      const session = await sessionManager.getSession(request, env.SESSION_SECRET, env);
 
       if (!session) {
         const errorResponse = securityHeaders.createSecureResponse(
@@ -2704,11 +2518,7 @@ export const mediaRoutes: Route[] = [
         if (!mediaId) {
           const duration = Date.now() - startTime;
           const regionDetector = new RegionDetector(env);
-          const region = await regionDetector.detectRegion(
-            request,
-            undefined,
-            undefined,
-          );
+          const region = await regionDetector.detectRegion(request, undefined, undefined);
           metrics.trackOperation({
             operation: "delete",
             endpoint: "/api/media/:mediaId",
@@ -2734,11 +2544,7 @@ export const mediaRoutes: Route[] = [
 
           const duration = Date.now() - startTime;
           const regionDetector = new RegionDetector(env);
-          const region = await regionDetector.detectRegion(
-            request,
-            undefined,
-            undefined,
-          );
+          const region = await regionDetector.detectRegion(request, undefined, undefined);
 
           // Track metrics
           metrics.trackMediaAction(
@@ -2762,11 +2568,7 @@ export const mediaRoutes: Route[] = [
         } catch (deleteError: any) {
           const duration = Date.now() - startTime;
           const regionDetector = new RegionDetector(env);
-          const region = await regionDetector.detectRegion(
-            request,
-            undefined,
-            undefined,
-          );
+          const region = await regionDetector.detectRegion(request, undefined, undefined);
 
           // Check if it's a "shared media" error (should hide instead)
           if (
@@ -2801,11 +2603,7 @@ export const mediaRoutes: Route[] = [
       } catch (error: any) {
         const duration = Date.now() - startTime;
         const regionDetector = new RegionDetector(env);
-        const region = await regionDetector.detectRegion(
-          request,
-          undefined,
-          undefined,
-        );
+        const region = await regionDetector.detectRegion(request, undefined, undefined);
 
         let status = 500;
         let message = "Failed to delete media";

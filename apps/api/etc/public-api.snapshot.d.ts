@@ -467,6 +467,13 @@ export interface Env {
          */
         reviewRateCap: number;
         /**
+         * Seconds advertised in `Retry-After` when the synchronous image check
+         * fails for a transient reason and the upload is answered 503. Source:
+         * MEDIA_MODERATION_RETRY_AFTER_SECONDS. NO default: when unset, the 503 is
+         * sent without a `Retry-After` header (the value is operator policy).
+         */
+        moderationRetryAfterSeconds?: number;
+        /**
          * Per-tenant upload quota DEFAULTS (the free tier): maximum number of
          * stored objects and total bytes. Enforcement is LIVE and fail-closed —
          * both upload gates (routes/media.ts and presigned-upload-handler.ts)
@@ -663,6 +670,7 @@ export declare function resolveMediaEnv(): {
         canonicalQuality: number;
         maxDurationSeconds: number;
         reviewRateCap: number;
+        moderationRetryAfterSeconds?: number;
         uploadQuota: {
             maxObjects: number;
             maxBytes: number;
@@ -841,6 +849,7 @@ export { setPushTransportProvider } from "./lib/push/index.js";
 export type { PushTransport, PushDeviceTarget, PushSendOutcome, PushPlatformWire, } from "./lib/push/index.js";
 export { setMediaModerationProvider } from "./lib/media/request-moderation.js";
 export { setMediaLabelPolicy } from "./lib/media/request-moderation.js";
+export { setUploadQuotaPort } from "./lib/media/upload-quota.js";
 export { createLabelPolicy, explainFromLabels, LabelPolicyConfigError, } from "./lib/media/label-policy.js";
 export type { LabelPolicy, LabelPolicyConfig, LabelPolicyContext, LabelPolicyExplanation, LabelPolicyGround, CategoryPolicy, TaxonomyPinMode, } from "./lib/media/label-policy.js";
 export { createCascadeRoute, routeOnConfidence, CascadeRouteConfigError, } from "./lib/media/cascade-route.js";
@@ -4868,6 +4877,19 @@ export type TrackOutcome = {
  *  - The function never returns "approved" from doubt.
  */
 export declare function combineTrackVerdicts(visual: TrackOutcome, audio: TrackOutcome): ModerationDecision;
+
+// ===== lib/media/upload-quota.d.ts =====
+import type { UploadQuotaPort } from "./media-ports.js";
+/** Register the quota adapter. Re-exported from `@de-otio/trellis`. */
+export declare function setUploadQuotaPort(port: UploadQuotaPort | undefined): void;
+/** The registered adapter, or `undefined` when none was wired. */
+export declare function getUploadQuotaPort(): UploadQuotaPort | undefined;
+/**
+ * The quota "kind" for a requested mime type. Images are the only `image`;
+ * everything else that can be presigned (video, and audio, which rides the same
+ * async pipeline) is `video`, because `UploadQuotaPort` has no other kind.
+ */
+export declare function uploadQuotaKind(mimeType: string): "image" | "video";
 
 // ===== lib/mfa/totp-service.d.ts =====
 /**
