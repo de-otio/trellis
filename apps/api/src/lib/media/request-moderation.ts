@@ -72,7 +72,7 @@ export function __resetMediaModerationProviderForTests(): void {
 //
 // Optional: with no policy the provider's own decision stands, exactly as
 // before. When a policy IS set it is authoritative, and because the policy can
-// only ever degrade a verdict (unmapped categories quarantine, an unverifiable
+// only ever degrade a verdict (unmapped categories hold for review, an unverifiable
 // taxonomy floors at review), turning it on cannot make anything more
 // permissive than the provider already was.
 // ---------------------------------------------------------------------------

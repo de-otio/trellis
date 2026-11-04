@@ -63,11 +63,17 @@
 
 /**
  * Container demuxers an input may be probed as. These are INPUT options and
- * must precede `-i`. Containers only — no playlist, concat or protocol-style
- * demuxers — and that is a safety property of the list, not a tuning knob, so
- * it is a constant here rather than config.
+ * must precede `-i`. Containers and raw single-stream audio demuxers only — no
+ * playlist, concat or protocol-style demuxers — and that is a safety property
+ * of the list, not a tuning knob, so it is a constant here rather than config.
+ *
+ * The list must admit every container the media allowlists can let through, or
+ * the whitelist silently turns an accepted upload into a failed transcode: the
+ * default audio allowlist includes MP3, which is only demuxed by `mp3`; the
+ * mobile capture formats add `3g2` and Ogg/raw AAC audio. `mov` also covers
+ * QuickTime, and `matroska` also covers WebM.
  */
-const FORMAT_WHITELIST = "mov,mp4,m4a,3gp,matroska,webm";
+const FORMAT_WHITELIST = "mov,mp4,m4a,3gp,3g2,matroska,webm,ogg,aac,mp3";
 
 /** A codec name as ffmpeg spells it: no separators, so a list cannot be smuggled in one entry. */
 const CODEC_NAME = /^[A-Za-z0-9_]+$/;

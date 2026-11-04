@@ -677,7 +677,7 @@ describe("buildFrameSamplingArgs", () => {
       "-protocol_whitelist",
       "file,pipe",
       "-format_whitelist",
-      "mov,mp4,m4a,3gp,matroska,webm",
+      "mov,mp4,m4a,3gp,3g2,matroska,webm,ogg,aac,mp3",
       "-t",
       "60",
       "-i",
@@ -702,7 +702,7 @@ describe("buildFrameSamplingArgs", () => {
 // ---------------------------------------------------------------------------
 
 describe("input whitelists on every builder", () => {
-  const FORMATS = "mov,mp4,m4a,3gp,matroska,webm";
+  const FORMATS = "mov,mp4,m4a,3gp,3g2,matroska,webm,ogg,aac,mp3";
   const job = (kind: "video" | "audio"): FfmpegJobSpec => ({
     kind,
     inputPath: "/tmp/in.mp4",
@@ -759,6 +759,20 @@ describe("input whitelists on every builder", () => {
       expect(() => build(["codec a"])).toThrow(TypeError);
     });
   }
+
+  it("the format whitelist admits every container the default allowlists can let through", () => {
+    // MP3 is in the default audio allowlist and has its own demuxer; the mobile
+    // capture formats need 3g2, Ogg and raw AAC. A whitelist missing one of
+    // these turns an accepted upload into a failed transcode.
+    const admitted = new Set(FORMATS.split(","));
+    for (const demuxer of ["mov", "mp4", "m4a", "3gp", "3g2", "matroska", "webm", "ogg", "aac", "mp3"]) {
+      expect(admitted.has(demuxer), demuxer).toBe(true);
+    }
+    // And nothing that can open other resources.
+    for (const demuxer of ["concat", "hls", "applehttp", "image2", "sdp", "rtsp"]) {
+      expect(admitted.has(demuxer), demuxer).toBe(false);
+    }
+  });
 
   it("the recorded argv for the transcode is stable", () => {
     expect(buildFfmpegArgs({ ...job("audio"), codecWhitelist: ["codec_a"] })).toEqual([
