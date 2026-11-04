@@ -1131,7 +1131,11 @@ model MediaModerationJob {
   media             MediaFile             @relation(fields: [mediaId], references: [id], onDelete: Cascade)
   track             ModerationTrack
   // jobId: the external provider's job identifier (unique per provider call).
-  jobId             String                @unique @map("job_id")
+  // NULL only for a RESERVED placeholder: a row recorded before the track's
+  // provider job exists (see CompletionStore.reserveTracks). A unique index
+  // admits many NULLs, so any number of placeholders may coexist. A row is
+  // "live" once jobId is set.
+  jobId             String?               @unique @map("job_id")
   // decision: resolved ModerationDecision value, or null while the job is in flight.
   decision          String?
   // thresholdSnapshot: a copy of env.media.thresholds at submission time (JSON).

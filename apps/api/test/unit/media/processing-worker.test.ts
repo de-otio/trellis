@@ -44,9 +44,7 @@ import {
   MockTranscodePort,
   MockTranscribePort,
 } from "../../../src/lib/media/media-ports.js";
-import {
-  MockModerationProvider,
-} from "../../../src/lib/media/moderation-provider.js";
+import { MockModerationProvider } from "../../../src/lib/media/moderation-provider.js";
 import { pendingKey, casKey, isCasKeyError } from "../../../src/lib/media/cas-keys.js";
 import type { Track } from "../../../src/lib/media/track-verdict.js";
 import {
@@ -106,25 +104,28 @@ interface PersistenceFake {
     contentHash: string;
     originalKey: string;
     stagingVersionId: string;
+    hasAudio?: boolean;
   }>;
   reviewed: string[]; // mediaIds marked for REVIEW
   uploaded: string[]; // mediaIds driven through bytes-arrived (T14)
   rejected: string[]; // mediaIds driven to REJECTED (T14 over-duration)
 }
 
-function makeDeps(opts: {
-  storageSeed?: Record<string, Buffer>;
-  duration?: number;
-  rows?: MediaFileRow[];
-  moderation?: MockModerationProvider;
-  transcribe?: MockTranscribePort;
-  storage?: MockStoragePort;
-  transcode?: MockTranscodePort;
-  maxDurationSeconds?: number;
-  failPersistence?: boolean;
-  spendGuard?: MediaSpendGuardPort;
-  spend?: MediaSpendConfig;
-} = {}): { deps: MediaProcessingDeps; fake: PersistenceFake } {
+function makeDeps(
+  opts: {
+    storageSeed?: Record<string, Buffer>;
+    duration?: number;
+    rows?: MediaFileRow[];
+    moderation?: MockModerationProvider;
+    transcribe?: MockTranscribePort;
+    storage?: MockStoragePort;
+    transcode?: MockTranscodePort;
+    maxDurationSeconds?: number;
+    failPersistence?: boolean;
+    spendGuard?: MediaSpendGuardPort;
+    spend?: MediaSpendConfig;
+  } = {},
+): { deps: MediaProcessingDeps; fake: PersistenceFake } {
   const fake: PersistenceFake = {
     rows: new Map((opts.rows ?? []).map((r) => [r.uploadId!, r])),
     jobs: [],
@@ -154,6 +155,7 @@ function makeDeps(opts: {
         contentHash: string;
         originalKey: string;
         stagingVersionId: string;
+        hasAudio?: boolean;
       },
     ): Promise<void> {
       fake.cleaned.push({ mediaId, ...content });
@@ -343,6 +345,8 @@ describe("processObjectKey — tenant-from-row + key mismatch", () => {
         contentHash: createHashHex(cleaned),
         originalKey: expectedCas,
         stagingVersionId: stagingVersion,
+        // Persisted with the pin so a reuse knows whether an AUDIO job is due.
+        hasAudio: true,
       },
     ]);
   });
@@ -365,7 +369,7 @@ describe("processObjectKey — tenant-from-row + key mismatch", () => {
     });
     // Insert a row whose uploadId is null but is reachable via the fake map key.
     (deps.persistence as any).findMediaByUploadId = async () =>
-      ({ id: "media1", tenantId: TENANT_A, uploadId: null } as MediaFileRow);
+      ({ id: "media1", tenantId: TENANT_A, uploadId: null }) as MediaFileRow;
 
     const out = await processObjectKey(key(TENANT_A, UPLOAD_1), deps);
 
@@ -405,9 +409,7 @@ describe("processObjectKey — duration cap", () => {
     const transcode = new MockTranscodePort({ duration: 120 });
     const pendingK = key(TENANT_A, UPLOAD_1);
     const storage = new MockStoragePort({ [pendingK]: Buffer.from("raw") });
-    vi.spyOn(storage, "deleteObject").mockRejectedValue(
-      new Error("AccessDenied"),
-    );
+    vi.spyOn(storage, "deleteObject").mockRejectedValue(new Error("AccessDenied"));
     const { deps, fake } = makeDeps({
       storage,
       transcode,
@@ -483,9 +485,7 @@ describe("processObjectKey — happy path", () => {
     const expectedCas = casKey(TENANT_A, createHashHex(cleaned));
     if (isCasKeyError(expectedCas)) throw new Error("expected valid cas key");
     expect(moderation.startVideoModeration).toBeDefined();
-    expect(transcribe.startCalls).toEqual([
-      { key: stagingKey, jobName: `jobname-${stagingKey}` },
-    ]);
+    expect(transcribe.startCalls).toEqual([{ key: stagingKey, jobName: `jobname-${stagingKey}` }]);
 
     // The real content identity was PERSISTED (replacing the uploadId
     // placeholder), pinned to the staging version that was hashed (AR-SEC F3).
@@ -497,6 +497,8 @@ describe("processObjectKey — happy path", () => {
         contentHash: createHashHex(cleaned),
         originalKey: expectedCas,
         stagingVersionId: stagingVersion,
+        // Persisted with the pin so a reuse knows whether an AUDIO job is due.
+        hasAudio: true,
       },
     ]);
 
@@ -640,9 +642,7 @@ describe("processObjectKey — poison vs retryable", () => {
       transcode,
       rows: [{ id: "media1", tenantId: TENANT_A, uploadId: UPLOAD_1 }],
     });
-    vi.spyOn(deps.persistence, "markMediaForReview").mockRejectedValue(
-      new Error("DB down"),
-    );
+    vi.spyOn(deps.persistence, "markMediaForReview").mockRejectedValue(new Error("DB down"));
 
     const out = await processObjectKey(key(TENANT_A, UPLOAD_1), deps);
 
@@ -656,12 +656,14 @@ describe("processObjectKey — poison vs retryable", () => {
 describe("processObjectKey — daily AI-spend guard (AR5)", () => {
   const SPEND: MediaSpendConfig = { dailyCapUsd: 5, perMinuteRateUsd: 0.2 };
 
-  function spendDeps(opts: {
-    spendUsd?: number;
-    guard?: MockSpendGuardPort;
-    spend?: MediaSpendConfig;
-    duration?: number;
-  } = {}) {
+  function spendDeps(
+    opts: {
+      spendUsd?: number;
+      guard?: MockSpendGuardPort;
+      spend?: MediaSpendConfig;
+      duration?: number;
+    } = {},
+  ) {
     const guard = opts.guard ?? new MockSpendGuardPort({ spendUsd: opts.spendUsd ?? 0 });
     const cleaned = Buffer.from("cleaned-bytes");
     const storage = happyStorage(TENANT_A, UPLOAD_1, cleaned);
@@ -985,8 +987,7 @@ describe("processObjectKey — AR-SEC F3 staging version pinning", () => {
 });
 
 describe("processObjectKey — the poster still does not outlive the job", () => {
-  const posterKey = (tenant: string, upload: string) =>
-    `processing/${tenant}/${upload}.poster`;
+  const posterKey = (tenant: string, upload: string) => `processing/${tenant}/${upload}.poster`;
 
   it("removes the poster after a successful run", async () => {
     // The poster is a derivative of user media that nothing downstream
@@ -1007,9 +1008,7 @@ describe("processObjectKey — the poster still does not outlive the job", () =>
     const out = await processObjectKey(key(TENANT_A, UPLOAD_1), deps);
 
     expect(out.disposition).toBe("ack");
-    expect(
-      (await storage.headObject(posterKey(TENANT_A, UPLOAD_1))).exists,
-    ).toBe(false);
+    expect((await storage.headObject(posterKey(TENANT_A, UPLOAD_1))).exists).toBe(false);
   });
 
   it("removes the poster when the run fails after the transcode", async () => {
@@ -1029,9 +1028,7 @@ describe("processObjectKey — the poster still does not outlive the job", () =>
     const out = await processObjectKey(key(TENANT_A, UPLOAD_1), deps);
 
     expect(out.disposition).toBe("fail");
-    expect(
-      (await storage.headObject(posterKey(TENANT_A, UPLOAD_1))).exists,
-    ).toBe(false);
+    expect((await storage.headObject(posterKey(TENANT_A, UPLOAD_1))).exists).toBe(false);
   });
 
   it("does not let a poster-delete failure change the outcome", async () => {

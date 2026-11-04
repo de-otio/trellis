@@ -45,6 +45,9 @@ import { decidePromotion } from "../media/promote-decision.js";
 import { moderationResolvedPayload } from "../media/moderation-resolved-payload.js";
 import { promotePinned, resolvePromoteSource } from "../media/promote-staging.js";
 import type { Track } from "../media/track-verdict.js";
+import { isModerationProviderError } from "../media/moderation-provider.js";
+import type { HoldGround } from "../media/moderation-provider.js";
+import type { CompletionStore } from "./media-completion.js";
 import type { ModerationDecision } from "../media/media-lifecycle.js";
 import type { SyntheticSourceType } from "../provenance/types.js";
 import { provenanceMetric } from "../provenance/metrics.js";
@@ -127,6 +130,44 @@ export interface MediaFileRow {
    * because settling would mean writing a lifecycle computed from a guess.
    */
   readonly lifecycle?: MediaLifecycle;
+  /**
+   * The persisted PIN of the cleaned staging object, when the adapter can read
+   * it back: the S3 version the worker hashed and started moderation on.
+   * Together with {@link contentHash} it says "the transcode already succeeded
+   * and its output is pinned", so a retry reuses it rather than transcoding
+   * again and overwriting the pin a decision may already rest on.
+   *
+   * OPTIONAL. Absent (or `null`) means no pin is known and the worker behaves
+   * exactly as before: it transcodes and persists a pin.
+   */
+  readonly stagingVersionId?: string | null;
+  /**
+   * The persisted SHA-256 of the cleaned bytes. Before processing the column
+   * holds the upload-session id as a placeholder; that value is never treated
+   * as a pin. OPTIONAL, with the same absent-means-unchanged rule.
+   */
+  readonly contentHash?: string | null;
+  /**
+   * Whether the cleaned output has an audio stream, persisted with the pin so
+   * a reuse knows whether an AUDIO job is to be started. OPTIONAL: when absent
+   * the worker infers it from an existing AUDIO row, and otherwise assumes
+   * audio is present.
+   */
+  readonly hasAudio?: boolean | null;
+}
+
+/**
+ * The state of one moderation-job row, as far as the processing worker needs
+ * it to decide which tracks still have to be started.
+ */
+export interface ExistingModerationJob {
+  readonly track: Track;
+  /** `null` for a reserved placeholder: the track is recorded but not started. */
+  readonly jobId: string | null;
+  /** Replaced by a newer attempt at the same track; never live. */
+  readonly superseded?: boolean;
+  /** The track's resolved decision, or `null`/absent while unresolved. */
+  readonly decision?: ModerationDecision | null;
 }
 
 /**
@@ -216,6 +257,8 @@ export interface MediaPersistencePort {
       contentHash: string;
       originalKey: string;
       stagingVersionId: string;
+      /** Persisted with the pin so a reuse knows whether an AUDIO job is due. */
+      hasAudio?: boolean;
     },
   ): Promise<void>;
   /**
@@ -244,6 +287,31 @@ export interface MediaPersistencePort {
       readonly examined: boolean;
     },
   ): Promise<void>;
+  /**
+   * The moderation-job rows that exist for a media object, placeholders
+   * included. The worker starts only the tracks that have no LIVE row (a row
+   * with a job id that is not superseded).
+   *
+   * OPTIONAL. Absent means "no track is known to be started": the worker
+   * starts every track, as it always has.
+   */
+  listModerationJobs?(mediaId: string): Promise<ReadonlyArray<ExistingModerationJob>>;
+  /**
+   * Settle a media object to REVIEW with the ground it is held on, as a
+   * COMPARE-AND-SET: apply only if the row still holds `expectedFrom`
+   * (`update ... where lifecycle = expectedFrom`). Resolves `true` when this
+   * call made the transition, `false` when the row had already moved.
+   *
+   * No column is required: an adapter may record the ground wherever it
+   * records other review metadata, or not at all.
+   *
+   * OPTIONAL. Absent means the worker falls back to {@link markMediaForReview},
+   * which is unconditional and records no ground.
+   */
+  holdForReview?(
+    mediaId: string,
+    hold: { readonly ground: HoldGround; readonly expectedFrom: MediaLifecycle },
+  ): Promise<boolean>;
   /** Drive a media object's lifecycle to REVIEW (poison path). */
   markMediaForReview(mediaId: string): Promise<void>;
   /**
@@ -319,6 +387,12 @@ export interface MediaProcessingConfig {
    * (CLAUDE.md rule 8). Omitted ⇒ {@link DEFAULT_PROVENANCE_SNIFF_BYTES}.
    */
   readonly provenanceSniffBytes?: number;
+  /**
+   * How long (seconds) a capacity refusal asks the caller to wait before the
+   * message is tried again. Operator config with NO default: when absent, a
+   * capacity refusal is handled like any other retryable fault.
+   */
+  readonly deferDelaySeconds?: number;
 }
 
 /**
@@ -341,6 +415,13 @@ export interface MediaProcessingDeps {
   readonly moderation: MediaModerationProvider;
   readonly persistence: MediaPersistencePort;
   readonly config: MediaProcessingConfig;
+  /**
+   * The completion store's reservation seam, exposed here rather than moved:
+   * its signature stays on {@link CompletionStore}. When present, the worker
+   * reserves every track it is about to start, in ONE call, before the first
+   * provider start. OPTIONAL: absent means nothing is reserved.
+   */
+  readonly store?: Pick<CompletionStore, "reserveTracks">;
   /**
    * Daily AI-spend counter (AR5). Optional; active iff `config.spend` is also
    * set. Consulted BEFORE the transcode + paid AI jobs; incremented AFTER the
@@ -407,8 +488,9 @@ export type RecordOutcome =
 
 /**
  * What one processing attempt concluded, independent of the queue transport:
- * finished, retry now, or come back after `delaySeconds`. Typed only; the
- * orchestration still returns {@link RecordOutcome}.
+ * finished, retry now, or come back after `delaySeconds`. Returned by
+ * {@link processMediaMessage}; the queue-facing {@link processObjectKey} and
+ * {@link processRecord} map it back onto {@link RecordOutcome}.
  */
 export type ProcessingOutcome =
   | { kind: "done" }
@@ -559,6 +641,147 @@ export async function processObjectKey(
   triggeringKey: string,
   deps: MediaProcessingDeps,
 ): Promise<RecordOutcome> {
+  // The legacy shape: no age bound (a retryable fault is always a retry) and
+  // every outcome mapped back onto the record disposition it always produced.
+  return (await runObjectKey(triggeringKey, deps, LEGACY_CLOCK)).record;
+}
+
+/**
+ * Process one queue message body and report what happened independent of the
+ * queue transport: `done`, `retry` now, or `defer` for `delaySeconds`.
+ *
+ *  - A media object that is no longer UPLOADED is `done` before any work.
+ *  - A persisted cleaned version (pin) is reused, never transcoded over.
+ *  - Every track about to start is reserved in one call before the first
+ *    provider start; only tracks with no live row are started.
+ *  - A provider refusal for lack of capacity is `defer`, not an attempt, and
+ *    writes nothing as failed.
+ *  - A retryable fault is `retry` while `clock.mediaAgeSeconds` is under
+ *    `clock.maxMediaAgeSeconds`; at or past it the object is settled to REVIEW
+ *    on the `technical` ground (compare-and-set) and the message is `done`.
+ *  - A poison fault settles REVIEW on the `unprocessable` ground
+ *    (compare-and-set) and the message is `done`.
+ *
+ * A body carrying several object keys is aggregated: any `retry` wins, then
+ * the longest `defer`, else `done`. The clock is the message's own, so it
+ * applies to every key in the body.
+ */
+export async function processMediaMessage(
+  body: string,
+  deps: MediaProcessingDeps,
+  clock: ProcessingClock,
+): Promise<ProcessingOutcome> {
+  let keys: string[];
+  try {
+    keys = extractObjectKeys(body);
+  } catch (err) {
+    // A body we cannot parse is a permanent payload defect: a retry re-parses
+    // the same bytes to the same failure.
+    deps.logger.warn("Unparseable queue message body — dropping as poison", {
+      error: err,
+    });
+    return { kind: "done" };
+  }
+  let deferred: ProcessingOutcome | null = null;
+  for (const key of keys) {
+    const { outcome } = await runObjectKey(key, deps, clock);
+    if (outcome.kind === "retry") return outcome;
+    if (
+      outcome.kind === "defer" &&
+      (deferred === null ||
+        (deferred.kind === "defer" && outcome.delaySeconds > deferred.delaySeconds))
+    ) {
+      deferred = outcome;
+    }
+  }
+  return deferred ?? { kind: "done" };
+}
+
+/**
+ * The clock the legacy entry points use: the age bound can never be reached,
+ * so a retryable fault is always a retry — today's behaviour.
+ */
+const LEGACY_CLOCK: ProcessingClock = {
+  mediaAgeSeconds: 0,
+  maxMediaAgeSeconds: Number.POSITIVE_INFINITY,
+};
+
+/** What one object key concluded: the outcome, and its legacy record form. */
+interface KeyResult {
+  readonly outcome: ProcessingOutcome;
+  readonly record: RecordOutcome;
+}
+
+function doneResult(record: RecordOutcome): KeyResult {
+  return { outcome: { kind: "done" }, record };
+}
+
+/** The track set every video is moderated on. */
+const ALL_TRACKS: readonly Track[] = ["VISUAL", "AUDIO"];
+
+function isLiveJob(j: ExistingModerationJob): boolean {
+  return typeof j.jobId === "string" && j.jobId.length > 0 && j.superseded !== true;
+}
+
+/**
+ * A retryable fault. While the media is younger than the bound it is a retry;
+ * at or past the bound retrying is over, and the object is settled to REVIEW on
+ * the `technical` ground instead of being retried until the queue gives up.
+ */
+async function retryOrSettle(
+  triggeringKey: string,
+  deps: MediaProcessingDeps,
+  clock: ProcessingClock,
+  reason: string,
+): Promise<KeyResult> {
+  if (clock.mediaAgeSeconds < clock.maxMediaAgeSeconds) {
+    return {
+      outcome: { kind: "retry", reason },
+      record: { disposition: "fail", reason },
+    };
+  }
+  const held = await holdForReason(triggeringKey, deps, "technical", reason);
+  return doneResult({ disposition: "ack", reason: held });
+}
+
+/**
+ * A capacity refusal is not an attempt and not a fault: the caller comes back
+ * after the configured delay. With no delay configured there is nothing to
+ * defer BY, so it is handled like any other retryable fault.
+ *
+ * Deferring is bounded by the media's age, like every other way of waiting: at
+ * or past `maxMediaAgeSeconds` the object is settled to REVIEW on the
+ * `technical` ground instead of deferred again, so a refusal that never clears
+ * cannot keep a message circulating, whether or not a recovery sweep runs.
+ */
+async function deferOrRetry(
+  triggeringKey: string,
+  deps: MediaProcessingDeps,
+  clock: ProcessingClock,
+  reason: string,
+): Promise<KeyResult> {
+  if (clock.mediaAgeSeconds >= clock.maxMediaAgeSeconds) {
+    return retryOrSettle(triggeringKey, deps, clock, reason);
+  }
+  const delay = deps.config.deferDelaySeconds;
+  if (typeof delay === "number" && Number.isFinite(delay) && delay > 0) {
+    return {
+      outcome: { kind: "defer", delaySeconds: delay, reason },
+      record: { disposition: "fail", reason },
+    };
+  }
+  deps.logger.warn(
+    "Capacity refusal but config.deferDelaySeconds is not set — treating as a retryable fault",
+    { key: triggeringKey, reason },
+  );
+  return retryOrSettle(triggeringKey, deps, clock, reason);
+}
+
+async function runObjectKey(
+  triggeringKey: string,
+  deps: MediaProcessingDeps,
+  clock: ProcessingClock,
+): Promise<KeyResult> {
   // The poster frame the transcode emits is a DERIVATIVE of user media that
   // nothing downstream consumes: it is not hashed, not moderated, and never
   // promoted. Left behind it is an un-moderated still of an object that may
@@ -578,7 +801,7 @@ export async function processObjectKey(
       deps.logger.info("Dropping non-pending key (not our work)", {
         key: triggeringKey,
       });
-      return { disposition: "ack", reason: "non-pending-key" };
+      return doneResult({ disposition: "ack", reason: "non-pending-key" });
     }
     const { uploadId } = parsed;
 
@@ -597,6 +820,24 @@ export async function processObjectKey(
       throw new KeyTenantMismatchError();
     }
 
+    // --- 2a. Not UPLOADED any more ⇒ nothing to do. Checked before any work. ---
+    // AWAITING_UPLOAD is the one other state accepted: this event fired because
+    // the bytes landed, and step 2b drives that transition. Any other state is
+    // an object the pipeline (or a moderator) has already moved on, and a
+    // redelivery must not run it again. An adapter that does not report the
+    // lifecycle gets today's behaviour.
+    if (
+      row.lifecycle !== undefined &&
+      row.lifecycle !== "UPLOADED" &&
+      row.lifecycle !== "AWAITING_UPLOAD"
+    ) {
+      deps.logger.info("Media is no longer UPLOADED — nothing to process", {
+        mediaId: row.id,
+        lifecycle: row.lifecycle,
+      });
+      return doneResult({ disposition: "ack", reason: "not-uploaded" });
+    }
+
     // --- 2b. Bytes are confirmed present (this event fired because they ---
     // landed): drive AWAITING_UPLOAD -> UPLOADED (T14 `bytes-arrived`) before
     // any processing, so later decision events fan in from the correct state.
@@ -605,6 +846,22 @@ export async function processObjectKey(
     // and a resolved verdict is never rewound. A throw here is transient
     // (classify → retry), never poison.
     await deps.persistence.markMediaUploaded(row.id);
+
+    // --- 2c. Which tracks already have a LIVE job? Start only the others. ---
+    // A reserved placeholder (no job id) and a superseded row are not live, so
+    // that track is started again: providers are idempotent.
+    const existingJobs =
+      typeof deps.persistence.listModerationJobs === "function"
+        ? await deps.persistence.listModerationJobs(row.id)
+        : [];
+    const liveTracks = new Set(existingJobs.filter(isLiveJob).map((j) => j.track));
+    const missingTracks = ALL_TRACKS.filter((t) => !liveTracks.has(t));
+    if (missingTracks.length === 0) {
+      deps.logger.info("Every track already has a live job — nothing to start", {
+        mediaId: row.id,
+      });
+      return doneResult({ disposition: "ack", reason: "already-started" });
+    }
 
     // --- 3. Duration cap (probe BEFORE transcoding — cost + abuse guard). ---
     // T14: over-cap is a TERMINAL REJECT, not REVIEW — duration is a product
@@ -633,21 +890,22 @@ export async function processObjectKey(
         probedSeconds: probed,
         maxDurationSeconds: deps.config.maxDurationSeconds,
       });
-      return { disposition: "ack", reason: "duration-cap-rejected" };
+      return doneResult({ disposition: "ack", reason: "duration-cap-rejected" });
     }
 
     // --- 3b. Daily AI-spend guard (AR5) — gate BEFORE the transcode and the ---
-    // paid AI jobs. Every uncertainty fails CLOSED as a `fail` disposition
-    // (SQS retry → DLQ backstop), NEVER as poison: an over-cap or a counter
-    // outage says nothing about the media, so the object must not be driven
-    // to REVIEW; the message is routed to the DLQ via the redrive policy.
+    // paid AI jobs. Every uncertainty fails CLOSED, NEVER as poison: an
+    // over-cap or a counter outage says nothing about the media, so the object
+    // must not be driven to REVIEW on that account. A cap or a brake is
+    // CAPACITY (deferred, not an attempt); a counter outage or a miswired guard
+    // is a retryable fault (bounded by the media's age).
     const spendGate = resolveSpendGuard(deps);
     if (spendGate === "misconfigured") {
       deps.logger.error(
         "Spend guard misconfigured (config.spend and spendGuard must be wired together) — failing record closed",
         { key: triggeringKey },
       );
-      return { disposition: "fail", reason: "spend-guard-misconfigured" };
+      return retryOrSettle(triggeringKey, deps, clock, "spend-guard-misconfigured");
     }
     let estimatedUsd = 0;
     if (spendGate !== undefined) {
@@ -657,15 +915,15 @@ export async function processObjectKey(
         currentUsd = await spendGate.guard.getTodaySpendUsd();
       } catch (readErr) {
         // Counter unreadable ⇒ we cannot prove we are under the cap ⇒ do NOT
-        // start paid jobs (fail closed). Retry/DLQ, never poison/REVIEW.
+        // start paid jobs (fail closed). Retry, never poison/REVIEW.
         deps.logger.error(
           "Spend counter read failed — failing record closed (no AI jobs started)",
           { key: triggeringKey, error: readErr },
         );
-        return { disposition: "fail", reason: "spend-guard-unavailable" };
+        return retryOrSettle(triggeringKey, deps, clock, "spend-guard-unavailable");
       }
       if (isOverDailyCap(currentUsd, spendGate.config.dailyCapUsd)) {
-        deps.logger.warn("Daily media AI spend cap reached — short-circuiting job to retry/DLQ", {
+        deps.logger.warn("Daily media AI spend cap reached — deferring the job", {
           key: triggeringKey,
           currentUsd,
           dailyCapUsd: spendGate.config.dailyCapUsd,
@@ -676,87 +934,137 @@ export async function processObjectKey(
           // Best-effort observability signal; never changes the disposition.
           deps.logger.warn("reportCapExceeded failed (ignored)", { error: reportErr });
         }
-        return { disposition: "fail", reason: "daily-spend-cap-exceeded" };
+        return deferOrRetry(triggeringKey, deps, clock, "daily-spend-cap-exceeded");
       }
     }
 
-    // --- 3b. Art. 50 provenance: read the ORIGINAL before the transcode. ---
-    //
-    // The transcode destroys the marking. Verified empirically against ffmpeg 8.1
-    // with the production argv: an XMP `uuid` box carrying
-    // `Iptc4xmpExt:DigitalSourceType` is present in the input bytes and absent
-    // from the output. (The same audit found that `-dn` alone did NOT strip the
-    // container metadata dictionary, so GPS survived — fixed separately in
-    // ffmpeg-args.ts with `-map_metadata -1`, which is also what destroys the
-    // marking outright rather than partially.)
-    //
-    // So this is the video/audio analogue of the image path's read-then-strip:
-    // look first, keep one enum's worth, discard the rest.
-    //
-    // BOUNDED, and never able to fail the upload. Two ranged reads instead of
-    // pulling a possibly-huge original into the worker; any error at all is
-    // swallowed to UNKNOWN. Provenance is a disclosure, not a safety gate — an
-    // unreadable original must not poison a media object.
-    await recordOriginalProvenance(deps, row.id, triggeringKey);
-
-    // --- 4. Transcode-and-discard ⇒ cleaned bytes. ---
-    // The cleaned output is written to a transient staging key OUTSIDE pending/
-    // (so re-uploading the cleaned bytes can never re-trigger this worker).
+    // --- 4. The cleaned output: REUSE a persisted pin, else transcode. ---
+    // A persisted pin means a previous attempt already transcoded and pinned
+    // its output, and a decision may already rest on that exact version.
+    // Transcoding again would overwrite the staging object and can move the
+    // pin, so that a decision made on version 1 promotes version 2. The pin is
+    // therefore never replaced: the persisted version is used as it stands.
+    // (The upload-time placeholder in `contentHash` is the upload id; it is not
+    // a pin.)
     const cleanedStagingKey = `processing/${rowTenant}/${uploadId}`;
-    posterStagingKey = `processing/${rowTenant}/${uploadId}.poster`;
-    const transcodeResult = await deps.transcode.transcodeVideo({
-      inputPath: triggeringKey,
-      outputPath: cleanedStagingKey,
-      posterPath: posterStagingKey,
-      maxDurationSeconds: deps.config.maxDurationSeconds,
-    });
-    const cleanedStagingKeyOut = transcodeResult.cleanedPath;
-    // Track the poster the adapter REPORTS rather than the one we requested.
-    // The same function already trusts `cleanedPath` over the requested output
-    // path, for the same reason: an adapter may write elsewhere (an image muxer
-    // that appends an extension, say), and deleting the key we asked for would
-    // then silently miss the still that actually exists.
-    if (typeof transcodeResult.posterPath === "string" && transcodeResult.posterPath.length > 0) {
-      posterStagingKey = transcodeResult.posterPath;
-    }
+    const persistedPin =
+      typeof row.stagingVersionId === "string" &&
+      row.stagingVersionId.length > 0 &&
+      typeof row.contentHash === "string" &&
+      row.contentHash.length > 0 &&
+      row.contentHash !== uploadId
+        ? { versionId: row.stagingVersionId, contentHash: row.contentHash }
+        : null;
 
-    // --- 4b. AR-SEC F3 (TOCTOU): pin the EXACT staging object version we ---
-    // are about to hash and moderate. Everything downstream — the content
-    // hash, the started moderation jobs, and the completion worker's promote
-    // copy — references THIS version, so bytes swapped at the same key after
-    // this point can never ride an earlier approval into cas/. Requires S3
-    // bucket versioning on the media bucket; an unresolvable version fails
-    // CLOSED (poison → REVIEW), never an unpinned pipeline.
-    const cleanedHead = await deps.storage.headObject(cleanedStagingKeyOut);
-    if (!cleanedHead.exists || cleanedHead.versionId === undefined) {
-      throw new StagingVersionUnresolvableError();
-    }
-    const stagingVersionId = cleanedHead.versionId;
-    const cleanedBytes = await deps.storage.getObject(cleanedStagingKeyOut, {
-      versionId: stagingVersionId,
-    });
+    let cleanedStagingKeyOut: string;
+    let stagingVersionId: string;
+    let contentHash: string;
+    let hasAudio: boolean;
+    if (persistedPin !== null) {
+      cleanedStagingKeyOut = cleanedStagingKey;
+      stagingVersionId = persistedPin.versionId;
+      contentHash = persistedPin.contentHash;
+      hasAudio = inferHasAudio(row, existingJobs);
+      deps.logger.info("Reusing the persisted cleaned version — not transcoding again", {
+        mediaId: row.id,
+        stagingVersionId,
+      });
+    } else {
+      // --- 4a. Art. 50 provenance: read the ORIGINAL before the transcode. ---
+      //
+      // The transcode destroys the marking. Verified empirically against ffmpeg
+      // 8.1 with the production argv: an XMP `uuid` box carrying
+      // `Iptc4xmpExt:DigitalSourceType` is present in the input bytes and
+      // absent from the output. (The same audit found that `-dn` alone did NOT
+      // strip the container metadata dictionary, so GPS survived — fixed
+      // separately in ffmpeg-args.ts with `-map_metadata -1`, which is also
+      // what destroys the marking outright rather than partially.)
+      //
+      // So this is the video/audio analogue of the image path's read-then-strip:
+      // look first, keep one enum's worth, discard the rest.
+      //
+      // BOUNDED, and never able to fail the upload. Two ranged reads instead of
+      // pulling a possibly-huge original into the worker; any error at all is
+      // swallowed to UNKNOWN. Provenance is a disclosure, not a safety gate — an
+      // unreadable original must not poison a media object.
+      await recordOriginalProvenance(deps, row.id, triggeringKey);
 
-    // --- 5. Hash the CLEANED bytes ⇒ real content identity; persist it. ---
-    // We do NOT write the cleaned bytes to cas/ here: they already live at the
-    // STAGING key, and cas/ (the CDN-served prefix) must only ever hold APPROVED
-    // bytes. We persist the real hash + future serve key so the completion
-    // worker can promote staging -> cas/ on approval.
-    const contentHash = createHash("sha256").update(cleanedBytes).digest("hex");
+      // Transcode-and-discard ⇒ cleaned bytes. The cleaned output is written to
+      // a transient staging key OUTSIDE pending/ (so re-uploading the cleaned
+      // bytes can never re-trigger this worker).
+      posterStagingKey = `processing/${rowTenant}/${uploadId}.poster`;
+      const transcodeResult = await deps.transcode.transcodeVideo({
+        inputPath: triggeringKey,
+        outputPath: cleanedStagingKey,
+        posterPath: posterStagingKey,
+        maxDurationSeconds: deps.config.maxDurationSeconds,
+      });
+      cleanedStagingKeyOut = transcodeResult.cleanedPath;
+      hasAudio = transcodeResult.hasAudio;
+      // Track the poster the adapter REPORTS rather than the one we requested.
+      // The same function already trusts `cleanedPath` over the requested
+      // output path, for the same reason: an adapter may write elsewhere (an
+      // image muxer that appends an extension, say), and deleting the key we
+      // asked for would then silently miss the still that actually exists.
+      if (typeof transcodeResult.posterPath === "string" && transcodeResult.posterPath.length > 0) {
+        posterStagingKey = transcodeResult.posterPath;
+      }
+
+      // --- 4b. AR-SEC F3 (TOCTOU): pin the EXACT staging object version we ---
+      // are about to hash and moderate. Everything downstream — the content
+      // hash, the started moderation jobs, and the completion worker's promote
+      // copy — references THIS version, so bytes swapped at the same key after
+      // this point can never ride an earlier approval into cas/. Requires S3
+      // bucket versioning on the media bucket; an unresolvable version fails
+      // CLOSED (poison → REVIEW), never an unpinned pipeline.
+      const cleanedHead = await deps.storage.headObject(cleanedStagingKeyOut);
+      if (!cleanedHead.exists || cleanedHead.versionId === undefined) {
+        throw new StagingVersionUnresolvableError();
+      }
+      stagingVersionId = cleanedHead.versionId;
+      const cleanedBytes = await deps.storage.getObject(cleanedStagingKeyOut, {
+        versionId: stagingVersionId,
+      });
+
+      // --- 5. Hash the CLEANED bytes ⇒ real content identity; persist it. ---
+      // We do NOT write the cleaned bytes to cas/ here: they already live at
+      // the STAGING key, and cas/ (the CDN-served prefix) must only ever hold
+      // APPROVED bytes. We persist the real hash + future serve key so the
+      // completion worker can promote staging -> cas/ on approval.
+      contentHash = createHash("sha256").update(cleanedBytes).digest("hex");
+      const cleanedCasKeyNew = casKey(rowTenant, contentHash);
+      if (isCasKeyError(cleanedCasKeyNew)) {
+        // The hash/tenant failed the CAS allowlist — a permanent defect in our
+        // own derivation inputs (e.g. a malformed tenant that slipped the row
+        // check). Fail closed: route to review rather than serve un-addressable
+        // bytes.
+        throw new KeyTenantMismatchError();
+      }
+      // Replace the upload-time uploadId placeholder contentHash with the REAL
+      // hash and record the future serve key (cas/{tenant}/{hash}) plus the
+      // pinned staging version the completion worker's promote copy must use.
+      await deps.persistence.persistCleanedContent(row.id, {
+        contentHash,
+        originalKey: cleanedCasKeyNew,
+        stagingVersionId,
+        hasAudio,
+      });
+    }
     const cleanedCasKey = casKey(rowTenant, contentHash);
     if (isCasKeyError(cleanedCasKey)) {
-      // The hash/tenant failed the CAS allowlist — a permanent defect in our own
-      // derivation inputs (e.g. a malformed tenant that slipped the row check).
-      // Fail closed: route to review rather than serve un-addressable bytes.
+      // A persisted hash that is not a CAS-addressable value: fail closed.
       throw new KeyTenantMismatchError();
     }
-    // Replace the upload-time uploadId placeholder contentHash with the REAL
-    // hash and record the future serve key (cas/{tenant}/{hash}) plus the
-    // pinned staging version the completion worker's promote copy must use.
-    await deps.persistence.persistCleanedContent(row.id, {
-      contentHash,
-      originalKey: cleanedCasKey,
-      stagingVersionId,
-    });
+
+    // --- 5b. Reserve every track about to start, in ONE call, BEFORE the ---
+    // first provider start. A completion for one track can then tell a sibling
+    // that has not started yet from one that will never exist. The reservation
+    // names the tracks that are missing a live row, including the vacuous AUDIO
+    // track of a silent video (its row is written just below, and the VISUAL
+    // completion can arrive first).
+    if (typeof deps.store?.reserveTracks === "function") {
+      await deps.store.reserveTracks(row.id, missingTracks);
+    }
 
     // --- 6. START moderation on the CLEANED STAGING object (the exact bytes ---
     // that will be served), NOT the raw pending upload and NOT a cas/ key.
@@ -775,71 +1083,87 @@ export async function processObjectKey(
       versionId: stagingVersionId,
     };
 
-    const visual = await deps.moderation.startVideoModeration(stagingRef);
-    // A backend may resolve the whole track during `start` — core's
-    // frame-sampling adapter does exactly that. Then there is no remote job to
-    // poll and no completion notification will ever arrive, so the decision is
-    // recorded now, using the same mechanism a silent video's audio track uses.
-    await deps.persistence.createModerationJob({
-      mediaId: row.id,
-      track: "VISUAL",
-      jobId: visual.jobId,
-      // Snapshot the CURRENT operative thresholds onto the job at submission.
-      thresholdSnapshot: deps.config.thresholds,
-      priority: "interactive",
-      ...(visual.initialDecision !== undefined && {
-        initialDecision: visual.initialDecision,
-      }),
-      // The verdict's identity and its evidence. Optional on the port, so an
-      // adapter that stores none of it still satisfies the interface — but
-      // then the evidence is gone, because the frames it describes are deleted
-      // as soon as the verdict is aggregated.
-      ...(visual.modelVersion !== undefined && {
-        modelVersion: visual.modelVersion,
-      }),
-      ...(visual.policyVersion !== undefined && {
-        policyVersion: visual.policyVersion,
-      }),
-      ...(visual.labels !== undefined && { labels: visual.labels }),
-      ...(visual.detail !== undefined && { detail: visual.detail }),
-    });
+    let startedAny = false;
+    let visualDecision: ModerationDecision | undefined =
+      existingJobs.find((j) => j.track === "VISUAL" && isLiveJob(j))?.decision ?? undefined;
+    let visualJobId = "(existing)";
+    if (missingTracks.includes("VISUAL")) {
+      const visual = await deps.moderation.startVideoModeration(stagingRef);
+      startedAny = true;
+      visualJobId = visual.jobId;
+      // A backend may resolve the whole track during `start` — core's
+      // frame-sampling adapter does exactly that. Then there is no remote job
+      // to poll and no completion notification will ever arrive, so the
+      // decision is recorded now, using the same mechanism a silent video's
+      // audio track uses.
+      visualDecision = visual.initialDecision;
+      await deps.persistence.createModerationJob({
+        mediaId: row.id,
+        track: "VISUAL",
+        jobId: visual.jobId,
+        // Snapshot the CURRENT operative thresholds onto the job at submission.
+        thresholdSnapshot: deps.config.thresholds,
+        priority: "interactive",
+        ...(visual.initialDecision !== undefined && {
+          initialDecision: visual.initialDecision,
+        }),
+        // The verdict's identity and its evidence. Optional on the port, so an
+        // adapter that stores none of it still satisfies the interface — but
+        // then the evidence is gone, because the frames it describes are
+        // deleted as soon as the verdict is aggregated.
+        ...(visual.modelVersion !== undefined && {
+          modelVersion: visual.modelVersion,
+        }),
+        ...(visual.policyVersion !== undefined && {
+          policyVersion: visual.policyVersion,
+        }),
+        ...(visual.labels !== undefined && { labels: visual.labels }),
+        ...(visual.detail !== undefined && { detail: visual.detail }),
+      });
+    }
 
     // AUDIO track. A video with an audio stream is transcribed and moderated
     // over the transcript (fan-in resolves the verdict later). A video with NO
     // audio stream has nothing to transcribe: starting a transcription would
     // fail and fail the track closed to REVIEW forever. Instead we record the
-    // AUDIO track as vacuously APPROVED at creation (no audio ⇒ no audio content
-    // to be unsafe) and start no transcription. The VISUAL completion then fans
-    // in against this pre-resolved decision. Fail-closed is preserved: this is a
-    // positive verdict on a track with no content, not approval-from-doubt.
-    let audioJobId: string;
-    let audioInitialDecision: ModerationDecision | undefined;
-    if (transcodeResult.hasAudio) {
-      const audio = await deps.transcribe.startTranscription({
-        key: cleanedStagingKeyOut,
-        jobName: deps.newJobName(cleanedStagingKeyOut),
-      });
-      audioJobId = audio.jobId;
-      await deps.persistence.createModerationJob({
-        mediaId: row.id,
-        track: "AUDIO",
-        jobId: audioJobId,
-        thresholdSnapshot: deps.config.thresholds,
-      });
-    } else {
-      // Synthetic, unique job id: no provider job exists, and no completion
-      // message will ever reference it (the completion worker reads this track
-      // by mediaId+track, not by job id). Namespaced so it can never collide
-      // with a real Transcribe job name.
-      audioJobId = `noaudio:${row.id}`;
-      audioInitialDecision = "approved";
-      await deps.persistence.createModerationJob({
-        mediaId: row.id,
-        track: "AUDIO",
-        jobId: audioJobId,
-        thresholdSnapshot: deps.config.thresholds,
-        initialDecision: audioInitialDecision,
-      });
+    // AUDIO track as vacuously APPROVED at creation (no audio ⇒ no audio
+    // content to be unsafe) and start no transcription. The VISUAL completion
+    // then fans in against this pre-resolved decision. Fail-closed is
+    // preserved: this is a positive verdict on a track with no content, not
+    // approval-from-doubt.
+    let audioJobId = "(existing)";
+    let audioInitialDecision: ModerationDecision | undefined =
+      existingJobs.find((j) => j.track === "AUDIO" && isLiveJob(j))?.decision ?? undefined;
+    if (missingTracks.includes("AUDIO")) {
+      if (hasAudio) {
+        const audio = await deps.transcribe.startTranscription({
+          key: cleanedStagingKeyOut,
+          jobName: deps.newJobName(cleanedStagingKeyOut),
+        });
+        startedAny = true;
+        audioJobId = audio.jobId;
+        audioInitialDecision = undefined;
+        await deps.persistence.createModerationJob({
+          mediaId: row.id,
+          track: "AUDIO",
+          jobId: audioJobId,
+          thresholdSnapshot: deps.config.thresholds,
+        });
+      } else {
+        // Synthetic, unique job id: no provider job exists, and no completion
+        // message will ever reference it (the completion worker reads this
+        // track by mediaId+track, not by job id). Namespaced so it can never
+        // collide with a real Transcribe job name.
+        audioJobId = `noaudio:${row.id}`;
+        audioInitialDecision = "approved";
+        await deps.persistence.createModerationJob({
+          mediaId: row.id,
+          track: "AUDIO",
+          jobId: audioJobId,
+          thresholdSnapshot: deps.config.thresholds,
+          initialDecision: audioInitialDecision,
+        });
+      }
     }
 
     // --- 6b. Both tracks resolved during processing? Then settle the object ---
@@ -847,11 +1171,11 @@ export async function processObjectKey(
     // notification is coming, and an object waiting for a message that will
     // never arrive would sit un-servable and un-rejected indefinitely — the
     // exact silent-forever failure this pipeline refuses elsewhere.
-    if (visual.initialDecision !== undefined && audioInitialDecision !== undefined) {
+    if (visualDecision !== undefined && audioInitialDecision !== undefined) {
       await settleInlineResolvedTracks(deps, {
         mediaId: row.id,
         currentStatus: row.lifecycle,
-        visual: visual.initialDecision,
+        visual: visualDecision,
         audio: audioInitialDecision,
         stagingKey: cleanedStagingKeyOut,
         casKey: cleanedCasKey,
@@ -868,7 +1192,7 @@ export async function processObjectKey(
     // retry would double real spend, so we log loudly and ack; the counter may
     // UNDERCOUNT until the backend recovers. The load-bearing READ gate above
     // fails closed.
-    if (spendGate !== undefined) {
+    if (spendGate !== undefined && startedAny) {
       try {
         await spendGate.guard.recordSpendUsd(estimatedUsd);
       } catch (recordErr) {
@@ -884,15 +1208,26 @@ export async function processObjectKey(
       stagingKey: cleanedStagingKeyOut,
       stagingVersionId,
       casKey: cleanedCasKey,
-      visualJobId: visual.jobId,
+      visualJobId,
       audioJobId,
-      hasAudio: transcodeResult.hasAudio,
+      hasAudio,
+      startedTracks: missingTracks,
       estimatedSpendUsd: estimatedUsd,
     });
 
-    return { disposition: "ack", reason: "started-moderation" };
+    return doneResult({ disposition: "ack", reason: "started-moderation" });
   } catch (err) {
-    // Single classification point: poison ⇒ REVIEW + ack; retryable ⇒ fail.
+    // A provider that refused for lack of CAPACITY (a quota, an in-flight
+    // gate, a brake) has said nothing about the media or about its own health:
+    // not an attempt, not a fault, and nothing is written as failed.
+    if (isModerationProviderError(err) && err.capacity === true) {
+      deps.logger.warn("Moderation provider is at capacity — deferring", {
+        key: triggeringKey,
+        error: err,
+      });
+      return deferOrRetry(triggeringKey, deps, clock, "provider-capacity");
+    }
+    // Single classification point: poison ⇒ REVIEW + ack; retryable ⇒ retry.
     const { klass, infraFault } = classifyWorkerErrorDetailed(err);
     if (infraFault) {
       // The adapter reported that the INFRASTRUCTURE failed, not the media.
@@ -916,17 +1251,31 @@ export async function processObjectKey(
       // cannot (e.g. the failure was the row lookup itself), there is nothing to
       // mark and the ack simply drops a message that would loop forever.
       const reviewReason = await routePoisonToReview(triggeringKey, deps, err);
-      return { disposition: "ack", reason: reviewReason, poison: true };
+      return doneResult({ disposition: "ack", reason: reviewReason, poison: true });
     }
-    deps.logger.error("Retryable media-processing fault — letting SQS retry", {
+    deps.logger.error("Retryable media-processing fault", {
       key: triggeringKey,
       error: err,
     });
-    return { disposition: "fail", reason: "retryable" };
+    return retryOrSettle(triggeringKey, deps, clock, "retryable");
   } finally {
     // Runs on every exit, including the returns above.
     await deletePosterStaging(deps, posterStagingKey);
   }
+}
+
+/**
+ * Whether the cleaned output has audio, on a reuse where the transcode (the
+ * only source of the answer) is not run again: the persisted flag, else the
+ * kind of AUDIO row an earlier attempt wrote, else assume audio is present.
+ */
+function inferHasAudio(row: MediaFileRow, jobs: ReadonlyArray<ExistingModerationJob>): boolean {
+  if (typeof row.hasAudio === "boolean") return row.hasAudio;
+  const audio = jobs.find((j) => j.track === "AUDIO" && j.jobId !== null);
+  if (audio !== undefined && audio.jobId !== null) {
+    return !audio.jobId.startsWith("noaudio:");
+  }
+  return true;
 }
 
 /**
@@ -1275,23 +1624,69 @@ async function routePoisonToReview(
     key: triggeringKey,
     error: cause,
   });
+  return holdForReason(triggeringKey, deps, "unprocessable", "poison");
+}
+
+/**
+ * Settle the media behind `triggeringKey` to REVIEW on `ground`. Never throws.
+ *
+ * Where the adapter offers {@link MediaPersistencePort.holdForReview} the write
+ * is a compare-and-set from UPLOADED, so a decision that landed meanwhile is
+ * never overwritten; a lost race is a no-op. A row the adapter reports as in
+ * any other settled state is left alone. An adapter without the method (or one
+ * that does not report the lifecycle) gets the unconditional
+ * {@link MediaPersistencePort.markMediaForReview} it always had.
+ *
+ * Reason strings: `poison-*` for the `unprocessable` ground (unchanged), and
+ * `technical-*` for the `technical` ground.
+ */
+async function holdForReason(
+  triggeringKey: string,
+  deps: MediaProcessingDeps,
+  ground: HoldGround,
+  why: string,
+): Promise<string> {
+  const prefix = ground === "unprocessable" ? "poison" : "technical";
   const parsed = parsePendingKey(triggeringKey);
   if (parsed === null) {
-    return "poison-no-row";
+    return `${prefix}-no-row`;
   }
   try {
     const row = await deps.persistence.findMediaByUploadId(parsed.uploadId);
     if (row === null) {
-      return "poison-no-row";
+      return `${prefix}-no-row`;
+    }
+    if (
+      row.lifecycle !== undefined &&
+      row.lifecycle !== "UPLOADED" &&
+      row.lifecycle !== "AWAITING_UPLOAD"
+    ) {
+      return `${prefix}-already-settled`;
+    }
+    if (typeof deps.persistence.holdForReview === "function" && row.lifecycle === "UPLOADED") {
+      const applied = await deps.persistence.holdForReview(row.id, {
+        ground,
+        expectedFrom: "UPLOADED",
+      });
+      if (ground === "technical") {
+        deps.logger.warn("Retry bound reached — media settled to REVIEW", {
+          mediaId: row.id,
+          ground,
+          why,
+          applied,
+        });
+      }
+      return applied ? `${prefix}-review` : `${prefix}-already-settled`;
     }
     await deps.persistence.markMediaForReview(row.id);
-    return "poison-review";
+    return `${prefix}-review`;
   } catch (markErr) {
-    deps.logger.error("Failed to mark poison media for REVIEW (acking anyway)", {
+    deps.logger.error("Failed to mark media for REVIEW (acking anyway)", {
       key: triggeringKey,
+      ground,
       error: markErr,
     });
-    return "poison-mark-failed";
+    return `${prefix}-mark-failed`;
   }
 }
 

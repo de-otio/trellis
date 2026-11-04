@@ -868,9 +868,10 @@ export { ModerationProviderError, isModerationProviderError, ModerationJobPendin
 export type { MediaModerationProvider, MediaPin, ImageRef, S3Ref, ModerationVerdict, ModerationLabel, ModerationCallOptions, VideoModerationStart, HoldGround, } from "./lib/media/moderation-provider.js";
 export type { ReviewActor } from "./lib/media/media-review-handler.js";
 export type { UploadQuotaPort } from "./lib/media/media-ports.js";
-export type { ProcessingOutcome, ProcessingClock } from "./lib/workers/media-processing.js";
-export { validateRecoverySweepConfig } from "./lib/workers/media-recovery-sweep.js";
-export type { MediaRecoverySweepConfig, RecoveryAction, RecoveryCandidate, RecoveryTrackState, CompletionQueueTiming, } from "./lib/workers/media-recovery-sweep.js";
+export { processMediaMessage } from "./lib/workers/media-processing.js";
+export type { ProcessingOutcome, ProcessingClock, ExistingModerationJob, } from "./lib/workers/media-processing.js";
+export { validateRecoverySweepConfig, planRecovery, sweepMedia, } from "./lib/workers/media-recovery-sweep.js";
+export type { MediaRecoverySweepConfig, MediaRecoveryStore, MediaRecoverySweepDeps, MediaRecoverySweepResult, RecoveryAction, RecoveryCandidate, RecoveryTrackState, CompletionQueueTiming, } from "./lib/workers/media-recovery-sweep.js";
 export { completionEnvelopeBody, parseCompletionEnvelope, } from "./lib/media/completion-envelope.js";
 export type { ModerationCompletionEnvelope } from "./lib/media/completion-envelope.js";
 export { setTextModerationProvider } from "./lib/media/request-text-moderation.js";
@@ -6860,8 +6861,321 @@ export declare class SessionManager {
 }
 export { MIN_SECRET_LENGTH, MIN_SALT_LENGTH };
 
+// ===== lib/workers/media-completion.d.ts =====
+import { type CascadeRouteConfig, type EscalationCause } from "../media/cascade-route.js";
+import type { DeferredLaneConfig } from "../media/deferred-lane.js";
+import type { LabelPolicyExplanation } from "../media/label-policy.js";
+import type { ModerationJobPriority } from "./media-processing.js";
+import type { Track } from "../media/track-verdict.js";
+import type { TextModerationProvider } from "../media/text-moderation.js";
+import type { StoragePort, TranscribePort } from "../media/media-ports.js";
+import type { MediaModerationProvider, ModerationVerdict } from "../media/moderation-provider.js";
+import type { ModerationDecision, MediaLifecycle } from "../media/media-lifecycle.js";
+/** The persisted moderation-job row, looked up by its provider jobId. */
+export interface ModerationJobRow {
+    readonly mediaId: string;
+    readonly track: Track;
+    /**
+     * Threshold snapshot captured at submission time (opaque JSON). For a
+     * `deferred` row this is the DEFERRED lane's own policy snapshot, captured at
+     * trigger time — the escalation runs a different model under a different
+     * taxonomy, and interpreting it through the inline snapshot would floor every
+     * deferred verdict at `review` via the taxonomy pin (plan 031 §status).
+     */
+    readonly thresholdSnapshot: unknown;
+    /**
+     * Scheduling intent (plan 031). `interactive` rows re-fetch from the media
+     * provider; `deferred` rows are escalation rows and re-fetch from the
+     * {@link EscalationResultPort}.
+     */
+    readonly priority: ModerationJobPriority;
+    /**
+     * The staging version this job was submitted against. OPTIONAL: the stock
+     * store leaves it `undefined` (core keeps no such column), and an absent
+     * value skips the rule below. A store that has it — a deployment tracking
+     * provider jobs in its own table — sets it, and a completion for a row whose
+     * `pinnedVersion` differs from the media's current `stagingVersionId` is
+     * `unroutable`: the verdict is about bytes that are no longer the pinned
+     * ones.
+     */
+    readonly pinnedVersion?: string;
+    /**
+     * `true` when a later job has replaced this one. OPTIONAL, same contract as
+     * {@link pinnedVersion}: absent means "not known to be superseded". A
+     * completion for a superseded row is `unroutable`.
+     */
+    readonly superseded?: boolean;
+}
+/**
+ * The persistence seam. Every method is idempotent-friendly and total; the
+ * shell never reaches around it to a concrete client.
+ */
+export interface CompletionStore {
+    /**
+     * Attempt to claim a message for processing. Returns `true` if THIS call
+     * inserted the row (first delivery), `false` if the row already existed
+     * (duplicate — caller must ack-drop). Implemented with an INSERT ...
+     * ON CONFLICT DO NOTHING so it is atomic across concurrent deliveries.
+     */
+    claimMessage(dedupeKey: string): Promise<boolean>;
+    /** Look up the job row by its provider jobId. `null` if unknown. */
+    findJobByJobId(jobId: string): Promise<ModerationJobRow | null>;
+    /** Persist this track's resolved decision onto its job row. */
+    persistTrackDecision(jobId: string, decision: ModerationDecision): Promise<void>;
+    /**
+     * Read the sibling track's resolved decision for a media object. Returns the
+     * decision if the other track's job exists AND has resolved; otherwise the
+     * `state` distinguishes a job that exists-but-unresolved from no-such-job.
+     *
+     * MULTIPLE ROWS PER TRACK (plan 031): when a track has more than one job row
+     * — an `interactive` row plus the `deferred` escalation row it spawned — the
+     * LATEST row (by creation) is authoritative for that track's state. An
+     * escalation row is a strictly later, strictly more deliberate attempt at the
+     * same question; the interactive row it supersedes stays open (its decision
+     * null) and must not be read as "pending" once the escalation has decided.
+     */
+    readOtherTrack(mediaId: string, thisTrack: Track): Promise<OtherTrackState>;
+    /**
+     * Create (or re-find) the escalation job row for `parentJobId` (plan 031 C1).
+     * MUST be idempotent on the parent: `parent_job_id` is unique, so a retried
+     * trigger re-finds the existing row and returns ITS jobId rather than minting
+     * a second one — that stability is what keeps the derived dedupe key and the
+     * engine's idempotency key the same string across retries. Implemented with
+     * INSERT ... ON CONFLICT (parent_job_id) DO NOTHING + re-select.
+     *
+     * OPTIONAL because only deployments that wire the cascade need it; the shell
+     * throws (→ retry, visible) if a cascade is configured without it.
+     */
+    createEscalationJob?(spec: EscalationJobSpec): Promise<CreatedEscalationJob>;
+    /**
+     * Record, up front, which tracks a media object will be moderated on, so a
+     * completion for one track can tell a sibling that has not started yet from
+     * one that will never exist. MUST be idempotent: reserving the same tracks
+     * twice is a no-op.
+     *
+     * OPTIONAL so existing implementers keep compiling; no core path calls it yet.
+     */
+    reserveTracks?(mediaId: string, tracks: readonly Track[]): Promise<void>;
+    /** Read the media object's current persisted lifecycle + CAS coords. */
+    findMedia(mediaId: string): Promise<MediaCoords | null>;
+    /** Persist a new moderation status for the media object. */
+    persistMediaStatus(mediaId: string, status: MediaLifecycle): Promise<void>;
+}
+/**
+ * The sibling track's state, used to build its {@link TrackOutcome}.
+ *  - `decided`  — the other track has a resolved decision.
+ *  - `pending`  — the other track's job exists but has not resolved yet.
+ *  - `absent`   — there is no job for the other track on this media object.
+ */
+export type OtherTrackState = {
+    readonly state: "decided";
+    readonly decision: ModerationDecision;
+} | {
+    readonly state: "pending";
+} | {
+    readonly state: "absent";
+};
+/** What {@link CompletionStore.createEscalationJob} persists. */
+export interface EscalationJobSpec {
+    readonly mediaId: string;
+    readonly track: Track;
+    /** The interactive row whose uncertain verdict spawned this escalation. */
+    readonly parentJobId: string;
+    /** The DEFERRED lane's own policy snapshot (see ModerationJobRow docs). */
+    readonly thresholdSnapshot: unknown;
+}
+/** The escalation row's identity — its jobId is the dedupe-key ingredient. */
+export interface CreatedEscalationJob {
+    readonly jobId: string;
+}
+/**
+ * What the trigger receives. Structurally identical to the worker host's
+ * `EscalationInput` (apps/worker/src/moderation/escalation-run.ts) — declared
+ * here too because the dependency arrow runs worker → api, never back.
+ *
+ * `jobId` is the ESCALATION row's own jobId, never the parent's: the
+ * completion dedupe key is SHA-256(contentHash, jobId, track), and re-entering
+ * under the parent's jobId would re-derive the key the inline completion
+ * already claimed, silently discarding the escalated verdict (plan 031
+ * §status).
+ */
+export interface DeferredEscalationRequest {
+    readonly jobId: string;
+    readonly mediaId: string;
+    readonly tenantId: string;
+    readonly track: Track;
+    readonly contentHash: string;
+    readonly dedupeKey: string;
+    readonly cause: EscalationCause;
+    readonly confidence: number;
+}
+/**
+ * Where a `deferred` row's verdict is re-fetched from. The deferred lane
+ * persists its clamped decision here BEFORE publishing its completion
+ * envelope; the envelope stays an untrusted pointer, exactly like the
+ * provider-backed tracks. `null` = no result recorded (fail closed: the row's
+ * outcome is `errored`, never `approved`).
+ */
+export interface EscalationResultPort {
+    get(jobId: string): Promise<ModerationDecision | null>;
+}
+/** The cascade wiring, present only where the deferred lane is deployed. */
+export interface CompletionCascade {
+    /** Operator route config (τ). Refused-at-construction upstream. */
+    readonly config: CascadeRouteConfig;
+    /** The lane config — read here for `allowApprove` (ships false, plan 031 §7.2). */
+    readonly lane: DeferredLaneConfig;
+    /** Captured onto every escalation row it creates. */
+    readonly deferredThresholdSnapshot: unknown;
+    /**
+     * Fire the deferred workflow. MUST absorb the engine's idempotency
+     * collision and nothing else (the worker host's `triggerEscalation` does
+     * exactly this); every other failure must throw so the delivery retries.
+     */
+    readonly trigger: (req: DeferredEscalationRequest) => Promise<void>;
+}
+/**
+ * The media coordinates the shell needs to gate promotion and build keys. The
+ * store returns the RAW identity columns ({@link tenantId}, {@link uploadId},
+ * {@link contentHash}); the shell derives every storage key from them via the
+ * canonical cas-keys builders (so key construction is centralized here and the
+ * store never hand-rolls a key string). {@link contentHash} is the post-
+ * transcode SHA-256 the processing worker persisted (NOT the upload-time
+ * uploadId placeholder).
+ */
+export interface MediaCoords {
+    readonly lifecycle: MediaLifecycle;
+    /** Tenant that owns this object (cas-keys input). */
+    readonly tenantId: string;
+    /** Upload session id — addresses the raw pending + cleaned staging keys. */
+    readonly uploadId: string;
+    /** 64-char lowercase SHA-256 of the CLEANED bytes (addresses the cas/ key). */
+    readonly contentHash: string;
+    /**
+     * The S3 versionId of the cleaned STAGING object the processing worker
+     * hashed and moderated (AR-SEC F3; persisted via persistCleanedContent).
+     * The promote copy pins its source to EXACTLY this version — never "the
+     * current bytes at the staging key" (TOCTOU). `null` on legacy/unpinned
+     * rows: those can never promote from staging (fail-closed REVIEW hold);
+     * only an already-present cas/ object (a prior pinned promote) satisfies
+     * them.
+     */
+    readonly stagingVersionId: string | null;
+}
+/**
+ * Pure re-interpreter for a VISUAL verdict against the job's threshold snapshot.
+ *
+ * Injected (not implemented here) so this PUBLIC module carries NO operational
+ * thresholds. It receives the SNAPSHOT taken at submission time — never live
+ * Env — so a config edit between deliveries cannot flip a replayed verdict. Must
+ * be total and fail-closed: any uncertainty maps to `"review"`, never `"approved"`.
+ */
+export type VisualVerdictReinterpreter = (verdict: ModerationVerdict, thresholdSnapshot: unknown) => ModerationDecision;
+/** Everything the per-record processor binds to. */
+export interface CompletionDeps {
+    readonly store: CompletionStore;
+    readonly moderation: MediaModerationProvider;
+    readonly transcribe: TranscribePort;
+    readonly textModeration: TextModerationProvider;
+    readonly storage: StoragePort;
+    /** Re-interpret a visual verdict using the job's threshold snapshot. */
+    readonly reinterpretVisual: VisualVerdictReinterpreter;
+    /** Emit the anti-oracle resolved event. Best-effort; must not throw to ack. */
+    readonly emitResolved: (payload: {
+        readonly mediaId: string;
+        readonly status: "ready" | "not-ready";
+    }) => Promise<void>;
+    /** Structured logger seam (defaults to a no-op in tests). */
+    readonly log?: {
+        info?: (msg: string, data?: unknown) => void;
+        warn?: (msg: string, data?: unknown) => void;
+        error?: (msg: string, data?: unknown) => void;
+    };
+    /**
+     * Explain a visual verdict against the job's snapshot (plan 031 C1) — the
+     * explanation, not just the decision, because `routeOnConfidence` needs the
+     * GROUND (a taxonomy-pin failure must settle, never escalate). Absent ⇒ the
+     * cascade never routes and behaviour is exactly pre-cascade.
+     */
+    readonly explainVisual?: (verdict: ModerationVerdict, thresholdSnapshot: unknown) => LabelPolicyExplanation;
+    /** The deferred lane's call-site wiring. Absent ⇒ no escalation, ever. */
+    readonly cascade?: CompletionCascade;
+    /** Where `deferred` rows re-fetch their verdict from. Absent ⇒ errored. */
+    readonly escalationResults?: EscalationResultPort;
+}
+/**
+ * The outcome of processing one SQS record. `retry` is the ONLY value that
+ * causes the message to be returned to the queue (and eventually DLQ'd);
+ * everything else is an ack-drop (idempotent no-op or fail-closed terminal).
+ */
+export type RecordOutcome = {
+    readonly kind: "duplicate";
+} | {
+    readonly kind: "unroutable";
+} | {
+    readonly kind: "illegal-transition";
+} | {
+    readonly kind: "applied";
+    readonly status: MediaLifecycle;
+} | {
+    readonly kind: "retry";
+    readonly reason: string;
+} | {
+    readonly kind: "escalated";
+    readonly escalationJobId: string;
+} | {
+    readonly kind: "not-terminal";
+} | {
+    readonly kind: "awaiting-sibling";
+} | {
+    readonly kind: "lost-race";
+};
+/**
+ * Extract the provider job pointer from an untrusted completion message body.
+ *
+ * The parsing itself lives in ./media/completion-envelope.ts, which accepts the
+ * canonical `{ track, jobId }` shape any adapter can emit and keeps the
+ * historical notification shapes parsing as a fallback. This re-export is the
+ * stable name the worker (and existing deep importers) bind to.
+ *
+ * Returns the job id and the CLAIMED track, or `null` when nothing routable can
+ * be recovered. The claimed track is a hint: {@link processCompletion} checks it
+ * against the job row before acting on it.
+ *
+ * Pure & total: never throws.
+ */
+export declare function extractJobPointer(body: string): {
+    readonly jobId: string;
+    readonly track: Track;
+} | null;
+/**
+ * Re-fetch THIS track's authoritative decision from the provider, ignoring the
+ * message body entirely. Fail-closed: a non-terminal / failed / unknown result
+ * yields `"errored"`-equivalent `null` so the caller records it as an errored
+ * track outcome (never `"approved"`).
+ *
+ * VISUAL: `getVideoModeration(jobId)` returns a settled verdict; the verdict is
+ * re-interpreted against the JOB's threshold snapshot (not live Env).
+ *
+ * AUDIO: `getTranscription(jobId)` is polled; only a COMPLETED transcription is
+ * fed to `transcriptToModerationDecision` (which is itself fail-closed). Any
+ * other status (IN_PROGRESS / FAILED) yields `null` (errored — fail closed).
+ */
+export declare function refetchTrackDecision(pointer: {
+    readonly jobId: string;
+    readonly track: Track;
+}, job: ModerationJobRow, deps: CompletionDeps): Promise<ModerationDecision | null>;
+/**
+ * Process one completion message. Returns a {@link RecordOutcome}; only
+ * `kind: "retry"` should be surfaced to SQS as a batch-item failure. Throws are
+ * caught by the handler and converted to a retry.
+ */
+export declare function processCompletion(body: string, deps: CompletionDeps): Promise<RecordOutcome>;
+
 // ===== lib/workers/media-processing.d.ts =====
 import type { Track } from "../media/track-verdict.js";
+import type { HoldGround } from "../media/moderation-provider.js";
+import type { CompletionStore } from "./media-completion.js";
 import type { ModerationDecision } from "../media/media-lifecycle.js";
 import type { SyntheticSourceType } from "../provenance/types.js";
 import type { MetricsPort } from "./metrics-port.js";
@@ -6919,6 +7233,43 @@ export interface MediaFileRow {
      * because settling would mean writing a lifecycle computed from a guess.
      */
     readonly lifecycle?: MediaLifecycle;
+    /**
+     * The persisted PIN of the cleaned staging object, when the adapter can read
+     * it back: the S3 version the worker hashed and started moderation on.
+     * Together with {@link contentHash} it says "the transcode already succeeded
+     * and its output is pinned", so a retry reuses it rather than transcoding
+     * again and overwriting the pin a decision may already rest on.
+     *
+     * OPTIONAL. Absent (or `null`) means no pin is known and the worker behaves
+     * exactly as before: it transcodes and persists a pin.
+     */
+    readonly stagingVersionId?: string | null;
+    /**
+     * The persisted SHA-256 of the cleaned bytes. Before processing the column
+     * holds the upload-session id as a placeholder; that value is never treated
+     * as a pin. OPTIONAL, with the same absent-means-unchanged rule.
+     */
+    readonly contentHash?: string | null;
+    /**
+     * Whether the cleaned output has an audio stream, persisted with the pin so
+     * a reuse knows whether an AUDIO job is to be started. OPTIONAL: when absent
+     * the worker infers it from an existing AUDIO row, and otherwise assumes
+     * audio is present.
+     */
+    readonly hasAudio?: boolean | null;
+}
+/**
+ * The state of one moderation-job row, as far as the processing worker needs
+ * it to decide which tracks still have to be started.
+ */
+export interface ExistingModerationJob {
+    readonly track: Track;
+    /** `null` for a reserved placeholder: the track is recorded but not started. */
+    readonly jobId: string | null;
+    /** Replaced by a newer attempt at the same track; never live. */
+    readonly superseded?: boolean;
+    /** The track's resolved decision, or `null`/absent while unresolved. */
+    readonly decision?: ModerationDecision | null;
 }
 /**
  * A copy of the operative moderation thresholds, snapshotted at job-submission
@@ -7007,6 +7358,8 @@ export interface MediaPersistencePort {
         contentHash: string;
         originalKey: string;
         stagingVersionId: string;
+        /** Persisted with the pin so a reuse knows whether an AUDIO job is due. */
+        hasAudio?: boolean;
     }): Promise<void>;
     /**
      * Record the synthetic-content provenance read from the ORIGINAL video/audio
@@ -7031,6 +7384,31 @@ export interface MediaPersistencePort {
         readonly sourceType: SyntheticSourceType;
         readonly examined: boolean;
     }): Promise<void>;
+    /**
+     * The moderation-job rows that exist for a media object, placeholders
+     * included. The worker starts only the tracks that have no LIVE row (a row
+     * with a job id that is not superseded).
+     *
+     * OPTIONAL. Absent means "no track is known to be started": the worker
+     * starts every track, as it always has.
+     */
+    listModerationJobs?(mediaId: string): Promise<ReadonlyArray<ExistingModerationJob>>;
+    /**
+     * Settle a media object to REVIEW with the ground it is held on, as a
+     * COMPARE-AND-SET: apply only if the row still holds `expectedFrom`
+     * (`update ... where lifecycle = expectedFrom`). Resolves `true` when this
+     * call made the transition, `false` when the row had already moved.
+     *
+     * No column is required: an adapter may record the ground wherever it
+     * records other review metadata, or not at all.
+     *
+     * OPTIONAL. Absent means the worker falls back to {@link markMediaForReview},
+     * which is unconditional and records no ground.
+     */
+    holdForReview?(mediaId: string, hold: {
+        readonly ground: HoldGround;
+        readonly expectedFrom: MediaLifecycle;
+    }): Promise<boolean>;
     /** Drive a media object's lifecycle to REVIEW (poison path). */
     markMediaForReview(mediaId: string): Promise<void>;
     /**
@@ -7101,6 +7479,12 @@ export interface MediaProcessingConfig {
      * (CLAUDE.md rule 8). Omitted ⇒ {@link DEFAULT_PROVENANCE_SNIFF_BYTES}.
      */
     readonly provenanceSniffBytes?: number;
+    /**
+     * How long (seconds) a capacity refusal asks the caller to wait before the
+     * message is tried again. Operator config with NO default: when absent, a
+     * capacity refusal is handled like any other retryable fault.
+     */
+    readonly deferDelaySeconds?: number;
 }
 /**
  * Default per-end sniff budget: 256 KiB, matching the image path's JUMBF sniff
@@ -7121,6 +7505,13 @@ export interface MediaProcessingDeps {
     readonly moderation: MediaModerationProvider;
     readonly persistence: MediaPersistencePort;
     readonly config: MediaProcessingConfig;
+    /**
+     * The completion store's reservation seam, exposed here rather than moved:
+     * its signature stays on {@link CompletionStore}. When present, the worker
+     * reserves every track it is about to start, in ONE call, before the first
+     * provider start. OPTIONAL: absent means nothing is reserved.
+     */
+    readonly store?: Pick<CompletionStore, "reserveTracks">;
     /**
      * Daily AI-spend counter (AR5). Optional; active iff `config.spend` is also
      * set. Consulted BEFORE the transcode + paid AI jobs; incremented AFTER the
@@ -7186,8 +7577,9 @@ export type RecordOutcome = {
 };
 /**
  * What one processing attempt concluded, independent of the queue transport:
- * finished, retry now, or come back after `delaySeconds`. Typed only; the
- * orchestration still returns {@link RecordOutcome}.
+ * finished, retry now, or come back after `delaySeconds`. Returned by
+ * {@link processMediaMessage}; the queue-facing {@link processObjectKey} and
+ * {@link processRecord} map it back onto {@link RecordOutcome}.
  */
 export type ProcessingOutcome = {
     kind: "done";
@@ -7266,6 +7658,27 @@ export declare function extractObjectKeys(recordBody: string): string[];
  */
 export declare function processObjectKey(triggeringKey: string, deps: MediaProcessingDeps): Promise<RecordOutcome>;
 /**
+ * Process one queue message body and report what happened independent of the
+ * queue transport: `done`, `retry` now, or `defer` for `delaySeconds`.
+ *
+ *  - A media object that is no longer UPLOADED is `done` before any work.
+ *  - A persisted cleaned version (pin) is reused, never transcoded over.
+ *  - Every track about to start is reserved in one call before the first
+ *    provider start; only tracks with no live row are started.
+ *  - A provider refusal for lack of capacity is `defer`, not an attempt, and
+ *    writes nothing as failed.
+ *  - A retryable fault is `retry` while `clock.mediaAgeSeconds` is under
+ *    `clock.maxMediaAgeSeconds`; at or past it the object is settled to REVIEW
+ *    on the `technical` ground (compare-and-set) and the message is `done`.
+ *  - A poison fault settles REVIEW on the `unprocessable` ground
+ *    (compare-and-set) and the message is `done`.
+ *
+ * A body carrying several object keys is aggregated: any `retry` wins, then
+ * the longest `defer`, else `done`. The clock is the message's own, so it
+ * applies to every key in the body.
+ */
+export declare function processMediaMessage(body: string, deps: MediaProcessingDeps, clock: ProcessingClock): Promise<ProcessingOutcome>;
+/**
  * Process one SQS record (which may carry several S3 object keys). The record
  * fails (SQS retry) iff ANY of its keys produced a retryable fault; otherwise
  * it is acked. Per-key poison is acked, never failed.
@@ -7290,6 +7703,9 @@ export declare function getInjectedMediaProcessingDeps(): MediaProcessingDeps | 
 // ===== lib/workers/media-recovery-sweep.d.ts =====
 import type { MediaLifecycle, ModerationDecision } from "../media/media-lifecycle.js";
 import type { Track } from "../media/track-verdict.js";
+import type { HoldGround } from "../media/moderation-provider.js";
+import type { StoragePort } from "../media/media-ports.js";
+import type { CompletionStore } from "./media-completion.js";
 /** Operator config for the sweep. All values are seconds except `batchSize`. */
 export interface MediaRecoverySweepConfig {
     /**
@@ -7351,6 +7767,117 @@ export interface CompletionQueueTiming {
  *     integer, so a malformed value is reported rather than compared.
  */
 export declare function validateRecoverySweepConfig(c: MediaRecoverySweepConfig, queue: CompletionQueueTiming): string[];
+/**
+ * Decide, for each candidate, the one thing the sweep should do about it.
+ * Pure and total; the output keeps the input's order and holds at most one
+ * action per candidate.
+ *
+ *   - UPLOADED at or past `maxMediaAgeSeconds` ⇒ `settle-technical`. This takes
+ *     precedence over re-enqueueing: past the bound an object is settled, not
+ *     re-driven.
+ *   - UPLOADED older than `settleWindowSeconds` with a track that has no live
+ *     job row (or no track at all) ⇒ `reenqueue-processing`.
+ *   - APPROVED older than `settleWindowSeconds` whose content-addressed object
+ *     is absent (`casObjectPresent === false`) ⇒ `repair-promotion`.
+ *   - Anything else, and anything inside the settle window, ⇒ no action.
+ */
+export declare function planRecovery(input: {
+    readonly media: ReadonlyArray<RecoveryCandidate>;
+    readonly now: Date;
+    readonly config: MediaRecoverySweepConfig;
+}): RecoveryAction[];
+/**
+ * The persistence the sweep needs. Implemented by the consuming application.
+ */
+export interface MediaRecoveryStore extends Pick<CompletionStore, "findMedia"> {
+    /**
+     * Read up to `batchSize` candidates:
+     *   - UPLOADED objects created before `createdBefore`, WHATEVER their job
+     *     rows (none, placeholders only, partly started, fully started);
+     *   - APPROVED objects whose content-addressed object is absent, with
+     *     `casObjectPresent: false`. The store resolves that, since it holds the
+     *     coordinates; it must not return APPROVED objects that are fine.
+     * Per track, `hasLiveRow` is "a row with a job id that is not superseded".
+     * The read MUST be bounded by `batchSize` and ordered oldest first.
+     */
+    findRecoveryCandidates(query: {
+        readonly createdBefore: Date;
+        readonly batchSize: number;
+    }): Promise<ReadonlyArray<RecoveryCandidate>>;
+    /**
+     * Move a media object to `status` as a COMPARE-AND-SET: apply only if the
+     * row still holds `expectedFrom`. Resolves `true` when THIS call made the
+     * transition and `false` when the row had already moved. `ground` is the
+     * hold ground when `status` is REVIEW; the store may record it or not.
+     */
+    settleMedia(mediaId: string, status: MediaLifecycle, options: {
+        readonly expectedFrom: MediaLifecycle;
+        readonly ground?: HoldGround;
+    }): Promise<boolean>;
+}
+/** Everything {@link sweepMedia} binds to. */
+export interface MediaRecoverySweepDeps {
+    readonly store: MediaRecoveryStore;
+    readonly storage: StoragePort;
+    /**
+     * Put the media object's processing message back on the queue. The sweep
+     * calls this on EVERY run while the object stays stalled, so the consumer
+     * should make it idempotent per object (a deduplication id, or a check for a
+     * message already in flight); core does not track what it already re-sent.
+     */
+    readonly enqueueProcessing: (mediaId: string) => Promise<void>;
+    /**
+     * The sweep config. ABSENT means the sweeper is disabled: it logs one WARN
+     * and does nothing. There is no default, because every value is operator
+     * config.
+     */
+    readonly config?: MediaRecoverySweepConfig;
+    /** The completion queue's timing, which the config is validated against. */
+    readonly queueTiming?: CompletionQueueTiming;
+    /** Defaults to the wall clock; injected so tests control time. */
+    readonly now?: () => Date;
+    /**
+     * The anti-oracle resolved event. Best-effort, after a settlement or after a
+     * promotion repair (the completion that approved the object could not
+     * announce it).
+     */
+    readonly emitResolved?: (payload: {
+        readonly mediaId: string;
+        readonly status: "ready" | "not-ready";
+    }) => Promise<void>;
+    readonly logger: {
+        info(message: string, data?: Record<string, unknown>): void;
+        warn(message: string, data?: Record<string, unknown>): void;
+        error(message: string, data?: Record<string, unknown>): void;
+    };
+}
+/** What one sweep run did. */
+export interface MediaRecoverySweepResult {
+    /** `false` when the sweeper is disabled (no or invalid config). */
+    readonly enabled: boolean;
+    readonly examined: number;
+    readonly reenqueued: number;
+    /** Settlements THIS run made (a lost compare-and-set is not counted). */
+    readonly settled: number;
+    readonly repaired: number;
+    /** Actions that lost a race or failed; the next run sees the object again. */
+    readonly skipped: number;
+}
+/** Test helper: forget that the disabled warning was already logged. */
+export declare function __resetMediaRecoverySweepWarnings(): void;
+/**
+ * One recovery sweep.
+ *
+ * Reads a bounded batch of candidates, plans, and executes. No claim or dedupe
+ * row is taken: every lifecycle write is a compare-and-set, so two sweepers
+ * running at once produce one transition and the loser stands down. Re-enqueue
+ * is safe to repeat because processing starts only tracks without a live row.
+ *
+ * `settle-technical` runs the normal fan-in over the tracks as read: an
+ * undecided track counts as review, and a quarantined track still wins.
+ * `repair-promotion` calls the existing pinned promotion.
+ */
+export declare function sweepMedia(deps: MediaRecoverySweepDeps): Promise<MediaRecoverySweepResult>;
 
 // ===== lib/workers/metrics-port.d.ts =====
 /**
