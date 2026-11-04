@@ -113,19 +113,19 @@ describe("explainFromLabels — the ground a decision rests on", () => {
       drivingConfidence: 0.95,
     },
     {
-      name: "an unmapped category is unmapped-category, not over-quarantine-bar",
+      name: "an unmapped category is taxonomy-drift, not over-quarantine-bar",
       verdict: verdict({ labels: [{ category: UNMAPPED, confidence: 0.1 }] }),
-      decision: "quarantine",
-      ground: "unmapped-category",
+      decision: "review",
+      ground: "taxonomy-drift",
       drivingConfidence: null,
     },
     {
-      name: "a label with no usable name is also unmapped-category",
+      name: "a label with no usable name is also taxonomy-drift",
       verdict: verdict({
         labels: [{ confidence: 0.1 } as unknown as { category: string; confidence: number }],
       }),
-      decision: "quarantine",
-      ground: "unmapped-category",
+      decision: "review",
+      ground: "taxonomy-drift",
       drivingConfidence: null,
     },
     {
@@ -291,11 +291,17 @@ function referenceDecide(
       label !== null && typeof label === "object" && typeof label.category === "string"
         ? label.category
         : null;
-    if (category === null) return "quarantine";
+    if (category === null) {
+      decision = worse(decision, "review");
+      continue;
+    }
     const policy = Object.prototype.hasOwnProperty.call(cfg.categories, category)
       ? cfg.categories[category]
       : undefined;
-    if (policy === undefined) return "quarantine";
+    if (policy === undefined) {
+      decision = worse(decision, "review");
+      continue;
+    }
     const confidence =
       typeof label.confidence === "number" && Number.isFinite(label.confidence)
         ? label.confidence

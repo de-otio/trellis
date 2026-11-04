@@ -116,6 +116,19 @@ export interface CompletionStore {
    */
   claimMessage(dedupeKey: string): Promise<boolean>;
 
+  /**
+   * Give back a claim made by {@link claimMessage}, so a redelivery is treated
+   * as a first delivery rather than ack-dropped as a duplicate.
+   *
+   * OPTIONAL. Called only when the authoritative re-fetch THROWS (after the
+   * claim, before anything is persisted) and just before the throw propagates
+   * to retry. Without it, a retryable provider fault would burn the claim and
+   * the retry would be dropped as a duplicate, leaving the media pending for
+   * good. A store whose claim and work share a transaction does not need it.
+   * Best-effort: a failure here is logged and the original error still wins.
+   */
+  releaseClaim?(dedupeKey: string): Promise<void>;
+
   /** Look up the job row by its provider jobId. `null` if unknown. */
   findJobByJobId(jobId: string): Promise<ModerationJobRow | null>;
 
@@ -411,8 +424,15 @@ export async function refetchTrackDecision(
     // Non-terminal or failed transcription — fail closed (errored).
     return null;
   }
-  const transcript = res.transcript ?? "";
-  const decision = await transcriptToModerationDecision(transcript, deps.textModeration);
+  // A COMPLETED transcription with no transcript field is a malformed response,
+  // not silence: the moderation core approves an empty string as `no-speech`,
+  // so a missing field must not be coerced into one. Errored, fail closed.
+  if (typeof res.transcript !== "string") return null;
+  const transcript = res.transcript;
+  const decision = await transcriptToModerationDecision(
+    transcript,
+    deps.textModeration,
+  );
   return normalizeDecision(decision);
 }
 
@@ -607,8 +627,27 @@ export async function processCompletion(
   // 3. RE-FETCH authoritative state for THIS track (body verdict ignored).
   //    Skipped when 1c already obtained it (deferred row / routed-to-settle):
   //    re-fetching twice would double the provider read for no new evidence.
-  const thisDecision =
-    preDecision !== undefined ? preDecision : await refetchTrackDecision(pointer, job, deps);
+  let thisDecision: ModerationDecision | null;
+  if (preDecision !== undefined) {
+    thisDecision = preDecision;
+  } else {
+    try {
+      thisDecision = await refetchTrackDecision(pointer, job, deps);
+    } catch (err) {
+      // The re-fetch threw (e.g. a retryable text-provider fault). Nothing has
+      // been persisted, so hand the claim back before propagating — otherwise
+      // the redelivery would be ack-dropped as a duplicate.
+      try {
+        await deps.store.releaseClaim?.(dedupeKey);
+      } catch (releaseErr) {
+        deps.log?.warn?.("completion: could not release claim after re-fetch failure", {
+          jobId: pointer.jobId,
+          error: releaseErr instanceof Error ? releaseErr.message : String(releaseErr),
+        });
+      }
+      throw err;
+    }
+  }
 
   // Persist this track's decision (the side effect we just earned the right to
   // perform). An errored re-fetch persists nothing on the row (decision stays

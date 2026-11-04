@@ -17,9 +17,10 @@ import type {
   MediaLifecycle,
 } from "../../../src/lib/media/media-lifecycle.js";
 import type { Track } from "../../../src/lib/media/track-verdict.js";
-import type {
-  MediaModerationProvider,
-  ModerationVerdict,
+import {
+  ModerationProviderError,
+  type MediaModerationProvider,
+  type ModerationVerdict,
 } from "../../../src/lib/media/moderation-provider.js";
 import type {
   StoragePort,
@@ -58,7 +59,7 @@ interface StoreState {
   calls: string[];
 }
 
-function makeStore(state: StoreState): CompletionStore {
+function makeStore(state: StoreState, withRelease = false): CompletionStore {
   return {
     async claimMessage(dedupeKey) {
       state.calls.push("claimMessage");
@@ -79,6 +80,14 @@ function makeStore(state: StoreState): CompletionStore {
     async findMedia(mediaId) {
       return state.media.get(mediaId)?.coords ?? null;
     },
+    ...(withRelease
+      ? {
+          async releaseClaim(dedupeKey: string) {
+            state.calls.push("releaseClaim");
+            state.claimed.delete(dedupeKey);
+          },
+        }
+      : {}),
     async persistMediaStatus(mediaId, status) {
       state.calls.push("persistMediaStatus");
       const m = state.media.get(mediaId);
@@ -151,6 +160,10 @@ function harness(opts: {
   // audio path
   transcription?: { status: TranscriptionStatus; transcript?: string };
   textVerdict?: ModerationDecision;
+  /** Replaces the text provider (e.g. one that throws). */
+  textProvider?: TextModerationProvider;
+  /** Give the store a `releaseClaim`. */
+  withReleaseClaim?: boolean;
   // sibling
   other?: OtherTrackState;
 }): Harness {
@@ -218,12 +231,13 @@ function harness(opts: {
   };
 
   const deps: CompletionDeps = {
-    store: makeStore(state),
+    store: makeStore(state, opts.withReleaseClaim === true),
     moderation: new FakeModeration(verdict(opts.videoVerdict ?? "review")),
     transcribe: new FakeTranscribe(
       opts.transcription ?? { status: "COMPLETED", transcript: "" },
     ),
-    textModeration: new FakeText(verdict(opts.textVerdict ?? "review")),
+    textModeration:
+      opts.textProvider ?? new FakeText(verdict(opts.textVerdict ?? "review")),
     storage,
     reinterpretVisual: (v, snapshot) => {
       reinterpretArgs.push({ verdict: v, snapshot });
@@ -396,6 +410,78 @@ describe("processCompletion — re-fetch authoritative (body verdict ignored)", 
     expect(out.kind).toBe("applied");
     expect((out as { status: MediaLifecycle }).status).toBe("REVIEW");
     expect(h.emitted).toEqual([{ mediaId: "media-1", status: "not-ready" }]);
+  });
+});
+
+describe("processCompletion — AUDIO transcript lane", () => {
+  const transient = {
+    async moderateText(): Promise<ModerationVerdict> {
+      throw new ModerationProviderError("throttled", { retryable: true });
+    },
+  };
+
+  it("a retryable text-provider fault propagates, so the delivery is retried", async () => {
+    const h = harness({
+      jobId: "tr-1",
+      track: "AUDIO",
+      transcription: { status: "COMPLETED", transcript: "hello there" },
+      textProvider: transient,
+      withReleaseClaim: true,
+    });
+    await expect(processCompletion(ebBody("tr-1"), h.deps)).rejects.toThrow("throttled");
+    // Nothing was decided or persisted for the media.
+    expect(h.state.calls).not.toContain("persistTrackDecision");
+    expect(h.state.calls).not.toContain("persistMediaStatus");
+  });
+
+  it("releases the claim on that fault, so the retry is not ack-dropped as a duplicate", async () => {
+    const h = harness({
+      jobId: "tr-1",
+      track: "AUDIO",
+      transcription: { status: "COMPLETED", transcript: "hello there" },
+      textProvider: transient,
+      withReleaseClaim: true,
+    });
+    await expect(processCompletion(ebBody("tr-1"), h.deps)).rejects.toThrow();
+    expect(h.state.claimed.size).toBe(0);
+
+    // Redelivery with a healthy provider now processes instead of "duplicate".
+    h.deps.textModeration = new FakeText(verdict("approved"));
+    const again = await processCompletion(ebBody("tr-1"), h.deps);
+    expect(again.kind).not.toBe("duplicate");
+  });
+
+  it("still propagates the fault when the store has no releaseClaim", async () => {
+    const h = harness({
+      jobId: "tr-1",
+      track: "AUDIO",
+      transcription: { status: "COMPLETED", transcript: "hello there" },
+      textProvider: transient,
+    });
+    await expect(processCompletion(ebBody("tr-1"), h.deps)).rejects.toThrow("throttled");
+  });
+
+  it("a silent track (empty transcript) counts as approved on the audio side", async () => {
+    const h = harness({
+      jobId: "tr-1",
+      track: "AUDIO",
+      transcription: { status: "COMPLETED", transcript: "  " },
+      textVerdict: "quarantine", // would quarantine if it were consulted
+      other: { state: "decided", decision: "approved" },
+    });
+    const out = await processCompletion(ebBody("tr-1"), h.deps);
+    expect((out as { status: MediaLifecycle }).status).toBe("APPROVED");
+  });
+
+  it("a COMPLETED transcription with NO transcript field is errored, not silence", async () => {
+    const h = harness({
+      jobId: "tr-1",
+      track: "AUDIO",
+      transcription: { status: "COMPLETED" },
+      other: { state: "decided", decision: "approved" },
+    });
+    const out = await processCompletion(ebBody("tr-1"), h.deps);
+    expect((out as { status: MediaLifecycle }).status).toBe("REVIEW");
   });
 });
 

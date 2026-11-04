@@ -199,9 +199,10 @@ describe("createCascadeRoute — over real verdicts", () => {
     expect(r).toEqual({ kind: "settle", decision: "review", reason: "confident" });
   });
 
-  it("settles an unmapped category as the quarantine it already is", () => {
+  it("settles an unmapped category as a review — taxonomy drift is never escalated", () => {
     const r = route.route(verdict({ labels: [{ category: UNMAPPED, confidence: 0.1 }] }));
-    expect(r).toEqual({ kind: "settle", decision: "quarantine", reason: "decided" });
+    expect(r.kind).toBe("settle");
+    expect(r).toMatchObject({ decision: "review" });
   });
 
   it("THE PIN TRAP: a slow model's verdict under a config pin never escalates", () => {

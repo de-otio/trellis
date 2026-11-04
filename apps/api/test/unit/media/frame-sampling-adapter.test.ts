@@ -480,9 +480,9 @@ describe("FrameSamplingVideoModerationAdapter — the operator's policy governs 
 
   const CATEGORIES = { category_a: { review: 0.5, quarantine: 0.9 } };
 
-  it("quarantines a video whose frames carry a category the operator never mapped", async () => {
-    // Without this, the policy's strongest rule would hold for a still and not
-    // for the same content inside a clip.
+  it("holds for review a video whose frames carry a category the operator never mapped", async () => {
+    // Without this, the policy's unmapped-category rule would hold for a still
+    // and not for the same content inside a clip.
     const { adapter, images } = withPolicy(
       createLabelPolicy({
         categories: CATEGORIES,
@@ -497,7 +497,7 @@ describe("FrameSamplingVideoModerationAdapter — the operator's policy governs 
     });
 
     expect((await adapter.startVideoModeration(REF)).initialDecision).toBe(
-      "quarantine",
+      "review",
     );
   });
 

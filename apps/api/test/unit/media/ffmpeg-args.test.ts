@@ -676,6 +676,8 @@ describe("buildFrameSamplingArgs", () => {
     expect(buildFrameSamplingArgs(spec)).toEqual([
       "-protocol_whitelist",
       "file,pipe",
+      "-format_whitelist",
+      "mov,mp4,m4a,3gp,matroska,webm",
       "-t",
       "60",
       "-i",
@@ -691,6 +693,93 @@ describe("buildFrameSamplingArgs", () => {
       "10",
       "-y",
       "/tmp/frames/frame-%04d.jpg",
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Input whitelists: every builder carries both, the codec list only on request
+// ---------------------------------------------------------------------------
+
+describe("input whitelists on every builder", () => {
+  const FORMATS = "mov,mp4,m4a,3gp,matroska,webm";
+  const job = (kind: "video" | "audio"): FfmpegJobSpec => ({
+    kind,
+    inputPath: "/tmp/in.mp4",
+    outputPath: "/tmp/out.mp4",
+    posterPath: "/tmp/poster.jpg",
+    maxDurationSeconds: 60,
+  });
+  const sampling = {
+    inputPath: "/tmp/in.mp4",
+    outputPattern: "/tmp/frames/frame-%04d.jpg",
+    framesPerSecond: 1,
+    maxFrames: 10,
+    maxDurationSeconds: 60,
+  };
+
+  const builders: Array<[string, (codecs?: readonly string[]) => string[]]> = [
+    ["buildFfmpegArgs (video)", (c) => buildFfmpegArgs({ ...job("video"), codecWhitelist: c })],
+    ["buildFfmpegArgs (audio)", (c) => buildFfmpegArgs({ ...job("audio"), codecWhitelist: c })],
+    [
+      "buildPosterArgs",
+      (c) => buildPosterArgs({ ...job("video"), posterPath: "/tmp/poster.jpg", codecWhitelist: c }),
+    ],
+    ["buildFrameSamplingArgs", (c) => buildFrameSamplingArgs({ ...sampling, codecWhitelist: c })],
+  ];
+
+  const valueOf = (args: string[], flag: string) => {
+    const i = args.indexOf(flag);
+    return i === -1 ? undefined : args[i + 1];
+  };
+
+  for (const [name, build] of builders) {
+    it(`${name}: carries the protocol and format whitelists before -i`, () => {
+      const args = build();
+      expect(valueOf(args, "-protocol_whitelist")).toBe("file,pipe");
+      expect(valueOf(args, "-format_whitelist")).toBe(FORMATS);
+      // They are INPUT options: ffmpeg ignores them after the input.
+      expect(args.indexOf("-protocol_whitelist")).toBeLessThan(args.indexOf("-i"));
+      expect(args.indexOf("-format_whitelist")).toBeLessThan(args.indexOf("-i"));
+    });
+
+    it(`${name}: no codec whitelist unless the caller supplies one`, () => {
+      expect(build()).not.toContain("-codec_whitelist");
+    });
+
+    it(`${name}: passes a caller-supplied codec whitelist, before -i`, () => {
+      const args = build(["codec_a", "codec_b"]);
+      expect(valueOf(args, "-codec_whitelist")).toBe("codec_a,codec_b");
+      expect(args.indexOf("-codec_whitelist")).toBeLessThan(args.indexOf("-i"));
+    });
+
+    it(`${name}: refuses an empty or malformed codec list instead of dropping it`, () => {
+      expect(() => build([])).toThrow(TypeError);
+      expect(() => build(["codec_a,codec_b"])).toThrow(TypeError);
+      expect(() => build(["codec a"])).toThrow(TypeError);
+    });
+  }
+
+  it("the recorded argv for the transcode is stable", () => {
+    expect(buildFfmpegArgs({ ...job("audio"), codecWhitelist: ["codec_a"] })).toEqual([
+      "-protocol_whitelist",
+      "file,pipe",
+      "-format_whitelist",
+      FORMATS,
+      "-codec_whitelist",
+      "codec_a",
+      "-t",
+      "60",
+      "-i",
+      "/tmp/in.mp4",
+      "-dn",
+      "-sn",
+      "-map_metadata",
+      "-1",
+      "-c:a",
+      "aac",
+      "-y",
+      "/tmp/out.mp4",
     ]);
   });
 });

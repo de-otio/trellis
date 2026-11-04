@@ -38,19 +38,42 @@ Passed to `createLabelPolicy()` when the operator installs a label policy.
 | Field | Values | Meaning |
 |---|---|---|
 | `pinMode` | `"response"` | The provider must report a `modelVersion` on every verdict, and for an async video job it must still match the version the job started under. |
-| | `"config"` | The reported version must equal `expectedModelVersion`. |
+| | `"config"` | The reported version must be one of `expectedModelVersion`. |
 | | `"none"` | No taxonomy pin. Requires `acceptUnpinnedTaxonomy: true` and raises a standing `unpinnedTaxonomy` flag on the ops surface. |
-| `expectedModelVersion` | string | Required when `pinMode` is `"config"`; construction throws otherwise. |
+| `expectedModelVersion` | string, or a set / array of strings | Required and non-empty when `pinMode` is `"config"`; construction throws otherwise. A reported version matching **any** member is accepted — use a set for a rollout window in which two versions are both known-good. |
+| `onUnacceptedVersion` | `"hold"` (default) | A reported version outside the accepted set floors the result at `review` (ground `taxonomy-pin-failed`). |
+| | `"warn"` | Decide normally from the labels and set `versionWarning: true` on the result of `policy.explain()`. Only valid with `pinMode: "config"`. See below. |
 | `acceptUnpinnedTaxonomy` | `true` | Required when `pinMode` is `"none"`. Running unpinned is a decision, not a default. |
 
 Under a pinned mode, a verdict whose version is missing or different is
 **unverifiable** and floors the result at `review`. It never lifts a
 quarantine.
 
+With `onUnacceptedVersion: "warn"`, a version that is *present but not
+accepted* no longer floors the result; the labels decide, and the explanation
+carries `versionWarning: true` so the caller can log or count it. The warning
+is a field on the result rather than a logger so the policy stays pure — and
+`policy.decide()` returns only the decision, so read `policy.explain()` if you
+use `"warn"`. Three things still hold regardless:
+
+- A verdict that reports **no** version always holds.
+- An **empty label array** from an unaccepted version holds: silence from a
+  provider whose taxonomy is not the pinned one is not evidence.
+- An **unmapped label** holds (below).
+
+### Unmapped labels
+
+A label whose category the policy has no rule for is treated as **taxonomy
+drift**: the result is `review` with ground `taxonomy-drift`, whatever the
+version and in every pin mode. It never approves and never lowers a stronger
+signal — a mapped label at its quarantine bar, or a provider `quarantine`,
+still quarantines. The `taxonomy-drift` ground is not escalated to the deferred
+lane: re-classifying does not repair a map that no longer matches the provider.
+
 `createLabelPolicy` throws `LabelPolicyConfigError` rather than constructing a
 policy nobody configured. An *empty* category map is permitted and is not the
 same as a missing one — it is a coherent policy meaning "every category the
-provider can report is unmapped, therefore quarantine".
+provider can report is unmapped, therefore review".
 
 ## Frame sampling (video via an image-only classifier)
 

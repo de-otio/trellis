@@ -207,6 +207,47 @@ absent track still degrades the object to `REVIEW`. Before this handling, a
 no-audio video would start a transcription that failed, fault the AUDIO track,
 and pin the object in `REVIEW` permanently.
 
+### The audio track: transcripts, silence and provider faults
+
+The audio track classifies the transcript through the injected text-moderation
+seam:
+
+- An **empty or whitespace-only transcript** is silence: `approved` with the
+  reason `no-speech`, and the seam is not called. `moderateTranscript()` returns
+  the reason so a caller can record that the approval rests on silence; the thin
+  `transcriptToModerationDecision()` wrapper returns the decision alone. A
+  transcription that completes **without a transcript at all** is not silence —
+  the completion worker treats it as an errored track.
+- A seam error marked `retryable` or `infraFault` is **re-thrown**, not turned
+  into `review`: the infrastructure failed, not the media. The completion worker
+  releases its dedupe claim (when the store provides `releaseClaim`) and lets
+  the throw propagate, so the delivery is retried rather than ack-dropped.
+- Any other seam error, and any malformed verdict, is `review`.
+
+### The `CompletionStore` contract
+
+`CompletionStore` is the persistence seam of the completion worker. Beyond the
+idempotent `claimMessage`, its load-bearing rule is about which job row counts:
+
+- A track may have several job rows for one media object — an `interactive` row
+  and the `deferred` escalation row it spawned. **The latest live row per media
+  and track is authoritative.** `readOtherTrack` reads that row; superseded rows
+  are ignored, and a superseded row that never resolved must not be read as
+  "pending".
+- `claimMessage` is atomic; `createEscalationJob` is idempotent on the parent
+  job; `releaseClaim` (optional) gives back a claim when the re-fetch throws
+  before anything was persisted.
+
+### Designed to be replaced by a durable workflow engine
+
+The completion ordering (claim, re-fetch, persist, fan-in, promote), the sweeper
+that recovers stuck objects, and the automated reviewer are an in-process
+implementation of a durable workflow. They are written against narrow ports —
+`CompletionStore`, the provider seams, the escalation trigger — so a deployment
+can replace them with a durable workflow engine that provides the same
+guarantees (exactly-once effects per delivery, latest-row-wins, fail closed on
+doubt) without changing the decision core.
+
 ## Injected capability seams
 
 The moderation core binds no cloud SDK. It ships the *interfaces* plus a

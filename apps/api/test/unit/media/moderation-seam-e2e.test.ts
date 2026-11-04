@@ -332,7 +332,7 @@ describe("moderation seam end-to-end — the deadline path", () => {
 });
 
 describe("moderation seam end-to-end — an operator policy overrides the provider", () => {
-  it("quarantines on an unmapped category even when the provider approved", async () => {
+  it("holds for review on an unmapped category even when the provider approved", async () => {
     const policy = createLabelPolicy({
       categories: THRESHOLDS,
       pinMode: "config",
@@ -348,7 +348,7 @@ describe("moderation seam end-to-end — an operator policy overrides the provid
       modelVersion: "mock-taxonomy-1",
     };
 
-    expect(policy.decide(providerVerdict)).toBe("quarantine");
+    expect(policy.decide(providerVerdict)).toBe("review");
   });
 
   it("reviews when the taxonomy the map was written for has moved", async () => {
