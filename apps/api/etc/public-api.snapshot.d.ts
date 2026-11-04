@@ -887,6 +887,13 @@ export type { StatementDelivery } from "./lib/compliance/statement-of-reasons.js
 export { ILLEGAL_SUSPECTED_LABEL, deriveBlockClass, isAppealable, } from "./lib/compliance/block-class.js";
 export { createPendingAuthorityReport, markAuthorityReportSubmitted, markAuthorityReportClosed, } from "./lib/compliance/authority-report.js";
 export type { AgentSurfaceContent } from "./lib/routes/agent-surface.js";
+export { processRecord as processMediaMessage } from "./lib/workers/media-processing.js";
+export type { MediaProcessingDeps, MediaProcessingConfig, MediaPersistencePort, MediaFileRow, MediaWorkerLogger, QueueRecordLike, RecordOutcome as MediaProcessingRecordOutcome, } from "./lib/workers/media-processing.js";
+export { processCompletion as handleMediaCompletion } from "./lib/workers/media-completion.js";
+export type { CompletionDeps, CompletionStore, CompletionCascade, EscalationResultPort, RecordOutcome as MediaCompletionRecordOutcome, } from "./lib/workers/media-completion.js";
+export type { StoragePort, TranscodePort, TranscribePort } from "./lib/media/media-ports.js";
+export type { MediaSpendGuardPort } from "./lib/media/spend-guard.js";
+export type { MetricsPort } from "./lib/workers/metrics-port.js";
 
 // ===== lib/at-rest-secret.d.ts =====
 /**
@@ -6859,6 +6866,301 @@ export declare class SessionManager {
     }): Promise<void>;
 }
 export { MIN_SECRET_LENGTH, MIN_SALT_LENGTH };
+
+// ===== lib/workers/media-completion.d.ts =====
+import { type CascadeRouteConfig, type EscalationCause } from "../media/cascade-route.js";
+import type { DeferredLaneConfig } from "../media/deferred-lane.js";
+import type { LabelPolicyExplanation } from "../media/label-policy.js";
+import type { ModerationJobPriority } from "./media-processing.js";
+import type { Track } from "../media/track-verdict.js";
+import type { TextModerationProvider } from "../media/text-moderation.js";
+import type { StoragePort, TranscribePort } from "../media/media-ports.js";
+import type { MediaModerationProvider, ModerationVerdict } from "../media/moderation-provider.js";
+import type { ModerationDecision, MediaLifecycle } from "../media/media-lifecycle.js";
+/** The persisted moderation-job row, looked up by its provider jobId. */
+export interface ModerationJobRow {
+    readonly mediaId: string;
+    readonly track: Track;
+    /**
+     * Threshold snapshot captured at submission time (opaque JSON). For a
+     * `deferred` row this is the DEFERRED lane's own policy snapshot, captured at
+     * trigger time — the escalation runs a different model under a different
+     * taxonomy, and interpreting it through the inline snapshot would floor every
+     * deferred verdict at `review` via the taxonomy pin (plan 031 §status).
+     */
+    readonly thresholdSnapshot: unknown;
+    /**
+     * Scheduling intent (plan 031). `interactive` rows re-fetch from the media
+     * provider; `deferred` rows are escalation rows and re-fetch from the
+     * {@link EscalationResultPort}.
+     */
+    readonly priority: ModerationJobPriority;
+}
+/**
+ * The persistence seam. Every method is idempotent-friendly and total; the
+ * shell never reaches around it to a concrete client.
+ */
+export interface CompletionStore {
+    /**
+     * Attempt to claim a message for processing. Returns `true` if THIS call
+     * inserted the row (first delivery), `false` if the row already existed
+     * (duplicate — caller must ack-drop). Implemented with an INSERT ...
+     * ON CONFLICT DO NOTHING so it is atomic across concurrent deliveries.
+     */
+    claimMessage(dedupeKey: string): Promise<boolean>;
+    /** Look up the job row by its provider jobId. `null` if unknown. */
+    findJobByJobId(jobId: string): Promise<ModerationJobRow | null>;
+    /** Persist this track's resolved decision onto its job row. */
+    persistTrackDecision(jobId: string, decision: ModerationDecision): Promise<void>;
+    /**
+     * Read the sibling track's resolved decision for a media object. Returns the
+     * decision if the other track's job exists AND has resolved; otherwise the
+     * `state` distinguishes a job that exists-but-unresolved from no-such-job.
+     *
+     * MULTIPLE ROWS PER TRACK (plan 031): when a track has more than one job row
+     * — an `interactive` row plus the `deferred` escalation row it spawned — the
+     * LATEST row (by creation) is authoritative for that track's state. An
+     * escalation row is a strictly later, strictly more deliberate attempt at the
+     * same question; the interactive row it supersedes stays open (its decision
+     * null) and must not be read as "pending" once the escalation has decided.
+     */
+    readOtherTrack(mediaId: string, thisTrack: Track): Promise<OtherTrackState>;
+    /**
+     * Create (or re-find) the escalation job row for `parentJobId` (plan 031 C1).
+     * MUST be idempotent on the parent: `parent_job_id` is unique, so a retried
+     * trigger re-finds the existing row and returns ITS jobId rather than minting
+     * a second one — that stability is what keeps the derived dedupe key and the
+     * engine's idempotency key the same string across retries. Implemented with
+     * INSERT ... ON CONFLICT (parent_job_id) DO NOTHING + re-select.
+     *
+     * OPTIONAL because only deployments that wire the cascade need it; the shell
+     * throws (→ retry, visible) if a cascade is configured without it.
+     */
+    createEscalationJob?(spec: EscalationJobSpec): Promise<CreatedEscalationJob>;
+    /**
+     * Record, up front, which tracks a media object will be moderated on, so a
+     * completion for one track can tell a sibling that has not started yet from
+     * one that will never exist. MUST be idempotent: reserving the same tracks
+     * twice is a no-op.
+     *
+     * OPTIONAL so existing implementers keep compiling; no core path calls it yet.
+     */
+    reserveTracks?(mediaId: string, tracks: readonly Track[]): Promise<void>;
+    /** Read the media object's current persisted lifecycle + CAS coords. */
+    findMedia(mediaId: string): Promise<MediaCoords | null>;
+    /** Persist a new moderation status for the media object. */
+    persistMediaStatus(mediaId: string, status: MediaLifecycle): Promise<void>;
+}
+/**
+ * The sibling track's state, used to build its {@link TrackOutcome}.
+ *  - `decided`  — the other track has a resolved decision.
+ *  - `pending`  — the other track's job exists but has not resolved yet.
+ *  - `absent`   — there is no job for the other track on this media object.
+ */
+export type OtherTrackState = {
+    readonly state: "decided";
+    readonly decision: ModerationDecision;
+} | {
+    readonly state: "pending";
+} | {
+    readonly state: "absent";
+};
+/** What {@link CompletionStore.createEscalationJob} persists. */
+export interface EscalationJobSpec {
+    readonly mediaId: string;
+    readonly track: Track;
+    /** The interactive row whose uncertain verdict spawned this escalation. */
+    readonly parentJobId: string;
+    /** The DEFERRED lane's own policy snapshot (see ModerationJobRow docs). */
+    readonly thresholdSnapshot: unknown;
+}
+/** The escalation row's identity — its jobId is the dedupe-key ingredient. */
+export interface CreatedEscalationJob {
+    readonly jobId: string;
+}
+/**
+ * What the trigger receives. Structurally identical to the worker host's
+ * `EscalationInput` (apps/worker/src/moderation/escalation-run.ts) — declared
+ * here too because the dependency arrow runs worker → api, never back.
+ *
+ * `jobId` is the ESCALATION row's own jobId, never the parent's: the
+ * completion dedupe key is SHA-256(contentHash, jobId, track), and re-entering
+ * under the parent's jobId would re-derive the key the inline completion
+ * already claimed, silently discarding the escalated verdict (plan 031
+ * §status).
+ */
+export interface DeferredEscalationRequest {
+    readonly jobId: string;
+    readonly mediaId: string;
+    readonly tenantId: string;
+    readonly track: Track;
+    readonly contentHash: string;
+    readonly dedupeKey: string;
+    readonly cause: EscalationCause;
+    readonly confidence: number;
+}
+/**
+ * Where a `deferred` row's verdict is re-fetched from. The deferred lane
+ * persists its clamped decision here BEFORE publishing its completion
+ * envelope; the envelope stays an untrusted pointer, exactly like the
+ * provider-backed tracks. `null` = no result recorded (fail closed: the row's
+ * outcome is `errored`, never `approved`).
+ */
+export interface EscalationResultPort {
+    get(jobId: string): Promise<ModerationDecision | null>;
+}
+/** The cascade wiring, present only where the deferred lane is deployed. */
+export interface CompletionCascade {
+    /** Operator route config (τ). Refused-at-construction upstream. */
+    readonly config: CascadeRouteConfig;
+    /** The lane config — read here for `allowApprove` (ships false, plan 031 §7.2). */
+    readonly lane: DeferredLaneConfig;
+    /** Captured onto every escalation row it creates. */
+    readonly deferredThresholdSnapshot: unknown;
+    /**
+     * Fire the deferred workflow. MUST absorb the engine's idempotency
+     * collision and nothing else (the worker host's `triggerEscalation` does
+     * exactly this); every other failure must throw so the delivery retries.
+     */
+    readonly trigger: (req: DeferredEscalationRequest) => Promise<void>;
+}
+/**
+ * The media coordinates the shell needs to gate promotion and build keys. The
+ * store returns the RAW identity columns ({@link tenantId}, {@link uploadId},
+ * {@link contentHash}); the shell derives every storage key from them via the
+ * canonical cas-keys builders (so key construction is centralized here and the
+ * store never hand-rolls a key string). {@link contentHash} is the post-
+ * transcode SHA-256 the processing worker persisted (NOT the upload-time
+ * uploadId placeholder).
+ */
+export interface MediaCoords {
+    readonly lifecycle: MediaLifecycle;
+    /** Tenant that owns this object (cas-keys input). */
+    readonly tenantId: string;
+    /** Upload session id — addresses the raw pending + cleaned staging keys. */
+    readonly uploadId: string;
+    /** 64-char lowercase SHA-256 of the CLEANED bytes (addresses the cas/ key). */
+    readonly contentHash: string;
+    /**
+     * The S3 versionId of the cleaned STAGING object the processing worker
+     * hashed and moderated (AR-SEC F3; persisted via persistCleanedContent).
+     * The promote copy pins its source to EXACTLY this version — never "the
+     * current bytes at the staging key" (TOCTOU). `null` on legacy/unpinned
+     * rows: those can never promote from staging (fail-closed REVIEW hold);
+     * only an already-present cas/ object (a prior pinned promote) satisfies
+     * them.
+     */
+    readonly stagingVersionId: string | null;
+}
+/**
+ * Pure re-interpreter for a VISUAL verdict against the job's threshold snapshot.
+ *
+ * Injected (not implemented here) so this PUBLIC module carries NO operational
+ * thresholds. It receives the SNAPSHOT taken at submission time — never live
+ * Env — so a config edit between deliveries cannot flip a replayed verdict. Must
+ * be total and fail-closed: any uncertainty maps to `"review"`, never `"approved"`.
+ */
+export type VisualVerdictReinterpreter = (verdict: ModerationVerdict, thresholdSnapshot: unknown) => ModerationDecision;
+/** Everything the per-record processor binds to. */
+export interface CompletionDeps {
+    readonly store: CompletionStore;
+    readonly moderation: MediaModerationProvider;
+    readonly transcribe: TranscribePort;
+    readonly textModeration: TextModerationProvider;
+    readonly storage: StoragePort;
+    /** Re-interpret a visual verdict using the job's threshold snapshot. */
+    readonly reinterpretVisual: VisualVerdictReinterpreter;
+    /** Emit the anti-oracle resolved event. Best-effort; must not throw to ack. */
+    readonly emitResolved: (payload: {
+        readonly mediaId: string;
+        readonly status: "ready" | "not-ready";
+    }) => Promise<void>;
+    /** Structured logger seam (defaults to a no-op in tests). */
+    readonly log?: {
+        info?: (msg: string, data?: unknown) => void;
+        warn?: (msg: string, data?: unknown) => void;
+        error?: (msg: string, data?: unknown) => void;
+    };
+    /**
+     * Explain a visual verdict against the job's snapshot (plan 031 C1) — the
+     * explanation, not just the decision, because `routeOnConfidence` needs the
+     * GROUND (a taxonomy-pin failure must settle, never escalate). Absent ⇒ the
+     * cascade never routes and behaviour is exactly pre-cascade.
+     */
+    readonly explainVisual?: (verdict: ModerationVerdict, thresholdSnapshot: unknown) => LabelPolicyExplanation;
+    /** The deferred lane's call-site wiring. Absent ⇒ no escalation, ever. */
+    readonly cascade?: CompletionCascade;
+    /** Where `deferred` rows re-fetch their verdict from. Absent ⇒ errored. */
+    readonly escalationResults?: EscalationResultPort;
+}
+/**
+ * The outcome of processing one SQS record. `retry` is the ONLY value that
+ * causes the message to be returned to the queue (and eventually DLQ'd);
+ * everything else is an ack-drop (idempotent no-op or fail-closed terminal).
+ */
+export type RecordOutcome = {
+    readonly kind: "duplicate";
+} | {
+    readonly kind: "unroutable";
+} | {
+    readonly kind: "illegal-transition";
+} | {
+    readonly kind: "applied";
+    readonly status: MediaLifecycle;
+} | {
+    readonly kind: "retry";
+    readonly reason: string;
+} | {
+    readonly kind: "escalated";
+    readonly escalationJobId: string;
+} | {
+    readonly kind: "not-terminal";
+} | {
+    readonly kind: "awaiting-sibling";
+} | {
+    readonly kind: "lost-race";
+};
+/**
+ * Extract the provider job pointer from an untrusted completion message body.
+ *
+ * The parsing itself lives in ./media/completion-envelope.ts, which accepts the
+ * canonical `{ track, jobId }` shape any adapter can emit and keeps the
+ * historical notification shapes parsing as a fallback. This re-export is the
+ * stable name the worker (and existing deep importers) bind to.
+ *
+ * Returns the job id and the CLAIMED track, or `null` when nothing routable can
+ * be recovered. The claimed track is a hint: {@link processCompletion} checks it
+ * against the job row before acting on it.
+ *
+ * Pure & total: never throws.
+ */
+export declare function extractJobPointer(body: string): {
+    readonly jobId: string;
+    readonly track: Track;
+} | null;
+/**
+ * Re-fetch THIS track's authoritative decision from the provider, ignoring the
+ * message body entirely. Fail-closed: a non-terminal / failed / unknown result
+ * yields `"errored"`-equivalent `null` so the caller records it as an errored
+ * track outcome (never `"approved"`).
+ *
+ * VISUAL: `getVideoModeration(jobId)` returns a settled verdict; the verdict is
+ * re-interpreted against the JOB's threshold snapshot (not live Env).
+ *
+ * AUDIO: `getTranscription(jobId)` is polled; only a COMPLETED transcription is
+ * fed to `transcriptToModerationDecision` (which is itself fail-closed). Any
+ * other status (IN_PROGRESS / FAILED) yields `null` (errored — fail closed).
+ */
+export declare function refetchTrackDecision(pointer: {
+    readonly jobId: string;
+    readonly track: Track;
+}, job: ModerationJobRow, deps: CompletionDeps): Promise<ModerationDecision | null>;
+/**
+ * Process one completion message. Returns a {@link RecordOutcome}; only
+ * `kind: "retry"` should be surfaced to SQS as a batch-item failure. Throws are
+ * caught by the handler and converted to a retry.
+ */
+export declare function processCompletion(body: string, deps: CompletionDeps): Promise<RecordOutcome>;
 
 // ===== lib/workers/media-processing.d.ts =====
 import type { Track } from "../media/track-verdict.js";

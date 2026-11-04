@@ -43,6 +43,9 @@ import { isRunDirectly } from "./run-directly.js";
 import { pollersLive, pollerStaleMs, startHealthServer } from "./health.js";
 import { closeDefaultResources, installShutdownHandlers } from "./shutdown.js";
 import { startHatchetHost } from "./hatchet.js";
+import type { CompletionDeps } from "../../api/src/lib/workers/media-completion.js";
+import { resolveEnabledQueues } from "./queue-selection.js";
+import { getInjectedMediaProcessingDeps } from "../../api/src/lib/workers/media-processing.js";
 
 const stage = process.env.STAGE || "dev";
 
@@ -66,6 +69,28 @@ const CONCURRENCY: Record<WorkerQueueName, number> = {
 
 async function main(): Promise<void> {
   const logger = getLogger();
+
+  // Media dependencies. The stock worker wires no completion backend; the
+  // processing deps exist only if something in this process injected them.
+  // Both feed the queue selection below.
+  const completionDeps: CompletionDeps | undefined = undefined as CompletionDeps | undefined;
+  const mediaDepsWired = {
+    "media-processing": getInjectedMediaProcessingDeps() !== undefined,
+    "media-completion": completionDeps !== undefined,
+  };
+
+  // ── Queue selection (WORKER_ENABLED_QUEUES). Resolved FIRST: a configuration
+  // error must stop the process before it touches a secret, a database or a
+  // queue. main() rejects ⇒ the entrypoint exits non-zero.
+  const selection = resolveEnabledQueues({
+    raw: process.env.WORKER_ENABLED_QUEUES,
+    depsAvailable: mediaDepsWired,
+  });
+  if (selection.skippedForMissingDeps.length > 0) {
+    logger.info("queues not consumed: dependencies not wired in this process", {
+      queues: selection.skippedForMissingDeps,
+    });
+  }
 
   // ── Fail-closed startup gate (finding 2, §3.1): refuse to start without
   // the DB secret and the pseudonym tombstone HMAC key. Values are proven
@@ -148,7 +173,7 @@ async function main(): Promise<void> {
       // Completion deps are injected by the consuming deployment at startup
       // (setMediaProcessingDeps + a CompletionDeps bag). Absent ⇒ the media
       // workers fail closed (throw → no-ack), never silently drop.
-      completionDeps: undefined,
+      completionDeps,
     },
     // T11 (finding 9): the PII-schema-bearing export worker is injected from
     // the PRIVATE consuming package; un-wired ⇒ the queue fails closed.
@@ -171,13 +196,15 @@ async function main(): Promise<void> {
 
   const sqsClient = makeDefaultSqsClient();
   const pollers: QueuePoller[] = [];
+  const startedQueues: WorkerQueueName[] = [];
   for (const [name, worker] of Object.entries(table) as Array<
     [WorkerQueueName, (typeof table)[WorkerQueueName]]
   >) {
     // Skip the federation-outbox poller when federation is disabled — the queue
     // is not provisioned then, so polling it just 404-loops. (The handler's
     // off-branch drain only matters when the queue actually exists.)
-    if (name === "federation-outbox" && !federationEnabled) continue;
+    if (!selection.queues.has(name)) continue;
+    if (name === "federation-outbox" && !federationEnabled && !selection.explicit) continue;
     const poller = new QueuePoller(
       makeSqsQueueClient(sqsClient, { queueUrl: queueUrl(name) }),
       worker,
@@ -185,6 +212,7 @@ async function main(): Promise<void> {
     );
     poller.start();
     pollers.push(poller);
+    startedQueues.push(name);
   }
   // ── Cron scheduler (T7b): the six cadences; single-fire lives INSIDE the
   // cores via CronLock over WS-1's KvStore (`cron` namespace). Profile:
@@ -320,7 +348,7 @@ async function main(): Promise<void> {
   logger.info("worker runtime started", {
     stage,
     profile,
-    queues: Object.keys(table),
+    queues: startedQueues,
   });
 }
 

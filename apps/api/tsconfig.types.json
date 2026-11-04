@@ -1,0 +1,16 @@
+{
+  // Typecheck for compile-time contract tests (test/types). Kept out of the
+  // main build so test code never reaches dist/.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "incremental": false,
+    "rootDir": ".",
+    "types": ["node"]
+  },
+  "include": ["src/**/*", "test/types/**/*"],
+  "exclude": ["node_modules", "dist"]
+}

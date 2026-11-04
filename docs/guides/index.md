@@ -11,4 +11,5 @@ Step-by-step instructions for specific tasks: running migrations, using
 feature flags, keeping shipped clients compatible across API changes,
 configuring an identity provider,
 [implementing a media-moderation provider](./implementing-a-media-moderation-provider.md),
+[hosting the media workers in your own process](./hosting-media-workers.md),
 classifying and listing your organization, and operating the service.

@@ -136,18 +136,23 @@ export function buildDispatchTable(
     // W3: validated at the seam — a schema failure returns "fail" before any
     // capability is touched. The core re-validates (the AWS entrypoint reaches
     // it directly) and checks the user row authorizes the erasure.
-    "delete-account": withPayloadSchema("delete-account", DeleteAccountPayloadSchema, logger, async (payload) => {
-      const db = await input.deleteAccount.getDb();
-      await runDeleteAccount(payload, {
-        db,
-        logger,
-        clock: input.clock,
-        identity: input.deleteAccount.identity,
-        resolvePseudonymSecret: input.deleteAccount.resolvePseudonymSecret,
-        deleteStagingObjects: input.deleteAccount.deleteStagingObjects,
-      });
-      // void return ⇒ ack; a throw propagates ⇒ fail (dispatcher rule).
-    }),
+    "delete-account": withPayloadSchema(
+      "delete-account",
+      DeleteAccountPayloadSchema,
+      logger,
+      async (payload) => {
+        const db = await input.deleteAccount.getDb();
+        await runDeleteAccount(payload, {
+          db,
+          logger,
+          clock: input.clock,
+          identity: input.deleteAccount.identity,
+          resolvePseudonymSecret: input.deleteAccount.resolvePseudonymSecret,
+          deleteStagingObjects: input.deleteAccount.deleteStagingObjects,
+        });
+        // void return ⇒ ack; a throw propagates ⇒ fail (dispatcher rule).
+      },
+    ),
 
     "media-processing": async (_payload, raw) => {
       const deps = getInjectedMediaProcessingDeps();
@@ -156,10 +161,7 @@ export function buildDispatchTable(
         // must never ack-drop real uploads. Throw ⇒ fail ⇒ redeliver.
         throw new Error("media-processing: deps not injected (setMediaProcessingDeps)");
       }
-      const outcome = await processRecord(
-        { body: raw.body, messageId: raw.messageId },
-        deps,
-      );
+      const outcome = await processRecord({ body: raw.body, messageId: raw.messageId }, deps);
       if (outcome.disposition === "fail") return "fail";
       // Poison (→ REVIEW) surfaces as an EXPLICIT returned ack-drop (§3.3);
       // plain success is an ack.
@@ -182,6 +184,14 @@ export function buildDispatchTable(
         case "escalated":
           // Routed to the deferred lane (plan 031 C1): the escalation row +
           // workflow own the rest; this delivery's work is done.
+          return "ack";
+        case "not-terminal":
+        case "awaiting-sibling":
+        case "lost-race":
+          // Documented acks: progress that is not a result, a sibling track
+          // still to finish the media object, or a concurrent delivery that
+          // already moved it. Explicit so a new kind can never fall through
+          // to the dispatcher's implicit-ack.
           return "ack";
         case "duplicate":
         case "unroutable":
@@ -216,26 +226,31 @@ export function buildDispatchTable(
       // OFF-branch returns ⇒ ack (log-and-drop); ON-branch throws ⇒ fail.
     },
 
-    "user-export": withPayloadSchema("user-export", ExportJobMessageSchema, logger, async (payload) => {
-      const port = input.exportWorker;
-      if (port === undefined) {
-        // Fail closed: an un-wired export consumer must never drop a DSAR
-        // request. Throw ⇒ no-ack ⇒ redeliver ⇒ DLQ pages.
-        throw new Error("user-export: ExportWorkerPort not injected");
-      }
-      const result = await port.run(payload);
-      switch (result.kind) {
-        case "completed":
-          return "ack";
-        case "failed":
-          // Permanent — the job store carries the failure; no DLQ loop.
-          logger.warn("user-export: job failed permanently — ack-drop", {
-            reason: result.reason,
-          });
-          return "ack-drop";
-        case "retry":
-          return "fail";
-      }
-    }),
+    "user-export": withPayloadSchema(
+      "user-export",
+      ExportJobMessageSchema,
+      logger,
+      async (payload) => {
+        const port = input.exportWorker;
+        if (port === undefined) {
+          // Fail closed: an un-wired export consumer must never drop a DSAR
+          // request. Throw ⇒ no-ack ⇒ redeliver ⇒ DLQ pages.
+          throw new Error("user-export: ExportWorkerPort not injected");
+        }
+        const result = await port.run(payload);
+        switch (result.kind) {
+          case "completed":
+            return "ack";
+          case "failed":
+            // Permanent — the job store carries the failure; no DLQ loop.
+            logger.warn("user-export: job failed permanently — ack-drop", {
+              reason: result.reason,
+            });
+            return "ack-drop";
+          case "retry":
+            return "fail";
+        }
+      },
+    ),
   };
 }
