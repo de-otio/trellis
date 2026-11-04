@@ -36,9 +36,10 @@
 //      moderation runs here, so a text-provider outage is also a `retry`.
 //   3. ONE database transaction (`store.inTransaction`):
 //        a. claim the dedupe key (already claimed => `duplicate`);
-//        b. persist this track's decision;
+//        b. persist this track's decision (an errored track persists a terminal
+//           `review` marker, so its sibling can see it as decided);
 //        c. read the sibling track;
-//        d. sibling undecided and this track neither quarantined nor errored
+//        d. sibling undecided and this track not quarantined
 //           => commit and return `awaiting-sibling`;
 //        e. otherwise fan in (decidePromotion) and write the lifecycle with a
 //           COMPARE-AND-SET (`expectedFrom`); a count other than 1 means a
@@ -50,9 +51,13 @@
 //      the cas/ object), and "ready" is not announced meanwhile. Promotion
 //      NEVER precedes the commit: an uncommitted approval must not make bytes
 //      servable.
-//   A quarantine — or an errored track, which can only ever hold — settles at
-//   once rather than waiting for the sibling: nothing the sibling says can
-//   improve on it, and waiting would let a lone errored track strand the item.
+//   A quarantine settles at once rather than waiting for the sibling: it wins
+//   over everything the sibling could say. An ERRORED track does NOT settle at
+//   once: it persists its `review` marker and waits like any other decision, so
+//   a sibling that later quarantines still wins (quarantine beats review), and a
+//   sibling that approves still yields REVIEW (technical), never APPROVED. Nothing
+//   waits forever: the recovery sweeper (age bound) settles any item whose
+//   sibling never arrives.
 //   An illegal transition (transition.ok === false) is ack-dropped, never DLQ.
 //
 // THRESHOLD SNAPSHOT: when (re)interpreting the re-fetched verdict we use the
@@ -558,10 +563,10 @@ function outcomeFromOther(other: OtherTrackState): TrackOutcome {
       return { state: "absent" };
     case "pending":
     default:
-      // Reached only when this track settles at once (quarantine / errored)
-      // with the sibling unresolved; an undecided sibling is NOT approval and
-      // the combinator degrades `errored` away from approved, so fail closed.
-      // (Otherwise a pending sibling returns `awaiting-sibling` before here.)
+      // Reached only when this track quarantines with the sibling unresolved;
+      // an undecided sibling is NOT approval, so fail closed (quarantine wins
+      // in the combinator regardless). (Otherwise a pending sibling returns
+      // `awaiting-sibling` before here.)
       return { state: "errored" };
   }
 }
@@ -833,9 +838,11 @@ export async function processCompletion(
     jobId: pointer.jobId,
     track: pointer.track,
   });
-  // A quarantine, or an errored track (which can only ever hold), settles at
-  // once: nothing the sibling says can improve on it.
-  const settlesAtOnce = thisDecision === null || thisDecision === "quarantine";
+  // Only a quarantine settles at once: it wins over whatever the sibling says.
+  // An errored track (null) persists a `review` marker and waits for the
+  // sibling like any other decision, so a later sibling quarantine still wins.
+  // A sibling that never arrives is settled by the recovery sweeper's age bound.
+  const settlesAtOnce = thisDecision === "quarantine";
 
   // 3. ONE transaction: claim -> persist -> read sibling -> fan in -> CAS.
   //    Everything here commits together or not at all, so a failure after the
@@ -846,9 +853,10 @@ export async function processCompletion(
       if (!(await t.claimMessage(dedupeKey))) {
         return { done: { kind: "duplicate" } };
       }
-      if (thisDecision !== null) {
-        await t.persistTrackDecision(pointer.jobId, thisDecision);
-      }
+      // An errored track persists as a terminal `review` marker: the sibling
+      // then reads it as decided (never as pending), and fan-in can only hold
+      // or quarantine, never approve.
+      await t.persistTrackDecision(pointer.jobId, thisDecision ?? "review");
 
       const other = await t.readOtherTrack(job.mediaId, pointer.track);
       if (other.state === "pending" && !settlesAtOnce) {

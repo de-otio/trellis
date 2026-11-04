@@ -337,9 +337,11 @@ describe("processCompletion — the deferred lane's call site (plan 031 C1)", ()
 
     expect(outcome.kind).toBe("applied");
     expect(w.triggers).toHaveLength(0);
-    // errored ⇒ nothing persisted on the track, claim WAS burned (settle path).
+    // errored ⇒ a terminal `review` marker is persisted on the track (never an
+    // approval), and the claim is taken in the same transaction.
     expect(w.calls).toContain("claimMessage");
-    expect(w.calls).not.toContain("persistTrackDecision");
+    expect(w.calls).toContain("persistTrackDecision");
+    expect(w.trackDecisions.get(JOB)).toBe("review");
   });
 
   it("cascade configured without createEscalationJob throws — a wiring bug must surface", async () => {
@@ -381,13 +383,13 @@ describe("processCompletion — the deferred lane's call site (plan 031 C1)", ()
       expect(w.trackDecisions.get(JOB)).toBe("quarantine");
     });
 
-    it("a missing result is errored — persisted as nothing, never approved", async () => {
+    it("a missing result is errored — persisted as a review marker, never approved", async () => {
       const w = world({ jobPriority: "deferred", escalationResult: null });
 
       const outcome = await processCompletion(BODY, w.deps);
 
       expect(outcome.kind).toBe("applied");
-      expect(w.trackDecisions.has(JOB)).toBe(false);
+      expect(w.trackDecisions.get(JOB)).toBe("review");
     });
 
     it("a missing port is errored too — fail closed, not a crash", async () => {
@@ -396,7 +398,7 @@ describe("processCompletion — the deferred lane's call site (plan 031 C1)", ()
       const outcome = await processCompletion(BODY, w.deps);
 
       expect(outcome.kind).toBe("applied");
-      expect(w.trackDecisions.has(JOB)).toBe(false);
+      expect(w.trackDecisions.get(JOB)).toBe("review");
     });
 
     it("never consults the media provider for a deferred row", async () => {

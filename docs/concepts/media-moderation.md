@@ -117,7 +117,11 @@ track.
    is retried, in both cases with nothing claimed. One store transaction then
    claims the dedupe key, records this track's decision, reads the sibling and,
    once both tracks (or a quarantine) are in, combines them and writes the new
-   status as a compare-and-set from `UPLOADED`; a lost race promotes nothing. Only
+   status as a compare-and-set from `UPLOADED`; a lost race promotes nothing. A
+   track whose moderation errored records a terminal `review` marker and waits
+   for its sibling like any other decision, so a sibling that later quarantines
+   still wins and a sibling that approves still yields `REVIEW`; if the sibling
+   never arrives, the recovery sweep's age bound settles the item. Only
    after that commit, and only on approval, are the cleaned staging bytes
    promoted to the served `cas/{tenant}/{hash}` prefix; a promotion failure is
    left for the recovery sweep. The `cas/` prefix holds approved bytes only:

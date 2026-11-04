@@ -1025,7 +1025,10 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   track decision, read the sibling, fan in, compare-and-set the lifecycle), and
   promotes only after the commit. A re-fetch that throws is a `retry` with
   nothing claimed; a pending job is `not-terminal`; a pending sibling is
-  `awaiting-sibling` rather than being counted as errored; a lost
+  `awaiting-sibling` rather than being counted as errored; an errored track
+  persists a terminal `review` marker and waits for its sibling too, so a
+  sibling quarantine still wins (quarantine beats review) and a sibling approval
+  still yields `REVIEW`; a lost
   compare-and-set is `lost-race` and promotes nothing. A promotion failure after
   commit is logged and left for the recovery sweep.
   **Breaking for custom `CompletionStore` implementers** (the stock package ships

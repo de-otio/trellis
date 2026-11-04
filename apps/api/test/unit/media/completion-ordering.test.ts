@@ -428,6 +428,74 @@ describe("sibling fan-in", () => {
   });
 });
 
+describe("an errored track waits for its sibling", () => {
+  // The audio track errors when the transcription job FAILED; the visual
+  // sibling is still pending. The errored track must not settle REVIEW at once:
+  // a sibling that later quarantines has to win.
+  const erroredAudio = (w: World): void => {
+    w.transcript = async () => ({ status: "FAILED" });
+  };
+
+  it("errored track with a pending sibling is awaiting-sibling, not an immediate REVIEW", async () => {
+    const w = new World({ tracks: ["VISUAL", "AUDIO"] });
+    erroredAudio(w);
+
+    const a = await processCompletion(audioBody, w.deps());
+
+    expect(a).toEqual({ kind: "awaiting-sibling" });
+    expect(w.lifecycle).toBe("UPLOADED");
+    expect(w.lifecycleWrites).toEqual([]);
+    // Persisted as a terminal review marker, so the sibling reads it as decided.
+    expect(w.decisions.get(JOB_A)).toBe("review");
+    expect(w.emitted).toEqual([]);
+  });
+
+  it("the sibling then quarantines: QUARANTINED, not REVIEW", async () => {
+    const w = new World({ tracks: ["VISUAL", "AUDIO"] });
+    erroredAudio(w);
+    w.visual = async () => verdict("quarantine");
+
+    expect((await processCompletion(audioBody, w.deps())).kind).toBe("awaiting-sibling");
+    const b = await processCompletion(visualBody, w.deps());
+
+    expect(b).toEqual({ kind: "applied", status: "QUARANTINED" });
+    expect(w.lifecycle).toBe("QUARANTINED");
+    expect(w.storageCalls).not.toContain("copyObject");
+  });
+
+  it("the sibling then approves: REVIEW (technical), never APPROVED, nothing promoted", async () => {
+    const w = new World({ tracks: ["VISUAL", "AUDIO"] });
+    erroredAudio(w);
+
+    expect((await processCompletion(audioBody, w.deps())).kind).toBe("awaiting-sibling");
+    const b = await processCompletion(visualBody, w.deps());
+
+    expect(b).toEqual({ kind: "applied", status: "REVIEW" });
+    expect(w.lifecycle).toBe("REVIEW");
+    expect(w.storageCalls).not.toContain("copyObject");
+    expect(w.emitted).toEqual([{ mediaId: MEDIA, status: "not-ready" }]);
+  });
+
+  it("an errored track whose sibling is already decided settles at once (REVIEW)", async () => {
+    const w = new World({ tracks: ["VISUAL", "AUDIO"], decided: { VISUAL: "approved" } });
+    erroredAudio(w);
+
+    const a = await processCompletion(audioBody, w.deps());
+
+    expect(a).toEqual({ kind: "applied", status: "REVIEW" });
+  });
+
+  it("an errored track whose sibling already quarantined is a duplicate (the item is settled)", async () => {
+    const w = new World({ tracks: ["VISUAL", "AUDIO"] });
+    erroredAudio(w);
+    w.visual = async () => verdict("quarantine");
+
+    expect((await processCompletion(visualBody, w.deps())).kind).toBe("applied");
+    expect(await processCompletion(audioBody, w.deps())).toEqual({ kind: "duplicate" });
+    expect(w.lifecycle).toBe("QUARANTINED");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Concurrency: both tracks completing at once settle exactly once.
 // ---------------------------------------------------------------------------
