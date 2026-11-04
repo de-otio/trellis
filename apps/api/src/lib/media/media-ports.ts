@@ -227,6 +227,23 @@ export interface TranscribePort {
   }>;
 }
 
+/**
+ * Per-user upload quota, checked before an upload is accepted. A refusal
+ * carries how long the caller should wait before trying again; the limits
+ * themselves are the adapter's runtime config, never core's.
+ *
+ * `kind` has two values: `"image"` for a still image and `"video"` for every
+ * other uploaded media type. Audio-only uploads ride the same asynchronous
+ * pipeline as video and are reported as `"video"`, so an adapter that caps
+ * `"video"` caps audio too.
+ */
+export interface UploadQuotaPort {
+  check(i: {
+    userId: string;
+    kind: "image" | "video";
+  }): Promise<{ ok: true } | { ok: false; retryAfterSeconds: number }>;
+}
+
 // ===========================================================================
 // Mock implementations (test-only). Deterministic, in-memory, no outside I/O.
 // ===========================================================================
@@ -242,18 +259,6 @@ export interface TranscribePort {
  * functional core (a separate caps unit), and the mock must not silently make
  * that decision for it.
  */
-/**
- * Per-user upload quota, checked before an upload is accepted. A refusal
- * carries how long the caller should wait before trying again; the limits
- * themselves are the adapter's runtime config, never core's.
- */
-export interface UploadQuotaPort {
-  check(i: {
-    userId: string;
-    kind: "image" | "video";
-  }): Promise<{ ok: true } | { ok: false; retryAfterSeconds: number }>;
-}
-
 export class MockTranscodePort implements TranscodePort {
   private duration: number;
   private hasAudio: boolean;

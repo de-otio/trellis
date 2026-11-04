@@ -73,8 +73,12 @@ export type ModeratorDecision = "approve" | "reject";
  * identified by its own id and the model it ran.
  */
 export type ReviewActor =
-  | { kind: "human"; userId: string }
-  | { kind: "automated"; reviewerId: string; modelId: string };
+  | { readonly kind: "human"; readonly userId: string }
+  | {
+      readonly kind: "automated";
+      readonly reviewerId: string;
+      readonly modelId: string;
+    };
 
 /** The media "kind" derived from its stored mimeType (drives the client view). */
 export type MediaKind = "image" | "video" | "audio" | "other";

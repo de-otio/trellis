@@ -3313,20 +3313,14 @@ export interface TranscribePort {
     }>;
 }
 /**
- * In-memory TranscodePort. Returns programmable durations and echoes the
- * requested output/poster paths back, so the shell's path-plumbing can be
- * asserted without invoking a real encoder.
- *
- * Determinism: a single `duration` (default 0) is returned by `probe` and by
- * both transcode calls unless overridden. `transcodeVideo`/`transcodeAudio`
- * never themselves enforce `maxDurationSeconds` — duration policy lives in the
- * functional core (a separate caps unit), and the mock must not silently make
- * that decision for it.
- */
-/**
  * Per-user upload quota, checked before an upload is accepted. A refusal
  * carries how long the caller should wait before trying again; the limits
  * themselves are the adapter's runtime config, never core's.
+ *
+ * `kind` has two values: `"image"` for a still image and `"video"` for every
+ * other uploaded media type. Audio-only uploads ride the same asynchronous
+ * pipeline as video and are reported as `"video"`, so an adapter that caps
+ * `"video"` caps audio too.
  */
 export interface UploadQuotaPort {
     check(i: {
@@ -3339,6 +3333,17 @@ export interface UploadQuotaPort {
         retryAfterSeconds: number;
     }>;
 }
+/**
+ * In-memory TranscodePort. Returns programmable durations and echoes the
+ * requested output/poster paths back, so the shell's path-plumbing can be
+ * asserted without invoking a real encoder.
+ *
+ * Determinism: a single `duration` (default 0) is returned by `probe` and by
+ * both transcode calls unless overridden. `transcodeVideo`/`transcodeAudio`
+ * never themselves enforce `maxDurationSeconds` — duration policy lives in the
+ * functional core (a separate caps unit), and the mock must not silently make
+ * that decision for it.
+ */
 export declare class MockTranscodePort implements TranscodePort {
     private duration;
     private hasAudio;
@@ -3498,12 +3503,12 @@ export type ModeratorDecision = "approve" | "reject";
  * identified by its own id and the model it ran.
  */
 export type ReviewActor = {
-    kind: "human";
-    userId: string;
+    readonly kind: "human";
+    readonly userId: string;
 } | {
-    kind: "automated";
-    reviewerId: string;
-    modelId: string;
+    readonly kind: "automated";
+    readonly reviewerId: string;
+    readonly modelId: string;
 };
 /** The media "kind" derived from its stored mimeType (drives the client view). */
 export type MediaKind = "image" | "video" | "audio" | "other";

@@ -94,6 +94,14 @@ describe("createLabelPolicy — refuses to construct without a policy", () => {
     ).toThrow(LabelPolicyConfigError);
   });
 
+  it('refuses a version list under "config" mode until a follow-up accepts one (fails closed)', () => {
+    expect(() =>
+      createLabelPolicy(
+        config({ pinMode: "config", expectedModelVersion: [MOCK_VERSION] }),
+      ),
+    ).toThrow(LabelPolicyConfigError);
+  });
+
   it('throws when "none" mode was requested without the explicit opt-in', () => {
     expect(() =>
       createLabelPolicy({ categories: CATEGORIES, pinMode: "none" }),
