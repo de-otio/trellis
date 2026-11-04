@@ -198,6 +198,14 @@ For completeness, the media routes also include:
 > client simply retries the upload. Only a provider verdict, an oversize file or
 > an unsupported format puts an upload in `REVIEW`.
 
+> **Presigned upload sessions can be refused with `429`.** When the deployment
+> registers an upload quota (`setUploadQuotaPort`), `POST /api/upload-sessions`
+> with `{ mimeType, sizeBytes }` consults it before issuing the presigned POST.
+> A refusal returns `429` with a `Retry-After` header (seconds) and creates
+> nothing: no session row, no media row, no signed grant. If the quota check
+> itself fails the response is `503`. With no quota registered, behaviour is
+> unchanged.
+
 ## Response example (image details)
 
 ```json

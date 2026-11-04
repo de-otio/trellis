@@ -40,6 +40,9 @@
 
 import type { Env } from "../env.js";
 import { getLogger, Logger } from "./logger.js";
+import { describeError } from "./media/describe-error.js";
+import type { UploadQuotaPort } from "./media/media-ports.js";
+import { getUploadQuotaPort, uploadQuotaKind } from "./media/upload-quota.js";
 import {
   planPresignedUpload,
   presignByteCap,
@@ -139,6 +142,8 @@ export type CreatePresignedResult =
       status: number;
       error: string;
       message: string;
+      /** Set on a quota refusal; the route sends it as `Retry-After`. */
+      retryAfterSeconds?: number;
     };
 
 export type CompletePresignedResult =
@@ -182,10 +187,17 @@ const SESSION_TTL_HOURS = 24;
 export class PresignedUploadHandler {
   private logger: Logger;
   private presignPort: PresignPort;
+  private uploadQuota: UploadQuotaPort | undefined;
 
-  constructor(env?: Env, presignPort?: PresignPort) {
+  constructor(
+    env?: Env,
+    presignPort?: PresignPort,
+    uploadQuota?: UploadQuotaPort,
+  ) {
     this.logger = env ? getLogger() : ({} as Logger);
     this.presignPort = presignPort ?? buildS3PresignPort();
+    // Optional port: absent means no per-user quota and unchanged behaviour.
+    this.uploadQuota = uploadQuota ?? getUploadQuotaPort();
   }
 
   /**
@@ -207,6 +219,40 @@ export class PresignedUploadHandler {
     const { withQueryTimeoutAndRetry, QueryTimeoutPresets } = await import(
       "./db-query-helper.js"
     );
+
+    // --- Per-user upload quota (optional port). ---
+    // Asked HERE, where the grant is issued, and before anything is created:
+    // a refusal leaves no session row, no media row and no signed POST. Fail
+    // closed if the adapter itself throws.
+    if (this.uploadQuota) {
+      let verdict: Awaited<ReturnType<UploadQuotaPort["check"]>>;
+      try {
+        verdict = await this.uploadQuota.check({
+          userId,
+          kind: uploadQuotaKind(input.mimeType),
+        });
+      } catch (error) {
+        this.logger.error("presigned.create: upload quota check failed", {
+          userId,
+          error: describeError(error),
+        });
+        return {
+          ok: false,
+          status: 503,
+          error: "Upload unavailable",
+          message: "Could not check the upload quota. Please try again.",
+        };
+      }
+      if (!verdict.ok) {
+        return {
+          ok: false,
+          status: 429,
+          error: "Upload quota exceeded",
+          message: "Too many uploads. Try again later.",
+          retryAfterSeconds: verdict.retryAfterSeconds,
+        };
+      }
+    }
 
     // --- Tenant resolution (same seam as the proxied path). ---
     const { resolveUploadTenantId } = await import("./routes/media.js");

@@ -32,10 +32,11 @@ function jsonResponse(
   env: any,
   body: unknown,
   status: number,
+  extraHeaders: Record<string, string> = {},
 ): Promise<Response> {
   const response = securityHeaders.createSecureResponse(JSON.stringify(body), {
     status,
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...extraHeaders },
   });
   return CorsHandler.addCorsHeaders(response, request, env);
 }
@@ -147,6 +148,11 @@ const createUploadSession: Route = {
             env,
             { error: result.error, message: result.message },
             result.status,
+            typeof result.retryAfterSeconds === "number" &&
+              Number.isFinite(result.retryAfterSeconds) &&
+              result.retryAfterSeconds > 0
+              ? { "Retry-After": String(Math.ceil(result.retryAfterSeconds)) }
+              : {},
           );
         }
         return jsonResponse(securityHeaders, request, env, result, 201);
@@ -175,7 +181,9 @@ const createUploadSession: Route = {
   },
   middleware: [corsMiddleware(), csrfMiddleware()],
   description:
-    "Create an upload session (legacy optimistic, or presigned direct-to-S3 with {mimeType, sizeBytes})",
+    "Create an upload session (legacy optimistic, or presigned direct-to-S3 with {mimeType, sizeBytes}). " +
+    "A presigned request answers 429 with Retry-After (seconds) when the optional per-user upload quota refuses it; " +
+    "nothing is created in that case.",
 };
 
 /**

@@ -204,6 +204,7 @@ import {
   type PresignPort,
 } from "../../src/lib/presigned-upload-handler.js";
 import type { Env } from "../../src/env.js";
+import { setUploadQuotaPort } from "../../src/lib/media/upload-quota.js";
 
 // ---------------------------------------------------------------------------
 // Env + port fixtures
@@ -987,5 +988,96 @@ describe("WS-2 §4 media control inversion (MEDIA_ENQUEUE_ON_COMPLETE)", () => {
     expect(res.ok).toBe(false);
     if (res.ok) return;
     expect(res.status).toBe(503);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Optional per-user upload quota (UploadQuotaPort)
+// ---------------------------------------------------------------------------
+
+describe("PresignedUploadHandler.createSession — upload quota port", () => {
+  const input = { mimeType: "video/mp4", sizeBytes: 5_000_000 };
+
+  it("denies with 429 + retryAfterSeconds and creates nothing (no rows, no presign)", async () => {
+    const env = makeEnv();
+    const { port, calls } = makePort();
+    const check = vi.fn(async () => ({ ok: false as const, retryAfterSeconds: 42 }));
+    const handler = new PresignedUploadHandler(env, port, { check });
+
+    const res = await handler.createSession(USER, "US", env, input);
+
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.status).toBe(429);
+    expect(res.retryAfterSeconds).toBe(42);
+    expect(state.sessions).toHaveLength(0);
+    expect(state.media).toHaveLength(0);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("is asked with the user and a kind derived from the mime type", async () => {
+    const env = makeEnv();
+    const check = vi.fn(async () => ({ ok: true as const }));
+    const handler = new PresignedUploadHandler(env, makePort().port, { check });
+
+    await handler.createSession(USER, "US", env, input);
+    await handler.createSession(USER, "US", env, { mimeType: "Image/PNG", sizeBytes: 10 });
+    await handler.createSession(USER, "US", env, { mimeType: "audio/mpeg", sizeBytes: 10 });
+
+    expect(check.mock.calls.map((c: any[]) => c[0])).toEqual([
+      { userId: USER, kind: "video" },
+      { userId: USER, kind: "image" },
+      { userId: USER, kind: "video" },
+    ]);
+  });
+
+  it("allows → today's flow (grant issued)", async () => {
+    const env = makeEnv();
+    const { port, calls } = makePort();
+    const handler = new PresignedUploadHandler(env, port, {
+      check: async () => ({ ok: true }),
+    });
+    const res = await handler.createSession(USER, "US", env, input);
+    expect(res.ok).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(state.sessions).toHaveLength(1);
+  });
+
+  it("no port → today's flow", async () => {
+    const env = makeEnv();
+    const { port, calls } = makePort();
+    const res = await new PresignedUploadHandler(env, port).createSession(USER, "US", env, input);
+    expect(res.ok).toBe(true);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("uses the registered port when none is passed, and unregistering restores today's flow", async () => {
+    const env = makeEnv();
+    const check = vi.fn(async () => ({ ok: false as const, retryAfterSeconds: 5 }));
+    setUploadQuotaPort({ check });
+    try {
+      const denied = await new PresignedUploadHandler(env, makePort().port).createSession(USER, "US", env, input);
+      expect(denied.ok).toBe(false);
+      expect(check).toHaveBeenCalledTimes(1);
+    } finally {
+      setUploadQuotaPort(undefined);
+    }
+    const allowed = await new PresignedUploadHandler(env, makePort().port).createSession(USER, "US", env, input);
+    expect(allowed.ok).toBe(true);
+  });
+
+  it("fails closed with 503 (no retryAfter) when the port throws, creating nothing", async () => {
+    const env = makeEnv();
+    const handler = new PresignedUploadHandler(env, makePort().port, {
+      check: async () => {
+        throw new Error("down");
+      },
+    });
+    const res = await handler.createSession(USER, "US", env, input);
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.status).toBe(503);
+    expect(res.retryAfterSeconds).toBeUndefined();
+    expect(state.sessions).toHaveLength(0);
   });
 });

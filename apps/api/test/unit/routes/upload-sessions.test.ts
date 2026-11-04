@@ -772,6 +772,43 @@ describe("Upload Session Routes — presigned dispatch (T14)", () => {
     expect(body.upload.fields).toHaveProperty("x-amz-signature");
   });
 
+  it("a quota refusal maps to 429 with a Retry-After header; a refusal without one sends none", async () => {
+    const call = async () =>
+      createRoute!.handler(
+        new Request("https://example.com/api/upload-sessions", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ mimeType: "video/mp4", sizeBytes: 5000000 }),
+        }),
+        mockEnv,
+        {
+          url: new URL("https://example.com/api/upload-sessions"),
+          pathname: "/api/upload-sessions",
+          params: {},
+        },
+      );
+    mockPresignedCreate.mockResolvedValue({
+      ok: false,
+      status: 429,
+      error: "Upload quota exceeded",
+      message: "Too many uploads. Try again later.",
+      retryAfterSeconds: 42.2,
+    });
+    const limited = await call();
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("Retry-After")).toBe("43");
+
+    mockPresignedCreate.mockResolvedValue({
+      ok: false,
+      status: 503,
+      error: "Upload unavailable",
+      message: "x",
+    });
+    const unavailable = await call();
+    expect(unavailable.status).toBe(503);
+    expect(unavailable.headers.has("Retry-After")).toBe(false);
+  });
+
   it("a half-declared body (mimeType without sizeBytes) is a 400, never a silent legacy fallback", async () => {
     const request = new Request("https://example.com/api/upload-sessions", {
       method: "POST",

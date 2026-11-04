@@ -52,6 +52,7 @@ export { setMediaModerationProvider } from "./lib/media/request-moderation.js";
 // provider's own decision. Optional — without one the provider's decision
 // stands — and it can only ever degrade a verdict, never loosen it.
 export { setMediaLabelPolicy } from "./lib/media/request-moderation.js";
+export { setUploadQuotaPort } from "./lib/media/upload-quota.js";
 export {
   createLabelPolicy,
   explainFromLabels,

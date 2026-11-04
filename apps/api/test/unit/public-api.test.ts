@@ -70,6 +70,7 @@ const EXPECTED_EXPORTS = [
   "NullModerationProvider",
   "parseCompletionEnvelope",
   "setMediaLabelPolicy",
+  "setUploadQuotaPort",
   "setMediaReviewPromotion",
   "ModerationMetrics",
   "validateRecoverySweepConfig",

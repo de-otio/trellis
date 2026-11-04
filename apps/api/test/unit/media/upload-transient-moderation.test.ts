@@ -123,6 +123,10 @@ describe("/api/media/upload — transient image-check failures", () => {
       () => new ModerationProviderError("cap reached", { retryable: false, infraFault: true }),
     ],
     [
+      "capacity flag (non-retryable, capacity ceiling)",
+      () => new ModerationProviderError("ceiling", { retryable: false, capacity: true }),
+    ],
+    [
       "credential error (unattributed provider fault)",
       () => new ModerationProviderError("bad credentials", { retryable: false, unknownCause: true }),
     ],
