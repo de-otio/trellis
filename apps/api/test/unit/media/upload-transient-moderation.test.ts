@@ -71,13 +71,11 @@ vi.mock("../../../src/lib/db-query-helper", () => ({
 import { mediaRoutes } from "../../../src/lib/routes/media.js";
 import { ModerationProviderError } from "../../../src/lib/media/moderation-provider.js";
 
-const uploadRoute = mediaRoutes.find(
-  (r) => r.path === "/api/media/upload" && r.method === "POST",
-)!;
+const uploadRoute = mediaRoutes.find((r) => r.path === "/api/media/upload" && r.method === "POST")!;
 
 const JPEG = new Uint8Array([
-  0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01,
-  0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xff, 0xd9,
+  0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01,
+  0x00, 0x01, 0x00, 0x00, 0xff, 0xd9,
 ]);
 
 function makeEnv(media: Record<string, unknown> = {}) {
@@ -117,7 +115,10 @@ describe("/api/media/upload — transient image-check failures", () => {
   });
 
   const transient: Array<[string, () => unknown]> = [
-    ["retryable provider error", () => new ModerationProviderError("throttled", { retryable: true })],
+    [
+      "retryable provider error",
+      () => new ModerationProviderError("throttled", { retryable: true }),
+    ],
     [
       "capacity / spend cap (infra fault)",
       () => new ModerationProviderError("cap reached", { retryable: false, infraFault: true }),
@@ -128,14 +129,21 @@ describe("/api/media/upload — transient image-check failures", () => {
     ],
     [
       "credential error (unattributed provider fault)",
-      () => new ModerationProviderError("bad credentials", { retryable: false, unknownCause: true }),
+      () =>
+        new ModerationProviderError("bad credentials", { retryable: false, unknownCause: true }),
     ],
     [
       "deadline error",
       () => new ModerationProviderError("moderation deadline exceeded", { retryable: true }),
     ],
-    ["untyped unknown error (classifier default is retryable)", () => new Error("provider exploded")],
-    ["untyped network error", () => Object.assign(new Error("socket hang up"), { name: "FetchError" })],
+    [
+      "untyped unknown error (classifier default is retryable)",
+      () => new Error("provider exploded"),
+    ],
+    [
+      "untyped network error",
+      () => Object.assign(new Error("socket hang up"), { name: "FetchError" }),
+    ],
   ];
 
   it.each(transient)("%s → 503 + Retry-After, no row, nothing promoted", async (_n, mk) => {
@@ -183,7 +191,9 @@ describe("/api/media/upload — outcomes that still hold", () => {
   });
 
   it("a non-transient untyped failure (corrupt media) still fails closed to REVIEW", async () => {
-    moderateImageMock.mockRejectedValue(Object.assign(new Error("invalid image"), { name: "InvalidImageError" }));
+    moderateImageMock.mockRejectedValue(
+      Object.assign(new Error("invalid image"), { name: "InvalidImageError" }),
+    );
     const { res } = await run();
     expect(res.status).not.toBe(503);
     expect(upsertMock.mock.calls[0][0].create.lifecycle).toBe("REVIEW");
@@ -207,7 +217,10 @@ describe("/api/media/upload — outcomes that still hold", () => {
   });
 
   it("an unsupported format is refused before moderation and never 503", async () => {
-    const { res } = await run(makeEnv(), req(new Uint8Array([1, 2, 3]), "application/x-msdownload", "a.exe"));
+    const { res } = await run(
+      makeEnv(),
+      req(new Uint8Array([1, 2, 3]), "application/x-msdownload", "a.exe"),
+    );
     expect(res.status).not.toBe(503);
     expect(res.status).toBeGreaterThanOrEqual(400);
     expect(moderateImageMock).not.toHaveBeenCalled();

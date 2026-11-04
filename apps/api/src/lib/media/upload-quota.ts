@@ -23,8 +23,7 @@ export function getUploadQuotaPort(): UploadQuotaPort | undefined {
  * async pipeline) is `video`, because `UploadQuotaPort` has no other kind.
  */
 export function uploadQuotaKind(mimeType: string): "image" | "video" {
-  return typeof mimeType === "string" &&
-    mimeType.trim().toLowerCase().startsWith("image/")
+  return typeof mimeType === "string" && mimeType.trim().toLowerCase().startsWith("image/")
     ? "image"
     : "video";
 }

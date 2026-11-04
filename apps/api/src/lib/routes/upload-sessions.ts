@@ -58,19 +58,9 @@ const createUploadSession: Route = {
 
     try {
       // Authenticate user
-      const session = await sessionManager.getSession(
-        request,
-        env.SESSION_SECRET,
-        env,
-      );
+      const session = await sessionManager.getSession(request, env.SESSION_SECRET, env);
       if (!session?.userId) {
-        return jsonResponse(
-          securityHeaders,
-          request,
-          env,
-          { error: "Unauthorized" },
-          401,
-        );
+        return jsonResponse(securityHeaders, request, env, { error: "Unauthorized" }, 401);
       }
 
       // Rate limiting: 10 sessions per hour per user
@@ -90,11 +80,7 @@ const createUploadSession: Route = {
       // Detect region
       const { RegionDetector } = await import("../region-detection.js");
       const regionDetector = new RegionDetector(env);
-      const region = await regionDetector.detectRegion(
-        request,
-        undefined,
-        undefined,
-      );
+      const region = await regionDetector.detectRegion(request, undefined, undefined);
 
       // Kind discrimination: a JSON body declaring the upload selects the
       // presigned direct-to-S3 flow; no/empty body is the legacy flow.
@@ -103,13 +89,7 @@ const createUploadSession: Route = {
         const text = await request.text();
         body = text ? JSON.parse(text) : null;
       } catch {
-        return jsonResponse(
-          securityHeaders,
-          request,
-          env,
-          { error: "Invalid JSON body" },
-          400,
-        );
+        return jsonResponse(securityHeaders, request, env, { error: "Invalid JSON body" }, 400);
       }
 
       const declared =
@@ -118,10 +98,7 @@ const createUploadSession: Route = {
           : null;
       if (declared && (declared.mimeType !== undefined || declared.sizeBytes !== undefined)) {
         // ── Presigned flow ──
-        if (
-          typeof declared.mimeType !== "string" ||
-          typeof declared.sizeBytes !== "number"
-        ) {
+        if (typeof declared.mimeType !== "string" || typeof declared.sizeBytes !== "number") {
           return jsonResponse(
             securityHeaders,
             request,
@@ -135,12 +112,10 @@ const createUploadSession: Route = {
           );
         }
         const presignedHandler = new PresignedUploadHandler(env);
-        const result = await presignedHandler.createSession(
-          session.userId,
-          region,
-          env,
-          { mimeType: declared.mimeType, sizeBytes: declared.sizeBytes },
-        );
+        const result = await presignedHandler.createSession(session.userId, region, env, {
+          mimeType: declared.mimeType,
+          sizeBytes: declared.sizeBytes,
+        });
         if (!result.ok) {
           return jsonResponse(
             securityHeaders,
@@ -159,24 +134,14 @@ const createUploadSession: Route = {
       }
 
       // ── Legacy flow ──
-      const result = await uploadSessionHandler.createSession(
-        session.userId,
-        region,
-        env,
-      );
+      const result = await uploadSessionHandler.createSession(session.userId, region, env);
 
       return jsonResponse(securityHeaders, request, env, result, 201);
     } catch (error) {
       logger.error("Failed to create upload session", {
         error: error instanceof Error ? error.message : String(error),
       });
-      return jsonResponse(
-        securityHeaders,
-        request,
-        env,
-        { error: "Internal server error" },
-        500,
-      );
+      return jsonResponse(securityHeaders, request, env, { error: "Internal server error" }, 500);
     }
   },
   middleware: [corsMiddleware(), csrfMiddleware()],
@@ -201,11 +166,7 @@ const addMediaToSession: Route = {
 
     try {
       // Authenticate user
-      const session = await sessionManager.getSession(
-        request,
-        env.SESSION_SECRET,
-        env,
-      );
+      const session = await sessionManager.getSession(request, env.SESSION_SECRET, env);
       if (!session?.userId) {
         const errorResponse = securityHeaders.createSecureResponse(
           JSON.stringify({ error: "Unauthorized" }),
@@ -248,11 +209,7 @@ const addMediaToSession: Route = {
       // Detect region
       const { RegionDetector } = await import("../region-detection.js");
       const regionDetector = new RegionDetector(env);
-      const region = await regionDetector.detectRegion(
-        request,
-        undefined,
-        undefined,
-      );
+      const region = await regionDetector.detectRegion(request, undefined, undefined);
 
       // Add media to session
       const result = await uploadSessionHandler.addMediaToSession(
@@ -271,10 +228,10 @@ const addMediaToSession: Route = {
         return CorsHandler.addCorsHeaders(errorResponse, request, env);
       }
 
-      const response = securityHeaders.createSecureResponse(
-        JSON.stringify(result),
-        { status: 200, headers: { "content-type": "application/json" } },
-      );
+      const response = securityHeaders.createSecureResponse(JSON.stringify(result), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
       return CorsHandler.addCorsHeaders(response, request, env);
     } catch (error) {
       logger.error("Failed to add media to upload session", {
@@ -307,11 +264,7 @@ const completeUploadSession: Route = {
 
     try {
       // Authenticate user
-      const session = await sessionManager.getSession(
-        request,
-        env.SESSION_SECRET,
-        env,
-      );
+      const session = await sessionManager.getSession(request, env.SESSION_SECRET, env);
       if (!session?.userId) {
         const errorResponse = securityHeaders.createSecureResponse(
           JSON.stringify({ error: "Unauthorized" }),
@@ -333,11 +286,7 @@ const completeUploadSession: Route = {
       // Detect region
       const { RegionDetector } = await import("../region-detection.js");
       const regionDetector = new RegionDetector(env);
-      const region = await regionDetector.detectRegion(
-        request,
-        undefined,
-        undefined,
-      );
+      const region = await regionDetector.detectRegion(request, undefined, undefined);
 
       // Presigned sessions first: the handler's lookup is scoped to
       // (id, userId, kind="presigned"), so a legacy session id (or another
@@ -378,10 +327,10 @@ const completeUploadSession: Route = {
         return CorsHandler.addCorsHeaders(errorResponse, request, env);
       }
 
-      const response = securityHeaders.createSecureResponse(
-        JSON.stringify(result),
-        { status: 200, headers: { "content-type": "application/json" } },
-      );
+      const response = securityHeaders.createSecureResponse(JSON.stringify(result), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
       return CorsHandler.addCorsHeaders(response, request, env);
     } catch (error) {
       logger.error("Failed to complete upload session", {
@@ -414,11 +363,7 @@ const abandonUploadSession: Route = {
 
     try {
       // Authenticate user
-      const session = await sessionManager.getSession(
-        request,
-        env.SESSION_SECRET,
-        env,
-      );
+      const session = await sessionManager.getSession(request, env.SESSION_SECRET, env);
       if (!session?.userId) {
         const errorResponse = securityHeaders.createSecureResponse(
           JSON.stringify({ error: "Unauthorized" }),
@@ -440,11 +385,7 @@ const abandonUploadSession: Route = {
       // Detect region
       const { RegionDetector } = await import("../region-detection.js");
       const regionDetector = new RegionDetector(env);
-      const region = await regionDetector.detectRegion(
-        request,
-        undefined,
-        undefined,
-      );
+      const region = await regionDetector.detectRegion(request, undefined, undefined);
 
       // Presigned sessions first (same 404-falls-through dispatch as complete).
       const presignedHandler = new PresignedUploadHandler(env);
@@ -483,10 +424,10 @@ const abandonUploadSession: Route = {
         return CorsHandler.addCorsHeaders(errorResponse, request, env);
       }
 
-      const response = securityHeaders.createSecureResponse(
-        JSON.stringify(result),
-        { status: 200, headers: { "content-type": "application/json" } },
-      );
+      const response = securityHeaders.createSecureResponse(JSON.stringify(result), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
       return CorsHandler.addCorsHeaders(response, request, env);
     } catch (error) {
       logger.error("Failed to abandon upload session", {

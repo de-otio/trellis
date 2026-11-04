@@ -35,7 +35,6 @@ vi.mock("../../../src/lib/rate-limit", () => ({
   },
 }));
 
-
 // Mock CorsHandler
 const mockAddCorsHeaders = vi.fn();
 vi.mock("../../../src/lib/cors-handler", () => ({
@@ -58,8 +57,7 @@ vi.mock("../../../src/db", () => ({
 // Mock withQueryTimeoutAndRetry
 const mockWithQueryTimeoutAndRetry = vi.fn();
 vi.mock("../../../src/lib/db-query-helper", () => ({
-  withQueryTimeoutAndRetry: (...args: any[]) =>
-    mockWithQueryTimeoutAndRetry(...args),
+  withQueryTimeoutAndRetry: (...args: any[]) => mockWithQueryTimeoutAndRetry(...args),
   QueryTimeoutPresets: {
     USER_FACING: { timeoutMs: 3000, retryTimeoutMs: 2000 },
   },
@@ -151,9 +149,7 @@ const verdictFor = (decision: "approved" | "review" | "quarantine") => ({
 // is that NOTHING was written to the approved cas/ prefix.
 const expectNoCasWrite = () =>
   expect(
-    mockR2Put.mock.calls.filter(
-      (c) => typeof c[0] === "string" && c[0].startsWith("cas/"),
-    ),
+    mockR2Put.mock.calls.filter((c) => typeof c[0] === "string" && c[0].startsWith("cas/")),
   ).toHaveLength(0);
 
 describe("Media Routes", () => {
@@ -217,9 +213,7 @@ describe("Media Routes", () => {
 
     mockGetSession.mockResolvedValue(mockSession);
     mockApplyRateLimitKV.mockResolvedValue(null); // No rate limit
-    mockCreateSecureResponse.mockImplementation(
-      (body, options) => new Response(body, options),
-    );
+    mockCreateSecureResponse.mockImplementation((body, options) => new Response(body, options));
     // CorsHandler is already mocked to return response as-is
     mockAddSecurityHeaders.mockImplementation((response) => response);
 
@@ -250,12 +244,7 @@ describe("Media Routes", () => {
 
     // Default withQueryTimeoutAndRetry mock - executes query function with mockDb
     mockWithQueryTimeoutAndRetry.mockImplementation(
-      async (
-        manager: any,
-        region: string,
-        env: any,
-        queryFn: (db: any) => Promise<any>,
-      ) => {
+      async (manager: any, region: string, env: any, queryFn: (db: any) => Promise<any>) => {
         return await queryFn(mockDb);
       },
     );
@@ -273,9 +262,7 @@ describe("Media Routes", () => {
     // T7 re-encode: pass-through, preserving the input bytes. canonicalMimeType
     // echoes image/jpeg (the canonical raster output).
     mockReencodeImage.mockImplementation(async (buf: ArrayBuffer) => ({
-      buffer: Buffer.from(
-        buf instanceof Buffer ? buf : new Uint8Array(buf as ArrayBuffer),
-      ),
+      buffer: Buffer.from(buf instanceof Buffer ? buf : new Uint8Array(buf as ArrayBuffer)),
       canonicalMimeType: "image/jpeg",
     }));
   });
@@ -291,11 +278,7 @@ describe("Media Routes", () => {
       mockGetSession.mockResolvedValue(null); // No session
 
       const formData = new FormData();
-      formData.append(
-        "file",
-        new Blob(["test"], { type: "image/jpeg" }),
-        "test.jpg",
-      );
+      formData.append("file", new Blob(["test"], { type: "image/jpeg" }), "test.jpg");
 
       mockRequest = new Request("https://api.example.com/api/media/upload", {
         method: "POST",
@@ -335,11 +318,7 @@ describe("Media Routes", () => {
 
     it("should reject invalid file types", async () => {
       const formData = new FormData();
-      formData.append(
-        "file",
-        new Blob(["test"], { type: "application/pdf" }),
-        "test.pdf",
-      );
+      formData.append("file", new Blob(["test"], { type: "application/pdf" }), "test.pdf");
 
       mockRequest = new Request("https://api.example.com/api/media/upload", {
         method: "POST",
@@ -386,9 +365,7 @@ describe("Media Routes", () => {
     it("should auto-detect PNG when declared as JPEG but file is actually PNG", async () => {
       // This is the real-world case: frontend compresses/converts image to PNG
       // but still declares it as JPEG. We should detect and use PNG.
-      const pngMagic = new Uint8Array([
-        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-      ]);
+      const pngMagic = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
       const blob = new Blob([pngMagic], { type: "image/jpeg" });
 
       const formData = new FormData();
@@ -438,9 +415,7 @@ describe("Media Routes", () => {
 
     it("should auto-detect MIME type when file has application/octet-stream type", async () => {
       // File with generic binary type - should auto-detect from magic numbers
-      const pngMagic = new Uint8Array([
-        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-      ]);
+      const pngMagic = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
       const blob = new Blob([pngMagic], { type: "application/octet-stream" });
 
       const formData = new FormData();
@@ -571,9 +546,7 @@ describe("Media Routes", () => {
 
     it("should successfully upload a valid PNG image", async () => {
       // Create a valid PNG file
-      const pngMagic = new Uint8Array([
-        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-      ]);
+      const pngMagic = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
       const blob = new Blob([pngMagic], { type: "image/png" });
 
       const formData = new FormData();
@@ -678,15 +651,11 @@ describe("Media Routes", () => {
         body: formData,
       });
 
-      const response = await uploadRoute!.handler(
-        mockRequest,
-        envWithLegacyR2,
-        {
-          url: new URL("https://api.example.com/api/media/upload"),
-          pathname: "/api/media/upload",
-          params: {},
-        },
-      );
+      const response = await uploadRoute!.handler(mockRequest, envWithLegacyR2, {
+        url: new URL("https://api.example.com/api/media/upload"),
+        pathname: "/api/media/upload",
+        params: {},
+      });
 
       // Should succeed and stage via the legacy R2_BUCKET binding.
       expect(response.status).toBe(200);
@@ -701,9 +670,7 @@ describe("Media Routes", () => {
       const blob = new Blob([jpegMagic], { type: "image/jpeg" });
 
       // Mock database without mediaFile model - make upsert throw
-      mockMediaFileUpsert.mockRejectedValue(
-        new Error("Property mediaFile does not exist"),
-      );
+      mockMediaFileUpsert.mockRejectedValue(new Error("Property mediaFile does not exist"));
 
       const formData = new FormData();
       formData.append("file", blob, "test.jpg");
@@ -725,7 +692,7 @@ describe("Media Routes", () => {
       const body = await response.json();
       expect(body).toHaveProperty("error", "Database error");
       // Should log error when DB upsert fails
-          });
+    });
 
     it("should apply rate limiting", async () => {
       const rateLimitResponse = new Response("Rate limit exceeded", {
@@ -755,9 +722,7 @@ describe("Media Routes", () => {
 
     it("recognizes valid video files and points them at the presigned flow (T14: 400, never proxied)", async () => {
       // Create a valid MP4 file (starts with ftyp box at offset 4)
-      const mp4Magic = new Uint8Array([
-        0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70,
-      ]);
+      const mp4Magic = new Uint8Array([0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70]);
       const blob = new Blob([mp4Magic], { type: "video/mp4" });
 
       const formData = new FormData();
@@ -914,15 +879,11 @@ describe("Media Routes", () => {
       vi.clearAllMocks();
       mockGetSession.mockResolvedValue(mockSession);
       mockApplyRateLimitKV.mockResolvedValue(null);
-      mockCreateSecureResponse.mockImplementation(
-        (body, options) => new Response(body, options),
-      );
+      mockCreateSecureResponse.mockImplementation((body, options) => new Response(body, options));
       mockAddSecurityHeaders.mockImplementation((r) => r);
       mockGetCurrentTenantId.mockReturnValue(TEST_TENANT_ID);
       mockReencodeImage.mockImplementation(async (buf: ArrayBuffer) => ({
-        buffer: Buffer.from(
-          buf instanceof Buffer ? buf : new Uint8Array(buf as ArrayBuffer),
-        ),
+        buffer: Buffer.from(buf instanceof Buffer ? buf : new Uint8Array(buf as ArrayBuffer)),
         canonicalMimeType: "image/jpeg",
       }));
       mockWithQueryTimeoutAndRetry.mockImplementation(
@@ -1013,7 +974,11 @@ describe("Media Routes", () => {
       return uploadRoute!.handler(
         new Request("https://api.example.com/api/media/upload", { method: "POST", body: formData }),
         mockEnv,
-        { url: new URL("https://api.example.com/api/media/upload"), pathname: "/api/media/upload", params: {} },
+        {
+          url: new URL("https://api.example.com/api/media/upload"),
+          pathname: "/api/media/upload",
+          params: {},
+        },
       );
     };
 
@@ -1029,7 +994,11 @@ describe("Media Routes", () => {
       const response = await uploadRoute!.handler(
         new Request("https://api.example.com/api/media/upload", { method: "POST", body: formData }),
         mockEnv,
-        { url: new URL("https://api.example.com/api/media/upload"), pathname: "/api/media/upload", params: {} },
+        {
+          url: new URL("https://api.example.com/api/media/upload"),
+          pathname: "/api/media/upload",
+          params: {},
+        },
       );
 
       expect(response.status).toBe(429);
@@ -1051,7 +1020,11 @@ describe("Media Routes", () => {
       const response = await uploadRoute!.handler(
         new Request("https://api.example.com/api/media/upload", { method: "POST", body: formData }),
         mockEnv,
-        { url: new URL("https://api.example.com/api/media/upload"), pathname: "/api/media/upload", params: {} },
+        {
+          url: new URL("https://api.example.com/api/media/upload"),
+          pathname: "/api/media/upload",
+          params: {},
+        },
       );
 
       expect(response.status).toBe(413);
@@ -1071,7 +1044,11 @@ describe("Media Routes", () => {
       const response = await uploadRoute!.handler(
         new Request("https://api.example.com/api/media/upload", { method: "POST", body: formData }),
         mockEnv,
-        { url: new URL("https://api.example.com/api/media/upload"), pathname: "/api/media/upload", params: {} },
+        {
+          url: new URL("https://api.example.com/api/media/upload"),
+          pathname: "/api/media/upload",
+          params: {},
+        },
       );
 
       // Should reach the sync-image path and succeed (200).
@@ -1249,8 +1226,18 @@ describe("Media Routes", () => {
     it("refuses proxied video/mp4 with 400 + a pointer to the presigned flow (T14: video never streams through Fargate)", async () => {
       // MP4 magic: ftyp box at offset 4
       const mp4Bytes = new Uint8Array([
-        0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70,
-        0x69, 0x73, 0x6f, 0x6d, // brand = "isom"
+        0x00,
+        0x00,
+        0x00,
+        0x20,
+        0x66,
+        0x74,
+        0x79,
+        0x70,
+        0x69,
+        0x73,
+        0x6f,
+        0x6d, // brand = "isom"
       ]);
       const formData = new FormData();
       formData.append("file", new Blob([mp4Bytes], { type: "video/mp4" }), "test.mp4");
@@ -1258,7 +1245,11 @@ describe("Media Routes", () => {
       const response = await uploadRoute!.handler(
         new Request("https://api.example.com/api/media/upload", { method: "POST", body: formData }),
         mockEnv,
-        { url: new URL("https://api.example.com/api/media/upload"), pathname: "/api/media/upload", params: {} },
+        {
+          url: new URL("https://api.example.com/api/media/upload"),
+          pathname: "/api/media/upload",
+          params: {},
+        },
       );
 
       expect(response.status).toBe(400);
@@ -1282,7 +1273,11 @@ describe("Media Routes", () => {
       const response = await uploadRoute!.handler(
         new Request("https://api.example.com/api/media/upload", { method: "POST", body: formData }),
         mockEnv,
-        { url: new URL("https://api.example.com/api/media/upload"), pathname: "/api/media/upload", params: {} },
+        {
+          url: new URL("https://api.example.com/api/media/upload"),
+          pathname: "/api/media/upload",
+          params: {},
+        },
       );
 
       expect(response.status).toBe(400);
@@ -1300,7 +1295,11 @@ describe("Media Routes", () => {
       const response = await uploadRoute!.handler(
         new Request("https://api.example.com/api/media/upload", { method: "POST", body: formData }),
         mockEnv,
-        { url: new URL("https://api.example.com/api/media/upload"), pathname: "/api/media/upload", params: {} },
+        {
+          url: new URL("https://api.example.com/api/media/upload"),
+          pathname: "/api/media/upload",
+          params: {},
+        },
       );
 
       expect(response.status).toBe(200);
@@ -1324,7 +1323,11 @@ describe("Media Routes", () => {
       const response = await uploadRoute!.handler(
         new Request("https://api.example.com/api/media/upload", { method: "POST", body: formData }),
         mockEnv,
-        { url: new URL("https://api.example.com/api/media/upload"), pathname: "/api/media/upload", params: {} },
+        {
+          url: new URL("https://api.example.com/api/media/upload"),
+          pathname: "/api/media/upload",
+          params: {},
+        },
       );
 
       expect(response.status).toBe(400);
@@ -1332,8 +1335,7 @@ describe("Media Routes", () => {
 
     it("the video refusal happens even when the DB is down (no dependency on any write)", async () => {
       const mp4Bytes = new Uint8Array([
-        0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70,
-        0x69, 0x73, 0x6f, 0x6d,
+        0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d,
       ]);
       const formData = new FormData();
       formData.append("file", new Blob([mp4Bytes], { type: "video/mp4" }), "test.mp4");
@@ -1345,7 +1347,11 @@ describe("Media Routes", () => {
       const response = await uploadRoute!.handler(
         new Request("https://api.example.com/api/media/upload", { method: "POST", body: formData }),
         mockEnv,
-        { url: new URL("https://api.example.com/api/media/upload"), pathname: "/api/media/upload", params: {} },
+        {
+          url: new URL("https://api.example.com/api/media/upload"),
+          pathname: "/api/media/upload",
+          params: {},
+        },
       );
 
       expect(response.status).toBe(400);
@@ -1406,9 +1412,7 @@ describe("Media Routes", () => {
     // moderationStatus APPROVED + not hidden + not deleted, and a valid 64-hex
     // contentHash (validateContentHash runs before any lookup).
     const APPROVED_CAS_KEY = `cas/${TEST_TENANT_ID}/${VALID_UPLOAD_HASH}`;
-    const approvedRecord = (
-      over: Record<string, unknown> = {},
-    ) => ({
+    const approvedRecord = (over: Record<string, unknown> = {}) => ({
       id: "media-123",
       contentHash: VALID_UPLOAD_HASH,
       mimeType: "image/png", // stored mime — MUST be ignored by the gate
@@ -1430,10 +1434,9 @@ describe("Media Routes", () => {
       };
       mockR2Get.mockResolvedValue(mockR2Object);
 
-      mockRequest = new Request(
-        `https://api.example.com/api/media/${VALID_UPLOAD_HASH}`,
-        { method: "GET" },
-      );
+      mockRequest = new Request(`https://api.example.com/api/media/${VALID_UPLOAD_HASH}`, {
+        method: "GET",
+      });
 
       const response = await getMediaRoute!.handler(mockRequest, mockEnv, {
         url: new URL(`https://api.example.com/api/media/${VALID_UPLOAD_HASH}`),
@@ -1450,15 +1453,12 @@ describe("Media Routes", () => {
     });
 
     it("denies a PENDING MediaFile (gate is APPROVED-only)", async () => {
-      mockMediaFileFindUnique.mockResolvedValue(
-        approvedRecord({ lifecycle: "UPLOADED" }),
-      );
+      mockMediaFileFindUnique.mockResolvedValue(approvedRecord({ lifecycle: "UPLOADED" }));
       mockR2Get.mockResolvedValue({ body: new ReadableStream() });
 
-      mockRequest = new Request(
-        `https://api.example.com/api/media/${VALID_UPLOAD_HASH}`,
-        { method: "GET" },
-      );
+      mockRequest = new Request(`https://api.example.com/api/media/${VALID_UPLOAD_HASH}`, {
+        method: "GET",
+      });
 
       const response = await getMediaRoute!.handler(mockRequest, mockEnv, {
         url: new URL(`https://api.example.com/api/media/${VALID_UPLOAD_HASH}`),
@@ -1481,9 +1481,7 @@ describe("Media Routes", () => {
           }),
           mockEnv,
           {
-            url: new URL(
-              `https://api.example.com/api/media/${VALID_UPLOAD_HASH}`,
-            ),
+            url: new URL(`https://api.example.com/api/media/${VALID_UPLOAD_HASH}`),
             pathname: `/api/media/${VALID_UPLOAD_HASH}`,
             params: { hash: VALID_UPLOAD_HASH },
           },
@@ -1538,15 +1536,12 @@ describe("Media Routes", () => {
     it("does NOT probe storage when MediaFile does not exist (no .png fallback)", async () => {
       mockMediaFileFindUnique.mockResolvedValue(null);
 
-      mockRequest = new Request(
-        "https://api.example.com/api/media/test-hash?variant=optimized",
-        { method: "GET" },
-      );
+      mockRequest = new Request("https://api.example.com/api/media/test-hash?variant=optimized", {
+        method: "GET",
+      });
 
       const response = await getMediaRoute!.handler(mockRequest, mockEnv, {
-        url: new URL(
-          "https://api.example.com/api/media/test-hash?variant=optimized",
-        ),
+        url: new URL("https://api.example.com/api/media/test-hash?variant=optimized"),
         pathname: "/api/media/test-hash",
         params: { hash: "test-hash" },
       });
@@ -1584,9 +1579,7 @@ describe("Media Routes", () => {
       );
 
       const response = await getMediaRoute!.handler(mockRequest, mockEnv, {
-        url: new URL(
-          `https://api.example.com/api/media/${VALID_UPLOAD_HASH}?variant=optimized`,
-        ),
+        url: new URL(`https://api.example.com/api/media/${VALID_UPLOAD_HASH}?variant=optimized`),
         pathname: `/api/media/${VALID_UPLOAD_HASH}`,
         params: { hash: VALID_UPLOAD_HASH },
       });
@@ -1628,10 +1621,9 @@ describe("Media Routes", () => {
       mockEnv.MEDIA_BUCKET_R2 = null;
       mockEnv.R2_BUCKET = null;
 
-      mockRequest = new Request(
-        `https://api.example.com/api/media/${VALID_UPLOAD_HASH}`,
-        { method: "GET" },
-      );
+      mockRequest = new Request(`https://api.example.com/api/media/${VALID_UPLOAD_HASH}`, {
+        method: "GET",
+      });
 
       const response = await getMediaRoute!.handler(mockRequest, mockEnv, {
         url: new URL(`https://api.example.com/api/media/${VALID_UPLOAD_HASH}`),
@@ -1671,9 +1663,7 @@ describe("Media Routes", () => {
 
         // PNG signature bytes — the input stream the gate must pass through
         // verbatim (the re-encode happened at upload; serve does not transform).
-        const pngBytes = new Uint8Array([
-          0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-        ]);
+        const pngBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
         const pngStream = new ReadableStream({
           start(controller) {
             controller.enqueue(pngBytes);
@@ -1699,9 +1689,7 @@ describe("Media Routes", () => {
           }),
           mockEnv,
           {
-            url: new URL(
-              `https://api.example.com/api/media/${VALID_UPLOAD_HASH}`,
-            ),
+            url: new URL(`https://api.example.com/api/media/${VALID_UPLOAD_HASH}`),
             pathname: `/api/media/${VALID_UPLOAD_HASH}`,
             params: { hash: VALID_UPLOAD_HASH },
           },
@@ -1743,9 +1731,7 @@ describe("Media Routes", () => {
           }),
           mockEnv,
           {
-            url: new URL(
-              `https://api.example.com/api/media/${VALID_UPLOAD_HASH}`,
-            ),
+            url: new URL(`https://api.example.com/api/media/${VALID_UPLOAD_HASH}`),
             pathname: `/api/media/${VALID_UPLOAD_HASH}`,
             params: { hash: VALID_UPLOAD_HASH },
           },
@@ -1760,9 +1746,7 @@ describe("Media Routes", () => {
   });
 
   describe("GET /api/media", () => {
-    const listRoute = mediaRoutes.find(
-      (r) => r.path === "/api/media" && r.method === "GET",
-    );
+    const listRoute = mediaRoutes.find((r) => r.path === "/api/media" && r.method === "GET");
 
     it("should require authentication", async () => {
       expect(listRoute).toBeDefined();
@@ -1792,12 +1776,9 @@ describe("Media Routes", () => {
             contentHash: "hash123",
             mimeType: "image/jpeg",
             size: 1024,
-            thumbnailUrl:
-              "https://api.example.com/api/media/hash123?variant=thumbnail",
-            optimizedUrl:
-              "https://api.example.com/api/media/hash123?variant=optimized",
-            originalUrl:
-              "https://api.example.com/api/media/hash123?variant=original",
+            thumbnailUrl: "https://api.example.com/api/media/hash123?variant=thumbnail",
+            optimizedUrl: "https://api.example.com/api/media/hash123?variant=optimized",
+            originalUrl: "https://api.example.com/api/media/hash123?variant=original",
             createdAt: "2025-01-15T00:00:00Z",
             hidden: false,
             postCount: 1,
@@ -1955,9 +1936,7 @@ describe("Media Routes", () => {
     });
 
     it("should return 404 when media not found", async () => {
-      mockMediaHandlerInstance.getMediaDetails.mockRejectedValue(
-        new Error("Media not found"),
-      );
+      mockMediaHandlerInstance.getMediaDetails.mockRejectedValue(new Error("Media not found"));
 
       mockRequest = new Request("https://api.example.com/api/media/invalid-id", {
         method: "GET",
@@ -2026,12 +2005,9 @@ describe("Media Routes", () => {
 
       mockGetSession.mockResolvedValue(null);
 
-      mockRequest = new Request(
-        "https://api.example.com/api/media/media-123/hide",
-        {
-          method: "POST",
-        },
-      );
+      mockRequest = new Request("https://api.example.com/api/media/media-123/hide", {
+        method: "POST",
+      });
 
       const response = await hideRoute!.handler(mockRequest, mockEnv, {
         url: new URL("https://api.example.com/api/media/media-123/hide"),
@@ -2051,12 +2027,9 @@ describe("Media Routes", () => {
 
       mockMediaHandlerInstance.hideMedia.mockResolvedValue(mockResult);
 
-      mockRequest = new Request(
-        "https://api.example.com/api/media/media-123/hide",
-        {
-          method: "POST",
-        },
-      );
+      mockRequest = new Request("https://api.example.com/api/media/media-123/hide", {
+        method: "POST",
+      });
 
       const response = await hideRoute!.handler(mockRequest, mockEnv, {
         url: new URL("https://api.example.com/api/media/media-123/hide"),
@@ -2071,16 +2044,11 @@ describe("Media Routes", () => {
     });
 
     it("should return 404 when media not found", async () => {
-      mockMediaHandlerInstance.hideMedia.mockRejectedValue(
-        new Error("Media not found"),
-      );
+      mockMediaHandlerInstance.hideMedia.mockRejectedValue(new Error("Media not found"));
 
-      mockRequest = new Request(
-        "https://api.example.com/api/media/invalid-id/hide",
-        {
-          method: "POST",
-        },
-      );
+      mockRequest = new Request("https://api.example.com/api/media/invalid-id/hide", {
+        method: "POST",
+      });
 
       const response = await hideRoute!.handler(mockRequest, mockEnv, {
         url: new URL("https://api.example.com/api/media/invalid-id/hide"),
@@ -2092,16 +2060,11 @@ describe("Media Routes", () => {
     });
 
     it("should return 400 when media already hidden", async () => {
-      mockMediaHandlerInstance.hideMedia.mockRejectedValue(
-        new Error("Media is already hidden"),
-      );
+      mockMediaHandlerInstance.hideMedia.mockRejectedValue(new Error("Media is already hidden"));
 
-      mockRequest = new Request(
-        "https://api.example.com/api/media/media-123/hide",
-        {
-          method: "POST",
-        },
-      );
+      mockRequest = new Request("https://api.example.com/api/media/media-123/hide", {
+        method: "POST",
+      });
 
       const response = await hideRoute!.handler(mockRequest, mockEnv, {
         url: new URL("https://api.example.com/api/media/media-123/hide"),
@@ -2120,12 +2083,9 @@ describe("Media Routes", () => {
       });
       mockApplyRateLimitKV.mockResolvedValue(rateLimitResponse);
 
-      mockRequest = new Request(
-        "https://api.example.com/api/media/media-123/hide",
-        {
-          method: "POST",
-        },
-      );
+      mockRequest = new Request("https://api.example.com/api/media/media-123/hide", {
+        method: "POST",
+      });
 
       const response = await hideRoute!.handler(mockRequest, mockEnv, {
         url: new URL("https://api.example.com/api/media/media-123/hide"),
@@ -2153,12 +2113,9 @@ describe("Media Routes", () => {
 
       mockGetSession.mockResolvedValue(null);
 
-      mockRequest = new Request(
-        "https://api.example.com/api/media/media-123/unhide",
-        {
-          method: "POST",
-        },
-      );
+      mockRequest = new Request("https://api.example.com/api/media/media-123/unhide", {
+        method: "POST",
+      });
 
       const response = await unhideRoute!.handler(mockRequest, mockEnv, {
         url: new URL("https://api.example.com/api/media/media-123/unhide"),
@@ -2178,12 +2135,9 @@ describe("Media Routes", () => {
 
       mockMediaHandlerInstance.unhideMedia.mockResolvedValue(mockResult);
 
-      mockRequest = new Request(
-        "https://api.example.com/api/media/media-123/unhide",
-        {
-          method: "POST",
-        },
-      );
+      mockRequest = new Request("https://api.example.com/api/media/media-123/unhide", {
+        method: "POST",
+      });
 
       const response = await unhideRoute!.handler(mockRequest, mockEnv, {
         url: new URL("https://api.example.com/api/media/media-123/unhide"),
@@ -2198,16 +2152,11 @@ describe("Media Routes", () => {
     });
 
     it("should return 400 when media not hidden", async () => {
-      mockMediaHandlerInstance.unhideMedia.mockRejectedValue(
-        new Error("Media is not hidden"),
-      );
+      mockMediaHandlerInstance.unhideMedia.mockRejectedValue(new Error("Media is not hidden"));
 
-      mockRequest = new Request(
-        "https://api.example.com/api/media/media-123/unhide",
-        {
-          method: "POST",
-        },
-      );
+      mockRequest = new Request("https://api.example.com/api/media/media-123/unhide", {
+        method: "POST",
+      });
 
       const response = await unhideRoute!.handler(mockRequest, mockEnv, {
         url: new URL("https://api.example.com/api/media/media-123/unhide"),
@@ -2226,12 +2175,9 @@ describe("Media Routes", () => {
       });
       mockApplyRateLimitKV.mockResolvedValue(rateLimitResponse);
 
-      mockRequest = new Request(
-        "https://api.example.com/api/media/media-123/unhide",
-        {
-          method: "POST",
-        },
-      );
+      mockRequest = new Request("https://api.example.com/api/media/media-123/unhide", {
+        method: "POST",
+      });
 
       const response = await unhideRoute!.handler(mockRequest, mockEnv, {
         url: new URL("https://api.example.com/api/media/media-123/unhide"),
@@ -2293,9 +2239,7 @@ describe("Media Routes", () => {
 
     it("should return 409 when media is shared", async () => {
       mockMediaHandlerInstance.deleteMedia.mockRejectedValue(
-        new Error(
-          "Media is used by other users. It has been hidden instead of deleted.",
-        ),
+        new Error("Media is used by other users. It has been hidden instead of deleted."),
       );
 
       mockRequest = new Request("https://api.example.com/api/media/media-123", {
@@ -2315,9 +2259,7 @@ describe("Media Routes", () => {
     });
 
     it("should return 400 when media already deleted", async () => {
-      mockMediaHandlerInstance.deleteMedia.mockRejectedValue(
-        new Error("Media is already deleted"),
-      );
+      mockMediaHandlerInstance.deleteMedia.mockRejectedValue(new Error("Media is already deleted"));
 
       mockRequest = new Request("https://api.example.com/api/media/media-123", {
         method: "DELETE",
@@ -2719,10 +2661,8 @@ describe("Media Routes", () => {
                 contentHash: "hash-1",
                 mimeType: "image/jpeg",
                 size: 1024,
-                thumbnailUrl:
-                  "https://api.example.com/api/media/hash-1?variant=thumbnail",
-                optimizedUrl:
-                  "https://api.example.com/api/media/hash-1?variant=optimized",
+                thumbnailUrl: "https://api.example.com/api/media/hash-1?variant=thumbnail",
+                optimizedUrl: "https://api.example.com/api/media/hash-1?variant=optimized",
                 createdAt: "2025-01-15T10:00:00Z",
                 hidden: false,
                 postCount: 1,
@@ -2732,16 +2672,11 @@ describe("Media Routes", () => {
         ],
       };
 
-      mockMediaHandlerInstance.listUserMediaGrouped.mockResolvedValue(
-        mockResult,
-      );
+      mockMediaHandlerInstance.listUserMediaGrouped.mockResolvedValue(mockResult);
 
-      mockRequest = new Request(
-        "https://api.example.com/api/media/grouped?groupBy=month",
-        {
-          method: "GET",
-        },
-      );
+      mockRequest = new Request("https://api.example.com/api/media/grouped?groupBy=month", {
+        method: "GET",
+      });
 
       const response = await groupedRoute!.handler(mockRequest, mockEnv, {
         url: new URL("https://api.example.com/api/media/grouped?groupBy=month"),
@@ -2752,9 +2687,7 @@ describe("Media Routes", () => {
       expect(response.status).toBe(200);
       const body = await response.json();
       expect(body).toEqual(mockResult);
-      expect(
-        mockMediaHandlerInstance.listUserMediaGrouped,
-      ).toHaveBeenCalledWith(
+      expect(mockMediaHandlerInstance.listUserMediaGrouped).toHaveBeenCalledWith(
         "user-123",
         "month",
         expect.objectContaining({
@@ -2767,12 +2700,9 @@ describe("Media Routes", () => {
     });
 
     it("should validate groupBy parameter", async () => {
-      mockRequest = new Request(
-        "https://api.example.com/api/media/grouped?groupBy=invalid",
-        {
-          method: "GET",
-        },
-      );
+      mockRequest = new Request("https://api.example.com/api/media/grouped?groupBy=invalid", {
+        method: "GET",
+      });
 
       const response = await groupedRoute!.handler(mockRequest, mockEnv, {
         url: new URL("https://api.example.com/api/media/grouped?groupBy=invalid"),
@@ -2805,9 +2735,7 @@ describe("Media Routes", () => {
         params: {},
       });
 
-      expect(
-        mockMediaHandlerInstance.listUserMediaGrouped,
-      ).toHaveBeenCalledWith(
+      expect(mockMediaHandlerInstance.listUserMediaGrouped).toHaveBeenCalledWith(
         "user-123",
         "year",
         expect.objectContaining({
@@ -2840,9 +2768,7 @@ describe("Media Routes", () => {
   });
 
   describe("GET /api/media/stats", () => {
-    const statsRoute = mediaRoutes.find(
-      (r) => r.path === "/api/media/stats" && r.method === "GET",
-    );
+    const statsRoute = mediaRoutes.find((r) => r.path === "/api/media/stats" && r.method === "GET");
 
     it("should require authentication", async () => {
       expect(statsRoute).toBeDefined();
@@ -2925,9 +2851,7 @@ describe("Media Routes", () => {
       );
 
       await statsRoute!.handler(mockRequest, mockEnv, {
-        url: new URL(
-          "https://api.example.com/api/media/stats?includeHidden=true&type=video",
-        ),
+        url: new URL("https://api.example.com/api/media/stats?includeHidden=true&type=video"),
         pathname: "/api/media/stats",
         params: {},
       });
@@ -3018,9 +2942,7 @@ describe("Media Routes", () => {
       mockNormalize.mockResolvedValue("media/xyz789_opt.jpg");
 
       // Create a valid PNG
-      const pngMagic = new Uint8Array([
-        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-      ]);
+      const pngMagic = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
       const blob = new Blob([pngMagic], { type: "image/png" });
 
       const formData = new FormData();
@@ -3042,9 +2964,7 @@ describe("Media Routes", () => {
 
     it("should skip normalization when uploading a video", async () => {
       // Create a valid MP4 video
-      const mp4Magic = new Uint8Array([
-        0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70,
-      ]);
+      const mp4Magic = new Uint8Array([0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70]);
       const blob = new Blob([mp4Magic], { type: "video/mp4" });
 
       const formData = new FormData();
@@ -3055,7 +2975,11 @@ describe("Media Routes", () => {
         body: formData,
       });
 
-      mockMediaFileCreate.mockResolvedValue({ id: "pv1", uploadId: "c" + "0".repeat(24), originalKey: null });
+      mockMediaFileCreate.mockResolvedValue({
+        id: "pv1",
+        uploadId: "c" + "0".repeat(24),
+        originalKey: null,
+      });
 
       const response = await uploadRoute!.handler(mockRequest, mockEnv, {
         url: new URL("https://api.example.com/api/media/upload"),
@@ -3130,9 +3054,7 @@ describe("Media Routes", () => {
       mockNormalize.mockResolvedValue(null);
 
       // Create a valid PNG
-      const pngMagic = new Uint8Array([
-        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-      ]);
+      const pngMagic = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
       const blob = new Blob([pngMagic], { type: "image/png" });
 
       const formData = new FormData();
@@ -3174,16 +3096,17 @@ describe("Media Routes", () => {
     const ftypBlob = (brand: string, declaredType: string) => {
       const brandBytes =
         brand.length === 4
-          ? [
-              brand.charCodeAt(0),
-              brand.charCodeAt(1),
-              brand.charCodeAt(2),
-              brand.charCodeAt(3),
-            ]
+          ? [brand.charCodeAt(0), brand.charCodeAt(1), brand.charCodeAt(2), brand.charCodeAt(3)]
           : [];
       const bytes = new Uint8Array([
-        0x00, 0x00, 0x00, 0x18, // box size
-        0x66, 0x74, 0x79, 0x70, // 'ftyp'
+        0x00,
+        0x00,
+        0x00,
+        0x18, // box size
+        0x66,
+        0x74,
+        0x79,
+        0x70, // 'ftyp'
         ...brandBytes,
       ]);
       return new Blob([bytes], { type: declaredType });
@@ -3206,10 +3129,7 @@ describe("Media Routes", () => {
     it("rejects an HEIF-brand ftyp (heic) as Invalid file type (not re-encodable, not video)", async () => {
       // brand 'heic' → detectedMimeType image/heic → not in REENCODABLE set,
       // not in video allowlist → 400 Invalid file type.
-      const response = await runUpload(
-        ftypBlob("heic", "application/octet-stream"),
-        "photo.heic",
-      );
+      const response = await runUpload(ftypBlob("heic", "application/octet-stream"), "photo.heic");
       expect(response.status).toBe(400);
       const body = await response.json();
       expect(body.error).toBe("Invalid file type");
@@ -3218,10 +3138,7 @@ describe("Media Routes", () => {
     });
 
     it("rejects another HEIF brand (mif1) as Invalid file type", async () => {
-      const response = await runUpload(
-        ftypBlob("mif1", "application/octet-stream"),
-        "photo.heif",
-      );
+      const response = await runUpload(ftypBlob("mif1", "application/octet-stream"), "photo.heif");
       expect(response.status).toBe(400);
       const body = await response.json();
       expect(body.error).toBe("Invalid file type");
@@ -3230,10 +3147,7 @@ describe("Media Routes", () => {
 
     it("accepts a QuickTime-brand ftyp ('qt  ') as video/quicktime", async () => {
       // brand 'qt  ' → detectedMimeType video/quicktime → in video allowlist.
-      const response = await runUpload(
-        ftypBlob("qt  ", "application/octet-stream"),
-        "clip.mov",
-      );
+      const response = await runUpload(ftypBlob("qt  ", "application/octet-stream"), "clip.mov");
       // T14: detected as video → presigned pointer (NOT "Invalid file type").
       expect(response.status).toBe(400);
       const body = await response.json();
@@ -3243,10 +3157,7 @@ describe("Media Routes", () => {
     });
 
     it("accepts a default ISO-BMFF brand (isom) as video/mp4", async () => {
-      const response = await runUpload(
-        ftypBlob("isom", "application/octet-stream"),
-        "clip.mp4",
-      );
+      const response = await runUpload(ftypBlob("isom", "application/octet-stream"), "clip.mp4");
       // T14: detected as video → presigned pointer.
       expect(response.status).toBe(400);
       expect((await response.json()).error).toBe("Use presigned upload");
@@ -3254,10 +3165,7 @@ describe("Media Routes", () => {
     });
 
     it("accepts an mp42-brand ftyp as video/mp4", async () => {
-      const response = await runUpload(
-        ftypBlob("mp42", "application/octet-stream"),
-        "clip.mp4",
-      );
+      const response = await runUpload(ftypBlob("mp42", "application/octet-stream"), "clip.mp4");
       // T14: detected as video → presigned pointer.
       expect(response.status).toBe(400);
       expect((await response.json()).error).toBe("Use presigned upload");
@@ -3266,9 +3174,7 @@ describe("Media Routes", () => {
 
     it("treats a brand-less minimal ftyp (bytes < 12) as video/mp4 (default branch)", async () => {
       // Only 8 bytes: size + 'ftyp', no brand → brand === "" → default → mp4.
-      const bytes = new Uint8Array([
-        0x00, 0x00, 0x00, 0x08, 0x66, 0x74, 0x79, 0x70,
-      ]);
+      const bytes = new Uint8Array([0x00, 0x00, 0x00, 0x08, 0x66, 0x74, 0x79, 0x70]);
       const response = await runUpload(
         new Blob([bytes], { type: "application/octet-stream" }),
         "clip.mp4",
@@ -3302,7 +3208,11 @@ describe("Media Routes", () => {
           async (brand) => {
             mockR2Put.mockClear();
             mockMediaFileCreate.mockClear();
-            mockMediaFileCreate.mockResolvedValue({ id: "p-fc", uploadId: "c" + "0".repeat(24), originalKey: null });
+            mockMediaFileCreate.mockResolvedValue({
+              id: "p-fc",
+              uploadId: "c" + "0".repeat(24),
+              originalKey: null,
+            });
             const response = await runUpload(
               ftypBlob(brand, "application/octet-stream"),
               "clip.bin",
@@ -3363,10 +3273,7 @@ describe("Media Routes", () => {
       // Embed a <?php marker within the first 1KB scanned window.
       const marker = new TextEncoder().encode("<?php evil(); ?>");
       big.set(marker, 16);
-      const response = await runUpload(
-        new Blob([big], { type: "image/jpeg" }),
-        "polyglot.jpg",
-      );
+      const response = await runUpload(new Blob([big], { type: "image/jpeg" }), "polyglot.jpg");
       expect(response.status).toBe(400);
       const body = await response.json();
       expect(body.error).toBe("Suspicious content detected");
@@ -3385,10 +3292,7 @@ describe("Media Routes", () => {
       big[7] = 0x0a;
       const marker = new TextEncoder().encode("<script>alert(1)</script>");
       big.set(marker, 32);
-      const response = await runUpload(
-        new Blob([big], { type: "image/png" }),
-        "polyglot.png",
-      );
+      const response = await runUpload(new Blob([big], { type: "image/png" }), "polyglot.png");
       expect(response.status).toBe(400);
       const body = await response.json();
       expect(body.error).toBe("Suspicious content detected");
@@ -3397,10 +3301,7 @@ describe("Media Routes", () => {
     it("returns 400 Image processing failed when re-encode throws", async () => {
       mockReencodeImage.mockRejectedValueOnce(new Error("bad image"));
       const jpegMagic = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]);
-      const response = await runUpload(
-        new Blob([jpegMagic], { type: "image/jpeg" }),
-        "broken.jpg",
-      );
+      const response = await runUpload(new Blob([jpegMagic], { type: "image/jpeg" }), "broken.jpg");
       expect(response.status).toBe(400);
       const body = await response.json();
       expect(body.error).toBe("Image processing failed");
@@ -3412,10 +3313,7 @@ describe("Media Routes", () => {
       // throws (mockDb has no `user` model) → caught → null → resolution fails.
       mockGetCurrentTenantId.mockReturnValue(undefined as any);
       const jpegMagic = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]);
-      const response = await runUpload(
-        new Blob([jpegMagic], { type: "image/jpeg" }),
-        "ok.jpg",
-      );
+      const response = await runUpload(new Blob([jpegMagic], { type: "image/jpeg" }), "ok.jpg");
       expect(response.status).toBe(500);
       const body = await response.json();
       expect(body.error).toBe("Tenant resolution failed");
@@ -3429,10 +3327,7 @@ describe("Media Routes", () => {
       // retries) rather than leaving an unreferenced cas/ object as a success.
       mockMediaFileUpsert.mockRejectedValueOnce(new Error("DB down"));
       const jpegMagic = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]);
-      const response = await runUpload(
-        new Blob([jpegMagic], { type: "image/jpeg" }),
-        "ok.jpg",
-      );
+      const response = await runUpload(new Blob([jpegMagic], { type: "image/jpeg" }), "ok.jpg");
       expect(response.status).toBe(500);
       const body = await response.json();
       expect(body.error).toBe("Database error");
@@ -3494,9 +3389,7 @@ describe("Media Routes", () => {
     });
 
     it("denies (404) an APPROVED record whose originalKey is null (no key → no serve)", async () => {
-      mockMediaFileFindUnique.mockResolvedValue(
-        approvedRecord({ originalKey: null }),
-      );
+      mockMediaFileFindUnique.mockResolvedValue(approvedRecord({ originalKey: null }));
       mockR2Get.mockResolvedValue({ body: new ReadableStream() });
 
       const response = await serve();
@@ -3564,13 +3457,10 @@ describe("Media Routes", () => {
     });
   });
 
-
   // ---- MediaHandler-delegating route error-string branches ------------------
   // Covers the switch-on-message error mappers that the happy-path tests skip.
   describe("MediaHandler-delegating route error branches", () => {
-    const listRoute = mediaRoutes.find(
-      (r) => r.path === "/api/media" && r.method === "GET",
-    );
+    const listRoute = mediaRoutes.find((r) => r.path === "/api/media" && r.method === "GET");
     const detailsRoute = mediaRoutes.find(
       (r) => r.path === "/api/media/:mediaId" && r.method === "GET",
     );
@@ -3586,14 +3476,10 @@ describe("Media Routes", () => {
     const groupedRoute = mediaRoutes.find(
       (r) => r.path === "/api/media/grouped" && r.method === "GET",
     );
-    const statsRoute = mediaRoutes.find(
-      (r) => r.path === "/api/media/stats" && r.method === "GET",
-    );
+    const statsRoute = mediaRoutes.find((r) => r.path === "/api/media/stats" && r.method === "GET");
 
     it("GET /api/media → 500 on a generic listUserMedia error", async () => {
-      mockMediaHandlerInstance.listUserMedia.mockRejectedValue(
-        new Error("connection reset"),
-      );
+      mockMediaHandlerInstance.listUserMedia.mockRejectedValue(new Error("connection reset"));
       const response = await listRoute!.handler(
         new Request("https://api.example.com/api/media", { method: "GET" }),
         mockEnv,
@@ -3609,9 +3495,7 @@ describe("Media Routes", () => {
     });
 
     it("GET /api/media → 404 when listUserMedia throws 'Media not found'", async () => {
-      mockMediaHandlerInstance.listUserMedia.mockRejectedValue(
-        new Error("Media not found"),
-      );
+      mockMediaHandlerInstance.listUserMedia.mockRejectedValue(new Error("Media not found"));
       const response = await listRoute!.handler(
         new Request("https://api.example.com/api/media", { method: "GET" }),
         mockEnv,
@@ -3645,9 +3529,7 @@ describe("Media Routes", () => {
     });
 
     it("GET /api/media/:mediaId → 500 on a generic error", async () => {
-      mockMediaHandlerInstance.getMediaDetails.mockRejectedValue(
-        new Error("kaboom"),
-      );
+      mockMediaHandlerInstance.getMediaDetails.mockRejectedValue(new Error("kaboom"));
       const response = await detailsRoute!.handler(
         new Request("https://api.example.com/api/media/media-123", {
           method: "GET",
@@ -3689,9 +3571,7 @@ describe("Media Routes", () => {
     });
 
     it("POST /hide → 403 Forbidden on a permission error", async () => {
-      mockMediaHandlerInstance.hideMedia.mockRejectedValue(
-        new Error("user lacks permission"),
-      );
+      mockMediaHandlerInstance.hideMedia.mockRejectedValue(new Error("user lacks permission"));
       const response = await hideRoute!.handler(
         new Request("https://api.example.com/api/media/media-123/hide", {
           method: "POST",
@@ -3709,9 +3589,7 @@ describe("Media Routes", () => {
     });
 
     it("POST /hide → 400 when the media was deleted", async () => {
-      mockMediaHandlerInstance.hideMedia.mockRejectedValue(
-        new Error("Media is deleted"),
-      );
+      mockMediaHandlerInstance.hideMedia.mockRejectedValue(new Error("Media is deleted"));
       const response = await hideRoute!.handler(
         new Request("https://api.example.com/api/media/media-123/hide", {
           method: "POST",
@@ -3747,9 +3625,7 @@ describe("Media Routes", () => {
     });
 
     it("POST /unhide → 404 when media not found", async () => {
-      mockMediaHandlerInstance.unhideMedia.mockRejectedValue(
-        new Error("Media not found"),
-      );
+      mockMediaHandlerInstance.unhideMedia.mockRejectedValue(new Error("Media not found"));
       const response = await unhideRoute!.handler(
         new Request("https://api.example.com/api/media/media-123/unhide", {
           method: "POST",
@@ -3765,9 +3641,7 @@ describe("Media Routes", () => {
     });
 
     it("POST /unhide → 403 Forbidden on a permission error", async () => {
-      mockMediaHandlerInstance.unhideMedia.mockRejectedValue(
-        new Error("permission denied"),
-      );
+      mockMediaHandlerInstance.unhideMedia.mockRejectedValue(new Error("permission denied"));
       const response = await unhideRoute!.handler(
         new Request("https://api.example.com/api/media/media-123/unhide", {
           method: "POST",
@@ -3783,9 +3657,7 @@ describe("Media Routes", () => {
     });
 
     it("POST /unhide → 500 on a generic error", async () => {
-      mockMediaHandlerInstance.unhideMedia.mockRejectedValue(
-        new Error("kaboom"),
-      );
+      mockMediaHandlerInstance.unhideMedia.mockRejectedValue(new Error("kaboom"));
       const response = await unhideRoute!.handler(
         new Request("https://api.example.com/api/media/media-123/unhide", {
           method: "POST",
@@ -3820,9 +3692,7 @@ describe("Media Routes", () => {
     });
 
     it("DELETE /api/media/:mediaId → 403 Forbidden on a permission error", async () => {
-      mockMediaHandlerInstance.deleteMedia.mockRejectedValue(
-        new Error("permission required"),
-      );
+      mockMediaHandlerInstance.deleteMedia.mockRejectedValue(new Error("permission required"));
       const response = await deleteRoute!.handler(
         new Request("https://api.example.com/api/media/media-123", {
           method: "DELETE",
@@ -3840,9 +3710,7 @@ describe("Media Routes", () => {
     });
 
     it("DELETE /api/media/:mediaId → 404 when media not found", async () => {
-      mockMediaHandlerInstance.deleteMedia.mockRejectedValue(
-        new Error("Media not found"),
-      );
+      mockMediaHandlerInstance.deleteMedia.mockRejectedValue(new Error("Media not found"));
       const response = await deleteRoute!.handler(
         new Request("https://api.example.com/api/media/media-123", {
           method: "DELETE",
@@ -3878,9 +3746,7 @@ describe("Media Routes", () => {
     });
 
     it("DELETE /api/media/:mediaId → 500 on a generic error", async () => {
-      mockMediaHandlerInstance.deleteMedia.mockRejectedValue(
-        new Error("kaboom"),
-      );
+      mockMediaHandlerInstance.deleteMedia.mockRejectedValue(new Error("kaboom"));
       const response = await deleteRoute!.handler(
         new Request("https://api.example.com/api/media/media-123", {
           method: "DELETE",
@@ -3913,18 +3779,14 @@ describe("Media Routes", () => {
     });
 
     it("GET /api/media/grouped → 404 when listUserMediaGrouped throws 'Media not found'", async () => {
-      mockMediaHandlerInstance.listUserMediaGrouped.mockRejectedValue(
-        new Error("Media not found"),
-      );
+      mockMediaHandlerInstance.listUserMediaGrouped.mockRejectedValue(new Error("Media not found"));
       const response = await groupedRoute!.handler(
         new Request("https://api.example.com/api/media/grouped?groupBy=month", {
           method: "GET",
         }),
         mockEnv,
         {
-          url: new URL(
-            "https://api.example.com/api/media/grouped?groupBy=month",
-          ),
+          url: new URL("https://api.example.com/api/media/grouped?groupBy=month"),
           pathname: "/api/media/grouped",
           params: {},
         },
@@ -3935,9 +3797,7 @@ describe("Media Routes", () => {
     });
 
     it("GET /api/media/grouped → 500 on a generic error", async () => {
-      mockMediaHandlerInstance.listUserMediaGrouped.mockRejectedValue(
-        new Error("group boom"),
-      );
+      mockMediaHandlerInstance.listUserMediaGrouped.mockRejectedValue(new Error("group boom"));
       const response = await groupedRoute!.handler(
         new Request("https://api.example.com/api/media/grouped?groupBy=year", {
           method: "GET",
@@ -3954,15 +3814,12 @@ describe("Media Routes", () => {
 
     it("GET /api/media/grouped → 400 Invalid limit when limit is out of range", async () => {
       const response = await groupedRoute!.handler(
-        new Request(
-          "https://api.example.com/api/media/grouped?groupBy=month&limit=0",
-          { method: "GET" },
-        ),
+        new Request("https://api.example.com/api/media/grouped?groupBy=month&limit=0", {
+          method: "GET",
+        }),
         mockEnv,
         {
-          url: new URL(
-            "https://api.example.com/api/media/grouped?groupBy=month&limit=0",
-          ),
+          url: new URL("https://api.example.com/api/media/grouped?groupBy=month&limit=0"),
           pathname: "/api/media/grouped",
           params: {},
         },
@@ -3973,9 +3830,7 @@ describe("Media Routes", () => {
     });
 
     it("GET /api/media/stats → 404 when getUserMediaStats throws 'Media not found'", async () => {
-      mockMediaHandlerInstance.getUserMediaStats.mockRejectedValue(
-        new Error("Media not found"),
-      );
+      mockMediaHandlerInstance.getUserMediaStats.mockRejectedValue(new Error("Media not found"));
       const response = await statsRoute!.handler(
         new Request("https://api.example.com/api/media/stats", { method: "GET" }),
         mockEnv,
@@ -3991,9 +3846,7 @@ describe("Media Routes", () => {
     });
 
     it("GET /api/media/stats → 500 on a generic error", async () => {
-      mockMediaHandlerInstance.getUserMediaStats.mockRejectedValue(
-        new Error("stats boom"),
-      );
+      mockMediaHandlerInstance.getUserMediaStats.mockRejectedValue(new Error("stats boom"));
       const response = await statsRoute!.handler(
         new Request("https://api.example.com/api/media/stats", { method: "GET" }),
         mockEnv,
@@ -4085,6 +3938,5 @@ describe("Media Routes", () => {
       // No bytes may reach the approved cas/ prefix on a refusal.
       expectNoCasWrite();
     });
-
   });
 });
