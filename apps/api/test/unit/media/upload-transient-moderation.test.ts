@@ -114,36 +114,40 @@ describe("/api/media/upload — transient image-check failures", () => {
     upsertMock.mockResolvedValue({ id: "mediafile-1" });
   });
 
+  // Only errors KNOWN to be transient answer 503: a typed provider error that
+  // says retryable or capacity, or an untyped error that matches an explicit
+  // transient signal. Everything else holds (see the next describe block).
   const transient: Array<[string, () => unknown]> = [
     [
       "retryable provider error",
       () => new ModerationProviderError("throttled", { retryable: true }),
     ],
     [
-      "capacity / spend cap (infra fault)",
-      () => new ModerationProviderError("cap reached", { retryable: false, infraFault: true }),
-    ],
-    [
       "capacity flag (non-retryable, capacity ceiling)",
       () => new ModerationProviderError("ceiling", { retryable: false, capacity: true }),
     ],
     [
-      "credential error (unattributed provider fault)",
+      "capacity flag with a spend cap (capacity + infra fault)",
       () =>
-        new ModerationProviderError("bad credentials", { retryable: false, unknownCause: true }),
+        new ModerationProviderError("cap reached", {
+          retryable: false,
+          capacity: true,
+          infraFault: true,
+        }),
     ],
     [
       "deadline error",
       () => new ModerationProviderError("moderation deadline exceeded", { retryable: true }),
     ],
     [
-      "untyped unknown error (classifier default is retryable)",
-      () => new Error("provider exploded"),
+      "untyped throttling error (known transient name)",
+      () => Object.assign(new Error("slow down"), { name: "ThrottlingException" }),
     ],
     [
       "untyped network error",
       () => Object.assign(new Error("socket hang up"), { name: "FetchError" }),
     ],
+    ["untyped upstream 503", () => Object.assign(new Error("upstream"), { statusCode: 503 })],
   ];
 
   it.each(transient)("%s → 503 + Retry-After, no row, nothing promoted", async (_n, mk) => {
@@ -197,6 +201,42 @@ describe("/api/media/upload — outcomes that still hold", () => {
     const { res } = await run();
     expect(res.status).not.toBe(503);
     expect(upsertMock.mock.calls[0][0].create.lifecycle).toBe("REVIEW");
+  });
+
+  it("an untyped error with no recognisable signal holds as REVIEW, not 503 (fail closed)", async () => {
+    // The worker classifier would call this retryable by default; the upload
+    // route must not, or every unrecognised failure becomes a "try again".
+    moderateImageMock.mockRejectedValue(new Error("provider exploded"));
+    const { res, env } = await run();
+    expect(res.status).not.toBe(503);
+    expect(upsertMock).toHaveBeenCalledTimes(1);
+    expect(upsertMock.mock.calls[0][0].create.lifecycle).toBe("REVIEW");
+    // Held, never promoted to cas/.
+    expect(env.MEDIA_BUCKET_R2.put).toHaveBeenCalledTimes(1);
+  });
+
+  it("a typed provider error that only reports an infra fault or unknown cause holds as REVIEW", async () => {
+    for (const err of [
+      new ModerationProviderError("unattributed", { retryable: false, unknownCause: true }),
+      new ModerationProviderError("infra", { retryable: false, infraFault: true }),
+    ]) {
+      vi.clearAllMocks();
+      upsertMock.mockResolvedValue({ id: "mediafile-1" });
+      moderateImageMock.mockRejectedValue(err);
+      const { res } = await run();
+      expect(res.status).not.toBe(503);
+      expect(upsertMock.mock.calls[0][0].create.lifecycle).toBe("REVIEW");
+    }
+  });
+
+  it("a typed retryable error wins over a poison-looking message", async () => {
+    // The typed flag is authoritative; the heuristic must not overrule it.
+    moderateImageMock.mockRejectedValue(
+      new ModerationProviderError("invalid image dimensions", { retryable: true }),
+    );
+    const { res } = await run();
+    expect(res.status).toBe(503);
+    expect(upsertMock).not.toHaveBeenCalled();
   });
 
   it("a typed, non-retryable provider error with no capacity or infra flag still holds as REVIEW", async () => {

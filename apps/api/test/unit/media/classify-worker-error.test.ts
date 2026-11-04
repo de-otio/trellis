@@ -17,6 +17,7 @@ import * as fc from "fast-check";
 import {
   classifyWorkerError,
   classifyWorkerErrorDetailed,
+  isKnownTransientByHeuristic,
   type ErrorClass,
 } from "../../../src/lib/media/classify-worker-error";
 import { ModerationProviderError } from "../../../src/lib/media/moderation-provider.js";
@@ -30,11 +31,7 @@ const FC = { seed: 0xc1a5, numRuns: 2000 } as const;
 
 const VALID_CLASSES: ReadonlySet<ErrorClass> = new Set(["poison", "retryable"]);
 
-function awsSdkError(
-  name: string,
-  message: string,
-  httpStatusCode?: number,
-): object {
+function awsSdkError(name: string, message: string, httpStatusCode?: number): object {
   return {
     name,
     message,
@@ -60,9 +57,7 @@ describe("classifyWorkerError — totality property", () => {
         name: fc.option(fc.string()),
         message: fc.option(fc.string()),
         statusCode: fc.option(fc.integer()),
-        $metadata: fc.option(
-          fc.record({ httpStatusCode: fc.option(fc.integer()) }),
-        ),
+        $metadata: fc.option(fc.record({ httpStatusCode: fc.option(fc.integer()) })),
       }),
       fc.array(fc.string()),
     );
@@ -114,7 +109,9 @@ describe("classifyWorkerError — output domain property", () => {
 
 describe("classifyWorkerError — poison examples", () => {
   it("classifies DecodeError by name", () => {
-    expect(classifyWorkerError(new Error("something failed") as Error & { name: string })).toBe("retryable"); // baseline
+    expect(classifyWorkerError(new Error("something failed") as Error & { name: string })).toBe(
+      "retryable",
+    ); // baseline
     const e = Object.assign(new Error("bad bytes"), { name: "DecodeError" });
     expect(classifyWorkerError(e)).toBe("poison");
   });
@@ -125,7 +122,9 @@ describe("classifyWorkerError — poison examples", () => {
   });
 
   it("classifies UnsupportedFormatError by name", () => {
-    expect(classifyWorkerError({ name: "UnsupportedFormatError", message: "avi not supported" })).toBe("poison");
+    expect(
+      classifyWorkerError({ name: "UnsupportedFormatError", message: "avi not supported" }),
+    ).toBe("poison");
   });
 
   it("classifies CorruptMediaError by name", () => {
@@ -133,28 +132,40 @@ describe("classifyWorkerError — poison examples", () => {
   });
 
   it("classifies DurationCapExceeded by name", () => {
-    expect(classifyWorkerError({ name: "DurationCapExceeded", message: "too long" })).toBe("poison");
+    expect(classifyWorkerError({ name: "DurationCapExceeded", message: "too long" })).toBe(
+      "poison",
+    );
   });
 
   it("classifies ValidationError by name", () => {
-    expect(classifyWorkerError({ name: "ValidationError", message: "schema violation" })).toBe("poison");
+    expect(classifyWorkerError({ name: "ValidationError", message: "schema violation" })).toBe(
+      "poison",
+    );
   });
 
   it("classifies InvalidImageException (AWS Rekognition) by name", () => {
-    expect(classifyWorkerError(awsSdkError("InvalidImageException", "image cannot be decoded", 400))).toBe("poison");
+    expect(
+      classifyWorkerError(awsSdkError("InvalidImageException", "image cannot be decoded", 400)),
+    ).toBe("poison");
   });
 
   it("classifies ImageTooLargeException (AWS Rekognition) by name", () => {
-    expect(classifyWorkerError(awsSdkError("ImageTooLargeException", "image too large", 400))).toBe("poison");
+    expect(classifyWorkerError(awsSdkError("ImageTooLargeException", "image too large", 400))).toBe(
+      "poison",
+    );
   });
 
   it("classifies InvalidS3ObjectException (AWS Rekognition) by name", () => {
-    expect(classifyWorkerError(awsSdkError("InvalidS3ObjectException", "cannot access object", 400))).toBe("poison");
+    expect(
+      classifyWorkerError(awsSdkError("InvalidS3ObjectException", "cannot access object", 400)),
+    ).toBe("poison");
   });
 
   it("classifies InvalidParameterException (400) by name — poison wins over 4xx", () => {
     // 400 is NOT in the retryable HTTP set, so this should be poison via name match.
-    expect(classifyWorkerError(awsSdkError("InvalidParameterException", "bad param", 400))).toBe("poison");
+    expect(classifyWorkerError(awsSdkError("InvalidParameterException", "bad param", 400))).toBe(
+      "poison",
+    );
   });
 
   it("classifies a plain Error with 'decode' in the message", () => {
@@ -200,43 +211,75 @@ describe("classifyWorkerError — poison examples", () => {
 
 describe("classifyWorkerError — retryable examples", () => {
   it("classifies ThrottlingException (AWS) as retryable", () => {
-    expect(classifyWorkerError(awsSdkError("ThrottlingException", "rate exceeded", 429))).toBe("retryable");
+    expect(classifyWorkerError(awsSdkError("ThrottlingException", "rate exceeded", 429))).toBe(
+      "retryable",
+    );
   });
 
   it("classifies RequestLimitExceeded (AWS) as retryable", () => {
-    expect(classifyWorkerError(awsSdkError("RequestLimitExceeded", "too many requests", 429))).toBe("retryable");
+    expect(classifyWorkerError(awsSdkError("RequestLimitExceeded", "too many requests", 429))).toBe(
+      "retryable",
+    );
   });
 
   it("classifies ProvisionedThroughputExceededException as retryable", () => {
-    expect(classifyWorkerError(awsSdkError("ProvisionedThroughputExceededException", "throttle", 400))).toBe("retryable");
+    expect(
+      classifyWorkerError(awsSdkError("ProvisionedThroughputExceededException", "throttle", 400)),
+    ).toBe("retryable");
   });
 
   it("classifies ServiceUnavailableException (AWS, 503) as retryable", () => {
-    expect(classifyWorkerError(awsSdkError("ServiceUnavailableException", "service unavailable", 503))).toBe("retryable");
+    expect(
+      classifyWorkerError(awsSdkError("ServiceUnavailableException", "service unavailable", 503)),
+    ).toBe("retryable");
   });
 
   it("classifies InternalFailure (AWS, 500) as retryable", () => {
-    expect(classifyWorkerError(awsSdkError("InternalFailure", "internal error", 500))).toBe("retryable");
+    expect(classifyWorkerError(awsSdkError("InternalFailure", "internal error", 500))).toBe(
+      "retryable",
+    );
   });
 
   it("classifies AccessDeniedException (AWS) as retryable (eventual-consistency lag)", () => {
-    expect(classifyWorkerError(awsSdkError("AccessDeniedException", "access denied", 403))).toBe("retryable");
+    expect(classifyWorkerError(awsSdkError("AccessDeniedException", "access denied", 403))).toBe(
+      "retryable",
+    );
   });
 
   it("classifies RequestTimeoutException as retryable", () => {
-    expect(classifyWorkerError(awsSdkError("RequestTimeoutException", "timed out", 408))).toBe("retryable");
+    expect(classifyWorkerError(awsSdkError("RequestTimeoutException", "timed out", 408))).toBe(
+      "retryable",
+    );
   });
 
   it("classifies http 429 via $metadata.httpStatusCode as retryable", () => {
-    expect(classifyWorkerError({ name: "UnknownError", message: "???", $metadata: { httpStatusCode: 429 } })).toBe("retryable");
+    expect(
+      classifyWorkerError({
+        name: "UnknownError",
+        message: "???",
+        $metadata: { httpStatusCode: 429 },
+      }),
+    ).toBe("retryable");
   });
 
   it("classifies http 500 via $metadata.httpStatusCode as retryable", () => {
-    expect(classifyWorkerError({ name: "UnknownError", message: "nope", $metadata: { httpStatusCode: 500 } })).toBe("retryable");
+    expect(
+      classifyWorkerError({
+        name: "UnknownError",
+        message: "nope",
+        $metadata: { httpStatusCode: 500 },
+      }),
+    ).toBe("retryable");
   });
 
   it("classifies http 502 via $metadata.httpStatusCode as retryable", () => {
-    expect(classifyWorkerError({ name: "ServiceError", message: "", $metadata: { httpStatusCode: 502 } })).toBe("retryable");
+    expect(
+      classifyWorkerError({
+        name: "ServiceError",
+        message: "",
+        $metadata: { httpStatusCode: 502 },
+      }),
+    ).toBe("retryable");
   });
 
   it("classifies http 503 via statusCode field as retryable", () => {
@@ -248,11 +291,15 @@ describe("classifyWorkerError — retryable examples", () => {
   });
 
   it("classifies ECONNRESET by name as retryable", () => {
-    expect(classifyWorkerError({ name: "ECONNRESET", message: "connection reset" })).toBe("retryable");
+    expect(classifyWorkerError({ name: "ECONNRESET", message: "connection reset" })).toBe(
+      "retryable",
+    );
   });
 
   it("classifies ETIMEDOUT by name as retryable", () => {
-    expect(classifyWorkerError({ name: "ETIMEDOUT", message: "connection timed out" })).toBe("retryable");
+    expect(classifyWorkerError({ name: "ETIMEDOUT", message: "connection timed out" })).toBe(
+      "retryable",
+    );
   });
 
   it("classifies NetworkError by name as retryable", () => {
@@ -260,7 +307,9 @@ describe("classifyWorkerError — retryable examples", () => {
   });
 
   it("classifies TimeoutError by name as retryable", () => {
-    expect(classifyWorkerError({ name: "TimeoutError", message: "fetch timed out" })).toBe("retryable");
+    expect(classifyWorkerError({ name: "TimeoutError", message: "fetch timed out" })).toBe(
+      "retryable",
+    );
   });
 
   it("classifies AbortError by name as retryable", () => {
@@ -318,7 +367,9 @@ describe("classifyWorkerError — default rule (unknown => retryable)", () => {
   });
 
   it("returns 'retryable' for an object with only unrecognised name+message", () => {
-    expect(classifyWorkerError({ name: "XyzAbcError", message: "flux capacitor fault" })).toBe("retryable");
+    expect(classifyWorkerError({ name: "XyzAbcError", message: "flux capacitor fault" })).toBe(
+      "retryable",
+    );
   });
 
   it("returns 'retryable' for an array", () => {
@@ -332,7 +383,13 @@ describe("classifyWorkerError — default rule (unknown => retryable)", () => {
   it("returns 'retryable' for a 404 HTTP status (not in retryable set — ambiguous, defaults to retryable via fallthrough)", () => {
     // 404 is not explicitly in RETRYABLE_HTTP_STATUS; no name/message match either.
     // The default rule applies: unknown => retryable.
-    expect(classifyWorkerError({ name: "NotFoundError", message: "object not found", $metadata: { httpStatusCode: 404 } })).toBe("retryable");
+    expect(
+      classifyWorkerError({
+        name: "NotFoundError",
+        message: "object not found",
+        $metadata: { httpStatusCode: 404 },
+      }),
+    ).toBe("retryable");
   });
 });
 
@@ -344,9 +401,9 @@ describe("classifyWorkerError — poison wins on conflict", () => {
   it("poison wins when name is poison-indicative but HTTP status is retryable", () => {
     // InvalidImageException name (poison) + httpStatusCode 429 (retryable).
     // Poison check runs first; it should win.
-    expect(
-      classifyWorkerError(awsSdkError("InvalidImageException", "bad image", 429)),
-    ).toBe("poison");
+    expect(classifyWorkerError(awsSdkError("InvalidImageException", "bad image", 429))).toBe(
+      "poison",
+    );
   });
 
   it("poison wins when message contains 'decode' but name is ThrottlingException", () => {
@@ -414,21 +471,23 @@ describe("classifyWorkerError — taxonomy property (retryable domain)", () => {
   it("always returns retryable for known-retryable error names (no conflicting message)", () => {
     const nameArb = fc.constantFrom(...retryableNames);
     // Messages that contain no poison fragments.
-    const safeMsgArb = fc.string({ maxLength: 50 }).filter(
-      (s) =>
-        !s.toLowerCase().includes("decode") &&
-        !s.toLowerCase().includes("corrupt") &&
-        !s.toLowerCase().includes("invalid") &&
-        !s.toLowerCase().includes("unsupported") &&
-        !s.toLowerCase().includes("malformed") &&
-        !s.toLowerCase().includes("parse") &&
-        !s.toLowerCase().includes("format") &&
-        !s.toLowerCase().includes("duration") &&
-        !s.toLowerCase().includes("validation") &&
-        !s.toLowerCase().includes("schema") &&
-        !s.toLowerCase().includes("constraint") &&
-        !s.toLowerCase().includes("payload"),
-    );
+    const safeMsgArb = fc
+      .string({ maxLength: 50 })
+      .filter(
+        (s) =>
+          !s.toLowerCase().includes("decode") &&
+          !s.toLowerCase().includes("corrupt") &&
+          !s.toLowerCase().includes("invalid") &&
+          !s.toLowerCase().includes("unsupported") &&
+          !s.toLowerCase().includes("malformed") &&
+          !s.toLowerCase().includes("parse") &&
+          !s.toLowerCase().includes("format") &&
+          !s.toLowerCase().includes("duration") &&
+          !s.toLowerCase().includes("validation") &&
+          !s.toLowerCase().includes("schema") &&
+          !s.toLowerCase().includes("constraint") &&
+          !s.toLowerCase().includes("payload"),
+      );
     fc.assert(
       fc.property(nameArb, safeMsgArb, (name, message) => {
         return classifyWorkerError({ name, message }) === "retryable";
@@ -521,10 +580,9 @@ describe("classifyWorkerErrorDetailed — a typed provider error wins", () => {
 
     // ...and the reverse direction: a permanent-sounding message the adapter
     // declared transient.
-    const transient = new ModerationProviderError(
-      "corrupt response from an upstream shard",
-      { retryable: true },
-    );
+    const transient = new ModerationProviderError("corrupt response from an upstream shard", {
+      retryable: true,
+    });
     expect(classifyWorkerError(transient)).toBe("retryable");
   });
 
@@ -549,9 +607,11 @@ describe("classifyWorkerErrorDetailed — a typed provider error wins", () => {
       source: "heuristic",
       infraFault: false,
     });
-    expect(
-      classifyWorkerErrorDetailed(new Error("failed to decode the frame")),
-    ).toEqual({ klass: "poison", source: "heuristic", infraFault: false });
+    expect(classifyWorkerErrorDetailed(new Error("failed to decode the frame"))).toEqual({
+      klass: "poison",
+      source: "heuristic",
+      infraFault: false,
+    });
   });
 
   it("never claims an infra fault from an untyped error", () => {
@@ -605,9 +665,7 @@ describe("infraFault on the RETRYABLE branch — the 429 gap", () => {
 
   it("an untyped error never reports an infrastructure fault", () => {
     // The heuristic is guessing. A guess must not raise an outage alarm.
-    expect(classifyWorkerErrorDetailed(new Error("429 Too Many Requests")).infraFault).toBe(
-      false,
-    );
+    expect(classifyWorkerErrorDetailed(new Error("429 Too Many Requests")).infraFault).toBe(false);
   });
 
   it("the classification's retry decision is UNCHANGED by the flag", () => {
@@ -626,5 +684,39 @@ describe("infraFault on the RETRYABLE branch — the 429 gap", () => {
         ).klass,
       ).toBe("poison");
     }
+  });
+});
+
+describe("isKnownTransientByHeuristic — retryable only on an explicit signal", () => {
+  it("is true for a recognised transient name, status or message", () => {
+    expect(
+      isKnownTransientByHeuristic(Object.assign(new Error("x"), { name: "ThrottlingException" })),
+    ).toBe(true);
+    expect(isKnownTransientByHeuristic(Object.assign(new Error("x"), { statusCode: 429 }))).toBe(
+      true,
+    );
+    expect(isKnownTransientByHeuristic(new Error("request timed out"))).toBe(true);
+    expect(isKnownTransientByHeuristic("socket hang up")).toBe(true);
+  });
+
+  it("is false for an error that matches nothing, though classifyWorkerError defaults it to retryable", () => {
+    const unknown = new Error("provider exploded");
+    expect(classifyWorkerError(unknown)).toBe("retryable");
+    expect(isKnownTransientByHeuristic(unknown)).toBe(false);
+    expect(isKnownTransientByHeuristic(undefined)).toBe(false);
+    expect(isKnownTransientByHeuristic(null)).toBe(false);
+    expect(isKnownTransientByHeuristic({})).toBe(false);
+  });
+
+  it("is false when a poison signal is present, even alongside a transient one", () => {
+    expect(isKnownTransientByHeuristic(new Error("invalid image: timeout reading header"))).toBe(
+      false,
+    );
+  });
+
+  it("is false for a typed provider error whatever its flags (the typed path decides)", () => {
+    expect(
+      isKnownTransientByHeuristic(new ModerationProviderError("throttled", { retryable: true })),
+    ).toBe(false);
   });
 });

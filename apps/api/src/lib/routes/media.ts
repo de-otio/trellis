@@ -1174,11 +1174,15 @@ export const mediaRoutes: Route[] = [
           // can never make this path more permissive than it already was.
           decision = decisionToStatus(interpretVerdict(verdict));
         } catch (moderationError: any) {
-          // A check that failed for a reason unrelated to the image
-          // (throttling, quota/spend cap, credential fault, deadline, network)
-          // is NOT a verdict. Holding the image would turn an outage into a
-          // permanent block of a probably benign upload wherever no moderator
-          // is standing by, so answer 503 and let the client retry.
+          // A check that failed for a reason KNOWN to be unrelated to the image
+          // (a typed provider error flagged retryable or capacity, or an
+          // untyped error matching an explicit transient signal such as
+          // throttling, a deadline or a network error) is NOT a verdict.
+          // Holding it would turn an outage into a permanent block of a
+          // probably benign upload wherever no moderator is standing by, so
+          // answer 503 and let the client retry. Anything else, including an
+          // untyped error we cannot recognise, falls through to the fail-closed
+          // hold below.
           //
           // Client-retry contract: the MediaFile row is created only AFTER
           // this step, so nothing exists yet to be servable. We drop the
@@ -1498,9 +1502,9 @@ export const mediaRoutes: Route[] = [
     middleware: [corsMiddleware(), csrfMiddleware()],
     description:
       "Upload media file (image or video) with content-addressed storage. " +
-      "Responses: 200 stored (a provider verdict that holds the upload is recorded as REVIEW and is not served); " +
-      "503 with an optional Retry-After (seconds, operator-configured) when the image check was temporarily unavailable " +
-      "(provider throttling, a quota or spend cap, a credential fault, a deadline, a network error) - nothing was stored, retry the upload; " +
+      "Responses: 200 stored (a provider verdict that holds the upload, or an image check that failed for a reason not known to be transient, is recorded as REVIEW and is not served); " +
+      "503 with an optional Retry-After (seconds, operator-configured) when the image check was known to be temporarily unavailable " +
+      "(a provider error flagged retryable or capacity, or throttling, a deadline or a network error) - nothing was stored, retry the upload; " +
       "429 when a rate or quota limit applies.",
   },
   {
