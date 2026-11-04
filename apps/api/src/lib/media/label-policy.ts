@@ -133,10 +133,7 @@ export interface LabelPolicyContext {
 
 export interface LabelPolicy {
   /** Interpret one verdict. Total: never throws, for any verdict shape. */
-  decide(
-    verdict: ModerationVerdict,
-    context?: LabelPolicyContext,
-  ): ModerationDecision;
+  decide(verdict: ModerationVerdict, context?: LabelPolicyContext): ModerationDecision;
   /**
    * The same interpretation, with the ground it rests on. `review` collapses
    * several distinct situations and only some of them are worth escalating to
@@ -152,10 +149,7 @@ export interface LabelPolicy {
    * this — so a policy without it degrades to "no escalation", never to a
    * crash.
    */
-  explain?(
-    verdict: ModerationVerdict,
-    context?: LabelPolicyContext,
-  ): LabelPolicyExplanation;
+  explain?(verdict: ModerationVerdict, context?: LabelPolicyContext): LabelPolicyExplanation;
   /**
    * True when this policy runs WITHOUT a taxonomy pin. A standing flag for the
    * operations surface, not a one-shot log line.
@@ -184,23 +178,14 @@ export function createLabelPolicy(config: LabelPolicyConfig): LabelPolicy {
       "label policy requires a category map; refusing to construct a policy nobody configured",
     );
   }
-  if (
-    config.pinMode !== "response" &&
-    config.pinMode !== "config" &&
-    config.pinMode !== "none"
-  ) {
-    throw new LabelPolicyConfigError(
-      `label policy pinMode must be "response", "config" or "none"`,
-    );
+  if (config.pinMode !== "response" && config.pinMode !== "config" && config.pinMode !== "none") {
+    throw new LabelPolicyConfigError(`label policy pinMode must be "response", "config" or "none"`);
   }
   if (
     config.pinMode === "config" &&
-    (typeof config.expectedModelVersion !== "string" ||
-      config.expectedModelVersion.length === 0)
+    (typeof config.expectedModelVersion !== "string" || config.expectedModelVersion.length === 0)
   ) {
-    throw new LabelPolicyConfigError(
-      'label policy pinMode "config" requires expectedModelVersion',
-    );
+    throw new LabelPolicyConfigError('label policy pinMode "config" requires expectedModelVersion');
   }
   if (config.pinMode === "none" && config.acceptUnpinnedTaxonomy !== true) {
     throw new LabelPolicyConfigError(
@@ -360,10 +345,7 @@ export function explainFromLabels(
         drivingConfidence: null,
       };
     }
-    const policy = Object.prototype.hasOwnProperty.call(
-      config.categories,
-      category,
-    )
+    const policy = Object.prototype.hasOwnProperty.call(config.categories, category)
       ? config.categories[category]
       : undefined;
     if (policy === undefined) {

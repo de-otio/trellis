@@ -846,7 +846,7 @@ export type { LabelPolicy, LabelPolicyConfig, LabelPolicyContext, LabelPolicyExp
 export { createCascadeRoute, routeOnConfidence, CascadeRouteConfigError, } from "./lib/media/cascade-route.js";
 export type { CascadeRoute, CascadeRouteConfig, CascadeRouter, EscalationCause, SettleReason, } from "./lib/media/cascade-route.js";
 export { clampEscalatedDecision, createDeferredLaneConfig, dispositionForDeadlineBreach, dispositionForError, DeferredLaneConfigError, DEFERRED_LANE_RETRIES, } from "./lib/media/deferred-lane.js";
-export type { DeferredLaneConfig, Disposition, ShedCause, } from "./lib/media/deferred-lane.js";
+export type { DeferredLaneConfig, Disposition, ShedCause } from "./lib/media/deferred-lane.js";
 export { setMediaReviewPromotion } from "./lib/media/media-review-handler.js";
 export type { ReviewPromotionPort, ReviewPromoteCoords } from "./lib/media/media-review-handler.js";
 export { ModerationMetrics } from "./lib/media/moderation-metrics.js";
@@ -868,7 +868,7 @@ export { ModerationProviderError, isModerationProviderError, ModerationJobPendin
 export type { MediaModerationProvider, MediaPin, ImageRef, S3Ref, ModerationVerdict, ModerationLabel, ModerationCallOptions, VideoModerationStart, HoldGround, } from "./lib/media/moderation-provider.js";
 export type { ReviewActor } from "./lib/media/media-review-handler.js";
 export type { UploadQuotaPort } from "./lib/media/media-ports.js";
-export type { ProcessingOutcome, ProcessingClock, } from "./lib/workers/media-processing.js";
+export type { ProcessingOutcome, ProcessingClock } from "./lib/workers/media-processing.js";
 export { validateRecoverySweepConfig } from "./lib/workers/media-recovery-sweep.js";
 export type { MediaRecoverySweepConfig, RecoveryAction, RecoveryCandidate, RecoveryTrackState, CompletionQueueTiming, } from "./lib/workers/media-recovery-sweep.js";
 export { completionEnvelopeBody, parseCompletionEnvelope, } from "./lib/media/completion-envelope.js";
@@ -876,10 +876,10 @@ export type { ModerationCompletionEnvelope } from "./lib/media/completion-envelo
 export { setTextModerationProvider } from "./lib/media/request-text-moderation.js";
 export { setEvidencePreservationStore, setAuthorityReportChannel, setModerationFeedbackSink, } from "./lib/media/compliance-seams.js";
 export type { EvidencePreservationStore, AuthorityReportChannel, ModerationFeedbackSink, EvidenceBundle, AuthorityReportBundle, AuthorityReportResult, ModerationFeedbackRecord, BlockClass, } from "./lib/media/compliance-seams.js";
-export { setReportTemplates, REPORT_TEMPLATE_KEYS, } from "./lib/report-templates.js";
+export { setReportTemplates, REPORT_TEMPLATE_KEYS } from "./lib/report-templates.js";
 export type { ReportTemplate, ReportTemplateMap } from "./lib/report-templates.js";
-export { setOperatorAlertHook, } from "./lib/report-operator-alert.js";
-export type { OperatorAlert, OperatorAlertHook, } from "./lib/report-operator-alert.js";
+export { setOperatorAlertHook } from "./lib/report-operator-alert.js";
+export type { OperatorAlert, OperatorAlertHook } from "./lib/report-operator-alert.js";
 export { restrictContent, evidenceHoldExemptWhere, setComplianceAlarmHook, } from "./lib/compliance/restrict-content.js";
 export type { RestrictContentRef, RestrictContentOpts, RestrictContentResult, ComplianceAlarm, ComplianceAlarmHook, } from "./lib/compliance/restrict-content.js";
 export { setStatementDelivery } from "./lib/compliance/statement-of-reasons.js";

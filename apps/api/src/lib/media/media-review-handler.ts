@@ -26,17 +26,10 @@
  * unit tests inject mocks — no module-level Prisma coupling.
  */
 
-import {
-  nextLifecycle,
-  type MediaLifecycle,
-} from "./media-lifecycle.js";
+import { nextLifecycle, type MediaLifecycle } from "./media-lifecycle.js";
 import { casKey, isCasKeyError } from "./cas-keys.js";
 import type { StoragePort } from "./media-ports.js";
-import {
-  promotePinned,
-  resolvePromoteSource,
-  type PromoteLog,
-} from "./promote-staging.js";
+import { promotePinned, resolvePromoteSource, type PromoteLog } from "./promote-staging.js";
 import { isModeratorServable } from "./moderator-serve-gate.js";
 import {
   MEDIA_MODERATION_APPROVED,
@@ -240,10 +233,7 @@ export class MediaReviewHandler {
    * or null when denied (no such user, or a non-moderator role). The route maps
    * null → 403. DB is the source of truth; the session only supplies the userId.
    */
-  async resolveModeratorRole(
-    db: ReviewPrismaLike,
-    userId: string,
-  ): Promise<string | null> {
+  async resolveModeratorRole(db: ReviewPrismaLike, userId: string): Promise<string | null> {
     const user = await db.user.findUnique({
       where: { id: userId },
       select: { role: true },
@@ -261,10 +251,7 @@ export class MediaReviewHandler {
     db: ReviewPrismaLike,
     opts: { limit?: number; cursor?: string; kind?: MediaKind } = {},
   ): Promise<ReviewQueuePage> {
-    const limit = Math.min(
-      Math.max(1, opts.limit ?? DEFAULT_LIMIT),
-      MAX_LIMIT,
-    );
+    const limit = Math.min(Math.max(1, opts.limit ?? DEFAULT_LIMIT), MAX_LIMIT);
 
     const where: Record<string, unknown> = {
       lifecycle: { in: ["REVIEW", "QUARANTINED"] },
@@ -312,8 +299,7 @@ export class MediaReviewHandler {
       width: (r.width as number | null) ?? null,
       height: (r.height as number | null) ?? null,
       duration: (r.duration as number | null) ?? null,
-      createdAt:
-        createdAt instanceof Date ? createdAt.toISOString() : String(createdAt),
+      createdAt: createdAt instanceof Date ? createdAt.toISOString() : String(createdAt),
       tracks,
     };
   }
@@ -399,9 +385,7 @@ export class MediaReviewHandler {
     }
 
     const targetStatus: MediaLifecycle =
-      transition.status === "APPROVED" && !bytesCertified
-        ? "REVIEW"
-        : transition.status;
+      transition.status === "APPROVED" && !bytesCertified ? "REVIEW" : transition.status;
     const promoted = targetStatus === "APPROVED";
 
     await db.mediaFile.update({
@@ -410,9 +394,7 @@ export class MediaReviewHandler {
     });
 
     await auditLogger.logSystemAction(
-      input.decision === "approve"
-        ? MEDIA_MODERATION_APPROVED
-        : MEDIA_MODERATION_REJECTED,
+      input.decision === "approve" ? MEDIA_MODERATION_APPROVED : MEDIA_MODERATION_REJECTED,
       {
         resource: "media",
         resourceId: input.mediaId,
@@ -506,10 +488,7 @@ export class MediaReviewHandler {
         source,
         stagingKey,
         casKey: casObjectKey,
-        cleanupKeys: [
-          `pending/${coords.tenantId}/${coords.uploadId}`,
-          stagingKey,
-        ],
+        cleanupKeys: [`pending/${coords.tenantId}/${coords.uploadId}`, stagingKey],
         log,
         logContext: { mediaId },
       });
@@ -554,9 +533,7 @@ export class MediaReviewHandler {
     const from = media.lifecycle as MediaLifecycle;
     const transition = nextLifecycle(from, { kind: "csam" });
     // csam is legal from ANY state, but guard defensively.
-    const targetStatus: MediaLifecycle = transition.ok
-      ? transition.status
-      : "REJECTED";
+    const targetStatus: MediaLifecycle = transition.ok ? transition.status : "REJECTED";
 
     await db.mediaFile.update({
       where: { id: input.mediaId },

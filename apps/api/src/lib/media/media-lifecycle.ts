@@ -106,8 +106,7 @@ export type IllegalTransition = {
 
 /** A successful transition to a next lifecycle state. */
 export type TransitionResult =
-  | { readonly ok: true; readonly status: MediaLifecycle }
-  | IllegalTransition;
+  { readonly ok: true; readonly status: MediaLifecycle } | IllegalTransition;
 
 /**
  * Map a classifier decision to the state it drives an `UPLOADED` object into.
@@ -233,10 +232,7 @@ export function nextLifecycle(
   }
 }
 
-function illegal(
-  from: MediaLifecycle,
-  event: MediaLifecycleEvent,
-): IllegalTransition {
+function illegal(from: MediaLifecycle, event: MediaLifecycleEvent): IllegalTransition {
   return { ok: false, reason: "illegal-transition", from, event };
 }
 
@@ -252,9 +248,7 @@ function illegal(
  * closed to `REVIEW` (never `APPROVED`): an unexpected refusal must degrade to
  * human review, not to serving.
  */
-export function decisionToStatus(
-  decision: ModerationDecision,
-): MediaLifecycle {
+export function decisionToStatus(decision: ModerationDecision): MediaLifecycle {
   const result = nextLifecycle("UPLOADED", { kind: "decision", decision });
   return result.ok ? result.status : "REVIEW";
 }

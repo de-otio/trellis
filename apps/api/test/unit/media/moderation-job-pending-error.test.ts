@@ -36,26 +36,20 @@ describe("ModerationJobPendingError", () => {
     expect(isModerationJobPendingError(undefined)).toBe(false);
     expect(isModerationJobPendingError("ModerationJobPendingError")).toBe(false);
     expect(isModerationJobPendingError(new Error("pending"))).toBe(false);
-    expect(
-      isModerationJobPendingError({ name: "ModerationJobPendingError" }),
-    ).toBe(false);
+    expect(isModerationJobPendingError({ name: "ModerationJobPendingError" })).toBe(false);
     expect(
       isModerationJobPendingError({
         name: "ModerationJobPendingError",
         pending: "true",
       }),
     ).toBe(false);
-    expect(
-      isModerationJobPendingError(
-        new ModerationProviderError("x", { retryable: true }),
-      ),
-    ).toBe(false);
+    expect(isModerationJobPendingError(new ModerationProviderError("x", { retryable: true }))).toBe(
+      false,
+    );
   });
 
   it("is not mistaken for a provider error", () => {
-    expect(isModerationProviderError(new ModerationJobPendingError())).toBe(
-      false,
-    );
+    expect(isModerationProviderError(new ModerationJobPendingError())).toBe(false);
   });
 });
 
@@ -75,9 +69,8 @@ describe("ModerationProviderError — capacity option", () => {
     });
     expect(e.capacity).toBe(true);
     expect(e.infraFault).toBe(false);
-    expect(
-      new ModerationProviderError("x", { retryable: false, capacity: false })
-        .capacity,
-    ).toBe(false);
+    expect(new ModerationProviderError("x", { retryable: false, capacity: false }).capacity).toBe(
+      false,
+    );
   });
 });

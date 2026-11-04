@@ -12,9 +12,7 @@ const HORIZON = 30;
 
 const FC = { seed: 0x5eed, numRuns: 500 } as const;
 
-function cfg(
-  over: Partial<MediaRecoverySweepConfig> = {},
-): MediaRecoverySweepConfig {
+function cfg(over: Partial<MediaRecoverySweepConfig> = {}): MediaRecoverySweepConfig {
   return {
     settleWindowSeconds: HORIZON,
     maxMediaAgeSeconds: HORIZON + 1,
@@ -54,10 +52,7 @@ describe("validateRecoverySweepConfig", () => {
     {
       name: "both timing rules broken",
       config: cfg({ settleWindowSeconds: 1, maxMediaAgeSeconds: 1 }),
-      errors: [
-        /settleWindowSeconds must be at least/,
-        /maxMediaAgeSeconds must be greater/,
-      ],
+      errors: [/settleWindowSeconds must be at least/, /maxMediaAgeSeconds must be greater/],
     },
     {
       name: "zero-length horizon",
@@ -153,9 +148,7 @@ describe("validateRecoverySweepConfig", () => {
               cfg({ settleWindowSeconds: settle, maxMediaAgeSeconds: settle }),
               { completionVisibilitySeconds: v, completionMaxReceive: r },
             ),
-          ).toEqual([
-            "maxMediaAgeSeconds must be greater than settleWindowSeconds",
-          ]);
+          ).toEqual(["maxMediaAgeSeconds must be greater than settleWindowSeconds"]);
         }),
         FC,
       );

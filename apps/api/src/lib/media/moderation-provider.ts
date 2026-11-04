@@ -263,20 +263,14 @@ export interface MediaModerationProvider {
    */
   readonly name?: string;
   /** Synchronous-style image moderation: resolves a verdict directly. */
-  moderateImage(
-    input: ImageRef,
-    options?: ModerationCallOptions,
-  ): Promise<ModerationVerdict>;
+  moderateImage(input: ImageRef, options?: ModerationCallOptions): Promise<ModerationVerdict>;
   /** Kicks off async video moderation; returns a handle to poll. */
   startVideoModeration(
     input: S3Ref,
     options?: ModerationCallOptions,
   ): Promise<VideoModerationStart>;
   /** Polls a previously-started video moderation job for its verdict. */
-  getVideoModeration(
-    jobId: string,
-    options?: ModerationCallOptions,
-  ): Promise<ModerationVerdict>;
+  getVideoModeration(jobId: string, options?: ModerationCallOptions): Promise<ModerationVerdict>;
 }
 
 /** Attribution for a provider that reports no name of its own. */
@@ -416,14 +410,10 @@ export class ModerationProviderError extends Error {
  * chain is a DIFFERENT class object, and an `instanceof` check would silently
  * demote it to the untyped fallback.
  */
-export function isModerationProviderError(
-  err: unknown,
-): err is ModerationProviderError {
+export function isModerationProviderError(err: unknown): err is ModerationProviderError {
   if (err === null || typeof err !== "object") return false;
   const o = err as Record<string, unknown>;
-  return (
-    o.name === "ModerationProviderError" && typeof o.retryable === "boolean"
-  );
+  return o.name === "ModerationProviderError" && typeof o.retryable === "boolean";
 }
 
 /**
@@ -448,9 +438,7 @@ export class ModerationJobPendingError extends Error {
  * the same reason as {@link isModerationProviderError}: an error built by
  * another copy of this package must still be recognised.
  */
-export function isModerationJobPendingError(
-  e: unknown,
-): e is ModerationJobPendingError {
+export function isModerationJobPendingError(e: unknown): e is ModerationJobPendingError {
   if (e === null || typeof e !== "object") return false;
   const o = e as Record<string, unknown>;
   return o.name === "ModerationJobPendingError" && o.pending === true;
@@ -464,11 +452,7 @@ export function isModerationJobPendingError(
  *   - `taxonomy-drift` — the provider answered in a vocabulary or model version
  *                        the policy does not accept.
  */
-export type HoldGround =
-  | "content"
-  | "technical"
-  | "unprocessable"
-  | "taxonomy-drift";
+export type HoldGround = "content" | "technical" | "unprocessable" | "taxonomy-drift";
 
 // ---------------------------------------------------------------------------
 // Warning sink.
@@ -534,9 +518,7 @@ export class NullModerationProvider implements MediaModerationProvider {
  * Returns true for the fail-closed Null provider. The startup guard uses this to
  * reject Null outside dev.
  */
-export function isNullModerationProvider(
-  provider: MediaModerationProvider,
-): boolean {
+export function isNullModerationProvider(provider: MediaModerationProvider): boolean {
   return provider instanceof NullModerationProvider;
 }
 
@@ -595,10 +577,7 @@ export class MockModerationProvider implements MediaModerationProvider {
    * own timing, so the mock stays free of clocks.
    */
   setImageResponder(
-    responder: (
-      input: ImageRef,
-      options?: ModerationCallOptions,
-    ) => Promise<ModerationVerdict>,
+    responder: (input: ImageRef, options?: ModerationCallOptions) => Promise<ModerationVerdict>,
   ): void {
     this.imageResponder = responder;
   }

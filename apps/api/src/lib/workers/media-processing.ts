@@ -38,29 +38,18 @@
 
 import { createHash } from "node:crypto";
 
-import {
-  pendingKey,
-  casKey,
-  isCasKeyError,
-} from "../media/cas-keys.js";
+import { pendingKey, casKey, isCasKeyError } from "../media/cas-keys.js";
 import { exceedsDurationCap } from "../media/duration-cap.js";
 import { classifyWorkerErrorDetailed } from "../media/classify-worker-error.js";
 import { decidePromotion } from "../media/promote-decision.js";
 import { moderationResolvedPayload } from "../media/moderation-resolved-payload.js";
-import {
-  promotePinned,
-  resolvePromoteSource,
-} from "../media/promote-staging.js";
+import { promotePinned, resolvePromoteSource } from "../media/promote-staging.js";
 import type { Track } from "../media/track-verdict.js";
 import type { ModerationDecision } from "../media/media-lifecycle.js";
 import type { SyntheticSourceType } from "../provenance/types.js";
 import { provenanceMetric } from "../provenance/metrics.js";
 import type { MetricsPort } from "./metrics-port.js";
-import type {
-  StoragePort,
-  TranscodePort,
-  TranscribePort,
-} from "../media/media-ports.js";
+import type { StoragePort, TranscodePort, TranscribePort } from "../media/media-ports.js";
 import type { MediaLifecycle } from "../media/media-lifecycle.js";
 import type {
   MediaModerationProvider,
@@ -146,10 +135,7 @@ export interface MediaFileRow {
  * shape mirrors Env.media.thresholds; the worker treats it as an opaque JSON
  * blob and never reads individual values (no compiled threshold logic here).
  */
-export type ThresholdSnapshot = Record<
-  string,
-  { review: number; quarantine: number }
->;
+export type ThresholdSnapshot = Record<string, { review: number; quarantine: number }>;
 
 /**
  * The persistence operations the worker needs, narrowed to exactly what it
@@ -453,9 +439,7 @@ export interface ProcessingClock {
  *          or null for ANY other key (which the caller ack-drops; we never
  *          write outputs under pending/, so a non-pending key is not our work).
  */
-export function parsePendingKey(
-  key: string,
-): { tenantId: string; uploadId: string } | null {
+export function parsePendingKey(key: string): { tenantId: string; uploadId: string } | null {
   const parts = key.split("/");
   if (parts.length !== 3 || parts[0] !== "pending") {
     return null;
@@ -542,7 +526,6 @@ class StagingVersionUnresolvableError extends Error {
     this.name = "ValidationError";
   }
 }
-
 
 // ---------------------------------------------------------------------------
 // Orchestration core — testable against the B0 Mocks
@@ -682,10 +665,11 @@ export async function processObjectKey(
         return { disposition: "fail", reason: "spend-guard-unavailable" };
       }
       if (isOverDailyCap(currentUsd, spendGate.config.dailyCapUsd)) {
-        deps.logger.warn(
-          "Daily media AI spend cap reached — short-circuiting job to retry/DLQ",
-          { key: triggeringKey, currentUsd, dailyCapUsd: spendGate.config.dailyCapUsd },
-        );
+        deps.logger.warn("Daily media AI spend cap reached — short-circuiting job to retry/DLQ", {
+          key: triggeringKey,
+          currentUsd,
+          dailyCapUsd: spendGate.config.dailyCapUsd,
+        });
         try {
           await spendGate.guard.reportCapExceeded();
         } catch (reportErr) {
@@ -863,10 +847,7 @@ export async function processObjectKey(
     // notification is coming, and an object waiting for a message that will
     // never arrive would sit un-servable and un-rejected indefinitely — the
     // exact silent-forever failure this pipeline refuses elsewhere.
-    if (
-      visual.initialDecision !== undefined &&
-      audioInitialDecision !== undefined
-    ) {
+    if (visual.initialDecision !== undefined && audioInitialDecision !== undefined) {
       await settleInlineResolvedTracks(deps, {
         mediaId: row.id,
         currentStatus: row.lifecycle,
@@ -1001,8 +982,7 @@ async function recordOriginalProvenance(
   originalKey: string,
 ): Promise<void> {
   try {
-    const budget =
-      deps.config.provenanceSniffBytes ?? DEFAULT_PROVENANCE_SNIFF_BYTES;
+    const budget = deps.config.provenanceSniffBytes ?? DEFAULT_PROVENANCE_SNIFF_BYTES;
 
     const head = await deps.storage.getObject(originalKey, {
       range: { start: 0, end: budget - 1 },
@@ -1023,9 +1003,7 @@ async function recordOriginalProvenance(
       // No tail. The head slice still yields a reading for front-loaded markings.
     }
 
-    const { readTimedMediaProvenance } = await import(
-      "../metadata/provenance-reader.js"
-    );
+    const { readTimedMediaProvenance } = await import("../metadata/provenance-reader.js");
     const reading = readTimedMediaProvenance(head, tail);
 
     if (!reading.examined) return; // Nothing found; nothing to record.
@@ -1177,8 +1155,7 @@ async function settleInlineResolvedTracks(
         casKey: args.casKey,
         cleanupKeys: [args.pendingKey, args.stagingKey],
         log: {
-          warn: (msg, data) =>
-            deps.logger.warn(msg, data as Record<string, unknown>),
+          warn: (msg, data) => deps.logger.warn(msg, data as Record<string, unknown>),
         },
         logContext: { mediaId: args.mediaId },
       });
@@ -1222,10 +1199,10 @@ async function settleInlineResolvedTracks(
     });
   } catch (err) {
     // The jobs already ran; a retry would re-run them. Hold for review instead.
-    deps.logger.error(
-      "Inline resolution failed — holding the object for human review",
-      { mediaId: args.mediaId, error: err },
-    );
+    deps.logger.error("Inline resolution failed — holding the object for human review", {
+      mediaId: args.mediaId,
+      error: err,
+    });
     try {
       await deps.persistence.markMediaForReview(args.mediaId);
     } catch {
@@ -1242,10 +1219,9 @@ async function settleInlineResolvedTracks(
 function emitInfraFaultMetric(deps: MediaProcessingDeps): void {
   if (!deps.metrics) return;
   try {
-    deps.metrics.emitCounts(
-      { kind: "moderation-infra-fault" },
-      [{ name: "ModerationInfraFault", value: 1 }],
-    );
+    deps.metrics.emitCounts({ kind: "moderation-infra-fault" }, [
+      { name: "ModerationInfraFault", value: 1 },
+    ]);
   } catch {
     // A metrics bug must never become a media-pipeline bug.
   }
@@ -1273,10 +1249,7 @@ function emitProvenanceMetric(
 
 function resolveSpendGuard(
   deps: MediaProcessingDeps,
-):
-  | { guard: MediaSpendGuardPort; config: MediaSpendConfig }
-  | "misconfigured"
-  | undefined {
+): { guard: MediaSpendGuardPort; config: MediaSpendConfig } | "misconfigured" | undefined {
   const guard = deps.spendGuard;
   const config = deps.config.spend;
   if (guard !== undefined && config !== undefined) {

@@ -104,8 +104,7 @@ export function validateRecoverySweepConfig(
   }
 
   if (numbersOk) {
-    const redeliveryHorizon =
-      queue.completionVisibilitySeconds * queue.completionMaxReceive;
+    const redeliveryHorizon = queue.completionVisibilitySeconds * queue.completionMaxReceive;
     if (c.settleWindowSeconds < redeliveryHorizon) {
       errors.push(
         "settleWindowSeconds must be at least completionVisibilitySeconds × completionMaxReceive",
