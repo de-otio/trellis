@@ -1,3 +1,4 @@
+import { adaptLegacyStore } from "./support/legacy-completion-store.js";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import fc from "fast-check";
 
@@ -59,7 +60,7 @@ interface StoreState {
 }
 
 function makeStore(state: StoreState): CompletionStore {
-  return {
+  return adaptLegacyStore({
     async claimMessage(dedupeKey) {
       state.calls.push("claimMessage");
       if (state.claimed.has(dedupeKey)) return false;
@@ -88,7 +89,7 @@ function makeStore(state: StoreState): CompletionStore {
         });
       }
     },
-  };
+  });
 }
 
 class FakeModeration implements MediaModerationProvider {
@@ -299,16 +300,19 @@ describe("extractJobPointer", () => {
 
 describe("processCompletion — dedupe before side effect", () => {
   it("duplicate delivery is a no-op: no persist, no storage write, no emit", async () => {
+    // The sibling is still pending, so the first delivery records its decision
+    // and waits; the item stays UPLOADED, which is what lets the second
+    // delivery reach (and lose) the claim. (Once an item has settled, the
+    // pre-check drops a redelivery before the claim — see the replay tests.)
     const h = harness({
       jobId: "rek-1",
       track: "VISUAL",
       videoVerdict: "approved",
-      other: { state: "decided", decision: "approved" },
+      other: { state: "pending" },
     });
 
-    // First delivery applies.
     const first = await processCompletion(snsBody("rek-1"), h.deps);
-    expect(first.kind).toBe("applied");
+    expect(first.kind).toBe("awaiting-sibling");
 
     const callsAfterFirst = [...h.state.calls];
     const emittedAfterFirst = h.emitted.length;
@@ -323,7 +327,10 @@ describe("processCompletion — dedupe before side effect", () => {
     const newStoreCalls = h.state.calls.slice(callsAfterFirst.length);
     expect(newStoreCalls).toEqual(["claimMessage"]);
     expect(h.emitted.length).toBe(emittedAfterFirst);
-    expect(h.storageCalls).toEqual(storageAfterFirst);
+    // Reads (the pinned-source head) may repeat; no storage WRITE may.
+    const writes = (calls: string[]) =>
+      calls.filter((c) => c !== "headObject");
+    expect(writes(h.storageCalls)).toEqual(writes(storageAfterFirst));
   });
 
   it("claimMessage precedes every side effect on first delivery", async () => {
@@ -417,7 +424,7 @@ describe("processCompletion — both tracks required for approval", () => {
     expect(h.storageCalls).not.toContain("copyObject");
   });
 
-  it("visual approved + audio PENDING (job exists, unresolved) => NOT approved", async () => {
+  it("visual approved + audio PENDING (job exists, unresolved) => waits, NOT approved", async () => {
     const h = harness({
       jobId: "rek-1",
       track: "VISUAL",
@@ -425,8 +432,12 @@ describe("processCompletion — both tracks required for approval", () => {
       other: { state: "pending" },
     });
     const out = await processCompletion(snsBody("rek-1"), h.deps);
-    expect((out as { status: MediaLifecycle }).status).toBe("REVIEW");
+    // A pending sibling is not an errored one: the item is not held, it waits
+    // for the sibling's own completion to finish it.
+    expect(out.kind).toBe("awaiting-sibling");
+    expect(h.state.media.get("media-1")!.coords.lifecycle).toBe("UPLOADED");
     expect(h.storageCalls).not.toContain("copyObject");
+    expect(h.emitted).toEqual([]);
   });
 
   it("visual approved + audio decided-approved => APPROVED + ready + promotion", async () => {
@@ -469,8 +480,7 @@ describe("processCompletion — both tracks required for approval", () => {
 // ---------------------------------------------------------------------------
 
 describe("processCompletion — fixed promote/persist/emit ordering", () => {
-  it("copyObject precedes persistMediaStatus precedes emit on approval", async () => {
-    const order: string[] = [];
+  it("persistMediaStatus precedes copyObject precedes emit on approval (promotion only after the commit)", async () => {
     const h = harness({
       jobId: "rek-1",
       track: "VISUAL",
@@ -478,34 +488,31 @@ describe("processCompletion — fixed promote/persist/emit ordering", () => {
       other: { state: "decided", decision: "approved" },
     });
 
-    // Wrap the side-effecting deps to record a global ordering.
+    // The store fake already logs its status write into state.calls; thread the
+    // storage copy and the emit into the same log to get one global order.
     const origCopy = h.deps.storage.copyObject.bind(h.deps.storage);
-    const origPersist = h.deps.store.persistMediaStatus.bind(h.deps.store);
     const origEmit = h.deps.emitResolved;
     const deps: CompletionDeps = {
       ...h.deps,
       storage: {
         ...h.deps.storage,
-        copyObject: async (a, b) => {
-          order.push("copy");
-          return origCopy(a, b);
-        },
-      },
-      store: {
-        ...h.deps.store,
-        persistMediaStatus: async (m, s) => {
-          order.push("persist");
-          return origPersist(m, s);
+        copyObject: async (a, b, c) => {
+          h.state.calls.push("copy");
+          return origCopy(a, b, c);
         },
       },
       emitResolved: async (p) => {
-        order.push("emit");
+        h.state.calls.push("emit");
         return origEmit(p);
       },
     };
 
     await processCompletion(snsBody("rek-1"), deps);
-    expect(order).toEqual(["copy", "persist", "emit"]);
+    expect(
+      h.state.calls.filter((c) =>
+        ["persistMediaStatus", "copy", "emit"].includes(c),
+      ),
+    ).toEqual(["persistMediaStatus", "copy", "emit"]);
   });
 
   it("deleteObject is best-effort: a delete failure does not fail the record", async () => {
@@ -535,7 +542,7 @@ describe("processCompletion — fixed promote/persist/emit ordering", () => {
 // ---------------------------------------------------------------------------
 
 describe("processCompletion — replay on terminal status", () => {
-  it("a fresh (non-deduped) decision on an already-APPROVED object is an ack-drop no-op", async () => {
+  it("a delivery for an already-APPROVED object is an ack-drop no-op (dropped before any claim)", async () => {
     const h = harness({
       jobId: "rek-1",
       track: "VISUAL",
@@ -544,8 +551,9 @@ describe("processCompletion — replay on terminal status", () => {
       other: { state: "decided", decision: "approved" },
     });
     const out = await processCompletion(snsBody("rek-1"), h.deps);
-    expect(out.kind).toBe("illegal-transition");
-    // No status persisted, no promotion, no emit.
+    expect(out.kind).toBe("duplicate");
+    // Nothing claimed, no status persisted, no promotion, no emit.
+    expect(h.state.calls).not.toContain("claimMessage");
     expect(h.state.calls).not.toContain("persistMediaStatus");
     expect(h.storageCalls).not.toContain("copyObject");
     expect(h.emitted).toEqual([]);
@@ -560,7 +568,7 @@ describe("processCompletion — replay on terminal status", () => {
       other: { state: "decided", decision: "approved" },
     });
     const out = await processCompletion(snsBody("rek-1"), h.deps);
-    expect(out.kind).toBe("illegal-transition");
+    expect(out.kind).toBe("duplicate");
     expect(out.kind).not.toBe("retry");
   });
 });
@@ -715,7 +723,14 @@ describe("property — APPROVED/ready iff both tracks positively approved", () =
             currentStatus: "UPLOADED",
           });
           const out = await processCompletion(snsBody("rek-1"), h.deps);
-          // PENDING always permits a legal transition, so the record applies.
+          // An undecided sibling makes a non-quarantine track wait for it; a
+          // quarantine settles at once. Everything else applies.
+          if (other.state === "pending" && thisDecision !== "quarantine") {
+            expect(out.kind).toBe("awaiting-sibling");
+            expect(h.emitted).toEqual([]);
+            expect(h.storageCalls).not.toContain("copyObject");
+            return;
+          }
           expect(out.kind).toBe("applied");
           const status = (out as { status: MediaLifecycle }).status;
           const bothApproved =
@@ -811,7 +826,7 @@ describe("T14 fail-closed — errored/timed-out moderation is HELD, never served
     ).toBe(false);
   });
 
-  it("provider re-fetch THROWS (timeout) ⇒ record retried, object stays UPLOADED, serve gate denies", async () => {
+  it("provider re-fetch THROWS (timeout) ⇒ retry with no claim, object stays UPLOADED, serve gate denies", async () => {
     const h = harness({
       jobId: "rek-timeout",
       track: "VISUAL",
@@ -822,9 +837,11 @@ describe("T14 fail-closed — errored/timed-out moderation is HELD, never served
       throw new Error("ETIMEDOUT");
     };
 
-    // processCompletion propagates (the SQS handler converts it to a retry) —
-    // the object's persisted state is untouched.
-    await expect(processCompletion(snsBody("rek-timeout"), h.deps)).rejects.toThrow();
+    // A failed re-fetch is returned as a retry (the SQS handler surfaces it as
+    // a batch-item failure) — nothing claimed, the object's state untouched.
+    const out = await processCompletion(snsBody("rek-timeout"), h.deps);
+    expect(out.kind).toBe("retry");
+    expect(h.state.claimed.size).toBe(0);
 
     const persisted = h.state.media.get("media-1")!.coords.lifecycle;
     expect(persisted).toBe("UPLOADED"); // never advanced toward APPROVED

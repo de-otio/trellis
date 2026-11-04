@@ -78,6 +78,7 @@ class World {
   // Hooks / scheduling.
   afterPreCheck?: () => void | Promise<void>;
   afterPersist?: (jobId: string) => void | Promise<void>;
+  onStatusWrite?: () => void;
   step: () => Promise<void> = async () => {};
 
   private tail: Promise<void> = Promise.resolve();
@@ -125,6 +126,7 @@ class World {
     expectedFrom: MediaLifecycle | undefined,
     undo: (() => void)[] | null,
   ): { count: number } {
+    this.onStatusWrite?.();
     if (expectedFrom !== undefined && this.lifecycle !== expectedFrom) return { count: 0 };
     const from = this.lifecycle;
     this.lifecycleWrites.push({ from, to, via: "completion" });
@@ -587,12 +589,7 @@ describe("lifecycle write is a compare-and-set", () => {
     const order: string[] = [];
     const deps = w.deps();
     const origCopy = deps.storage.copyObject.bind(deps.storage);
-    const origPersist = w.store.persistMediaStatus.bind(w.store);
-    (w.store as { persistMediaStatus: CompletionStore["persistMediaStatus"] }).persistMediaStatus =
-      async (...a) => {
-        order.push("status");
-        return origPersist(...a);
-      };
+    w.onStatusWrite = () => order.push("status");
     const origTx = w.store.inTransaction.bind(w.store);
     (w.store as { inTransaction: CompletionStore["inTransaction"] }).inTransaction = async (id, fn) => {
       const r = await origTx(id, fn);

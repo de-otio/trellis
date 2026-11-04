@@ -20,6 +20,7 @@
  *       bytes later served from cas/ (what is SERVED) — same bytes, no swap.
  */
 
+import { adaptLegacyStore } from "./support/legacy-completion-store.js";
 import { describe, it, expect, vi } from "vitest";
 import { createHash } from "node:crypto";
 
@@ -227,7 +228,7 @@ describe("P0b pipeline — cross-worker byte integrity (APPROVED path)", () => {
     expect(visualJob).toBeDefined();
     expect(audioJob).toBeDefined();
 
-    const store: CompletionStore = {
+    const store: CompletionStore = adaptLegacyStore({
       async claimMessage(dedupeKey) {
         if (shared.claimed.has(dedupeKey)) return false;
         shared.claimed.add(dedupeKey);
@@ -259,7 +260,7 @@ describe("P0b pipeline — cross-worker byte integrity (APPROVED path)", () => {
       async persistMediaStatus(mediaId, status) {
         if (mediaId === shared.row.id) shared.row.lifecycle = status;
       },
-    };
+    });
 
     const completionDeps: CompletionDeps = {
       store,
@@ -364,7 +365,7 @@ describe("P0b pipeline — cross-worker byte integrity (APPROVED path)", () => {
     ];
 
     const deps: CompletionDeps = {
-      store: {
+      store: adaptLegacyStore({
         async claimMessage(dk) {
           if (claimed.has(dk)) return false;
           claimed.add(dk);
@@ -385,7 +386,7 @@ describe("P0b pipeline — cross-worker byte integrity (APPROVED path)", () => {
         async persistMediaStatus(_m, status) {
           row.lifecycle = status;
         },
-      },
+      }),
       moderation: {
         async moderateImage() {
           return { decision: "approved", labels: [], provider: "f" };
@@ -529,7 +530,7 @@ describe("P0b pipeline — AR-SEC F3 staging-overwrite TOCTOU", () => {
     const audioJob = shared.jobs.find((j) => j.track === "AUDIO")!;
     audioJob.decision = "approved";
 
-    const store: CompletionStore = {
+    const store: CompletionStore = adaptLegacyStore({
       async claimMessage(dedupeKey) {
         if (shared.claimed.has(dedupeKey)) return false;
         shared.claimed.add(dedupeKey);
@@ -564,7 +565,7 @@ describe("P0b pipeline — AR-SEC F3 staging-overwrite TOCTOU", () => {
       async persistMediaStatus(mediaId, status) {
         if (mediaId === shared.row.id) shared.row.lifecycle = status;
       },
-    };
+    });
 
     const completionDeps: CompletionDeps = {
       store,

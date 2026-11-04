@@ -22,28 +22,38 @@
 //
 // SAFETY ORDER (fixed, never reordered):
 //   0. parse body -> jobId ONLY
-//   1. DEDUPE FIRST: insert ProcessedModerationMessage(dedupeKey); if it already
-//      exists, ack-drop (idempotent no-op) BEFORE any side effect.
+//   1. PRE-CHECK, rows only, no provider call. An unknown or superseded job
+//      row, a row pinned to a version other than the media's current
+//      `stagingVersionId`, or a track mismatch is `unroutable`. An item that is
+//      no longer UPLOADED, or a track that already has a decision, is a
+//      `duplicate`.
 //   2. RE-FETCH authoritative track state from the provider (visual) or the
-//      transcription seam (audio). Derive THIS track's decision SOLELY from the
-//      re-fetched result. Non-terminal / failed / unknown => errored (fail closed).
-//   3. Look up the MediaModerationJob by jobId => mediaId + track. Persist this
-//      track's decision. Read the OTHER track's decision. Build both TrackOutcomes.
-//   4. decidePromotion({ visual, audio, currentStatus, casObjectPresent }).
-//      casObjectPresent = the cleaned bytes are available to serve: TRUE iff the
-//      cas/ key exists (a prior promote) OR the cleaned STAGING key exists (the
-//      processing worker left them there, pre-promote).
-//   5. APPLY in fixed order:
-//        a. if shouldPromote: copyObject(STAGING -> cas) — promote the CLEANED
-//           STAGING bytes (the exact bytes that were moderated), NEVER the raw
-//           pending upload. Then best-effort deleteObject(pending) (raw-original
-//           cleanup) AND deleteObject(staging) (staging cleanup) — tolerate
-//           already-deleted on both. cas/ thus only ever holds APPROVED cleaned
-//           bytes ("cleaned-staging, promote-on-approval").
-//        b. if shouldPersistStatus: persist transition.status.
-//        c. if shouldEmitResolved: emit moderation.resolved with
-//           moderationResolvedPayload(mediaId, status) — ready|not-ready ONLY.
-//      An illegal transition (transition.ok === false) is ack-dropped, never DLQ.
+//      transcription seam (audio) — read-only. Derive THIS track's decision
+//      SOLELY from the re-fetched result. A job that has not finished
+//      (`ModerationJobPendingError`, or an in-progress transcription) is
+//      `not-terminal`: acknowledged, nothing claimed, nothing persisted. Any
+//      throw is a `retry` with no claim. For the audio track the transcript
+//      moderation runs here, so a text-provider outage is also a `retry`.
+//   3. ONE database transaction (`store.inTransaction`):
+//        a. claim the dedupe key (already claimed => `duplicate`);
+//        b. persist this track's decision;
+//        c. read the sibling track;
+//        d. sibling undecided and this track neither quarantined nor errored
+//           => commit and return `awaiting-sibling`;
+//        e. otherwise fan in (decidePromotion) and write the lifecycle with a
+//           COMPARE-AND-SET (`expectedFrom`); a count other than 1 means a
+//           concurrent writer moved the item => `lost-race` (the track
+//           decision stays, the lifecycle is untouched).
+//   4. AFTER the commit, if APPROVED: promote the pinned version, then emit.
+//      A promotion failure is logged and left for the recovery sweeper; the
+//      item stays APPROVED but serves nothing until repaired (serving needs
+//      the cas/ object), and "ready" is not announced meanwhile. Promotion
+//      NEVER precedes the commit: an uncommitted approval must not make bytes
+//      servable.
+//   A quarantine — or an errored track, which can only ever hold — settles at
+//   once rather than waiting for the sibling: nothing the sibling says can
+//   improve on it, and waiting would let a lone errored track strand the item.
+//   An illegal transition (transition.ok === false) is ack-dropped, never DLQ.
 //
 // THRESHOLD SNAPSHOT: when (re)interpreting the re-fetched verdict we use the
 // threshold snapshot stored ON THE JOB ROW (job.thresholdSnapshot), never live
@@ -64,7 +74,11 @@ import {
 import type { DeferredLaneConfig } from "../media/deferred-lane.js";
 import type { LabelPolicyExplanation } from "../media/label-policy.js";
 import type { ModerationJobPriority } from "./media-processing.js";
-import { resolvePromoteSource, promotePinned } from "../media/promote-staging.js";
+import {
+  resolvePromoteSource,
+  promotePinned,
+  type PromoteSource,
+} from "../media/promote-staging.js";
 import { casKey, pendingKey, isCasKeyError } from "../media/cas-keys.js";
 import type { TrackOutcome, Track } from "../media/track-verdict.js";
 import { deriveDedupeKey } from "../media/dedupe-key.js";
@@ -73,8 +87,16 @@ import { moderationResolvedPayload } from "../media/moderation-resolved-payload.
 import { transcriptToModerationDecision } from "../media/transcript-moderation.js";
 import type { TextModerationProvider } from "../media/text-moderation.js";
 import type { StoragePort, TranscribePort } from "../media/media-ports.js";
-import type { MediaModerationProvider, ModerationVerdict } from "../media/moderation-provider.js";
-import type { ModerationDecision, MediaLifecycle } from "../media/media-lifecycle.js";
+import {
+  ModerationJobPendingError,
+  isModerationJobPendingError,
+  type MediaModerationProvider,
+  type ModerationVerdict,
+} from "../media/moderation-provider.js";
+import type {
+  ModerationDecision,
+  MediaLifecycle,
+} from "../media/media-lifecycle.js";
 
 // ---------------------------------------------------------------------------
 // Narrow data shapes the shell needs from persistence. These mirror the Prisma
@@ -101,6 +123,22 @@ export interface ModerationJobRow {
    * {@link EscalationResultPort}.
    */
   readonly priority: ModerationJobPriority;
+  /**
+   * The staging version this job was submitted against. OPTIONAL: the stock
+   * store leaves it `undefined` (core keeps no such column), and an absent
+   * value skips the rule below. A store that has it — a deployment tracking
+   * provider jobs in its own table — sets it, and a completion for a row whose
+   * `pinnedVersion` differs from the media's current `stagingVersionId` is
+   * `unroutable`: the verdict is about bytes that are no longer the pinned
+   * ones.
+   */
+  readonly pinnedVersion?: string;
+  /**
+   * `true` when a later job has replaced this one. OPTIONAL, same contract as
+   * {@link pinnedVersion}: absent means "not known to be superseded". A
+   * completion for a superseded row is `unroutable`.
+   */
+  readonly superseded?: boolean;
 }
 
 /**
@@ -119,8 +157,19 @@ export interface CompletionStore {
   /** Look up the job row by its provider jobId. `null` if unknown. */
   findJobByJobId(jobId: string): Promise<ModerationJobRow | null>;
 
+  /**
+   * This job's persisted decision, or `null` while unresolved. Read by the
+   * pre-check so a redelivery for an already-decided track is dropped before
+   * any provider call. OPTIONAL: the dedupe claim inside the transaction is the
+   * authority, so a store without it only loses the early exit.
+   */
+  readTrackDecision?(jobId: string): Promise<ModerationDecision | null>;
+
   /** Persist this track's resolved decision onto its job row. */
-  persistTrackDecision(jobId: string, decision: ModerationDecision): Promise<void>;
+  persistTrackDecision(
+    jobId: string,
+    decision: ModerationDecision,
+  ): Promise<void>;
 
   /**
    * Read the sibling track's resolved decision for a media object. Returns the
@@ -134,7 +183,10 @@ export interface CompletionStore {
    * same question; the interactive row it supersedes stays open (its decision
    * null) and must not be read as "pending" once the escalation has decided.
    */
-  readOtherTrack(mediaId: string, thisTrack: Track): Promise<OtherTrackState>;
+  readOtherTrack(
+    mediaId: string,
+    thisTrack: Track,
+  ): Promise<OtherTrackState>;
 
   /**
    * Create (or re-find) the escalation job row for `parentJobId` (plan 031 C1).
@@ -162,9 +214,54 @@ export interface CompletionStore {
   /** Read the media object's current persisted lifecycle + CAS coords. */
   findMedia(mediaId: string): Promise<MediaCoords | null>;
 
-  /** Persist a new moderation status for the media object. */
-  persistMediaStatus(mediaId: string, status: MediaLifecycle): Promise<void>;
+  /**
+   * Persist a new moderation status for the media object — a COMPARE-AND-SET.
+   *
+   * MUST be a single conditional update (`updateMany({ where: { id: mediaId,
+   * lifecycle: options.expectedFrom }, data: { lifecycle: status } })`) and
+   * MUST report how many rows it changed. A human decision or another delivery
+   * can land between this worker's read and its write, and an unconditional
+   * write would overwrite it. `count !== 1` makes the shell stand down with
+   * `lost-race`.
+   */
+  persistMediaStatus(
+    mediaId: string,
+    status: MediaLifecycle,
+    options: { readonly expectedFrom: MediaLifecycle },
+  ): Promise<{ readonly count: number }>;
+
+  /**
+   * Run `fn` inside ONE database transaction and return its result. If `fn`
+   * throws, everything done through `tx` is rolled back and the error
+   * propagates. If it returns, everything commits.
+   *
+   * MUST serialize transactions for the same `mediaId` (a row lock on the media
+   * row, or an advisory lock keyed on it). Two tracks completing at once each
+   * persist their own decision and then read the other's; without the lock,
+   * under read-committed isolation both can read the sibling as undecided and
+   * both answer `awaiting-sibling`, leaving nobody to settle the item. With the
+   * lock, the second to enter sees the first's committed decision.
+   *
+   * `fn` may be run once per call and must stay free of side effects other than
+   * through `tx`.
+   */
+  inTransaction<T>(
+    mediaId: string,
+    fn: (tx: CompletionTransaction) => Promise<T>,
+  ): Promise<T>;
 }
+
+/**
+ * The store operations that take part in the completion transaction. Same
+ * contracts as on {@link CompletionStore}; here they are atomic with each other.
+ */
+export type CompletionTransaction = Pick<
+  CompletionStore,
+  | "claimMessage"
+  | "persistTrackDecision"
+  | "readOtherTrack"
+  | "persistMediaStatus"
+>;
 
 /**
  * The sibling track's state, used to build its {@link TrackOutcome}.
@@ -303,10 +400,9 @@ export interface CompletionDeps {
   /** Re-interpret a visual verdict using the job's threshold snapshot. */
   readonly reinterpretVisual: VisualVerdictReinterpreter;
   /** Emit the anti-oracle resolved event. Best-effort; must not throw to ack. */
-  readonly emitResolved: (payload: {
-    readonly mediaId: string;
-    readonly status: "ready" | "not-ready";
-  }) => Promise<void>;
+  readonly emitResolved: (
+    payload: { readonly mediaId: string; readonly status: "ready" | "not-ready" },
+  ) => Promise<void>;
   /** Structured logger seam (defaults to a no-op in tests). */
   readonly log?: {
     info?: (msg: string, data?: unknown) => void;
@@ -384,14 +480,18 @@ export function extractJobPointer(
  * Re-fetch THIS track's authoritative decision from the provider, ignoring the
  * message body entirely. Fail-closed: a non-terminal / failed / unknown result
  * yields `"errored"`-equivalent `null` so the caller records it as an errored
- * track outcome (never `"approved"`).
+ * track outcome (never `"approved"`). A job that has simply not finished yet is
+ * different: it throws {@link ModerationJobPendingError} (from the provider, or
+ * raised here for an in-progress transcription) so the caller can acknowledge
+ * without deciding anything.
  *
  * VISUAL: `getVideoModeration(jobId)` returns a settled verdict; the verdict is
  * re-interpreted against the JOB's threshold snapshot (not live Env).
  *
  * AUDIO: `getTranscription(jobId)` is polled; only a COMPLETED transcription is
- * fed to `transcriptToModerationDecision` (which is itself fail-closed). Any
- * other status (IN_PROGRESS / FAILED) yields `null` (errored — fail closed).
+ * fed to `transcriptToModerationDecision` (which is itself fail-closed).
+ * IN_PROGRESS is pending (throws {@link ModerationJobPendingError}); FAILED or
+ * anything else yields `null` (errored — fail closed).
  */
 export async function refetchTrackDecision(
   pointer: { readonly jobId: string; readonly track: Track },
@@ -407,12 +507,31 @@ export async function refetchTrackDecision(
 
   // AUDIO
   const res = await deps.transcribe.getTranscription(pointer.jobId);
+  if (res != null && res.status === "IN_PROGRESS") {
+    throw new ModerationJobPendingError("transcription in progress");
+  }
   if (res == null || res.status !== "COMPLETED") {
-    // Non-terminal or failed transcription — fail closed (errored).
+    // Failed or unrecognised transcription — fail closed (errored).
     return null;
   }
   const transcript = res.transcript ?? "";
-  const decision = await transcriptToModerationDecision(transcript, deps.textModeration);
+  // transcriptToModerationDecision is fail-closed by contract: a throwing seam
+  // becomes "review". For a PERSISTED verdict that is right, but here it would
+  // turn a transient text-provider outage into a permanent hold. Probe the seam
+  // so the shell can see the throw and retry instead (nothing claimed yet).
+  let seamFailure: { readonly error: unknown } | null = null;
+  const probe: TextModerationProvider = {
+    moderateText: async (text) => {
+      try {
+        return await deps.textModeration.moderateText(text);
+      } catch (error) {
+        seamFailure = { error };
+        throw error;
+      }
+    },
+  };
+  const decision = await transcriptToModerationDecision(transcript, probe);
+  if (seamFailure !== null) throw (seamFailure as { error: unknown }).error;
   return normalizeDecision(decision);
 }
 
@@ -439,9 +558,10 @@ function outcomeFromOther(other: OtherTrackState): TrackOutcome {
       return { state: "absent" };
     case "pending":
     default:
-      // A sibling job that exists but has not resolved is NOT approval — the
-      // combinator treats `absent` and `errored` alike (both degrade away from
-      // approved), and we have no positive evidence yet, so fail closed.
+      // Reached only when this track settles at once (quarantine / errored)
+      // with the sibling unresolved; an undecided sibling is NOT approval and
+      // the combinator degrades `errored` away from approved, so fail closed.
+      // (Otherwise a pending sibling returns `awaiting-sibling` before here.)
       return { state: "errored" };
   }
 }
@@ -449,6 +569,45 @@ function outcomeFromOther(other: OtherTrackState): TrackOutcome {
 // ---------------------------------------------------------------------------
 // Per-record processor (the heart; mock-friendly).
 // ---------------------------------------------------------------------------
+
+type Guarded<T> =
+  | { readonly ok: true; readonly value: T }
+  | { readonly ok: false; readonly outcome: RecordOutcome };
+
+/**
+ * Run one read-only provider/port read. A pending job is `not-terminal`; any
+ * other throw is a `retry`. Neither has claimed or persisted anything.
+ */
+async function guardedRead<T>(
+  read: () => Promise<T>,
+  deps: CompletionDeps,
+  jobId: string,
+): Promise<Guarded<T>> {
+  try {
+    return { ok: true, value: await read() };
+  } catch (err) {
+    if (isModerationJobPendingError(err)) {
+      deps.log?.info?.("completion: job not finished — ack, nothing recorded", {
+        jobId,
+      });
+      return { ok: false, outcome: { kind: "not-terminal" } };
+    }
+    deps.log?.warn?.("completion: re-fetch failed — retry, nothing claimed", {
+      jobId,
+      error: String(err),
+    });
+    return { ok: false, outcome: { kind: "retry", reason: "refetch-failed" } };
+  }
+}
+
+/** What the transaction decided; promotion and emit happen after the commit. */
+type TxResult =
+  | { readonly done: RecordOutcome }
+  | {
+      readonly done?: undefined;
+      readonly status: MediaLifecycle;
+      readonly promote: boolean;
+    };
 
 /**
  * Process one completion message. Returns a {@link RecordOutcome}; only
@@ -466,8 +625,7 @@ export async function processCompletion(
     return { kind: "unroutable" };
   }
 
-  // 1. Look up the job row first — needed for the contentHash that scopes the
-  //    dedupe key and for the threshold snapshot. (No side effect yet.)
+  // 1. PRE-CHECK — rows only, no provider call, no write.
   const job = await deps.store.findJobByJobId(pointer.jobId);
   if (job === null) {
     deps.log?.warn?.("completion: unknown jobId — dropping", {
@@ -475,12 +633,16 @@ export async function processCompletion(
     });
     return { kind: "unroutable" };
   }
+  if (job.superseded === true) {
+    deps.log?.warn?.("completion: superseded job row — dropping", {
+      jobId: pointer.jobId,
+    });
+    return { kind: "unroutable" };
+  }
 
-  // 1b. The body's `track` is a routing HINT chosen by whatever wrote the
-  //     message; the job row's track is the authority. A mismatch is dropped
-  //     here — before the dedupe claim — because claiming the key first would
-  //     let a message with a forged track burn the slot the genuine completion
-  //     needs, turning a parse-level lie into a permanently silenced verdict.
+  // The body's `track` is a routing HINT chosen by whatever wrote the message;
+  // the job row's track is the authority. A mismatch is dropped before any
+  // claim, so a forged track cannot burn the slot the genuine completion needs.
   if (pointer.track !== job.track) {
     deps.log?.warn?.("completion: track does not match the job row — dropping", {
       jobId: pointer.jobId,
@@ -489,10 +651,6 @@ export async function processCompletion(
     return { kind: "unroutable" };
   }
 
-  // The media object's content hash addresses the dedupe key so identical bytes
-  // share fan-in across tenants; we read it from the media coords below. But the
-  // dedupe MUST happen before ANY side effect, and persistTrackDecision is a
-  // side effect — so we resolve the media first (read-only) to obtain the hash.
   const media = await deps.store.findMedia(job.mediaId);
   if (media === null) {
     deps.log?.warn?.("completion: media row missing — dropping", {
@@ -501,36 +659,74 @@ export async function processCompletion(
     return { kind: "unroutable" };
   }
 
-  // 1c. Pre-claim routing (plan 031 C1). Two cases obtain THIS track's
-  //     decision BEFORE the dedupe claim — deliberately, because their
-  //     re-fetches are read-only and the escalate branch must NEVER burn the
-  //     claim slot: a claim followed by a crash in the trigger would make the
-  //     redelivery a "duplicate" and silently lose the escalation. The
-  //     escalate branch's own side effects are each idempotent by their own
-  //     keys instead (unique parent_job_id; the engine's idempotency key).
-  //
-  //     `undefined` = not precomputed (the plain path re-fetches after the
-  //     claim, exactly as before); `null` = precomputed as errored.
+  // A row that records the version it was submitted against must still match
+  // the media's pin. Absent => the rule is skipped (the stock store has no such
+  // column).
+  if (
+    job.pinnedVersion !== undefined &&
+    job.pinnedVersion !== media.stagingVersionId
+  ) {
+    deps.log?.warn?.("completion: job row pinned to another version — dropping", {
+      jobId: pointer.jobId,
+    });
+    return { kind: "unroutable" };
+  }
+
+  if (media.lifecycle !== "UPLOADED") {
+    deps.log?.info?.("completion: item already settled — ack-drop", {
+      mediaId: job.mediaId,
+      from: media.lifecycle,
+    });
+    return { kind: "duplicate" };
+  }
+  if (deps.store.readTrackDecision !== undefined) {
+    const existing = await deps.store.readTrackDecision(pointer.jobId);
+    if (existing !== null) {
+      deps.log?.info?.("completion: track already decided — ack-drop", {
+        jobId: pointer.jobId,
+      });
+      return { kind: "duplicate" };
+    }
+  }
+
+  // 2. RE-FETCH (read-only). `undefined` = not precomputed; `null` = errored.
+  //    The deferred row and the cascade-routed visual track obtain their
+  //    decision here too, and the escalate branch returns WITHOUT claiming: its
+  //    side effects are each idempotent by their own keys (unique parent_job_id;
+  //    the engine's idempotency key), and a claim followed by a crash in the
+  //    trigger would make the redelivery a "duplicate" and lose the escalation.
   let preDecision: ModerationDecision | null | undefined;
 
   if (job.priority === "deferred") {
     // A deferred row's provider IS the deferred lane: re-fetch from the
     // escalation-result port. Missing port, missing result, or an unknown
     // value all fail closed to an errored outcome — never approved.
-    const got =
-      deps.escalationResults === undefined ? null : await deps.escalationResults.get(pointer.jobId);
+    let got: ModerationDecision | null = null;
+    if (deps.escalationResults !== undefined) {
+      const port = deps.escalationResults;
+      const r = await guardedRead(() => port.get(pointer.jobId), deps, pointer.jobId);
+      if (!r.ok) return r.outcome;
+      got = r.value;
+    }
     const norm = normalizeDecision(got);
     // Re-clamp on the way back in (belt and braces on plan 031 §7.2's "the
     // lane ships unable to approve"): approve survives only when the lane
     // config explicitly allows it. Same law as clampEscalatedDecision.
     const allowApprove = deps.cascade?.lane.allowApprove === true;
-    preDecision = norm === "approved" && !allowApprove ? "review" : norm;
+    preDecision =
+      norm === "approved" && !allowApprove ? "review" : norm;
   } else if (
     pointer.track === "VISUAL" &&
     deps.cascade !== undefined &&
     deps.explainVisual !== undefined
   ) {
-    const verdict = await deps.moderation.getVideoModeration(pointer.jobId);
+    const read = await guardedRead(
+      () => deps.moderation.getVideoModeration(pointer.jobId),
+      deps,
+      pointer.jobId,
+    );
+    if (!read.ok) return read.outcome;
+    const verdict = read.value;
     if (verdict == null || typeof verdict !== "object") {
       // Provider unreadable — errored; falls through to the settle path,
       // which fails closed exactly as it always has.
@@ -561,8 +757,8 @@ export async function processCompletion(
           track: pointer.track,
         });
         // A trigger failure THROWS (→ retry): the route recomputes and the
-        // trigger re-fires idempotently on the next delivery, because the
-        // original claim slot below was never touched.
+        // trigger re-fires idempotently on the next delivery, because no claim
+        // was ever taken.
         await deps.cascade.trigger({
           jobId: esc.jobId,
           mediaId: job.mediaId,
@@ -586,44 +782,18 @@ export async function processCompletion(
     }
   }
 
-  // 2. DEDUPE FIRST — before any side effect. The dedupe key binds the content
-  //    hash, the jobId, and the track so the two tracks of the same bytes never
-  //    collide and a redelivery of the SAME completion is a no-op. (The
-  //    escalate branch above returns without claiming — its side effects carry
-  //    their own idempotency; this claim guards the SETTLE path's.)
-  const dedupeKey = deriveDedupeKey({
-    contentHash: media.contentHash,
-    jobId: pointer.jobId,
-    track: pointer.track,
-  });
-  const claimed = await deps.store.claimMessage(dedupeKey);
-  if (!claimed) {
-    deps.log?.info?.("completion: duplicate delivery — ack-drop", {
-      jobId: pointer.jobId,
-    });
-    return { kind: "duplicate" };
+  let thisDecision: ModerationDecision | null;
+  if (preDecision !== undefined) {
+    thisDecision = preDecision;
+  } else {
+    const r = await guardedRead(
+      () => refetchTrackDecision(pointer, job, deps),
+      deps,
+      pointer.jobId,
+    );
+    if (!r.ok) return r.outcome;
+    thisDecision = r.value;
   }
-
-  // 3. RE-FETCH authoritative state for THIS track (body verdict ignored).
-  //    Skipped when 1c already obtained it (deferred row / routed-to-settle):
-  //    re-fetching twice would double the provider read for no new evidence.
-  const thisDecision =
-    preDecision !== undefined ? preDecision : await refetchTrackDecision(pointer, job, deps);
-
-  // Persist this track's decision (the side effect we just earned the right to
-  // perform). An errored re-fetch persists nothing on the row (decision stays
-  // null) but still contributes an `errored` outcome to the combine.
-  if (thisDecision !== null) {
-    await deps.store.persistTrackDecision(pointer.jobId, thisDecision);
-  }
-
-  // Read the OTHER track's decision and build both outcomes.
-  const other = await deps.store.readOtherTrack(job.mediaId, pointer.track);
-  const thisOutcome = outcomeFromDecision(thisDecision);
-  const otherOutcome = outcomeFromOther(other);
-
-  const visual = pointer.track === "VISUAL" ? thisOutcome : otherOutcome;
-  const audio = pointer.track === "AUDIO" ? thisOutcome : otherOutcome;
 
   // Derive every storage key from the row's identity columns via the canonical
   // cas-keys builders — key construction is centralized here, never trusted from
@@ -640,100 +810,152 @@ export async function processCompletion(
   // The cleaned bytes live at the STAGING key until promoted to cas/.
   const stagingK = `processing/${media.tenantId}/${media.uploadId}`;
 
-  // 4. Resolve the promote SOURCE, version-pinned (AR-SEC F3), then decide
-  //    (pure). Promotion may only ever copy the EXACT staging object version
-  //    the processing worker hashed and moderated — never "whatever bytes
-  //    currently sit at the staging key" (TOCTOU: a swap between moderation
-  //    and promote must not ride the approval into cas/). A cas/ object from
-  //    a prior promote also satisfies presence: those bytes were themselves
-  //    pin-copied.
-  // Normalize fail-closed: only a non-empty string is a usable pin. An
-  // undefined/empty value (legacy row, adapter gap) must NOT degrade into an
-  // unpinned head/copy of the current staging bytes. (resolvePromoteSource owns
-  // that rule, shared with the human-approval path.)
-  const promoteSource = await resolvePromoteSource({
-    storage: deps.storage,
-    stagingKey: stagingK,
-    casKey: casK,
-    stagingVersionId: media.stagingVersionId,
-  });
+  // Resolve the promote SOURCE, version-pinned (AR-SEC F3). Promotion may only
+  // ever copy the EXACT staging object version the processing worker hashed and
+  // moderated — never "whatever bytes currently sit at the staging key"
+  // (TOCTOU). A cas/ object from a prior promote also satisfies presence: those
+  // bytes were themselves pin-copied. This is storage I/O, so it happens before
+  // the transaction opens, and only when this track approved — any other
+  // decision cannot lead to APPROVED, so its source is never consulted.
+  const promoteSource: PromoteSource =
+    thisDecision === "approved"
+      ? await resolvePromoteSource({
+          storage: deps.storage,
+          stagingKey: stagingK,
+          casKey: casK,
+          stagingVersionId: media.stagingVersionId,
+        })
+      : { kind: "none" };
   const casPresent = promoteSource.kind !== "none";
-  const action = decidePromotion({
-    visual,
-    audio,
-    currentStatus: media.lifecycle,
-    casObjectPresent: casPresent,
+
+  const dedupeKey = deriveDedupeKey({
+    contentHash: media.contentHash,
+    jobId: pointer.jobId,
+    track: pointer.track,
   });
+  // A quarantine, or an errored track (which can only ever hold), settles at
+  // once: nothing the sibling says can improve on it.
+  const settlesAtOnce = thisDecision === null || thisDecision === "quarantine";
 
-  // An illegal transition (e.g. replay on a terminal APPROVED/REJECTED) is an
-  // idempotent ack-drop — NEVER a DLQ.
-  if (action.transition.ok === false) {
-    deps.log?.info?.("completion: illegal/absorbing transition — ack-drop", {
-      mediaId: job.mediaId,
-      from: media.lifecycle,
+  // 3. ONE transaction: claim -> persist -> read sibling -> fan in -> CAS.
+  //    Everything here commits together or not at all, so a failure after the
+  //    claim leaves no claim behind for the redelivery to trip over.
+  let tx: TxResult;
+  try {
+    tx = await deps.store.inTransaction<TxResult>(job.mediaId, async (t) => {
+      if (!(await t.claimMessage(dedupeKey))) {
+        return { done: { kind: "duplicate" } };
+      }
+      if (thisDecision !== null) {
+        await t.persistTrackDecision(pointer.jobId, thisDecision);
+      }
+
+      const other = await t.readOtherTrack(job.mediaId, pointer.track);
+      if (other.state === "pending" && !settlesAtOnce) {
+        return { done: { kind: "awaiting-sibling" } };
+      }
+
+      const thisOutcome = outcomeFromDecision(thisDecision);
+      const otherOutcome = outcomeFromOther(other);
+      const action = decidePromotion({
+        visual: pointer.track === "VISUAL" ? thisOutcome : otherOutcome,
+        audio: pointer.track === "AUDIO" ? thisOutcome : otherOutcome,
+        currentStatus: media.lifecycle,
+        casObjectPresent: casPresent,
+      });
+
+      // An illegal transition is an idempotent ack-drop — NEVER a DLQ.
+      if (action.transition.ok === false) {
+        return { done: { kind: "illegal-transition" } };
+      }
+
+      let status = action.transition.status;
+      let promote = action.shouldPromote;
+      // AR-SEC F3 fail-closed hold: approved, but the version-pinned moderated
+      // bytes cannot be resolved (unpinned legacy row, pinned version gone, and
+      // no prior cas/ promote). Do NOT persist APPROVED — it would emit "ready"
+      // with nothing safe to serve. Hold in REVIEW; doubt never serves.
+      if (status === "APPROVED" && promoteSource.kind === "none") {
+        deps.log?.error?.(
+          "completion: approved but pinned moderated bytes unresolvable — holding REVIEW",
+          { mediaId: job.mediaId },
+        );
+        status = "REVIEW";
+        promote = false;
+      }
+
+      // Compare-and-set from the lifecycle the pre-check saw. Zero rows means a
+      // concurrent writer got there first: stand down, keep the track decision.
+      const res = await t.persistMediaStatus(job.mediaId, status, {
+        expectedFrom: media.lifecycle,
+      });
+      if (res.count !== 1) return { done: { kind: "lost-race" } };
+
+      return { status, promote };
     });
-    return { kind: "illegal-transition" };
-  }
-
-  const nextStatusValue = action.transition.status;
-
-  // AR-SEC F3 fail-closed hold: both tracks approved but the version-pinned
-  // moderated bytes cannot be resolved (unpinned legacy row, pinned version
-  // gone, and no prior cas/ promote). Do NOT persist APPROVED — an APPROVED
-  // row without certified bytes would emit "ready" with nothing safe to
-  // serve, and could later be satisfied by unmoderated bytes. Hold in REVIEW
-  // instead: a human (or a pipeline re-run) resolves it; doubt never serves.
-  if (nextStatusValue === "APPROVED" && promoteSource.kind === "none") {
-    deps.log?.error?.(
-      "completion: approved but pinned moderated bytes unresolvable — holding REVIEW",
-      { mediaId: job.mediaId },
-    );
-    await deps.store.persistMediaStatus(job.mediaId, "REVIEW");
-    await deps.emitResolved(moderationResolvedPayload(job.mediaId, "REVIEW"));
-    return { kind: "applied", status: "REVIEW" };
-  }
-
-  // 5. APPLY in fixed order: promote -> persist -> emit.
-
-  // 5a. PROMOTE: copy the CLEANED STAGING bytes — pinned to the EXACT version
-  //     that was hashed and moderated (AR-SEC F3) — to cas/ so they can serve;
-  //     NEVER the raw pending upload and NEVER the unpinned "current" staging
-  //     bytes. copyObject is idempotent (content-derived target key). When the
-  //     cas/ object already exists (a prior pinned promote; replay), the copy
-  //     is skipped — re-copying from staging could adopt post-moderation
-  //     bytes. Then best-effort remove BOTH the raw original (pending/) and
-  //     the staging copy. cas/ thus only ever holds APPROVED cleaned bytes.
-  if (action.shouldPromote) {
-    await promotePinned({
-      storage: deps.storage,
-      source: promoteSource,
-      stagingKey: stagingK,
-      casKey: casK,
-      // Raw original + cleaned staging copy: both transient, neither may
-      // outlive the promotion. Tolerate already-deleted on both (a prior
-      // delivery or lifecycle expiry) — the cas/ copy is what matters.
-      cleanupKeys: [pendingK, stagingK],
-      log: deps.log,
-      logContext: { mediaId: job.mediaId },
+  } catch (err) {
+    deps.log?.error?.("completion: transaction failed — retry, nothing committed", {
+      jobId: pointer.jobId,
+      error: String(err),
     });
+    return { kind: "retry", reason: "transaction-failed" };
   }
 
-  // 5b. PERSIST the new status.
-  if (action.shouldPersistStatus) {
-    await deps.store.persistMediaStatus(job.mediaId, nextStatusValue);
+  if (tx.done !== undefined) {
+    deps.log?.info?.("completion: not settled by this delivery", {
+      jobId: pointer.jobId,
+      outcome: tx.done.kind,
+    });
+    return tx.done;
   }
 
-  // 5c. EMIT the anti-oracle resolved event (ready|not-ready ONLY).
-  if (action.shouldEmitResolved) {
-    const payload = moderationResolvedPayload(job.mediaId, nextStatusValue);
-    await deps.emitResolved(payload);
+  // 4. AFTER the commit. Promote the CLEANED STAGING bytes — pinned to the
+  //    EXACT version that was hashed and moderated — to cas/, then remove the
+  //    raw original (pending/) and the staging copy, best-effort. copyObject is
+  //    idempotent (content-derived target key). A failure here must not undo
+  //    or hide the committed decision: it is logged and the recovery sweeper
+  //    repairs the promotion. Until then the item serves nothing, and "ready"
+  //    is not announced.
+  let servable = true;
+  if (tx.promote) {
+    try {
+      await promotePinned({
+        storage: deps.storage,
+        source: promoteSource,
+        stagingKey: stagingK,
+        casKey: casK,
+        cleanupKeys: [pendingK, stagingK],
+        log: deps.log,
+        logContext: { mediaId: job.mediaId },
+      });
+    } catch (err) {
+      servable = false;
+      deps.log?.error?.(
+        "completion: promotion failed after commit — left for the recovery sweep",
+        { mediaId: job.mediaId, error: String(err) },
+      );
+    }
+  }
+
+  // EMIT the anti-oracle resolved event (ready|not-ready ONLY). Best-effort: a
+  // redelivery would now be a `duplicate`, so a throw here must not become a
+  // retry that can never emit.
+  if (servable) {
+    try {
+      await deps.emitResolved(moderationResolvedPayload(job.mediaId, tx.status));
+    } catch (err) {
+      deps.log?.warn?.("completion: resolved event not emitted", {
+        mediaId: job.mediaId,
+        error: String(err),
+      });
+    }
   }
 
   deps.log?.info?.("completion: applied", {
     mediaId: job.mediaId,
-    status: nextStatusValue,
+    status: tx.status,
   });
-  return { kind: "applied", status: nextStatusValue };
+  return { kind: "applied", status: tx.status };
 }
 
 // The SQS `makeHandler` adapter stays in `lambda/media-completion-worker.ts`

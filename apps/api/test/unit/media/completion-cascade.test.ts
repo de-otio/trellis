@@ -13,6 +13,7 @@
 //  - A taxonomy-pin failure settles; it must never escalate (guaranteed-useless
 //    spend). A disabled lane settles everything ("lane-closed").
 
+import { adaptLegacyStore } from "./support/legacy-completion-store.js";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -86,7 +87,7 @@ function world(opts: {
     ],
   ]);
 
-  const store: CompletionStore = {
+  const store: CompletionStore = adaptLegacyStore({
     async claimMessage(key) {
       calls.push("claimMessage");
       if (claimed.has(key)) return false;
@@ -127,7 +128,7 @@ function world(opts: {
             return { jobId: ESC_JOB };
           },
         }),
-  };
+  });
 
   const moderation: MediaModerationProvider = {
     async moderateImage() {
@@ -322,7 +323,11 @@ describe("processCompletion — the deferred lane's call site (plan 031 C1)", ()
 
     expect(outcome.kind).toBe("applied");
     expect(w.triggers).toHaveLength(0);
-    expect(w.calls[0]).toBe("claimMessage"); // original order: claim, then fetch
+    // Read-only fetch first, then the claim: a failed fetch must not burn the slot.
+    expect(w.calls.indexOf("getVideoModeration")).toBeGreaterThanOrEqual(0);
+    expect(w.calls.indexOf("getVideoModeration")).toBeLessThan(
+      w.calls.indexOf("claimMessage"),
+    );
   });
 
   it("an unreadable provider verdict falls through to the errored settle path", async () => {
