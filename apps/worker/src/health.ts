@@ -23,6 +23,7 @@ import { DEFAULT_BACKOFF_MAX_MS, DEFAULT_WAIT_TIME_SECONDS } from "./poller-defa
 export interface PollerLiveness {
   readonly started: boolean;
   readonly lastAttemptAt: number | undefined;
+  readonly inFlightCount: number;
 }
 
 /**
@@ -37,7 +38,16 @@ export function pollerStaleMs(env: NodeJS.ProcessEnv): number {
   return 2 * (DEFAULT_WAIT_TIME_SECONDS * 1000 + DEFAULT_BACKOFF_MAX_MS);
 }
 
-/** True when every started poller completed a cycle within `staleMs`. */
+/**
+ * True when every started poller is either working (a dispatch in flight) or
+ * completed a cycle within `staleMs`.
+ *
+ * A busy poller counts as live: a slot only re-stamps after its message
+ * settles, so a legitimately long job (a transcode, a large erasure) on every
+ * slot would otherwise read as a wedged loop and flip readiness. A handler
+ * that hangs forever is not this check's concern — the visibility timeout
+ * redelivers its message (W2).
+ */
 export function pollersLive(
   pollers: readonly PollerLiveness[],
   nowMs: number,
@@ -45,7 +55,9 @@ export function pollersLive(
 ): boolean {
   return pollers.every(
     (p) =>
-      !p.started || (p.lastAttemptAt !== undefined && nowMs - p.lastAttemptAt <= staleMs),
+      !p.started ||
+      p.inFlightCount > 0 ||
+      (p.lastAttemptAt !== undefined && nowMs - p.lastAttemptAt <= staleMs),
   );
 }
 

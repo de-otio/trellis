@@ -70,6 +70,37 @@ describe("poller liveness (W6)", () => {
     await p.stop();
   });
 
+  it("a long-running job on every slot keeps the poller live, past the threshold", async () => {
+    const clock = { t: 10_000 };
+    let finish!: () => void;
+    const jobDone = new Promise<void>((r) => (finish = r));
+    let delivered = false;
+    const oneMessage: QueueClient = {
+      receive: async (): Promise<ReceivedMessage[]> => {
+        if (delivered) return new Promise(() => {}); // after the job: wedge
+        delivered = true;
+        return [{ messageId: "m1", receiptHandle: "r1", body: "{}" }];
+      },
+      deleteMessage: async () => {},
+    };
+    const p = new QueuePoller(oneMessage, async () => { await jobDone; return "ack" as const; }, {
+      queueName: "q", concurrency: 1, logger: logger(), now: () => clock.t,
+    });
+    p.start();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(p.inFlightCount).toBe(1);
+    clock.t += STALE * 10; // the job runs far longer than the threshold
+    expect(pollersLive([p], clock.t, STALE)).toBe(true);
+
+    finish(); // job settles; the slot stamps, then wedges in receive
+    await new Promise((r) => setTimeout(r, 10));
+    expect(p.inFlightCount).toBe(0);
+    expect(pollersLive([p], clock.t, STALE)).toBe(true); // fresh stamp
+    clock.t += STALE + 1;
+    expect(pollersLive([p], clock.t, STALE)).toBe(false); // now genuinely stuck
+    void p.stop();
+  });
+
   it("a poller never started (federation disabled) does not count", () => {
     const skipped = poller(idle(), { t: 0 }); // never start()ed, never pushed in prod
     expect(skipped.lastAttemptAt).toBeUndefined();
