@@ -189,6 +189,15 @@ describe("/api/media/upload — outcomes that still hold", () => {
     expect(upsertMock.mock.calls[0][0].create.lifecycle).toBe("REVIEW");
   });
 
+  it("a typed, non-retryable provider error with no capacity or infra flag still holds as REVIEW", async () => {
+    moderateImageMock.mockRejectedValue(
+      new ModerationProviderError("rejected these bytes", { retryable: false }),
+    );
+    const { res } = await run();
+    expect(res.status).not.toBe(503);
+    expect(upsertMock.mock.calls[0][0].create.lifecycle).toBe("REVIEW");
+  });
+
   it("an oversize image is refused before moderation and never 503", async () => {
     const env = makeEnv({ maxBytes: { image: 4, video: 100 } });
     const { res } = await run(env);
