@@ -92,11 +92,7 @@ export {
   DeferredLaneConfigError,
   DEFERRED_LANE_RETRIES,
 } from "./lib/media/deferred-lane.js";
-export type {
-  DeferredLaneConfig,
-  Disposition,
-  ShedCause,
-} from "./lib/media/deferred-lane.js";
+export type { DeferredLaneConfig, Disposition, ShedCause } from "./lib/media/deferred-lane.js";
 // Human-review promotion: wiring this is what makes a moderator's approval
 // actually copy the reviewed bytes to the serve prefix. Without it, approval
 // applies the lifecycle transition and promotes nothing — and says so.
@@ -158,6 +154,8 @@ export type {
 export {
   ModerationProviderError,
   isModerationProviderError,
+  ModerationJobPendingError,
+  isModerationJobPendingError,
   NullModerationProvider,
   assertModerationProviderAllowed,
   moderationProviderName,
@@ -172,7 +170,21 @@ export type {
   ModerationLabel,
   ModerationCallOptions,
   VideoModerationStart,
+  HoldGround,
 } from "./lib/media/moderation-provider.js";
+// Media moderation contract types the follow-up pipeline work builds against.
+// Types and pure helpers only: nothing here is wired into a code path yet.
+export type { ReviewActor } from "./lib/media/media-review-handler.js";
+export type { UploadQuotaPort } from "./lib/media/media-ports.js";
+export type { ProcessingOutcome, ProcessingClock } from "./lib/workers/media-processing.js";
+export { validateRecoverySweepConfig } from "./lib/workers/media-recovery-sweep.js";
+export type {
+  MediaRecoverySweepConfig,
+  RecoveryAction,
+  RecoveryCandidate,
+  RecoveryTrackState,
+  CompletionQueueTiming,
+} from "./lib/workers/media-recovery-sweep.js";
 // The canonical completion envelope a backend publishes when an async job
 // finishes, plus its producer.
 export {
@@ -208,20 +220,12 @@ export type {
 } from "./lib/media/compliance-seams.js";
 // Reporter-notification templates (plan 08 §2.2 §3.3) — deployment injects
 // localized, counsel-approved Art. 16(4)/(5) copy; core ships a neutral fallback.
-export {
-  setReportTemplates,
-  REPORT_TEMPLATE_KEYS,
-} from "./lib/report-templates.js";
+export { setReportTemplates, REPORT_TEMPLATE_KEYS } from "./lib/report-templates.js";
 export type { ReportTemplate, ReportTemplateMap } from "./lib/report-templates.js";
 // Operator-alert hook (plan 08 §2.2) — ILLEGAL_* reports alert the operator;
 // the deployment can inject a richer hook (default emails MODERATOR_EMAILS).
-export {
-  setOperatorAlertHook,
-} from "./lib/report-operator-alert.js";
-export type {
-  OperatorAlert,
-  OperatorAlertHook,
-} from "./lib/report-operator-alert.js";
+export { setOperatorAlertHook } from "./lib/report-operator-alert.js";
+export type { OperatorAlert, OperatorAlertHook } from "./lib/report-operator-alert.js";
 // Compliance enforcement (plan 08 Phase 2 / spec 07 §4 — Lane A2).
 // - `restrictContent` orchestrates takedown (hide → preserve → statement → audit).
 // - The deployment injects the affected-user statement delivery transport and an

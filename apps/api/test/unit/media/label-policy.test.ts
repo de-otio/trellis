@@ -72,32 +72,36 @@ describe("createLabelPolicy — refuses to construct without a policy", () => {
   it("accepts an EMPTY map — that is a coherent policy, not a missing one", () => {
     const policy = createLabelPolicy(config({ categories: {} }));
     // Every reported category is therefore unmapped.
-    expect(
-      policy.decide(verdictOf([{ category: MOCK_CATEGORY_A, confidence: 0 }])),
-    ).toBe("quarantine");
+    expect(policy.decide(verdictOf([{ category: MOCK_CATEGORY_A, confidence: 0 }]))).toBe(
+      "quarantine",
+    );
     // ...but a verdict with no labels at all still approves.
     expect(policy.decide(verdictOf([]))).toBe("approved");
   });
 
   it("throws on an unrecognised pin mode", () => {
-    expect(() =>
-      createLabelPolicy(config({ pinMode: "whatever" as never })),
-    ).toThrow(LabelPolicyConfigError);
+    expect(() => createLabelPolicy(config({ pinMode: "whatever" as never }))).toThrow(
+      LabelPolicyConfigError,
+    );
   });
 
   it('throws when "config" mode names no version', () => {
-    expect(() => createLabelPolicy(config({ pinMode: "config" }))).toThrow(
-      LabelPolicyConfigError,
-    );
+    expect(() => createLabelPolicy(config({ pinMode: "config" }))).toThrow(LabelPolicyConfigError);
     expect(() =>
       createLabelPolicy(config({ pinMode: "config", expectedModelVersion: "" })),
     ).toThrow(LabelPolicyConfigError);
   });
 
-  it('throws when "none" mode was requested without the explicit opt-in', () => {
+  it('refuses a version list under "config" mode until a follow-up accepts one (fails closed)', () => {
     expect(() =>
-      createLabelPolicy({ categories: CATEGORIES, pinMode: "none" }),
+      createLabelPolicy(config({ pinMode: "config", expectedModelVersion: [MOCK_VERSION] })),
     ).toThrow(LabelPolicyConfigError);
+  });
+
+  it('throws when "none" mode was requested without the explicit opt-in', () => {
+    expect(() => createLabelPolicy({ categories: CATEGORIES, pinMode: "none" })).toThrow(
+      LabelPolicyConfigError,
+    );
     expect(() =>
       createLabelPolicy({
         categories: CATEGORIES,
@@ -110,13 +114,10 @@ describe("createLabelPolicy — refuses to construct without a policy", () => {
   it("exposes unpinnedTaxonomy as a standing flag", () => {
     expect(createLabelPolicy(config()).unpinnedTaxonomy).toBe(true);
     expect(
-      createLabelPolicy(
-        config({ pinMode: "config", expectedModelVersion: MOCK_VERSION }),
-      ).unpinnedTaxonomy,
+      createLabelPolicy(config({ pinMode: "config", expectedModelVersion: MOCK_VERSION }))
+        .unpinnedTaxonomy,
     ).toBe(false);
-    expect(
-      createLabelPolicy(config({ pinMode: "response" })).unpinnedTaxonomy,
-    ).toBe(false);
+    expect(createLabelPolicy(config({ pinMode: "response" })).unpinnedTaxonomy).toBe(false);
   });
 });
 
@@ -182,16 +183,17 @@ describe("decideFromLabels — category mapping", () => {
     // "constructor" and "toString" exist on every object's prototype chain; a
     // naive lookup would read them as configured categories.
     for (const category of ["constructor", "toString", "__proto__"]) {
-      expect(
-        decideFromLabels(verdictOf([{ category, confidence: 0 }]), unpinned),
-      ).toBe("quarantine");
+      expect(decideFromLabels(verdictOf([{ category, confidence: 0 }]), unpinned)).toBe(
+        "quarantine",
+      );
     }
   });
 
   it("reviews a mapped category whose confidence is unusable", () => {
-    const labels = [
-      { category: MOCK_CATEGORY_A, confidence: Number.NaN },
-    ] as Array<{ category: string; confidence: number }>;
+    const labels = [{ category: MOCK_CATEGORY_A, confidence: Number.NaN }] as Array<{
+      category: string;
+      confidence: number;
+    }>;
     expect(decideFromLabels(verdictOf(labels), unpinned)).toBe("review");
   });
 
@@ -287,24 +289,20 @@ describe("decideFromLabels — taxonomy pin modes", () => {
 
   for (const row of modes) {
     it(`zero labels — ${row.name}`, () => {
-      expect(decideFromLabels(verdictOf([], row.version), row.cfg, row.context)).toBe(
-        row.expected,
-      );
+      expect(decideFromLabels(verdictOf([], row.version), row.cfg, row.context)).toBe(row.expected);
     });
 
     it(`benign labels — ${row.name}`, () => {
-      expect(
-        decideFromLabels(verdictOf(benign, row.version), row.cfg, row.context),
-      ).toBe(row.expected);
+      expect(decideFromLabels(verdictOf(benign, row.version), row.cfg, row.context)).toBe(
+        row.expected,
+      );
     });
   }
 
   it("pin failure floors at review — it never lifts a quarantine", () => {
     const cfg = config({ pinMode: "config", expectedModelVersion: MOCK_VERSION });
     // Version drifted AND a damning label: the worse of the two must survive.
-    expect(decideFromLabels(verdictOf(damning, OTHER_VERSION), cfg)).toBe(
-      "quarantine",
-    );
+    expect(decideFromLabels(verdictOf(damning, OTHER_VERSION), cfg)).toBe("quarantine");
     expect(
       decideFromLabels(
         verdictOf([{ category: "mock_category_unmapped", confidence: 0 }], undefined),
@@ -341,24 +339,21 @@ describe("decideFromLabels — the policy can only ever DEGRADE a verdict", () =
       config({ pinMode: "response" }),
       config({ pinMode: "config", expectedModelVersion: MOCK_VERSION }),
     ]) {
-      expect(
-        decideFromLabels(verdictOf([], MOCK_VERSION, "review"), cfg),
-      ).toBe("review");
+      expect(decideFromLabels(verdictOf([], MOCK_VERSION, "review"), cfg)).toBe("review");
     }
   });
 
   it("never discards a quarantine that carries no labels", () => {
     // A hash match or a policy refusal is not expressible as a label, and must
     // survive interpretation untouched.
-    expect(
-      decideFromLabels(verdictOf([], MOCK_VERSION, "quarantine"), config()),
-    ).toBe("quarantine");
+    expect(decideFromLabels(verdictOf([], MOCK_VERSION, "quarantine"), config())).toBe(
+      "quarantine",
+    );
   });
 
   it("does not let the fail-closed Null provider approve anything", async () => {
-    const { NullModerationProvider } = await import(
-      "../../../src/lib/media/moderation-provider.js"
-    );
+    const { NullModerationProvider } =
+      await import("../../../src/lib/media/moderation-provider.js");
     const verdict = await new NullModerationProvider(() => {}).moderateImage({
       bucket: "b",
       key: "k",
@@ -392,13 +387,8 @@ describe("decideFromLabels — the policy can only ever DEGRADE a verdict", () =
           [{ category: "mock_category_unmapped", confidence: 0 }],
         ]) {
           for (const version of [MOCK_VERSION, OTHER_VERSION, undefined]) {
-            const out = decideFromLabels(
-              verdictOf(labels, version, providerDecision),
-              cfg,
-            );
-            expect(SEVERITY[out]).toBeGreaterThanOrEqual(
-              SEVERITY[providerDecision],
-            );
+            const out = decideFromLabels(verdictOf(labels, version, providerDecision), cfg);
+            expect(SEVERITY[out]).toBeGreaterThanOrEqual(SEVERITY[providerDecision]);
           }
         }
       }

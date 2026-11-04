@@ -157,11 +157,7 @@ export interface StoragePort {
    * version (AR-SEC F3) — on S3 a versioned `CopySource`; without it the
    * CURRENT bytes at `fromKey` are copied (TOCTOU-prone for moderated media —
    * the media pipeline always pins). */
-  copyObject(
-    fromKey: string,
-    toKey: string,
-    options?: { fromVersionId?: string },
-  ): Promise<void>;
+  copyObject(fromKey: string, toKey: string, options?: { fromVersionId?: string }): Promise<void>;
   deleteObject(key: string): Promise<void>;
   /**
    * Existence check. Without options: reports the CURRENT object, and — when
@@ -197,10 +193,7 @@ export interface StoragePort {
 export type TranscriptionStatus = "COMPLETED" | "FAILED" | "IN_PROGRESS";
 
 export interface TranscribePort {
-  startTranscription(input: {
-    key: string;
-    jobName: string;
-  }): Promise<{ jobId: string }>;
+  startTranscription(input: { key: string; jobName: string }): Promise<{ jobId: string }>;
   /**
    * Poll a transcription job.
    *
@@ -225,6 +218,23 @@ export interface TranscribePort {
     status: TranscriptionStatus;
     transcript?: string;
   }>;
+}
+
+/**
+ * Per-user upload quota, checked before an upload is accepted. A refusal
+ * carries how long the caller should wait before trying again; the limits
+ * themselves are the adapter's runtime config, never core's.
+ *
+ * `kind` has two values: `"image"` for a still image and `"video"` for every
+ * other uploaded media type. Audio-only uploads ride the same asynchronous
+ * pipeline as video and are reported as `"video"`, so an adapter that caps
+ * `"video"` caps audio too.
+ */
+export interface UploadQuotaPort {
+  check(i: {
+    userId: string;
+    kind: "image" | "video";
+  }): Promise<{ ok: true } | { ok: false; retryAfterSeconds: number }>;
 }
 
 // ===========================================================================
@@ -313,11 +323,7 @@ export class MockTranscodePort implements TranscodePort {
    */
   async sampleFrames(input: SampleFramesInput): Promise<SampleFramesResult> {
     this.sampleCalls.push(input);
-    const wanted = expectedFrameCount(
-      this.duration,
-      input.framesPerSecond,
-      input.maxFrames,
-    );
+    const wanted = expectedFrameCount(this.duration, input.framesPerSecond, input.maxFrames);
     const yielded =
       this.extractableFrames === undefined
         ? wanted
@@ -401,13 +407,9 @@ export class MockStoragePort implements StoragePort {
           );
 
     if (options?.versionId !== undefined) {
-      const v = this.objects
-        .get(key)
-        ?.versions.find((x) => x.versionId === options.versionId);
+      const v = this.objects.get(key)?.versions.find((x) => x.versionId === options.versionId);
       if (!v) {
-        throw new Error(
-          `MockStoragePort: no version "${options.versionId}" at key "${key}"`,
-        );
+        throw new Error(`MockStoragePort: no version "${options.versionId}" at key "${key}"`);
       }
       return slice(v.body);
     }
@@ -429,9 +431,7 @@ export class MockStoragePort implements StoragePort {
   ): Promise<void> {
     const source =
       options?.fromVersionId !== undefined
-        ? this.objects
-            .get(fromKey)
-            ?.versions.find((x) => x.versionId === options.fromVersionId)
+        ? this.objects.get(fromKey)?.versions.find((x) => x.versionId === options.fromVersionId)
         : this.current(fromKey);
     if (!source) {
       throw new Error(`MockStoragePort: no object at key "${fromKey}" to copy`);
@@ -453,9 +453,7 @@ export class MockStoragePort implements StoragePort {
     options?: { versionId?: string },
   ): Promise<{ exists: boolean; versionId?: string; size?: number }> {
     if (options?.versionId !== undefined) {
-      const v = this.objects
-        .get(key)
-        ?.versions.find((x) => x.versionId === options.versionId);
+      const v = this.objects.get(key)?.versions.find((x) => x.versionId === options.versionId);
       return v
         ? { exists: true, versionId: options.versionId, size: v.body.length }
         : { exists: false };
@@ -487,10 +485,7 @@ export class MockTranscribePort implements TranscribePort {
   /** Records of each start call, for assertions. */
   readonly startCalls: { key: string; jobName: string }[] = [];
 
-  async startTranscription(input: {
-    key: string;
-    jobName: string;
-  }): Promise<{ jobId: string }> {
+  async startTranscription(input: { key: string; jobName: string }): Promise<{ jobId: string }> {
     this.startCalls.push(input);
     this.seq += 1;
     const jobId = `mock-transcribe-${this.seq}`;
@@ -501,10 +496,7 @@ export class MockTranscribePort implements TranscribePort {
   }
 
   /** Program the result a given job id will report. */
-  setResult(
-    jobId: string,
-    result: { status: TranscriptionStatus; transcript?: string },
-  ): void {
+  setResult(jobId: string, result: { status: TranscriptionStatus; transcript?: string }): void {
     this.results.set(jobId, result);
   }
 

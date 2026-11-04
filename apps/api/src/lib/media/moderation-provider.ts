@@ -263,20 +263,14 @@ export interface MediaModerationProvider {
    */
   readonly name?: string;
   /** Synchronous-style image moderation: resolves a verdict directly. */
-  moderateImage(
-    input: ImageRef,
-    options?: ModerationCallOptions,
-  ): Promise<ModerationVerdict>;
+  moderateImage(input: ImageRef, options?: ModerationCallOptions): Promise<ModerationVerdict>;
   /** Kicks off async video moderation; returns a handle to poll. */
   startVideoModeration(
     input: S3Ref,
     options?: ModerationCallOptions,
   ): Promise<VideoModerationStart>;
   /** Polls a previously-started video moderation job for its verdict. */
-  getVideoModeration(
-    jobId: string,
-    options?: ModerationCallOptions,
-  ): Promise<ModerationVerdict>;
+  getVideoModeration(jobId: string, options?: ModerationCallOptions): Promise<ModerationVerdict>;
 }
 
 /** Attribution for a provider that reports no name of its own. */
@@ -376,6 +370,12 @@ export class ModerationProviderError extends Error {
    * unaffected.
    */
   readonly infraFault: boolean;
+  /**
+   * The provider refused the call for lack of CAPACITY (a quota or concurrency
+   * ceiling), as distinct from a fault. Typed only: `undefined` when the
+   * adapter does not say, and no core path reads it yet.
+   */
+  readonly capacity: boolean | undefined;
 
   constructor(
     message: string,
@@ -383,6 +383,7 @@ export class ModerationProviderError extends Error {
       retryable: boolean;
       unknownCause?: boolean;
       infraFault?: boolean;
+      capacity?: boolean;
       cause?: unknown;
     } = {
       retryable: false,
@@ -395,6 +396,7 @@ export class ModerationProviderError extends Error {
     // `unknownCause` implies `infraFault`, so no existing adapter changes
     // behaviour and no caller has to set both.
     this.infraFault = options.infraFault === true || this.unknownCause;
+    this.capacity = options.capacity;
     if (options.cause !== undefined) {
       (this as { cause?: unknown }).cause = options.cause;
     }
@@ -408,15 +410,49 @@ export class ModerationProviderError extends Error {
  * chain is a DIFFERENT class object, and an `instanceof` check would silently
  * demote it to the untyped fallback.
  */
-export function isModerationProviderError(
-  err: unknown,
-): err is ModerationProviderError {
+export function isModerationProviderError(err: unknown): err is ModerationProviderError {
   if (err === null || typeof err !== "object") return false;
   const o = err as Record<string, unknown>;
-  return (
-    o.name === "ModerationProviderError" && typeof o.retryable === "boolean"
-  );
+  return o.name === "ModerationProviderError" && typeof o.retryable === "boolean";
 }
+
+/**
+ * Thrown when an asynchronous moderation job has been started but has not
+ * produced a result yet. It is a control-flow signal, not a fault: the caller
+ * should come back later rather than retry the call or fail the track.
+ */
+export class ModerationJobPendingError extends Error {
+  readonly pending = true as const;
+
+  constructor(message = "moderation job pending", options?: { cause?: unknown }) {
+    super(message);
+    this.name = "ModerationJobPendingError";
+    if (options?.cause !== undefined) {
+      (this as { cause?: unknown }).cause = options.cause;
+    }
+  }
+}
+
+/**
+ * Structural type guard for {@link ModerationJobPendingError}, structural for
+ * the same reason as {@link isModerationProviderError}: an error built by
+ * another copy of this package must still be recognised.
+ */
+export function isModerationJobPendingError(e: unknown): e is ModerationJobPendingError {
+  if (e === null || typeof e !== "object") return false;
+  const o = e as Record<string, unknown>;
+  return o.name === "ModerationJobPendingError" && o.pending === true;
+}
+
+/**
+ * Why a track is being held rather than released:
+ *   - `content`        — the verdict itself calls for a hold;
+ *   - `technical`      — moderation could not complete for infrastructure reasons;
+ *   - `unprocessable`  — the bytes could not be processed at all;
+ *   - `taxonomy-drift` — the provider answered in a vocabulary or model version
+ *                        the policy does not accept.
+ */
+export type HoldGround = "content" | "technical" | "unprocessable" | "taxonomy-drift";
 
 // ---------------------------------------------------------------------------
 // Warning sink.
@@ -482,9 +518,7 @@ export class NullModerationProvider implements MediaModerationProvider {
  * Returns true for the fail-closed Null provider. The startup guard uses this to
  * reject Null outside dev.
  */
-export function isNullModerationProvider(
-  provider: MediaModerationProvider,
-): boolean {
+export function isNullModerationProvider(provider: MediaModerationProvider): boolean {
   return provider instanceof NullModerationProvider;
 }
 
@@ -543,10 +577,7 @@ export class MockModerationProvider implements MediaModerationProvider {
    * own timing, so the mock stays free of clocks.
    */
   setImageResponder(
-    responder: (
-      input: ImageRef,
-      options?: ModerationCallOptions,
-    ) => Promise<ModerationVerdict>,
+    responder: (input: ImageRef, options?: ModerationCallOptions) => Promise<ModerationVerdict>,
   ): void {
     this.imageResponder = responder;
   }

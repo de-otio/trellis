@@ -46,7 +46,7 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   typed `any` (so the compiler saw nothing) and every unit test asserts against
   a `vi.fn()` that accepts any shape (so the mocks agreed with the bug); the
   only lane that exercises a real `create` is the standalone one, and the two
-  tests there that would have failed were skipped *citing this bug*. The
+  tests there that would have failed were skipped _citing this bug_. The
   handler now resolves a tenant by the same rule as the media write path
   (`media/tenant-resolution.ts`): the ambient tenant from the auth seam wins,
   and with `TENANT_SCOPE_MODE="off"` — the default — it falls back to the
@@ -65,7 +65,7 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 - **A private extension route with scopes can boot.** The published contract for
   `ExtensionRouteDefinition.scopes` is three-valued, and the third value —
   non-empty, "every listed scope required" — could not be declared at all
-  unless the route was *also* `publicSpec`. `describedExtensionRoutes` copies
+  unless the route was _also_ `publicSpec`. `describedExtensionRoutes` copies
   `def.scopes` onto the core `Route`, and `buildPublicV1Routes()` runs
   `assertPublicMountWiring` over a table that includes extension routes; its
   second rule threw for non-empty `scopes` without `publicSpec: true`, on the
@@ -208,7 +208,7 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   status code, across every tenant at once; the suggestions route then read the
   post's `text` with a second bare `findUnique` and returned tags derived from
   it, which turns the oracle from existence into content. Nobody saw it because
-  the 401 *is* there — one comment above it even said the route was
+  the 401 _is_ there — one comment above it even said the route was
   deliberately public — and the ordering, not the presence, was the defect; the
   H3 wave that put `canReadPost` in front of the comment-thread, sentiment and
   who-reacted reads did not reach these two, which the 2026-08-03 call-site
@@ -271,13 +271,13 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   gate (no auth, no CSRF, no security headers, and the full core `Env` handed
   to the handler). It decided "has auth middleware" with
   `m.name === "authMiddleware" || m.name === "csrfMiddleware"`. `.name` is a
-  property of the function the *extension* supplies, so the check tested a
+  property of the function the _extension_ supplies, so the check tested a
   label the caller writes: `function authMiddleware(_c, next) { return
-  next(); }` passed while defending nothing, and `Function.prototype.name` is
+next(); }` passed while defending nothing, and `Function.prototype.name` is
   configurable, so even a lambda can claim it. The mirror image was worse —
   core's real `csrfMiddleware()` returns an anonymous arrow whose `.name` is
   `""`, and core's `authMiddleware` is not a `Middleware` at all
-  (`(request, env) => AuthContext | null`), so *neither* of the two things the
+  (`(request, env) => AuthContext | null`), so _neither_ of the two things the
   message told you to attach could satisfy it. Nobody saw it because the
   validator's own test asserted the guard with a hand-named no-op, which is
   precisely the shape that should have been refused, and the one live consumer
@@ -300,10 +300,10 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   and in the reference docs — as never exposing core secrets such as
   `SESSION_SECRET`, `DATABASE_URL` or API keys. `extractExtensionConfig`
   implemented that by walking the extension's own `configSchema.shape` and
-  returning `process.env[key]` for every entry, so declaring the key *was* the
+  returning `process.env[key]` for every entry, so declaring the key _was_ the
   exploit: `z.object({ SESSION_SECRET: z.string() })` put the session-signing
   key on `ctx.config`, no `.passthrough()` or `.transform()` required. The
-  existing test only checked an *undeclared* key, which was never the hole, and
+  existing test only checked an _undeclared_ key, which was never the hole, and
   the live consumer declares an empty schema, so nothing failed. A
   `configSchema` naming any key in `CORE_SECRET_ENV_KEYS` (database credentials
   in all three accepted forms, the session secret/ARN/salt, the at-rest KEKs,
@@ -340,18 +340,18 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   the tenant core had already resolved for the request — and the `TenantId`
   brand is type-only, so it erases in the compiled JS that extensions actually
   consume. Prisma ignores an `undefined` field in a `where`, so the
-  `{ tenantId: undefined }` clause that produced was *no filter*: a scoped
+  `{ tenantId: undefined }` clause that produced was _no filter_: a scoped
   `findMany` became a platform-wide read and a scoped `deleteMany` a
   platform-wide delete, with no backstop (`TENANT_SCOPE_MODE` is off by default
   and RLS is installed inert). `planScopedOp` now rejects any non-string or
   empty tenant id, and on the route path the context binds to the tenant core
   resolved, rejecting a request for any other. Second: both projection guards
-  tested the *value* of a `select` entry, so `select: { author: true }` — the
+  tested the _value_ of a `select` entry, so `select: { author: true }` — the
   same read spelled with a boolean instead of a nested object — passed, and
   `author` is not a scalar so the excluded-column guard did not see it either.
   Every SHOUT post came back with its author's `User` row and, via `tenant`,
   the tenant row: the author→tenant map that excluding `tenantId` from every
-  model exists to prevent. Both guards now decide on the *key*, against the
+  model exists to prevent. Both guards now decide on the _key_, against the
   DMMF relation set, and `orderBy` on a relation is rejected for the same
   reason. No public API changed.
 
@@ -398,8 +398,8 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
   **Downstream test harnesses must be updated.** A harness that calls these
   endpoints anonymously will now see `403 {"error":"Forbidden: Test endpoints
-  are not enabled"}` (gate) or, once the env opt-in is set, `401
-  {"error":"Unauthorized"}` (no session). Trellis's own standalone e2e lane
+are not enabled"}` (gate) or, once the env opt-in is set, `401
+{"error":"Unauthorized"}` (no session). Trellis's own standalone e2e lane
   shows the intended pattern: seed one SUPER_ADMIN row in the test database,
   seal a session cookie with the server's secret, then fetch a CSRF token from
   `/api/csrf-token` — see `getTestAdminAuth()` in `test/utils/test-auth.ts`.
@@ -443,7 +443,7 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 - **Extensions: an unauthenticated raw route now fails startup.** Raw
   `ext.routes` entries are spliced into the core route table verbatim — no auth,
   no CSRF, no security headers, and the handler receives the full core `Env`
-  including `SESSION_SECRET` and `DATABASE_URL`. The validator only *warned*
+  including `SESSION_SECRET` and `DATABASE_URL`. The validator only _warned_
   when such a route declared no auth middleware; it now throws. The
   extension-api README documents the real trust model: extensions are **not**
   sandboxed. Extensions using the wrapped `extensionRoutes` path are unaffected.
@@ -469,7 +469,7 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   blocklist, the session epoch and, for a token that carries no `userId`
   claim, the JIT claim read), so the repeats were network calls, not cache
   hits. `lib/request-identity.ts` adds the slot to `TrellisRequestContext`: a
-  lazy memo of the two *independent* resolutions — `getSession`, which honours
+  lazy memo of the two _independent_ resolutions — `getSession`, which honours
   revocation, and `authMiddleware`, which is JWT-only — kept separate because
   they apply different rules to the same token, and merging them would move an
   authorization boundary. `server.ts` fills it, and `csrfMiddleware`,
@@ -477,7 +477,7 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   them) read it through `resolveSession`. It is a memo and not a cache: no
   key, no TTL, no eviction, and its lifetime is the request's — a token-keyed
   cache would keep answering after a logout, because the blocklist and epoch
-  reads *are* the revocation check. Revocation semantics are unchanged: still
+  reads _are_ the revocation check. Revocation semantics are unchanged: still
   read once per request, from the live store. With no request context (a unit
   test, or context construction having thrown) the call falls through to a
   fresh resolution, so the degradation is slower, never someone else's
@@ -498,7 +498,7 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   field — `"chronological@1"`, the value of `FEED_RANKER_ID` — so a client
   can show the user how the page is ordered; the no-covert-engagement-ordering
   invariant (`docs/concepts/feed-ordering.md`) requires every order to be
-  declared *and user-visible*, and until now the visibility half lived only
+  declared _and user-visible_, and until now the visibility half lived only
   in documentation. Underneath, the feed's `orderBy` is now `FEED_ORDER_BY`
   (`feed-pagination.ts`), built from `ALLOWED_SORT_FIELDS` and tied to it
   with a `satisfies` clause. Before this the pinned constants had no runtime
@@ -507,10 +507,10 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   sorted by something else. The invariant test block now pins
   `FEED_ORDER_BY`, and the feed-handler tests assert the query is issued with
   it. Additive: no existing field changes. Also documented (`SCORING-CODEBOOK.md`
-  §11d) the one user-facing list that *is* ordered by the scoring engine's
+  §11d) the one user-facing list that _is_ ordered by the scoring engine's
   output — the viewer's own circle roster — so the exposure map is complete.
 - **Content reports — the Art. 16 notice-and-action path (`reportType:
-  "CONTENT"`).** A reporter picks from a data-driven category vocabulary
+"CONTENT"`).** A reporter picks from a data-driven category vocabulary
   (`GET /api/report-categories` returns the ACTIVE `ReportCategory` rows a
   deployment seeds; core routes only on each category's `RoutingClass` —
   `ILLEGAL_PRIORITY` / `ILLEGAL` / `POLICY_VIOLATION` / `FEEDBACK` — and never
@@ -534,7 +534,7 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   A category routing to `ILLEGAL_PRIORITY` does not wait for a human before its
   first protective steps. Intake hides the resource, preserves the original
   under an evidence hold through the injected `EvidencePreservationStore`,
-  writes a *suppressed* statement of reasons (the audit record exists; delivery
+  writes a _suppressed_ statement of reasons (the audit record exists; delivery
   to the affected user is skipped), marks media `illegal-suspected` so it is
   never offered the appeal path, and creates a `pending` authority report. It
   deliberately submits nothing to any authority — filing stays human-gated
@@ -569,7 +569,7 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   camera model and serial, capture times, edit history, often an identity
   claim) and it stays — but it is irreversible: once the original bytes are
   gone nobody can ever check a Content Credentials claim about that image
-  again. So the manifest store is now copied out of the original *before* the
+  again. So the manifest store is now copied out of the original _before_ the
   strip and kept as a sidecar object beside the media. JPEG APP11 JUMBF is
   reassembled across segments with the packet-sequence and `LBox` checks that
   tell a clean reassembly from a mangled one; PNG `caBX` is read whole; every
@@ -610,9 +610,9 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   standing human moderator, so the block is the user-side remedy, and a remedy
   that only silences notifications is not one.
 
-  Blocking requires a session *and* a JWT with an active tenant — the tenant
+  Blocking requires a session _and_ a JWT with an active tenant — the tenant
   comes from the JWT, never from the body — is idempotent (a repeat is `200
-  alreadyBlocked`, not `409`), and deletes both directed `Relationship` edges
+alreadyBlocked`, not `409`), and deletes both directed `Relationship` edges
   in the same transaction as the block row, since an edge that outlived the
   block would keep the blocked account inside the blocker's audience. On the
   read paths the exclusion is **bidirectional** and threaded through
@@ -893,7 +893,7 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   with the same `GraphNotFoundError` as a missing one, before any write.
   User targets are unchanged.
 - **`tenant_id` is immutable in the database.** A `BEFORE UPDATE OF
-  tenant_id` trigger (`trellis_tenant_id_immutable()`) on every table with
+tenant_id` trigger (`trellis_tenant_id_immutable()`) on every table with
   the column raises when the value changes, through any client, raw SQL
   included. The tenant-qualified FKs already stop a parent moving while it
   has children; this covers rows with no children and tables outside an FK
@@ -950,7 +950,7 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   cleanup. A migration step applies what the new FK would have done to
   those rows only: it deletes edge and location rows whose entity is gone,
   and nulls `events.group_id` / `announce_post_id` whose target is gone. A
-  row whose target exists in *another* tenant is left alone, and `VALIDATE`
+  row whose target exists in _another_ tenant is left alone, and `VALIDATE`
   then stops `migrate deploy` on it, naming the key.
 
 - **Foreign keys between tenant-holding tables are tenant-qualified.** Sixteen
@@ -1031,7 +1031,7 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
   A minimum age of **18** is now enforced at every point a date of birth enters
   the system: `POST /auth/register` returns `403 {"error":
-  "AGE_REQUIREMENT_NOT_MET", "message", "remediation", "field"}`, and JIT
+"AGE_REQUIREMENT_NOT_MET", "message", "remediation", "field"}`, and JIT
   provisioning (both the Cognito PostConfirmation trigger and the Keycloak
   first-sign-in path) refuses before writing a row — the trigger fails, the JIT
   path yields no claims and the request 401s.
@@ -1047,7 +1047,7 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
   **No schema change.** The `AgeTier` enum, `User.ageTier`, `ParentalLink`, the
   tier→policy tables and the nightly age-tier transition job all stay, and tiers
-  read from the *database* (notification delivery floors, recap) remain a live
+  read from the _database_ (notification delivery floors, recap) remain a live
   floor over stored data.
 
 - **`computeAgeTier` had three implementations, and the one the nightly job ran
@@ -1285,7 +1285,7 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 - **The `@opentelemetry` override moves the whole family instead of splicing
   one package.** `GHSA-8988-4f7v-96qf` (unbounded memory allocation in W3C
   Baggage propagation) was already closed by forcing `@opentelemetry/core` to
-  2.8.0 *inside* the `sdk-metrics` subtree. That works, but it leaves
+  2.8.0 _inside_ the `sdk-metrics` subtree. That works, but it leaves
   `sdk-metrics@2.7.1` and `resources@2.7.1` — both of which pin `core` to an
   exact `2.7.1` — running against 2.8.0. Overriding `sdk-metrics` to 2.8.0
   instead moves the three packages as the unit their exact pins declare them to
@@ -1303,6 +1303,7 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
   root of an install tree, so anything installing `@de-otio/trellis` still
   resolves Fedify's exact pin and needs its own entry until Fedify relaxes it
   upstream.
+
 - **A human approval now promotes the bytes that were reviewed.** Approving a
   review-queue item performs the same version-pinned copy the automatic path
   performs, and refuses when that version can no longer be resolved. It never

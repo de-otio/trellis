@@ -64,10 +64,7 @@ import {
 import type { DeferredLaneConfig } from "../media/deferred-lane.js";
 import type { LabelPolicyExplanation } from "../media/label-policy.js";
 import type { ModerationJobPriority } from "./media-processing.js";
-import {
-  resolvePromoteSource,
-  promotePinned,
-} from "../media/promote-staging.js";
+import { resolvePromoteSource, promotePinned } from "../media/promote-staging.js";
 import { casKey, pendingKey, isCasKeyError } from "../media/cas-keys.js";
 import type { TrackOutcome, Track } from "../media/track-verdict.js";
 import { deriveDedupeKey } from "../media/dedupe-key.js";
@@ -76,14 +73,8 @@ import { moderationResolvedPayload } from "../media/moderation-resolved-payload.
 import { transcriptToModerationDecision } from "../media/transcript-moderation.js";
 import type { TextModerationProvider } from "../media/text-moderation.js";
 import type { StoragePort, TranscribePort } from "../media/media-ports.js";
-import type {
-  MediaModerationProvider,
-  ModerationVerdict,
-} from "../media/moderation-provider.js";
-import type {
-  ModerationDecision,
-  MediaLifecycle,
-} from "../media/media-lifecycle.js";
+import type { MediaModerationProvider, ModerationVerdict } from "../media/moderation-provider.js";
+import type { ModerationDecision, MediaLifecycle } from "../media/media-lifecycle.js";
 
 // ---------------------------------------------------------------------------
 // Narrow data shapes the shell needs from persistence. These mirror the Prisma
@@ -129,10 +120,7 @@ export interface CompletionStore {
   findJobByJobId(jobId: string): Promise<ModerationJobRow | null>;
 
   /** Persist this track's resolved decision onto its job row. */
-  persistTrackDecision(
-    jobId: string,
-    decision: ModerationDecision,
-  ): Promise<void>;
+  persistTrackDecision(jobId: string, decision: ModerationDecision): Promise<void>;
 
   /**
    * Read the sibling track's resolved decision for a media object. Returns the
@@ -146,10 +134,7 @@ export interface CompletionStore {
    * same question; the interactive row it supersedes stays open (its decision
    * null) and must not be read as "pending" once the escalation has decided.
    */
-  readOtherTrack(
-    mediaId: string,
-    thisTrack: Track,
-  ): Promise<OtherTrackState>;
+  readOtherTrack(mediaId: string, thisTrack: Track): Promise<OtherTrackState>;
 
   /**
    * Create (or re-find) the escalation job row for `parentJobId` (plan 031 C1).
@@ -164,14 +149,21 @@ export interface CompletionStore {
    */
   createEscalationJob?(spec: EscalationJobSpec): Promise<CreatedEscalationJob>;
 
+  /**
+   * Record, up front, which tracks a media object will be moderated on, so a
+   * completion for one track can tell a sibling that has not started yet from
+   * one that will never exist. MUST be idempotent: reserving the same tracks
+   * twice is a no-op.
+   *
+   * OPTIONAL so existing implementers keep compiling; no core path calls it yet.
+   */
+  reserveTracks?(mediaId: string, tracks: readonly Track[]): Promise<void>;
+
   /** Read the media object's current persisted lifecycle + CAS coords. */
   findMedia(mediaId: string): Promise<MediaCoords | null>;
 
   /** Persist a new moderation status for the media object. */
-  persistMediaStatus(
-    mediaId: string,
-    status: MediaLifecycle,
-  ): Promise<void>;
+  persistMediaStatus(mediaId: string, status: MediaLifecycle): Promise<void>;
 }
 
 /**
@@ -311,9 +303,10 @@ export interface CompletionDeps {
   /** Re-interpret a visual verdict using the job's threshold snapshot. */
   readonly reinterpretVisual: VisualVerdictReinterpreter;
   /** Emit the anti-oracle resolved event. Best-effort; must not throw to ack. */
-  readonly emitResolved: (
-    payload: { readonly mediaId: string; readonly status: "ready" | "not-ready" },
-  ) => Promise<void>;
+  readonly emitResolved: (payload: {
+    readonly mediaId: string;
+    readonly status: "ready" | "not-ready";
+  }) => Promise<void>;
   /** Structured logger seam (defaults to a no-op in tests). */
   readonly log?: {
     info?: (msg: string, data?: unknown) => void;
@@ -349,7 +342,15 @@ export type RecordOutcome =
   | { readonly kind: "retry"; readonly reason: string } // transient I/O — return to queue
   // Routed to the deferred lane (plan 031 C1): no verdict written, the job
   // stays open, the escalation row + workflow own the rest. An ack.
-  | { readonly kind: "escalated"; readonly escalationJobId: string };
+  | { readonly kind: "escalated"; readonly escalationJobId: string }
+  // The job reported progress that is not a final result. An ack.
+  | { readonly kind: "not-terminal" }
+  // This track resolved but a sibling track has not; the sibling's completion
+  // finishes the media object. An ack.
+  | { readonly kind: "awaiting-sibling" }
+  // A concurrent delivery already moved the media object; this one stands
+  // down without writing. An ack.
+  | { readonly kind: "lost-race" };
 
 // ---------------------------------------------------------------------------
 // Body parsing — extract ONLY the job id from an untrusted pointer.
@@ -411,10 +412,7 @@ export async function refetchTrackDecision(
     return null;
   }
   const transcript = res.transcript ?? "";
-  const decision = await transcriptToModerationDecision(
-    transcript,
-    deps.textModeration,
-  );
+  const decision = await transcriptToModerationDecision(transcript, deps.textModeration);
   return normalizeDecision(decision);
 }
 
@@ -520,16 +518,13 @@ export async function processCompletion(
     // escalation-result port. Missing port, missing result, or an unknown
     // value all fail closed to an errored outcome — never approved.
     const got =
-      deps.escalationResults === undefined
-        ? null
-        : await deps.escalationResults.get(pointer.jobId);
+      deps.escalationResults === undefined ? null : await deps.escalationResults.get(pointer.jobId);
     const norm = normalizeDecision(got);
     // Re-clamp on the way back in (belt and braces on plan 031 §7.2's "the
     // lane ships unable to approve"): approve survives only when the lane
     // config explicitly allows it. Same law as clampEscalatedDecision.
     const allowApprove = deps.cascade?.lane.allowApprove === true;
-    preDecision =
-      norm === "approved" && !allowApprove ? "review" : norm;
+    preDecision = norm === "approved" && !allowApprove ? "review" : norm;
   } else if (
     pointer.track === "VISUAL" &&
     deps.cascade !== undefined &&
@@ -613,9 +608,7 @@ export async function processCompletion(
   //    Skipped when 1c already obtained it (deferred row / routed-to-settle):
   //    re-fetching twice would double the provider read for no new evidence.
   const thisDecision =
-    preDecision !== undefined
-      ? preDecision
-      : await refetchTrackDecision(pointer, job, deps);
+    preDecision !== undefined ? preDecision : await refetchTrackDecision(pointer, job, deps);
 
   // Persist this track's decision (the side effect we just earned the right to
   // perform). An errored re-fetch persists nothing on the row (decision stays

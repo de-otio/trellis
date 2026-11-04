@@ -32,13 +32,9 @@ const FC = { seed: 0x5eed, numRuns: 1000 } as const;
 
 // --- arbitraries ----------------------------------------------------------
 
-const statusArb: fc.Arbitrary<MediaLifecycle> = fc.constantFrom(
-  ...ALL_MEDIA_LIFECYCLES,
-);
+const statusArb: fc.Arbitrary<MediaLifecycle> = fc.constantFrom(...ALL_MEDIA_LIFECYCLES);
 
-const decisionArb: fc.Arbitrary<ModerationDecision> = fc.constantFrom(
-  ...ALL_MODERATION_DECISIONS,
-);
+const decisionArb: fc.Arbitrary<ModerationDecision> = fc.constantFrom(...ALL_MODERATION_DECISIONS);
 
 const eventArb: fc.Arbitrary<MediaLifecycleEvent> = fc.oneof(
   fc.constant({ kind: "bytes-arrived" } as const),
@@ -49,6 +45,7 @@ const eventArb: fc.Arbitrary<MediaLifecycleEvent> = fc.oneof(
   fc.constant({ kind: "csam" } as const),
   fc.constant({ kind: "over-duration" } as const),
   fc.constant({ kind: "upload-failed" } as const),
+  fc.constant({ kind: "automated-review", action: "approve" } as const),
 );
 
 // Non-CSAM events only — used to prove absorbing states stay absorbing.
@@ -60,6 +57,7 @@ const nonCsamEventArb: fc.Arbitrary<MediaLifecycleEvent> = fc.oneof(
     .map((action) => ({ kind: "human", action }) as const),
   fc.constant({ kind: "over-duration" } as const),
   fc.constant({ kind: "upload-failed" } as const),
+  fc.constant({ kind: "automated-review", action: "approve" } as const),
 );
 
 /** Apply a sequence of events, stopping at the first illegal transition. */
@@ -322,9 +320,7 @@ describe("nextLifecycle — labeled edges", () => {
   });
 
   it("AWAITING_UPLOAD --bytes-arrived--> UPLOADED", () => {
-    expect(nextLifecycle("AWAITING_UPLOAD", { kind: "bytes-arrived" })).toEqual(
-      ok("UPLOADED"),
-    );
+    expect(nextLifecycle("AWAITING_UPLOAD", { kind: "bytes-arrived" })).toEqual(ok("UPLOADED"));
   });
 
   it("AWAITING_UPLOAD --upload-failed--> UPLOAD_FAILED", () => {
@@ -334,63 +330,53 @@ describe("nextLifecycle — labeled edges", () => {
   });
 
   it("UPLOADED --bytes-arrived--> UPLOADED (idempotent race of worker + completion call)", () => {
-    expect(nextLifecycle("UPLOADED", { kind: "bytes-arrived" })).toEqual(
-      ok("UPLOADED"),
-    );
+    expect(nextLifecycle("UPLOADED", { kind: "bytes-arrived" })).toEqual(ok("UPLOADED"));
   });
 
   it("UPLOADED --decision approved--> APPROVED", () => {
-    expect(
-      nextLifecycle("UPLOADED", { kind: "decision", decision: "approved" }),
-    ).toEqual(ok("APPROVED"));
+    expect(nextLifecycle("UPLOADED", { kind: "decision", decision: "approved" })).toEqual(
+      ok("APPROVED"),
+    );
   });
 
   it("UPLOADED --decision review--> REVIEW", () => {
-    expect(
-      nextLifecycle("UPLOADED", { kind: "decision", decision: "review" }),
-    ).toEqual(ok("REVIEW"));
+    expect(nextLifecycle("UPLOADED", { kind: "decision", decision: "review" })).toEqual(
+      ok("REVIEW"),
+    );
   });
 
   it("UPLOADED --decision quarantine--> QUARANTINED", () => {
-    expect(
-      nextLifecycle("UPLOADED", { kind: "decision", decision: "quarantine" }),
-    ).toEqual(ok("QUARANTINED"));
+    expect(nextLifecycle("UPLOADED", { kind: "decision", decision: "quarantine" })).toEqual(
+      ok("QUARANTINED"),
+    );
   });
 
   it("UPLOADED --over-duration--> REJECTED (ffprobe gate; terminal)", () => {
-    expect(nextLifecycle("UPLOADED", { kind: "over-duration" })).toEqual(
-      ok("REJECTED"),
-    );
+    expect(nextLifecycle("UPLOADED", { kind: "over-duration" })).toEqual(ok("REJECTED"));
   });
 
   it("UPLOADED --upload-failed--> UPLOAD_FAILED (stuck-pipeline reap)", () => {
-    expect(nextLifecycle("UPLOADED", { kind: "upload-failed" })).toEqual(
-      ok("UPLOAD_FAILED"),
-    );
+    expect(nextLifecycle("UPLOADED", { kind: "upload-failed" })).toEqual(ok("UPLOAD_FAILED"));
   });
 
   it("REVIEW --human approve--> APPROVED", () => {
-    expect(
-      nextLifecycle("REVIEW", { kind: "human", action: "approve" }),
-    ).toEqual(ok("APPROVED"));
+    expect(nextLifecycle("REVIEW", { kind: "human", action: "approve" })).toEqual(ok("APPROVED"));
   });
 
   it("REVIEW --human reject--> REJECTED", () => {
-    expect(
-      nextLifecycle("REVIEW", { kind: "human", action: "reject" }),
-    ).toEqual(ok("REJECTED"));
+    expect(nextLifecycle("REVIEW", { kind: "human", action: "reject" })).toEqual(ok("REJECTED"));
   });
 
   it("QUARANTINED --human approve--> APPROVED", () => {
-    expect(
-      nextLifecycle("QUARANTINED", { kind: "human", action: "approve" }),
-    ).toEqual(ok("APPROVED"));
+    expect(nextLifecycle("QUARANTINED", { kind: "human", action: "approve" })).toEqual(
+      ok("APPROVED"),
+    );
   });
 
   it("QUARANTINED --human reject--> REJECTED", () => {
-    expect(
-      nextLifecycle("QUARANTINED", { kind: "human", action: "reject" }),
-    ).toEqual(ok("REJECTED"));
+    expect(nextLifecycle("QUARANTINED", { kind: "human", action: "reject" })).toEqual(
+      ok("REJECTED"),
+    );
   });
 
   it("any state --csam--> REJECTED", () => {
@@ -413,9 +399,7 @@ describe("nextLifecycle — labeled edges", () => {
   });
 
   it("AWAITING_UPLOAD --over-duration--> illegal (nothing probed yet)", () => {
-    expect(
-      nextLifecycle("AWAITING_UPLOAD", { kind: "over-duration" }).ok,
-    ).toBe(false);
+    expect(nextLifecycle("AWAITING_UPLOAD", { kind: "over-duration" }).ok).toBe(false);
   });
 
   it("UPLOADED --human approve--> illegal (no human acts pre-verdict)", () => {
@@ -435,27 +419,19 @@ describe("nextLifecycle — labeled edges", () => {
   });
 
   it("APPROVED --human reject--> illegal (terminal)", () => {
-    expect(
-      nextLifecycle("APPROVED", { kind: "human", action: "reject" }).ok,
-    ).toBe(false);
+    expect(nextLifecycle("APPROVED", { kind: "human", action: "reject" }).ok).toBe(false);
   });
 
   it("REJECTED --human approve--> illegal (terminal; no resurrection)", () => {
-    expect(
-      nextLifecycle("REJECTED", { kind: "human", action: "approve" }).ok,
-    ).toBe(false);
+    expect(nextLifecycle("REJECTED", { kind: "human", action: "approve" }).ok).toBe(false);
   });
 
   it("UPLOAD_FAILED --bytes-arrived--> illegal (terminal; a failed upload stays failed)", () => {
-    expect(nextLifecycle("UPLOAD_FAILED", { kind: "bytes-arrived" }).ok).toBe(
-      false,
-    );
+    expect(nextLifecycle("UPLOAD_FAILED", { kind: "bytes-arrived" }).ok).toBe(false);
   });
 
   it("REVIEW --decision approved--> illegal (classifier does not re-decide)", () => {
-    expect(
-      nextLifecycle("REVIEW", { kind: "decision", decision: "approved" }).ok,
-    ).toBe(false);
+    expect(nextLifecycle("REVIEW", { kind: "decision", decision: "approved" }).ok).toBe(false);
   });
 
   // Fail-closed widening at the I/O boundary.
@@ -501,4 +477,24 @@ describe("decisionToStatus — sync-image verdict mapping", () => {
   it("fails closed to REVIEW for an unexpected (widened) decision value", () => {
     expect(decisionToStatus("bogus" as ModerationDecision)).toBe("REVIEW");
   });
+});
+
+describe("nextLifecycle — automated-review", () => {
+  const event: MediaLifecycleEvent = {
+    kind: "automated-review",
+    action: "approve",
+  };
+
+  // Exhaustive over the state union: a state added later without a decision
+  // about automated review still lands here.
+  for (const from of ALL_MEDIA_LIFECYCLES) {
+    it(`is illegal from ${from}`, () => {
+      expect(nextLifecycle(from, event)).toEqual({
+        ok: false,
+        reason: "illegal-transition",
+        from,
+        event,
+      });
+    });
+  }
 });
