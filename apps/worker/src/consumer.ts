@@ -26,11 +26,8 @@
  */
 
 import type { Logger } from "../../api/src/lib/logger.js";
-import {
-  dispatchMessage,
-  type MessageWorker,
-  type QueueClient,
-} from "./dispatch.js";
+import { dispatchMessage, type MessageWorker, type QueueClient } from "./dispatch.js";
+import { DEFAULT_BACKOFF_MAX_MS, DEFAULT_WAIT_TIME_SECONDS } from "./poller-defaults.js";
 
 export interface QueuePollerOptions {
   readonly queueName: string;
@@ -43,6 +40,8 @@ export interface QueuePollerOptions {
   /** Receive-failure backoff (W7). Defaults: 1 s base, 60 s ceiling. */
   readonly backoff?: ReceiveBackoffOptions;
   readonly logger: Logger;
+  /** Clock for the liveness stamp (ms). Default `Date.now`; tests pin it. */
+  readonly now?: () => number;
 }
 
 export interface ReceiveBackoffOptions {
@@ -58,7 +57,6 @@ export interface ReceiveBackoffOptions {
 }
 
 const DEFAULT_BACKOFF_BASE_MS = 1000;
-const DEFAULT_BACKOFF_MAX_MS = 60_000;
 const DEFAULT_UNHEALTHY_AFTER = 5;
 
 /**
@@ -85,6 +83,7 @@ export class QueuePoller {
   /** Wake-ups for slots sleeping in a backoff; `stop()` fires them. */
   private readonly sleepers = new Set<() => void>();
   private consecutiveReceiveFailures = 0;
+  private lastAttempt: number | undefined;
 
   constructor(
     private readonly queue: QueueClient,
@@ -96,6 +95,7 @@ export class QueuePoller {
   start(): void {
     if (this.running) return;
     this.running = true;
+    this.stamp();
     for (let slot = 0; slot < this.options.concurrency; slot++) {
       void this.slotLoop(slot);
     }
@@ -112,6 +112,22 @@ export class QueuePoller {
   /** True while at least one dispatch is in flight (readiness signal). */
   get inFlightCount(): number {
     return this.inFlight.size;
+  }
+
+  /** True between `start()` and `stop()`. */
+  get started(): boolean {
+    return this.running;
+  }
+
+  /** Time (ms, injected clock) the last receive cycle completed — success,
+   *  handled failure, backoff wait, or dispatch. Seeded at `start()`;
+   *  `undefined` before. A stale value means the loops died or wedged (W6). */
+  get lastAttemptAt(): number | undefined {
+    return this.lastAttempt;
+  }
+
+  private stamp(): void {
+    this.lastAttempt = (this.options.now ?? Date.now)();
   }
 
   /** False once `unhealthyAfter` receives in a row have failed; true again
@@ -138,7 +154,7 @@ export class QueuePoller {
       try {
         messages = await this.queue.receive({
           maxMessages: 1,
-          waitTimeSeconds: this.options.waitTimeSeconds ?? 20,
+          waitTimeSeconds: this.options.waitTimeSeconds ?? DEFAULT_WAIT_TIME_SECONDS,
           visibilityTimeoutSeconds: this.options.visibilityTimeoutSeconds,
         });
       } catch (err) {
@@ -160,9 +176,11 @@ export class QueuePoller {
           });
         }
         await this.pause(delayMs);
+        this.stamp();
         continue;
       }
       slotFailures = 0;
+      this.stamp();
       if (this.consecutiveReceiveFailures > 0) {
         logger.info("receive recovered", {
           queue: queueName,
@@ -179,19 +197,16 @@ export class QueuePoller {
       for (const message of messages) {
         // One message per slot: dispatch inline (per-message try/catch lives
         // inside dispatchMessage — a poison message never kills the slot).
-        const work = dispatchMessage(
-          this.queue,
-          queueName,
-          this.worker,
-          message,
-          logger,
-        ).then(() => undefined);
+        const work = dispatchMessage(this.queue, queueName, this.worker, message, logger).then(
+          () => undefined,
+        );
         this.inFlight.add(work);
         try {
           await work;
         } finally {
           this.inFlight.delete(work);
         }
+        this.stamp();
       }
     }
   }

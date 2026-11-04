@@ -17,6 +17,49 @@
 
 import { createServer, type Server } from "node:http";
 import type { Logger } from "../../api/src/lib/logger.js";
+import { DEFAULT_BACKOFF_MAX_MS, DEFAULT_WAIT_TIME_SECONDS } from "./poller-defaults.js";
+
+/** The slice of `QueuePoller` the readiness check reads. */
+export interface PollerLiveness {
+  readonly started: boolean;
+  readonly lastAttemptAt: number | undefined;
+  readonly inFlightCount: number;
+}
+
+/**
+ * Staleness threshold (ms) for a poller's last completed receive cycle.
+ * `WORKER_POLLER_STALE_MS` overrides; the default (the default receive wait
+ * plus the backoff ceiling, doubled for slack) lives HERE, in the env read —
+ * a runtime config value, not a comparison-site constant.
+ */
+export function pollerStaleMs(env: NodeJS.ProcessEnv): number {
+  const raw = Number(env.WORKER_POLLER_STALE_MS);
+  if (Number.isFinite(raw) && raw > 0) return raw;
+  return 2 * (DEFAULT_WAIT_TIME_SECONDS * 1000 + DEFAULT_BACKOFF_MAX_MS);
+}
+
+/**
+ * True when every started poller is either working (a dispatch in flight) or
+ * completed a cycle within `staleMs`.
+ *
+ * A busy poller counts as live: a slot only re-stamps after its message
+ * settles, so a legitimately long job (a transcode, a large erasure) on every
+ * slot would otherwise read as a wedged loop and flip readiness. A handler
+ * that hangs forever is not this check's concern — the visibility timeout
+ * redelivers its message (W2).
+ */
+export function pollersLive(
+  pollers: readonly PollerLiveness[],
+  nowMs: number,
+  staleMs: number,
+): boolean {
+  return pollers.every(
+    (p) =>
+      !p.started ||
+      p.inFlightCount > 0 ||
+      (p.lastAttemptAt !== undefined && nowMs - p.lastAttemptAt <= staleMs),
+  );
+}
 
 export interface HealthServerOptions {
   /** Bind host. MUST stay loopback/internal (finding 10b). */

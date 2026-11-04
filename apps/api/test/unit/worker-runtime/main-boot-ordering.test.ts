@@ -53,9 +53,7 @@ vi.mock("../../../src/lib/lambda-prisma.js", () => ({
   getLambdaPrisma: mocks.getLambdaPrisma,
   // KV url falls back to the resolved app-DB connection string when no explicit
   // KV_DATABASE_URL/DATABASE_URL is set (same source as getLambdaPrisma).
-  resolveDbConnectionString: vi
-    .fn()
-    .mockResolvedValue("postgresql://u:p@h:5432/db"),
+  resolveDbConnectionString: vi.fn().mockResolvedValue("postgresql://u:p@h:5432/db"),
 }));
 vi.mock("../../../src/lib/services/user-data-deletion.js", () => ({
   resolvePseudonymSecret: mocks.resolvePseudonymSecret,
@@ -93,7 +91,8 @@ vi.mock("../../../../worker/src/scheduler.js", () => ({
     stop = mocks.schedulerStop;
   },
 }));
-vi.mock("../../../../worker/src/health.js", () => ({
+vi.mock("../../../../worker/src/health.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../../worker/src/health.js")>()),
   startHealthServer: mocks.startHealthServer,
 }));
 vi.mock("../../../../worker/src/shutdown.js", () => ({
@@ -139,8 +138,9 @@ describe("main() boot ordering (critic F5)", () => {
     expect(mocks.pollerStart).not.toHaveBeenCalled();
     // No queue client was ever constructed ⇒ zero queue.receive calls.
     for (const result of mocks.makeSqsQueueClient.mock.results) {
-      expect((result.value as { receive: ReturnType<typeof vi.fn> }).receive)
-        .not.toHaveBeenCalled();
+      expect(
+        (result.value as { receive: ReturnType<typeof vi.fn> }).receive,
+      ).not.toHaveBeenCalled();
     }
     // And none of the later composition ran either:
     expect(mocks.schedulerStart).not.toHaveBeenCalled();
