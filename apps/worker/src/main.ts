@@ -16,10 +16,7 @@
 import { DeleteObjectsCommand } from "@aws-sdk/client-s3";
 import { createDefaultS3Client } from "@de-otio/saas-foundation/storage";
 import { getLogger } from "../../api/src/lib/logger.js";
-import {
-  getLambdaPrisma,
-  resolveDbConnectionString,
-} from "../../api/src/lib/lambda-prisma.js";
+import { getLambdaPrisma, resolveDbConnectionString } from "../../api/src/lib/lambda-prisma.js";
 import { buildSqsUrl } from "../../api/src/lib/sqs-url.js";
 import { resolvePseudonymSecret } from "../../api/src/lib/services/user-data-deletion.js";
 import { deleteStagingObjects } from "../../api/src/lib/media/staging-object-cleanup.js";
@@ -260,9 +257,7 @@ async function main(): Promise<void> {
       // stages via Lambda today; container wiring arrives with WS-3.3).
       e2eSweeper: undefined,
       kvSweep:
-        profile === "scaleway"
-          ? { executor: getKvSqlExecutor()!, cronLock, clock }
-          : undefined,
+        profile === "scaleway" ? { executor: getKvSqlExecutor()!, cronLock, clock } : undefined,
       // Deploy-time cron gate (resolved above): WORKER_DISABLED_CRONS is a
       // comma-separated list of cron names to omit. Queue consumers are
       // unaffected. Empty/unset = all crons scheduled.

@@ -26,11 +26,7 @@
  */
 
 import type { Logger } from "../../api/src/lib/logger.js";
-import {
-  dispatchMessage,
-  type MessageWorker,
-  type QueueClient,
-} from "./dispatch.js";
+import { dispatchMessage, type MessageWorker, type QueueClient } from "./dispatch.js";
 import { DEFAULT_BACKOFF_MAX_MS, DEFAULT_WAIT_TIME_SECONDS } from "./poller-defaults.js";
 
 export interface QueuePollerOptions {
@@ -201,13 +197,9 @@ export class QueuePoller {
       for (const message of messages) {
         // One message per slot: dispatch inline (per-message try/catch lives
         // inside dispatchMessage — a poison message never kills the slot).
-        const work = dispatchMessage(
-          this.queue,
-          queueName,
-          this.worker,
-          message,
-          logger,
-        ).then(() => undefined);
+        const work = dispatchMessage(this.queue, queueName, this.worker, message, logger).then(
+          () => undefined,
+        );
         this.inFlight.add(work);
         try {
           await work;

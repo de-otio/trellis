@@ -6,7 +6,11 @@ import type { QueueClient, ReceivedMessage } from "../../../../worker/src/dispat
 import type { Logger } from "../../../src/lib/logger.js";
 
 const logger = (): Logger => ({
-  error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn(), trace: vi.fn(),
+  error: vi.fn(),
+  warn: vi.fn(),
+  info: vi.fn(),
+  debug: vi.fn(),
+  trace: vi.fn(),
 });
 const noWork = async (): Promise<"ack"> => "ack";
 const STALE = 1000;
@@ -43,7 +47,10 @@ describe("poller liveness (W6)", () => {
   it("stalled poller past threshold -> unready", async () => {
     const clock = { t: 10_000 };
     // receive never resolves: the loop is wedged after start().
-    const p = poller({ receive: () => new Promise(() => {}), deleteMessage: async () => {} }, clock);
+    const p = poller(
+      { receive: () => new Promise(() => {}), deleteMessage: async () => {} },
+      clock,
+    );
     p.start();
     clock.t += STALE + 1;
     expect(pollersLive([p], clock.t, STALE)).toBe(false);
@@ -53,7 +60,9 @@ describe("poller liveness (W6)", () => {
   it("poller in a long backoff that keeps cycling -> ready", async () => {
     const clock = { t: 10_000 };
     const failing: QueueClient = {
-      receive: async () => { throw new Error("down"); },
+      receive: async () => {
+        throw new Error("down");
+      },
       deleteMessage: async () => {},
     };
     const p = poller(failing, clock, 5);
@@ -83,9 +92,19 @@ describe("poller liveness (W6)", () => {
       },
       deleteMessage: async () => {},
     };
-    const p = new QueuePoller(oneMessage, async () => { await jobDone; return "ack" as const; }, {
-      queueName: "q", concurrency: 1, logger: logger(), now: () => clock.t,
-    });
+    const p = new QueuePoller(
+      oneMessage,
+      async () => {
+        await jobDone;
+        return "ack" as const;
+      },
+      {
+        queueName: "q",
+        concurrency: 1,
+        logger: logger(),
+        now: () => clock.t,
+      },
+    );
     p.start();
     await new Promise((r) => setTimeout(r, 10));
     expect(p.inFlightCount).toBe(1);

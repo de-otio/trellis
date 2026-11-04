@@ -19,8 +19,7 @@ afterAll(() => rmSync(dir, { recursive: true, force: true }));
 describe("isRunDirectly (W14)", () => {
   const url = pathToFileURL(fileA).href;
   it("same file -> true", () => expect(isRunDirectly(url, fileA)).toBe(true));
-  it("different file, same basename -> false", () =>
-    expect(isRunDirectly(url, fileB)).toBe(false));
+  it("different file, same basename -> false", () => expect(isRunDirectly(url, fileB)).toBe(false));
   it("symlink to the file -> true", () => expect(isRunDirectly(url, link)).toBe(true));
   it("argv[1] undefined -> false", () => expect(isRunDirectly(url, undefined)).toBe(false));
   it("nonexistent argv[1] -> false", () =>
