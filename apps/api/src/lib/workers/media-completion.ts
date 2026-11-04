@@ -102,15 +102,19 @@ export interface ModerationJobRow {
    */
   readonly priority: ModerationJobPriority;
   /**
-   * The cleaned-staging version the provider job was started on, when the
-   * store can say. OPTIONAL and absent from the stock Prisma store: the
-   * provider-job table that records it belongs to the consuming application.
+   * The staging version this job was submitted against. OPTIONAL: the stock
+   * store leaves it `undefined` (core keeps no such column), and an absent
+   * value skips the rule below. A store that has it — a deployment tracking
+   * provider jobs in its own table — sets it, and a completion for a row whose
+   * `pinnedVersion` differs from the media's current `stagingVersionId` is
+   * `unroutable`: the verdict is about bytes that are no longer the pinned
+   * ones.
    */
   readonly pinnedVersion?: string;
   /**
-   * This row has been replaced by a newer attempt at the same track. A
-   * superseded row is never live. OPTIONAL and absent from the stock Prisma
-   * store, for the same reason as {@link pinnedVersion}.
+   * `true` when a later job has replaced this one. OPTIONAL, same contract as
+   * {@link pinnedVersion}: absent means "not known to be superseded". A
+   * completion for a superseded row is `unroutable`.
    */
   readonly superseded?: boolean;
 }

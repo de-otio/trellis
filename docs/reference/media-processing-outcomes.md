@@ -32,7 +32,9 @@ Rules, in the order they apply:
    id and is not superseded; a reserved placeholder is started again.
 5. A `ModerationProviderError` with `capacity: true`, and the daily spend gate,
    give `defer` with `config.deferDelaySeconds`. With no delay configured they
-   are handled as a retryable fault.
+   are handled as a retryable fault. Deferring is bounded by the media's age: at
+   or past `maxMediaAgeSeconds` the object is settled to REVIEW on the
+   `technical` ground (rule 6) instead of deferred again.
 6. A retryable fault is `retry` while `mediaAgeSeconds < maxMediaAgeSeconds`.
    At or past the bound the object is settled to REVIEW on the `technical`
    ground (compare-and-set from `UPLOADED`) and the message is `done`.
@@ -76,7 +78,15 @@ it is disabled and logs one WARN.
   review, an absent track is not approval, and a quarantined track still wins.
 - Every lifecycle write is a compare-and-set through `settleMedia`; there is no
   claim or dedupe row, so two sweepers running together produce one transition.
-- `repair-promotion` calls the existing pinned promotion.
+- `repair-promotion` calls the existing pinned promotion, then announces `ready`
+  through `emitResolved` (best-effort): the completion that approved the object
+  could not, because its own promotion failed. If a settle lands on APPROVED
+  (both tracks had approved, nothing settled the object), the sweep promotes
+  first and announces afterwards.
+- `enqueueProcessing(mediaId)` is called on every run while an object stays
+  stalled; core keeps no record of what it already re-sent, so the consumer
+  should make it idempotent per object (a deduplication id, or a check for a
+  message already in flight).
 
 `MediaRecoveryStore` has three members: `findRecoveryCandidates`, `settleMedia`
 and `findMedia`. The sweep runs before the stale-upload reaper; see

@@ -210,9 +210,67 @@ describe("sweepMedia — actions", () => {
       contentHash: hash,
       stagingVersionId: version,
     });
-    const r = await sweepMedia(deps(store, { storage }));
+    const emitResolved = vi.fn(async () => {});
+    const r = await sweepMedia(deps(store, { storage, emitResolved }));
     expect(r.repaired).toBe(1);
     expect((await storage.headObject(`cas/${tenant}/${hash}`)).exists).toBe(true);
+    // The completion that approved it could not announce "ready" (its promotion
+    // failed), so the repair does, once the bytes are servable.
+    expect(emitResolved).toHaveBeenCalledTimes(1);
+    expect(emitResolved).toHaveBeenCalledWith({ mediaId: "m1", status: "ready" });
+  });
+
+  it("announces nothing when the repair cannot promote", async () => {
+    const approved: RecoveryCandidate = {
+      mediaId: "m1",
+      lifecycle: "APPROVED",
+      createdAt: at(50),
+      tracks: {},
+      casObjectPresent: false,
+    };
+    const { store } = fakeStore([approved]);
+    store.findMedia = async () => ({
+      lifecycle: "APPROVED",
+      tenantId: "caaaaaaaaaaaaaaaaaaaaaaaa",
+      uploadId: "cuuuuuuuuuuuuuuuuuuuuuuu1",
+      contentHash: "c".repeat(64),
+      stagingVersionId: "v-gone", // nothing in storage: the pinned bytes are unresolvable
+    });
+    const emitResolved = vi.fn(async () => {});
+    const r = await sweepMedia(deps(store, { emitResolved }));
+    expect(r.repaired).toBe(0);
+    expect(emitResolved).not.toHaveBeenCalled();
+  });
+
+  it("promotes before announcing when the age-bound settle itself lands on APPROVED", async () => {
+    const tenant = "caaaaaaaaaaaaaaaaaaaaaaaa";
+    const upload = "cuuuuuuuuuuuuuuuuuuuuuuu1";
+    const hash = "c".repeat(64);
+    const storage = new MockStoragePort({
+      [`processing/${tenant}/${upload}`]: Buffer.from("cleaned"),
+    });
+    const version = (await storage.headObject(`processing/${tenant}/${upload}`)).versionId!;
+    const c = uploaded("m1", 100, {
+      VISUAL: { hasLiveRow: true, decision: "approved" },
+      AUDIO: { hasLiveRow: true, decision: "approved" },
+    });
+    const { store, lifecycle } = fakeStore([c]);
+    store.findMedia = async () => ({
+      lifecycle: lifecycle.get("m1")!,
+      tenantId: tenant,
+      uploadId: upload,
+      contentHash: hash,
+      stagingVersionId: version,
+    });
+    const order: string[] = [];
+    const emitResolved = vi.fn(async () => {
+      order.push(`emit:${(await storage.headObject(`cas/${tenant}/${hash}`)).exists}`);
+    });
+    const r = await sweepMedia(deps(store, { storage, emitResolved }));
+    expect(r.settled).toBe(1);
+    expect(lifecycle.get("m1")).toBe("APPROVED");
+    // The event is only sent once the object exists at its served key.
+    expect(order).toEqual(["emit:true"]);
   });
 
   it("does not stop the batch when one action throws", async () => {

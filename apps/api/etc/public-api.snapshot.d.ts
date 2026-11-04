@@ -6890,15 +6890,19 @@ export interface ModerationJobRow {
      */
     readonly priority: ModerationJobPriority;
     /**
-     * The cleaned-staging version the provider job was started on, when the
-     * store can say. OPTIONAL and absent from the stock Prisma store: the
-     * provider-job table that records it belongs to the consuming application.
+     * The staging version this job was submitted against. OPTIONAL: the stock
+     * store leaves it `undefined` (core keeps no such column), and an absent
+     * value skips the rule below. A store that has it — a deployment tracking
+     * provider jobs in its own table — sets it, and a completion for a row whose
+     * `pinnedVersion` differs from the media's current `stagingVersionId` is
+     * `unroutable`: the verdict is about bytes that are no longer the pinned
+     * ones.
      */
     readonly pinnedVersion?: string;
     /**
-     * This row has been replaced by a newer attempt at the same track. A
-     * superseded row is never live. OPTIONAL and absent from the stock Prisma
-     * store, for the same reason as {@link pinnedVersion}.
+     * `true` when a later job has replaced this one. OPTIONAL, same contract as
+     * {@link pinnedVersion}: absent means "not known to be superseded". A
+     * completion for a superseded row is `unroutable`.
      */
     readonly superseded?: boolean;
 }
@@ -7815,7 +7819,12 @@ export interface MediaRecoveryStore extends Pick<CompletionStore, "findMedia"> {
 export interface MediaRecoverySweepDeps {
     readonly store: MediaRecoveryStore;
     readonly storage: StoragePort;
-    /** Put the media object's processing message back on the queue. */
+    /**
+     * Put the media object's processing message back on the queue. The sweep
+     * calls this on EVERY run while the object stays stalled, so the consumer
+     * should make it idempotent per object (a deduplication id, or a check for a
+     * message already in flight); core does not track what it already re-sent.
+     */
     readonly enqueueProcessing: (mediaId: string) => Promise<void>;
     /**
      * The sweep config. ABSENT means the sweeper is disabled: it logs one WARN
@@ -7827,7 +7836,11 @@ export interface MediaRecoverySweepDeps {
     readonly queueTiming?: CompletionQueueTiming;
     /** Defaults to the wall clock; injected so tests control time. */
     readonly now?: () => Date;
-    /** The anti-oracle resolved event. Best-effort, after a settlement. */
+    /**
+     * The anti-oracle resolved event. Best-effort, after a settlement or after a
+     * promotion repair (the completion that approved the object could not
+     * announce it).
+     */
     readonly emitResolved?: (payload: {
         readonly mediaId: string;
         readonly status: "ready" | "not-ready";

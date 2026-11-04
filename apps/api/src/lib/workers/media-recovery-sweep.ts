@@ -222,7 +222,12 @@ export interface MediaRecoveryStore extends Pick<CompletionStore, "findMedia"> {
 export interface MediaRecoverySweepDeps {
   readonly store: MediaRecoveryStore;
   readonly storage: StoragePort;
-  /** Put the media object's processing message back on the queue. */
+  /**
+   * Put the media object's processing message back on the queue. The sweep
+   * calls this on EVERY run while the object stays stalled, so the consumer
+   * should make it idempotent per object (a deduplication id, or a check for a
+   * message already in flight); core does not track what it already re-sent.
+   */
   readonly enqueueProcessing: (mediaId: string) => Promise<void>;
   /**
    * The sweep config. ABSENT means the sweeper is disabled: it logs one WARN
@@ -234,7 +239,11 @@ export interface MediaRecoverySweepDeps {
   readonly queueTiming?: CompletionQueueTiming;
   /** Defaults to the wall clock; injected so tests control time. */
   readonly now?: () => Date;
-  /** The anti-oracle resolved event. Best-effort, after a settlement. */
+  /**
+   * The anti-oracle resolved event. Best-effort, after a settlement or after a
+   * promotion repair (the completion that approved the object could not
+   * announce it).
+   */
   readonly emitResolved?: (payload: {
     readonly mediaId: string;
     readonly status: "ready" | "not-ready";
@@ -403,17 +412,40 @@ async function settleTechnical(
     mediaId: c.mediaId,
     status,
   });
-  if (typeof deps.emitResolved === "function") {
+  if (status === "APPROVED") {
+    // Both tracks had approved but no completion ever settled the object. The
+    // bytes were never promoted, so announcing "ready" now would announce
+    // something that cannot be served. Promote first; the repair announces it,
+    // and a failure here is retried by the next run (APPROVED, no object).
     try {
-      await deps.emitResolved(moderationResolvedPayload(c.mediaId, status));
+      await repairPromotion(deps, c);
     } catch (err) {
-      deps.logger.warn("Recovery settle: resolved-event emission failed (decision persisted)", {
+      deps.logger.error("Recovery settle: promotion failed after approval — left for the next run", {
         mediaId: c.mediaId,
         error: err,
       });
     }
+    return true;
   }
+  await announceResolved(deps, c.mediaId, status);
   return true;
+}
+
+/** Best-effort anti-oracle event after a decision that is already persisted. */
+async function announceResolved(
+  deps: MediaRecoverySweepDeps,
+  mediaId: string,
+  status: MediaLifecycle,
+): Promise<void> {
+  if (typeof deps.emitResolved !== "function") return;
+  try {
+    await deps.emitResolved(moderationResolvedPayload(mediaId, status));
+  } catch (err) {
+    deps.logger.warn("Recovery: resolved-event emission failed (decision persisted)", {
+      mediaId,
+      error: err,
+    });
+  }
 }
 
 /** Re-run the pinned promotion for an APPROVED object whose bytes never landed. */
@@ -459,5 +491,9 @@ async function repairPromotion(
   deps.logger.info("Recovery promotion repaired an approved object", {
     mediaId: c.mediaId,
   });
+  // The completion that approved this object did not announce "ready" because
+  // its promotion failed; nothing else will, so the repair does. Best-effort,
+  // and harmless if the event was in fact already delivered.
+  await announceResolved(deps, c.mediaId, "APPROVED");
   return true;
 }
