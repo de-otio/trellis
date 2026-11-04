@@ -265,7 +265,7 @@ export {
 // generic, truthful llms.txt default and NO security.txt default — an
 // unconfigured deployment 404s rather than serve a placeholder contact.
 export type { AgentSurfaceContent } from "./lib/routes/agent-surface.js";
-// Media worker cores: a host that runs its own queue consumer (any SQS-shaped
+// Media worker cores: a host that runs its own queue consumer (any at-least-once
 // consumer library) binds these to its own dependencies. The cores take every
 // dependency by injection and return an outcome; they never ack, delete,
 // delay or retry a message themselves — that is the host's job (see

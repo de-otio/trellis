@@ -11,7 +11,7 @@ Trellis ships the two media consumers as **cores**: functions that take one
 message and a bag of injected dependencies and return an outcome. They own the
 media logic. They do not own the queue. Receiving, acking, delaying, retrying
 and shutting down are the host's job — the host being your own worker process,
-built on whatever SQS-shaped consumer library you prefer.
+built on whatever at-least-once queue consumer library you prefer.
 
 The stock worker (`apps/worker`) does **not** run these queues: it wires none of
 their dependencies. See [Stock worker queue selection](#stock-worker-queue-selection).
