@@ -90,9 +90,12 @@ describe("createLabelPolicy — refuses to construct without a policy", () => {
     ).toThrow(LabelPolicyConfigError);
   });
 
-  it('refuses a version list under "config" mode until a follow-up accepts one (fails closed)', () => {
+  it('accepts a version list under "config" mode, and refuses one that names no usable version', () => {
     expect(() =>
       createLabelPolicy(config({ pinMode: "config", expectedModelVersion: [MOCK_VERSION] })),
+    ).not.toThrow();
+    expect(() =>
+      createLabelPolicy(config({ pinMode: "config", expectedModelVersion: [] })),
     ).toThrow(LabelPolicyConfigError);
   });
 
