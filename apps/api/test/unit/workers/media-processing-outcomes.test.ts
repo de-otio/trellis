@@ -187,8 +187,7 @@ function world(opts: Opts = {}) {
   };
 }
 
-const retryable = () =>
-  new ModerationProviderError("provider is down", { retryable: true });
+const retryable = () => new ModerationProviderError("provider is down", { retryable: true });
 const capacity = () =>
   new ModerationProviderError("over the limit", {
     retryable: false,
@@ -343,9 +342,7 @@ describe("processMediaMessage — retryable and poison faults", () => {
     expect(await processMediaMessage(BODY, w.deps, YOUNG)).toEqual({
       kind: "done",
     });
-    expect(w.holds).toEqual([
-      { ground: "unprocessable", expectedFrom: "UPLOADED" },
-    ]);
+    expect(w.holds).toEqual([{ ground: "unprocessable", expectedFrom: "UPLOADED" }]);
     expect(w.reviewed).toEqual([]);
   });
 
@@ -417,10 +414,7 @@ describe("processMediaMessage — tracks", () => {
     const w = world({ hasAudio: false });
     await processMediaMessage(BODY, w.deps, YOUNG);
     expect(w.reserved).toEqual([["VISUAL", "AUDIO"]]);
-    expect(w.created.map((j) => j.jobId)).toEqual([
-      "visual-job-1",
-      `noaudio:${MEDIA_ID}`,
-    ]);
+    expect(w.created.map((j) => j.jobId)).toEqual(["visual-job-1", `noaudio:${MEDIA_ID}`]);
   });
 });
 

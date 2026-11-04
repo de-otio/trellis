@@ -20,8 +20,7 @@ const CONFIG: MediaRecoverySweepConfig = {
 const NOW = new Date("2030-01-01T00:00:00Z");
 const FC = { seed: 0x5eed, numRuns: 500 } as const;
 
-const at = (ageSeconds: number): Date =>
-  new Date(NOW.getTime() - ageSeconds * 1000);
+const at = (ageSeconds: number): Date => new Date(NOW.getTime() - ageSeconds * 1000);
 
 function candidate(over: Partial<RecoveryCandidate> & { age: number }): RecoveryCandidate {
   const { age, ...rest } = over;
@@ -38,8 +37,7 @@ function candidate(over: Partial<RecoveryCandidate> & { age: number }): Recovery
   };
 }
 
-const plan = (media: RecoveryCandidate[]) =>
-  planRecovery({ media, now: NOW, config: CONFIG });
+const plan = (media: RecoveryCandidate[]) => planRecovery({ media, now: NOW, config: CONFIG });
 
 describe("planRecovery — rules", () => {
   it("re-enqueues an UPLOADED object past the window with a track missing a live row", () => {

@@ -295,9 +295,7 @@ export interface MediaPersistencePort {
    * OPTIONAL. Absent means "no track is known to be started": the worker
    * starts every track, as it always has.
    */
-  listModerationJobs?(
-    mediaId: string,
-  ): Promise<ReadonlyArray<ExistingModerationJob>>;
+  listModerationJobs?(mediaId: string): Promise<ReadonlyArray<ExistingModerationJob>>;
   /**
    * Settle a media object to REVIEW with the ground it is held on, as a
    * COMPARE-AND-SET: apply only if the row still holds `expectedFrom`
@@ -856,9 +854,7 @@ async function runObjectKey(
       typeof deps.persistence.listModerationJobs === "function"
         ? await deps.persistence.listModerationJobs(row.id)
         : [];
-    const liveTracks = new Set(
-      existingJobs.filter(isLiveJob).map((j) => j.track),
-    );
+    const liveTracks = new Set(existingJobs.filter(isLiveJob).map((j) => j.track));
     const missingTracks = ALL_TRACKS.filter((t) => !liveTracks.has(t));
     if (missingTracks.length === 0) {
       deps.logger.info("Every track already has a live job — nothing to start", {
@@ -909,12 +905,7 @@ async function runObjectKey(
         "Spend guard misconfigured (config.spend and spendGuard must be wired together) — failing record closed",
         { key: triggeringKey },
       );
-      return retryOrSettle(
-        triggeringKey,
-        deps,
-        clock,
-        "spend-guard-misconfigured",
-      );
+      return retryOrSettle(triggeringKey, deps, clock, "spend-guard-misconfigured");
     }
     let estimatedUsd = 0;
     if (spendGate !== undefined) {
@@ -929,30 +920,21 @@ async function runObjectKey(
           "Spend counter read failed — failing record closed (no AI jobs started)",
           { key: triggeringKey, error: readErr },
         );
-        return retryOrSettle(
-          triggeringKey,
-          deps,
-          clock,
-          "spend-guard-unavailable",
-        );
+        return retryOrSettle(triggeringKey, deps, clock, "spend-guard-unavailable");
       }
       if (isOverDailyCap(currentUsd, spendGate.config.dailyCapUsd)) {
-        deps.logger.warn(
-          "Daily media AI spend cap reached — deferring the job",
-          { key: triggeringKey, currentUsd, dailyCapUsd: spendGate.config.dailyCapUsd },
-        );
+        deps.logger.warn("Daily media AI spend cap reached — deferring the job", {
+          key: triggeringKey,
+          currentUsd,
+          dailyCapUsd: spendGate.config.dailyCapUsd,
+        });
         try {
           await spendGate.guard.reportCapExceeded();
         } catch (reportErr) {
           // Best-effort observability signal; never changes the disposition.
           deps.logger.warn("reportCapExceeded failed (ignored)", { error: reportErr });
         }
-        return deferOrRetry(
-          triggeringKey,
-          deps,
-          clock,
-          "daily-spend-cap-exceeded",
-        );
+        return deferOrRetry(triggeringKey, deps, clock, "daily-spend-cap-exceeded");
       }
     }
 
@@ -1102,9 +1084,8 @@ async function runObjectKey(
     };
 
     let startedAny = false;
-    let visualDecision: ModerationDecision | undefined = existingJobs.find(
-      (j) => j.track === "VISUAL" && isLiveJob(j),
-    )?.decision ?? undefined;
+    let visualDecision: ModerationDecision | undefined =
+      existingJobs.find((j) => j.track === "VISUAL" && isLiveJob(j))?.decision ?? undefined;
     let visualJobId = "(existing)";
     if (missingTracks.includes("VISUAL")) {
       const visual = await deps.moderation.startVideoModeration(stagingRef);
@@ -1151,9 +1132,8 @@ async function runObjectKey(
     // preserved: this is a positive verdict on a track with no content, not
     // approval-from-doubt.
     let audioJobId = "(existing)";
-    let audioInitialDecision: ModerationDecision | undefined = existingJobs.find(
-      (j) => j.track === "AUDIO" && isLiveJob(j),
-    )?.decision ?? undefined;
+    let audioInitialDecision: ModerationDecision | undefined =
+      existingJobs.find((j) => j.track === "AUDIO" && isLiveJob(j))?.decision ?? undefined;
     if (missingTracks.includes("AUDIO")) {
       if (hasAudio) {
         const audio = await deps.transcribe.startTranscription({
@@ -1289,10 +1269,7 @@ async function runObjectKey(
  * only source of the answer) is not run again: the persisted flag, else the
  * kind of AUDIO row an earlier attempt wrote, else assume audio is present.
  */
-function inferHasAudio(
-  row: MediaFileRow,
-  jobs: ReadonlyArray<ExistingModerationJob>,
-): boolean {
+function inferHasAudio(row: MediaFileRow, jobs: ReadonlyArray<ExistingModerationJob>): boolean {
   if (typeof row.hasAudio === "boolean") return row.hasAudio;
   const audio = jobs.find((j) => j.track === "AUDIO" && j.jobId !== null);
   if (audio !== undefined && audio.jobId !== null) {
@@ -1686,10 +1663,7 @@ async function holdForReason(
     ) {
       return `${prefix}-already-settled`;
     }
-    if (
-      typeof deps.persistence.holdForReview === "function" &&
-      row.lifecycle === "UPLOADED"
-    ) {
+    if (typeof deps.persistence.holdForReview === "function" && row.lifecycle === "UPLOADED") {
       const applied = await deps.persistence.holdForReview(row.id, {
         ground,
         expectedFrom: "UPLOADED",

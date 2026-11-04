@@ -10,10 +10,10 @@ implements none of them keeps the behaviour it had before.
 Processes one queue message and returns a `ProcessingOutcome`, independent of
 the queue transport.
 
-| Outcome | Meaning |
-|---|---|
-| `{ kind: "done" }` | Nothing more to do for this message. |
-| `{ kind: "retry", reason }` | Try again now. |
+| Outcome                                   | Meaning                                                                |
+| ----------------------------------------- | ---------------------------------------------------------------------- |
+| `{ kind: "done" }`                        | Nothing more to do for this message.                                   |
+| `{ kind: "retry", reason }`               | Try again now.                                                         |
 | `{ kind: "defer", delaySeconds, reason }` | Capacity, not a fault: come back after `delaySeconds`. Not an attempt. |
 
 `clock` is `{ mediaAgeSeconds, maxMediaAgeSeconds }`. The maximum is operator
@@ -47,26 +47,26 @@ with a clock that can never reach the bound, and map outcomes back to the
 
 ### Optional members this uses
 
-| Member | Where | Needed for rules |
-|---|---|---|
-| `reserveTracks(mediaId, tracks)` | `deps.store` (same signature as `CompletionStore.reserveTracks`) | 3 |
-| `listModerationJobs(mediaId)` | `MediaPersistencePort` | 4 |
-| `holdForReview(mediaId, { ground, expectedFrom })` → `boolean` | `MediaPersistencePort` | 6, 7 (compare-and-set; without it `markMediaForReview` is used, unconditional, no ground) |
-| `stagingVersionId`, `contentHash`, `hasAudio` | `MediaFileRow` | 2 |
-| `hasAudio` | `persistCleanedContent` argument | 2 (so a reuse knows whether an AUDIO job is due) |
-| `deferDelaySeconds` | `MediaProcessingConfig` | 5 |
-| `pinnedVersion`, `superseded` | `ModerationJobRow` | read by the consuming application's store; the stock Prisma store returns neither |
+| Member                                                         | Where                                                            | Needed for rules                                                                          |
+| -------------------------------------------------------------- | ---------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `reserveTracks(mediaId, tracks)`                               | `deps.store` (same signature as `CompletionStore.reserveTracks`) | 3                                                                                         |
+| `listModerationJobs(mediaId)`                                  | `MediaPersistencePort`                                           | 4                                                                                         |
+| `holdForReview(mediaId, { ground, expectedFrom })` → `boolean` | `MediaPersistencePort`                                           | 6, 7 (compare-and-set; without it `markMediaForReview` is used, unconditional, no ground) |
+| `stagingVersionId`, `contentHash`, `hasAudio`                  | `MediaFileRow`                                                   | 2                                                                                         |
+| `hasAudio`                                                     | `persistCleanedContent` argument                                 | 2 (so a reuse knows whether an AUDIO job is due)                                          |
+| `deferDelaySeconds`                                            | `MediaProcessingConfig`                                          | 5                                                                                         |
+| `pinnedVersion`, `superseded`                                  | `ModerationJobRow`                                               | read by the consuming application's store; the stock Prisma store returns neither         |
 
 ## `planRecovery({ media, now, config })`
 
 Pure. At most one action per candidate, in input order.
 
-| Candidate | Action |
-|---|---|
-| `UPLOADED`, age ≥ `maxMediaAgeSeconds` | `settle-technical` (wins over re-enqueue) |
-| `UPLOADED`, older than `settleWindowSeconds`, a track missing a live row (or no track) | `reenqueue-processing` |
-| `APPROVED`, older than `settleWindowSeconds`, `casObjectPresent === false` | `repair-promotion` |
-| anything else, anything inside the settle window | none |
+| Candidate                                                                              | Action                                    |
+| -------------------------------------------------------------------------------------- | ----------------------------------------- |
+| `UPLOADED`, age ≥ `maxMediaAgeSeconds`                                                 | `settle-technical` (wins over re-enqueue) |
+| `UPLOADED`, older than `settleWindowSeconds`, a track missing a live row (or no track) | `reenqueue-processing`                    |
+| `APPROVED`, older than `settleWindowSeconds`, `casObjectPresent === false`             | `repair-promotion`                        |
+| anything else, anything inside the settle window                                       | none                                      |
 
 ## `sweepMedia(deps)`
 

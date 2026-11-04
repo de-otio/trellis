@@ -296,9 +296,7 @@ const DISABLED: MediaRecoverySweepResult = {
  * undecided track counts as review, and a quarantined track still wins.
  * `repair-promotion` calls the existing pinned promotion.
  */
-export async function sweepMedia(
-  deps: MediaRecoverySweepDeps,
-): Promise<MediaRecoverySweepResult> {
+export async function sweepMedia(deps: MediaRecoverySweepDeps): Promise<MediaRecoverySweepResult> {
   const { config, queueTiming, logger } = deps;
   if (config === undefined || queueTiming === undefined) {
     if (!warnedDisabled) {
@@ -420,10 +418,13 @@ async function settleTechnical(
     try {
       await repairPromotion(deps, c);
     } catch (err) {
-      deps.logger.error("Recovery settle: promotion failed after approval — left for the next run", {
-        mediaId: c.mediaId,
-        error: err,
-      });
+      deps.logger.error(
+        "Recovery settle: promotion failed after approval — left for the next run",
+        {
+          mediaId: c.mediaId,
+          error: err,
+        },
+      );
     }
     return true;
   }

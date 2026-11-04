@@ -101,9 +101,7 @@ describe("sweepMedia — configuration", () => {
   it("queries with the settle cutoff and the batch size", async () => {
     const { store, queries } = fakeStore([]);
     await sweepMedia(deps(store));
-    expect(queries).toEqual([
-      { createdBefore: at(CONFIG.settleWindowSeconds), batchSize: 5 },
-    ]);
+    expect(queries).toEqual([{ createdBefore: at(CONFIG.settleWindowSeconds), batchSize: 5 }]);
   });
 
   it("never acts on more than batchSize candidates, even if the store returns more", async () => {
@@ -158,9 +156,7 @@ describe("sweepMedia — actions", () => {
     });
     const { store, transitions } = fakeStore([c]);
     await sweepMedia(deps(store));
-    expect(transitions).toEqual([
-      { mediaId: "m1", status: "REVIEW", ground: "technical" },
-    ]);
+    expect(transitions).toEqual([{ mediaId: "m1", status: "REVIEW", ground: "technical" }]);
   });
 
   it("emits the resolved event only for a settlement it made", async () => {
@@ -178,10 +174,7 @@ describe("sweepMedia — actions", () => {
       VISUAL: { hasLiveRow: true, decision: null },
     });
     const { store, transitions } = fakeStore([c]);
-    const [a, b] = await Promise.all([
-      sweepMedia(deps(store)),
-      sweepMedia(deps(store)),
-    ]);
+    const [a, b] = await Promise.all([sweepMedia(deps(store)), sweepMedia(deps(store))]);
     expect(transitions).toHaveLength(1);
     expect(a.settled + b.settled).toBe(1);
     expect(a.skipped + b.skipped).toBe(1);
