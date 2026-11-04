@@ -16,6 +16,19 @@ Entries below are for `@de-otio/trellis` unless noted otherwise.
 
 ## [Unreleased]
 
+### Added
+
+- **Media processing outcomes and a recovery sweep.** `processMediaMessage`
+  returns `done` / `retry` / `defer` (a capacity refusal is not an attempt), reuses
+  a persisted cleaned version instead of transcoding over it, reserves tracks
+  before starting any, starts only tracks without a live job row, and settles a
+  stalled or unprocessable object to REVIEW by compare-and-set. `planRecovery`
+  and `sweepMedia` re-drive or settle stalled objects and repair promotion. All
+  new port members are optional and additive; see
+  `docs/reference/media-processing-outcomes.md`.
+- **Schema:** `media_moderation_jobs.job_id` is now nullable (additive), so a
+  reserved placeholder row can exist before its provider job.
+
 ### Fixed
 
 - **Tagging an entity on a new post no longer throws.** `DataRouter.createPost`'s

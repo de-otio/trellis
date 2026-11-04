@@ -106,6 +106,7 @@ interface PersistenceFake {
     contentHash: string;
     originalKey: string;
     stagingVersionId: string;
+    hasAudio?: boolean;
   }>;
   reviewed: string[]; // mediaIds marked for REVIEW
   uploaded: string[]; // mediaIds driven through bytes-arrived (T14)
@@ -154,6 +155,7 @@ function makeDeps(opts: {
         contentHash: string;
         originalKey: string;
         stagingVersionId: string;
+        hasAudio?: boolean;
       },
     ): Promise<void> {
       fake.cleaned.push({ mediaId, ...content });
@@ -343,6 +345,8 @@ describe("processObjectKey — tenant-from-row + key mismatch", () => {
         contentHash: createHashHex(cleaned),
         originalKey: expectedCas,
         stagingVersionId: stagingVersion,
+        // Persisted with the pin so a reuse knows whether an AUDIO job is due.
+        hasAudio: true,
       },
     ]);
   });
@@ -497,6 +501,8 @@ describe("processObjectKey — happy path", () => {
         contentHash: createHashHex(cleaned),
         originalKey: expectedCas,
         stagingVersionId: stagingVersion,
+        // Persisted with the pin so a reuse knows whether an AUDIO job is due.
+        hasAudio: true,
       },
     ]);
 

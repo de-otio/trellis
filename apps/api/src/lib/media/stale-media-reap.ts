@@ -30,6 +30,14 @@
  *      moderation audit records. Such rows must surface as a pipeline fault,
  *      not be silently deleted. (Deliberately stricter than "no OPEN job".)
  *
+ * The recovery sweep (`lib/workers/media-recovery-sweep.ts`) runs FIRST. It
+ * re-drives or settles an UPLOADED row that has stalled, so by the time a row
+ * reaches this reaper's window the sweep has already had every chance to act.
+ * The reaper reaps any jobless UPLOADED row after its window, whatever the
+ * sweep did; it is the last resort, not the first. (A reserved placeholder row
+ * counts as a job here, as guard 3 says, so a row the sweep could not settle
+ * stays visible rather than being deleted.)
+ *
  * Reapers must apply {@link staleMediaReapWhere} to BOTH the candidate
  * `findMany` AND the subsequent `deleteMany` (not `id IN (...)` alone), so a
  * row that acquires a moderation job between the two statements is re-excluded

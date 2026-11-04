@@ -73,6 +73,9 @@ const EXPECTED_EXPORTS = [
   "setMediaReviewPromotion",
   "ModerationMetrics",
   "validateRecoverySweepConfig",
+  "planRecovery",
+  "sweepMedia",
+  "processMediaMessage",
   "withModerationDeadline",
   // Provider self-identification: the resolver and the fallback it returns.
   "moderationProviderName",

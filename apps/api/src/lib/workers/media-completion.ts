@@ -101,6 +101,18 @@ export interface ModerationJobRow {
    * {@link EscalationResultPort}.
    */
   readonly priority: ModerationJobPriority;
+  /**
+   * The cleaned-staging version the provider job was started on, when the
+   * store can say. OPTIONAL and absent from the stock Prisma store: the
+   * provider-job table that records it belongs to the consuming application.
+   */
+  readonly pinnedVersion?: string;
+  /**
+   * This row has been replaced by a newer attempt at the same track. A
+   * superseded row is never live. OPTIONAL and absent from the stock Prisma
+   * store, for the same reason as {@link pinnedVersion}.
+   */
+  readonly superseded?: boolean;
 }
 
 /**

@@ -176,10 +176,22 @@ export type {
 // Types and pure helpers only: nothing here is wired into a code path yet.
 export type { ReviewActor } from "./lib/media/media-review-handler.js";
 export type { UploadQuotaPort } from "./lib/media/media-ports.js";
-export type { ProcessingOutcome, ProcessingClock } from "./lib/workers/media-processing.js";
-export { validateRecoverySweepConfig } from "./lib/workers/media-recovery-sweep.js";
+export { processMediaMessage } from "./lib/workers/media-processing.js";
+export type {
+  ProcessingOutcome,
+  ProcessingClock,
+  ExistingModerationJob,
+} from "./lib/workers/media-processing.js";
+export {
+  validateRecoverySweepConfig,
+  planRecovery,
+  sweepMedia,
+} from "./lib/workers/media-recovery-sweep.js";
 export type {
   MediaRecoverySweepConfig,
+  MediaRecoveryStore,
+  MediaRecoverySweepDeps,
+  MediaRecoverySweepResult,
   RecoveryAction,
   RecoveryCandidate,
   RecoveryTrackState,

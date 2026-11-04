@@ -19,12 +19,16 @@ export {
   parsePendingKey,
   extractObjectKeys,
   processObjectKey,
+  processMediaMessage,
   processRecord,
   setMediaProcessingDeps,
   __resetMediaProcessingDeps,
   getInjectedMediaProcessingDeps,
 } from "../lib/workers/media-processing.js";
 export type {
+  ExistingModerationJob,
+  ProcessingClock,
+  ProcessingOutcome,
   MediaFileRow,
   ThresholdSnapshot,
   MediaPersistencePort,
