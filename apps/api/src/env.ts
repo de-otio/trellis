@@ -565,6 +565,13 @@ export interface Env {
      */
     reviewRateCap: number;
     /**
+     * Seconds advertised in `Retry-After` when the synchronous image check
+     * fails for a transient reason and the upload is answered 503. Source:
+     * MEDIA_MODERATION_RETRY_AFTER_SECONDS. NO default: when unset, the 503 is
+     * sent without a `Retry-After` header (the value is operator policy).
+     */
+    moderationRetryAfterSeconds?: number;
+    /**
      * Per-tenant upload quota DEFAULTS (the free tier): maximum number of
      * stored objects and total bytes. Enforcement is LIVE and fail-closed —
      * both upload gates (routes/media.ts and presigned-upload-handler.ts)
@@ -853,6 +860,7 @@ export function resolveMediaEnv(): { media: {
   canonicalQuality: number;
   maxDurationSeconds: number;
   reviewRateCap: number;
+  moderationRetryAfterSeconds?: number;
   uploadQuota: { maxObjects: number; maxBytes: number };
   transcribe: { outputBucket?: string; languageCode: string };
   presignExpirySeconds: number;
@@ -969,6 +977,17 @@ export function resolveMediaEnv(): { media: {
       ? reviewRateCapRaw
       : 20;
 
+  // --- moderationRetryAfterSeconds: Retry-After for transient-check 503s ---
+  // No default: unset/invalid => the header is simply omitted.
+  const retryAfterRaw = Number.parseInt(
+    process.env.MEDIA_MODERATION_RETRY_AFTER_SECONDS ?? "",
+    10,
+  );
+  const moderationRetryAfterSeconds =
+    Number.isFinite(retryAfterRaw) && retryAfterRaw > 0
+      ? retryAfterRaw
+      : undefined;
+
   // --- uploadQuota: per-tenant object count + byte ceiling ---
   const quotaMaxObjectsRaw = Number.parseInt(
     process.env.MEDIA_QUOTA_MAX_OBJECTS ?? "",
@@ -1019,6 +1038,7 @@ export function resolveMediaEnv(): { media: {
       canonicalQuality,
       maxDurationSeconds,
       reviewRateCap,
+      moderationRetryAfterSeconds,
       uploadQuota: { maxObjects: quotaMaxObjects, maxBytes: quotaMaxBytes },
       transcribe: { outputBucket: transcribeOutputBucket, languageCode: transcribeLanguageCode },
       presignExpirySeconds,

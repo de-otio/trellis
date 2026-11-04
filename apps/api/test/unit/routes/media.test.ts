@@ -887,8 +887,12 @@ describe("Media Routes", () => {
       expect(upsertModerationStatus()).toBe("QUARANTINED");
     });
 
-    it("provider THROWS → treated as review (fail-closed): NO cas/, row REVIEW", async () => {
-      mockModerateImage.mockRejectedValue(new Error("provider exploded"));
+    it("provider THROWS a media-defect error → treated as review (fail-closed): NO cas/, row REVIEW", async () => {
+      // A failure that is about the media (not a transient fault) still holds.
+      // Transient faults answer 503 instead — see upload-transient-moderation.test.ts.
+      mockModerateImage.mockRejectedValue(
+        Object.assign(new Error("invalid image"), { name: "InvalidImageError" }),
+      );
 
       const response = await runImageUpload();
 

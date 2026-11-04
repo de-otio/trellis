@@ -22,6 +22,7 @@ import {
 } from "../media/cas-keys.js";
 import { buildMediaUpsertArgs } from "../media/media-upsert.js";
 import { checkUploadQuota } from "../media/quota-check.js";
+import { isTransientModerationFailure } from "../media/transient-moderation-failure.js";
 import { resolveQuotaLimits, type TenantQuotaOverride } from "../media/quota-resolution.js";
 import {
   isOverReviewRateCap,
@@ -1242,6 +1243,53 @@ export const mediaRoutes: Route[] = [
           // can never make this path more permissive than it already was.
           decision = decisionToStatus(interpretVerdict(verdict));
         } catch (moderationError: any) {
+          // A check that failed for a reason unrelated to the image
+          // (throttling, quota/spend cap, credential fault, deadline, network)
+          // is NOT a verdict. Holding the image would turn an outage into a
+          // permanent block of a probably benign upload wherever no moderator
+          // is standing by, so answer 503 and let the client retry.
+          //
+          // Client-retry contract: the MediaFile row is created only AFTER
+          // this step, so nothing exists yet to be servable. We drop the
+          // staged object (best effort; it is also lifecycle-expired) and
+          // create no row, so a retry is an ordinary fresh upload.
+          if (isTransientModerationFailure(moderationError)) {
+            logger.warn(
+              "[Media Upload] Image moderation unavailable — 503, no hold",
+              {
+                userId: session.userId,
+                error: describeError(moderationError),
+              },
+            );
+            try {
+              await mediaBucket.delete(stagingKey);
+            } catch (deleteError: any) {
+              logger.warn("[Media Upload] Staging delete tolerated", {
+                userId: session.userId,
+                error: describeError(deleteError),
+              });
+            }
+            const retryAfter = env.media?.moderationRetryAfterSeconds;
+            const headers: Record<string, string> = {
+              "content-type": "application/json",
+            };
+            if (
+              typeof retryAfter === "number" &&
+              Number.isFinite(retryAfter) &&
+              retryAfter > 0
+            ) {
+              headers["Retry-After"] = String(Math.ceil(retryAfter));
+            }
+            const errorResponse = securityHeaders.createSecureResponse(
+              JSON.stringify({
+                error: "Upload unavailable",
+                message:
+                  "Image checking is temporarily unavailable. Please retry the upload.",
+              }),
+              { status: 503, headers },
+            );
+            return CorsHandler.addCorsHeaders(errorResponse, request, env);
+          }
           logger.warn(
             "[Media Upload] Image moderation failed — failing closed to REVIEW",
             {
@@ -1535,7 +1583,11 @@ export const mediaRoutes: Route[] = [
     },
     middleware: [corsMiddleware(), csrfMiddleware()],
     description:
-      "Upload media file (image or video) with content-addressed storage",
+      "Upload media file (image or video) with content-addressed storage. " +
+      "Responses: 200 stored (a provider verdict that holds the upload is recorded as REVIEW and is not served); " +
+      "503 with an optional Retry-After (seconds, operator-configured) when the image check was temporarily unavailable " +
+      "(provider throttling, a quota or spend cap, a credential fault, a deadline, a network error) - nothing was stored, retry the upload; " +
+      "429 when a rate or quota limit applies.",
   },
   {
     // AR16: the legacy batch-upload path is intentionally NOT implemented.

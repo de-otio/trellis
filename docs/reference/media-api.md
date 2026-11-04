@@ -188,6 +188,16 @@ For completeness, the media routes also include:
 > not serve until the asynchronous moderation pipeline approves it. See
 > [Media Moderation](../concepts/media-moderation.md).
 
+> **Transient image-check failures return `503`, not a hold.** If the
+> synchronous image check cannot reach a decision for a reason unrelated to the
+> image (provider throttling, a quota or spend cap, a credential fault, a
+> deadline, a network error), `POST /api/media/upload` responds `503` with a
+> `Retry-After` header (seconds; operator-configured via
+> `MEDIA_MODERATION_RETRY_AFTER_SECONDS`, omitted when unset). Nothing is
+> stored: no media row is created and the staged bytes are discarded, so the
+> client simply retries the upload. Only a provider verdict, an oversize file or
+> an unsupported format puts an upload in `REVIEW`.
+
 ## Response example (image details)
 
 ```json
