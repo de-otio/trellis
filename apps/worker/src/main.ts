@@ -42,7 +42,8 @@ import { buildDispatchTable, type WorkerQueueName } from "./workers.js";
 import { validateRequiredSecrets } from "./startup-validation.js";
 import { CronScheduler } from "./scheduler.js";
 import { buildCronJobs, type WorkerProfile } from "./cron-jobs.js";
-import { startHealthServer } from "./health.js";
+import { isRunDirectly } from "./run-directly.js";
+import { pollersLive, pollerStaleMs, startHealthServer } from "./health.js";
 import { closeDefaultResources, installShutdownHandlers } from "./shutdown.js";
 import { startHatchetHost } from "./hatchet.js";
 
@@ -275,6 +276,7 @@ async function main(): Promise<void> {
   // bind only. WORKER_HEALTH_HOST exists for pod-internal binds (e.g.
   // 0.0.0.0 inside an isolated pod network) — WS-4 must NOT route it
   // publicly (verified in T8's wiring inputs).
+  const staleMs = pollerStaleMs(process.env);
   startHealthServer({
     host: process.env.WORKER_HEALTH_HOST || "127.0.0.1",
     port: Number(process.env.WORKER_HEALTH_PORT || 8081),
@@ -283,7 +285,8 @@ async function main(): Promise<void> {
       // (logged, never echoed).
       const db = await getLambdaPrisma();
       await db.$queryRaw`SELECT 1`;
-      return pollers.length > 0;
+      // …and every started poller's loop is still cycling (W6).
+      return pollers.length > 0 && pollersLive(pollers, Date.now(), staleMs);
     },
     logger,
   });
@@ -327,8 +330,7 @@ async function main(): Promise<void> {
 }
 
 // Only run when executed directly (not when imported by tests).
-const isDirectRun =
-  process.argv[1] !== undefined && import.meta.url.endsWith(process.argv[1].split("/").pop() ?? "");
+const isDirectRun = isRunDirectly(import.meta.url);
 if (isDirectRun) {
   main().catch((err) => {
     // Startup failure (incl. the finding-2 gate): exit non-zero so the

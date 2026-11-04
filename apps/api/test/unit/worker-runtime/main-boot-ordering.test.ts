@@ -93,7 +93,8 @@ vi.mock("../../../../worker/src/scheduler.js", () => ({
     stop = mocks.schedulerStop;
   },
 }));
-vi.mock("../../../../worker/src/health.js", () => ({
+vi.mock("../../../../worker/src/health.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../../worker/src/health.js")>()),
   startHealthServer: mocks.startHealthServer,
 }));
 vi.mock("../../../../worker/src/shutdown.js", () => ({

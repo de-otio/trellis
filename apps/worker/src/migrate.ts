@@ -18,6 +18,7 @@
 
 import { spawnSync, type SpawnSyncOptions } from "node:child_process";
 import { resolveDbConnectionString } from "../../api/src/lib/lambda-prisma.js";
+import { isRunDirectly } from "./run-directly.js";
 
 /** Absolute in-image paths (see apps/worker/Dockerfile runtime stage). */
 const PRISMA_CLI = "/repo/node_modules/prisma/build/index.js";
@@ -55,8 +56,7 @@ export async function runMigrate(
 }
 
 // Only run when executed directly (not when imported by tests).
-const isDirectRun =
-  process.argv[1] !== undefined && import.meta.url.endsWith(process.argv[1].split("/").pop() ?? "");
+const isDirectRun = isRunDirectly(import.meta.url);
 if (isDirectRun) {
   runMigrate()
     .then((code) => process.exit(code))
