@@ -21,7 +21,7 @@ environment, and runs the deploy pipeline. That split shapes where tests run:
 
 The E2E and post-deployment **test code lives in this repo** (under
 `apps/api/test/e2e` and `apps/api/test/integration/postdeployment`), but it
-targets a *deployed* environment. In this repo those suites are **not part of
+targets a _deployed_ environment. In this repo those suites are **not part of
 the CI gate** — they run either against a deployed environment you point them
 at, or (preferably) against the local dummy target described in
 [standalone.md](standalone.md).
@@ -39,13 +39,13 @@ Three parallel jobs: `lint-and-test`, `standalone`, and `graph`.
 
 ### `lint-and-test`
 
-| Step | What runs |
-|------|-----------|
-| Services | PostgreSQL 16 + DynamoDB Local (GitHub Actions service containers) |
-| Prisma | `prisma:generate` + `prisma:migrate:deploy` against the service Postgres |
-| Build | `npm run build -w @de-otio/trellis` |
-| Lint | `npm run lint -w @de-otio/trellis` (`tsc --build`) |
-| Test | `npm test -w @de-otio/trellis` (unit + pre-deploy integration) |
+| Step           | What runs                                                                                                                                      |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| Services       | PostgreSQL 16 + DynamoDB Local (GitHub Actions service containers)                                                                             |
+| Prisma         | `prisma:generate` + `prisma:migrate:deploy` against the service Postgres                                                                       |
+| Build          | `npm run build -w @de-otio/trellis`                                                                                                            |
+| Lint           | `npm run lint -w @de-otio/trellis` (`tsc --build`)                                                                                             |
+| Test           | `npm test -w @de-otio/trellis` (unit + pre-deploy integration)                                                                                 |
 | Consumer smoke | `bash apps/api/scripts/smoke-pack.sh` — packs the tarball, installs it `--omit=dev` into a fresh project, requires every published entry point |
 
 The consumer-install smoke is the one piece of CI that verifies Trellis the
@@ -104,10 +104,10 @@ silently.
 
 Tag-triggered npm publish (Trusted Publishing / OIDC). Two flows:
 
-| Tag pattern | Publishes |
-|-------------|-----------|
-| `v<x.y.z>` | `@de-otio/trellis` (the api package) |
-| `extension-api-v<x.y.z>` | `@de-otio/trellis-extension-api` |
+| Tag pattern              | Publishes                            |
+| ------------------------ | ------------------------------------ |
+| `v<x.y.z>`               | `@de-otio/trellis` (the api package) |
+| `extension-api-v<x.y.z>` | `@de-otio/trellis-extension-api`     |
 
 See the **Release Checklist** in [`CLAUDE.md`](../../../../CLAUDE.md) for the
 pre-tag gate (versions match, lint+tests pass on `main`, lockfile updated).
@@ -123,7 +123,6 @@ pre-tag gate (versions match, lint+tests pass on `main`, lockfile updated).
 > `engines.node` and the lockfile all deliberately untouched, per this section.
 > Rationale and the dependency audit behind it: `doc/evaluation/node-engine-skew.md`.
 
-
 `ci.yml`'s 7 jobs run Node 22 (matching `.nvmrc` and root `engines: >=22`);
 `publish.yml` runs Node 24. This is deliberate, not drift: npm Trusted
 Publishing requires npm ≥ 11.5.1, which Node 24 ships (npm 11) and Node 22
@@ -138,10 +137,10 @@ both and installs anyway — advisory only, not a failure, today.
 **The sharp edge, verified 2026-08-16 (not merely relayed from the prior
 session's notes):**
 
-| | Node 22 / npm 10 (`ci.yml`) | Node 24 / npm 11 (`publish.yml`) |
-|---|---|---|
-| `npm ci` (scripts enabled) | Silent — no such warning exists on npm 10 | Prints `npm warn allow-scripts`: 4 packages (`@prisma/engines`, `esbuild`, `fsevents`, `prisma`) have install scripts "not yet covered by allowScripts" |
-| `npm ci --ignore-scripts` | No install scripts run; nothing to warn about | Same — no `allow-scripts` warning either, because nothing is uncovered when nothing runs |
+|                            | Node 22 / npm 10 (`ci.yml`)                   | Node 24 / npm 11 (`publish.yml`)                                                                                                                        |
+| -------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `npm ci` (scripts enabled) | Silent — no such warning exists on npm 10     | Prints `npm warn allow-scripts`: 4 packages (`@prisma/engines`, `esbuild`, `fsevents`, `prisma`) have install scripts "not yet covered by allowScripts" |
+| `npm ci --ignore-scripts`  | No install scripts run; nothing to warn about | Same — no `allow-scripts` warning either, because nothing is uncovered when nothing runs                                                                |
 
 npm 11's `allow-scripts` check currently only **warns**; it still runs the
 scripts. If a future npm makes that gate **blocking**, `npm run
@@ -164,7 +163,7 @@ to blocking) is now closed for `publish.yml`, independent of when or whether
 npm makes that change.**
 
 **Recommendation: do not bump `ci.yml` to Node 24 preemptively.** The
-forcing functions that *would* justify it, in order of likelihood:
+forcing functions that _would_ justify it, in order of likelihood:
 
 1. `@de-otio/vestibulum` / `@de-otio/saas-foundation` (or a future dependency)
    tighten `engines.node >= 24` from advisory (`EBADENGINE` warning) to a
@@ -192,30 +191,30 @@ whichever npm version `ci.yml` will actually run, the same way the
 
 ## Test Configs by Runner
 
-| npm script | Vitest config | What it includes | Runs in this repo's CI? |
-|------------|---------------|------------------|--------------------------|
-| `test` | `vitest.config.ts` | Unit + pre-deploy integration (excludes e2e, postdeployment, graph, schema, live-infra integration) | ✅ yes |
-| `test:integration` | `vitest.integration.config.ts` | Pre-deployment integration (needs Docker Compose) | run locally / standalone |
-| `test:graph` | `vitest.graph.config.ts` | Postgres graph integration (needs PostGIS Postgres) | ✅ yes (`graph` job) |
-| `test:schema` | `vitest.schema.config.ts` | Prisma schema-shape checks (needs local Postgres) | run locally |
-| `test:e2e` (+ shards) | `vitest.e2e*.config.ts` | E2E against a deployed API (or the dummy target) | consumer pipeline / standalone |
-| `test:postdeployment` (+ shards) | `vitest.postdeployment*.config.ts` | Post-deploy validation against deployed infra | consumer pipeline |
-| `test:agents` | `vitest.agents.config.ts` | Bedrock AgentCore smoke tests | manual (needs AWS) |
-| `test:coverage` | `vitest.config.ts` + coverage | Unit + integration with coverage report | manual |
+| npm script                       | Vitest config                      | What it includes                                                                                    | Runs in this repo's CI?        |
+| -------------------------------- | ---------------------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------ |
+| `test`                           | `vitest.config.ts`                 | Unit + pre-deploy integration (excludes e2e, postdeployment, graph, schema, live-infra integration) | ✅ yes                         |
+| `test:integration`               | `vitest.integration.config.ts`     | Pre-deployment integration (needs Docker Compose)                                                   | run locally / standalone       |
+| `test:graph`                     | `vitest.graph.config.ts`           | Postgres graph integration (needs PostGIS Postgres)                                                 | ✅ yes (`graph` job)           |
+| `test:schema`                    | `vitest.schema.config.ts`          | Prisma schema-shape checks (needs local Postgres)                                                   | run locally                    |
+| `test:e2e` (+ shards)            | `vitest.e2e*.config.ts`            | E2E against a deployed API (or the dummy target)                                                    | consumer pipeline / standalone |
+| `test:postdeployment` (+ shards) | `vitest.postdeployment*.config.ts` | Post-deploy validation against deployed infra                                                       | consumer pipeline              |
+| `test:agents`                    | `vitest.agents.config.ts`          | Bedrock AgentCore smoke tests                                                                       | manual (needs AWS)             |
+| `test:coverage`                  | `vitest.config.ts` + coverage      | Unit + integration with coverage report                                                             | manual                         |
 
 ## Environment Variables for Test Runners
 
 ### Unit / Integration (CI or local)
 
-| Variable | Source | Required |
-|----------|--------|----------|
-| `DATABASE_URL` | Docker Compose or CI service | Yes |
-| `DYNAMODB_ENDPOINT` | Docker Compose or CI service | Yes |
-| `DYNAMODB_TABLE` | Hardcoded (`test-trellis`) | Yes |
-| `SESSION_SECRET` | Test constant or CI secret (≥32 chars) | Yes |
-| `STAGE` | `test` | Yes |
-| `NODE_ENV` | `test` | Yes |
-| `AWS_REGION` / `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Dummy values for SDK clients | Yes |
+| Variable                                                     | Source                                 | Required |
+| ------------------------------------------------------------ | -------------------------------------- | -------- |
+| `DATABASE_URL`                                               | Docker Compose or CI service           | Yes      |
+| `DYNAMODB_ENDPOINT`                                          | Docker Compose or CI service           | Yes      |
+| `DYNAMODB_TABLE`                                             | Hardcoded (`test-trellis`)             | Yes      |
+| `SESSION_SECRET`                                             | Test constant or CI secret (≥32 chars) | Yes      |
+| `STAGE`                                                      | `test`                                 | Yes      |
+| `NODE_ENV`                                                   | `test`                                 | Yes      |
+| `AWS_REGION` / `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Dummy values for SDK clients           | Yes      |
 
 (These match the `env:` block of the `Run tests` step in
 [`ci.yml`](../../../../.github/workflows/ci.yml).)
