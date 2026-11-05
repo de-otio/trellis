@@ -11,10 +11,22 @@ import type { Session } from "../../../src/lib/session-cookie.js";
 
 // Mock SessionManager
 const mockGetSession = vi.fn();
+const mockRevokeAllSessionsIfBound = vi.fn();
 vi.mock("../../../src/lib/session-cookie", () => ({
   SessionManager: class {
     getSession = mockGetSession;
+    revokeAllSessionsIfBound = mockRevokeAllSessionsIfBound;
   },
+}));
+
+// Mock claims-cache invalidation + audit (both best-effort side effects)
+const mockInvalidateClaims = vi.fn();
+vi.mock("../../../src/lib/auth/claims-invalidation", () => ({
+  invalidateClaims: (...args: any[]) => mockInvalidateClaims(...args),
+}));
+const mockAuditLog = vi.fn();
+vi.mock("../../../src/lib/audit-composer", () => ({
+  createAuditLogger: () => ({ log: (...args: any[]) => mockAuditLog(...args) }),
 }));
 
 // Mock SecurityHeaders
@@ -115,6 +127,9 @@ describe("Dashboard Routes", () => {
     };
 
     mockGetSession.mockResolvedValue(mockSession);
+    mockRevokeAllSessionsIfBound.mockResolvedValue("revoked");
+    mockInvalidateClaims.mockResolvedValue(undefined);
+    mockAuditLog.mockResolvedValue(undefined);
     mockDetectRegionSync.mockReturnValue("US");
     mockCreatePrisma.mockReturnValue(mockDb);
     mockCreateSecureResponse.mockImplementation(
@@ -849,6 +864,134 @@ describe("Dashboard Routes", () => {
           }),
         }),
       );
+    });
+
+    const patchUser = (body: unknown) =>
+      route.handler(
+        new Request("http://test.com/api/dashboard/users/user-456", {
+          method: "PATCH",
+          body: JSON.stringify(body),
+          headers: { "Content-Type": "application/json" },
+        }),
+        mockEnv,
+        { pathname: "/api/dashboard/users/user-456" },
+      );
+    const stubTargetUpdate = (over: Record<string, unknown>) => {
+      mockDb.user.findUnique.mockResolvedValue({ role: "INTERNAL" });
+      mockDb.user.update.mockResolvedValue({
+        id: "user-456",
+        email: "user@example.com",
+        role: "END_USER",
+        subject: "sub-456",
+        suspended: false,
+        createdAt: new Date("2024-01-01"),
+        ...over,
+      });
+    };
+
+    it("M9: suspending revokes the TARGET's sessions and invalidates claims", async () => {
+      stubTargetUpdate({ suspended: true });
+
+      const response = await patchUser({ status: "suspended" });
+
+      expect(response.status).toBe(200);
+      // Epoch is keyed by the suspended user, not the acting admin (user-123).
+      expect(mockRevokeAllSessionsIfBound).toHaveBeenCalledTimes(1);
+      expect(mockRevokeAllSessionsIfBound).toHaveBeenCalledWith(
+        "user-456",
+        mockEnv,
+      );
+      expect(mockInvalidateClaims).toHaveBeenCalledWith(
+        ["sub-456"],
+        "user.change_status",
+      );
+    });
+
+    it("M9: a failed session revocation is not reported as success", async () => {
+      stubTargetUpdate({ suspended: true });
+      mockRevokeAllSessionsIfBound.mockRejectedValue(new Error("kv down"));
+
+      const response = await patchUser({ status: "suspended" });
+
+      expect(response.status).toBe(500);
+      const data = await response.json();
+      expect(data.error).toMatch(/sessions could not be revoked/i);
+      // The suspension itself was written; the retry is idempotent.
+      expect(mockDb.user.update).toHaveBeenCalledTimes(1);
+    });
+
+    it("M9: reactivating does not touch sessions but does invalidate claims", async () => {
+      stubTargetUpdate({ suspended: false });
+
+      const response = await patchUser({ status: "active" });
+
+      expect(response.status).toBe(200);
+      expect(mockRevokeAllSessionsIfBound).not.toHaveBeenCalled();
+      expect(mockInvalidateClaims).toHaveBeenCalledWith(
+        ["sub-456"],
+        "user.change_status",
+      );
+    });
+
+    it("H1: a role change invalidates the claims cache for the target", async () => {
+      mockDb.user.findUnique
+        .mockResolvedValueOnce({ role: "SUPER_ADMIN" })
+        .mockResolvedValueOnce({ role: "INTERNAL" });
+      mockDb.user.update.mockResolvedValue({
+        id: "user-456",
+        email: "user@example.com",
+        role: "END_USER",
+        subject: "sub-456",
+        suspended: false,
+        createdAt: new Date("2024-01-01"),
+      });
+
+      const response = await patchUser({ role: "END_USER" });
+
+      expect(response.status).toBe(200);
+      expect(mockInvalidateClaims).toHaveBeenCalledWith(
+        ["sub-456"],
+        "user.change_global_role",
+      );
+      expect(mockRevokeAllSessionsIfBound).not.toHaveBeenCalled();
+    });
+
+    it("H1: the change is audited with actor, target and previous role", async () => {
+      mockDb.user.findUnique
+        .mockResolvedValueOnce({ role: "SUPER_ADMIN" })
+        .mockResolvedValueOnce({ role: "INTERNAL" });
+      mockDb.user.update.mockResolvedValue({
+        id: "user-456",
+        email: "user@example.com",
+        role: "END_USER",
+        subject: "sub-456",
+        suspended: false,
+        createdAt: new Date("2024-01-01"),
+      });
+
+      await patchUser({ role: "END_USER" });
+
+      expect(mockAuditLog).toHaveBeenCalledTimes(1);
+      const [event] = mockAuditLog.mock.calls[0];
+      expect(event).toMatchObject({
+        action: "dashboard.user.update",
+        userId: "user-123",
+        resourceId: "user-456",
+        success: true,
+        metadata: { previousRole: "INTERNAL", newRole: "END_USER" },
+      });
+      // Client-metadata rule: no IP / UA on this event.
+      expect(event).not.toHaveProperty("ipAddress");
+      expect(event).not.toHaveProperty("userAgent");
+    });
+
+    it("H1: an audit failure never blocks the update", async () => {
+      stubTargetUpdate({ suspended: false });
+      mockAuditLog.mockRejectedValue(new Error("audit sink down"));
+
+      const response = await patchUser({ status: "active" });
+
+      expect(response.status).toBe(200);
     });
 
     it("should return 400 for invalid role", async () => {

@@ -1193,6 +1193,32 @@ export class SessionManager {
       expirationTtl: BLOCKLIST_TTL_SECONDS,
     });
   }
+
+  /**
+   * M9: `revokeAllSessions` for the deprovisioning paths (suspension, removal),
+   * which must work on deployments that bind no blocklist KV.
+   *
+   * Mirrors the read side (`isEpochStale`): with no KV bound there is no epoch
+   * check either, so there is nothing to revoke and this returns `"unbound"`.
+   * `SESSION_BLOCKLIST_REQUIRED=true` makes a missing binding an error instead,
+   * and a KV write failure always throws — the caller must not report a
+   * suspension as complete while sealed sessions can still authenticate.
+   */
+  async revokeAllSessionsIfBound(
+    userId: string,
+    env: { [key: string]: any },
+  ): Promise<"revoked" | "unbound"> {
+    if (!getBlocklistWriter(env)) {
+      if (env?.SESSION_BLOCKLIST_REQUIRED === "true") {
+        throw new Error(
+          "SESSION_BLOCKLIST_REQUIRED=true but no SESSION_BLOCKLIST_KV is bound; cannot revoke sessions",
+        );
+      }
+      return "unbound";
+    }
+    await this.revokeAllSessions(userId, env);
+    return "revoked";
+  }
 }
 
 // Re-export foundation constants for callers that referenced the

@@ -361,6 +361,38 @@ describe("SEC L2 — sessionEpoch ('revoke all sessions')", () => {
     );
   });
 
+  it("M9: revokeAllSessionsIfBound kills the user's sessions end-to-end", async () => {
+    const token = await sm.encryptSession(
+      JSON.stringify(baseSession({ userId: "victim" })),
+      SECRET,
+      SALT,
+    );
+    expect(await sm.getSession(cookieRequest(token), SECRET, env)).not.toBeNull();
+
+    await tick();
+    expect(await sm.revokeAllSessionsIfBound("victim", env)).toBe("revoked");
+
+    expect(await sm.getSession(cookieRequest(token), SECRET, env)).toBeNull();
+  });
+
+  it("M9: revokeAllSessionsIfBound is a no-op when no KV is bound (deployment shape)", async () => {
+    expect(await sm.revokeAllSessionsIfBound("victim", {})).toBe("unbound");
+  });
+
+  it("M9: revokeAllSessionsIfBound throws when no KV is bound but one is REQUIRED", async () => {
+    await expect(
+      sm.revokeAllSessionsIfBound("victim", {
+        SESSION_BLOCKLIST_REQUIRED: "true",
+      }),
+    ).rejects.toThrow(/SESSION_BLOCKLIST_REQUIRED/);
+  });
+
+  it("M9: revokeAllSessionsIfBound propagates a KV write failure", async () => {
+    await expect(
+      sm.revokeAllSessionsIfBound("victim", { SESSION_BLOCKLIST_KV: brokenKv() }),
+    ).rejects.toThrow(/KV unreachable/);
+  });
+
   it("a corrupt stored epoch does not lock everyone out", async () => {
     kv.store.set("sessionepoch:user-abc", "not-a-number");
     const token = await sm.encryptSession(

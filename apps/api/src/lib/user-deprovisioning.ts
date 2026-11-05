@@ -14,10 +14,14 @@ import {
 import { SecurityMonitor } from "./security-monitor.js";
 import { getLogger, Logger, type LoggerEnv } from "./logger.js";
 import { invalidateClaims } from "./auth/claims-invalidation.js";
+import { SessionManager } from "./session-cookie.js";
 
 export interface Env {
   DATABASE_URL: string;
   SECURITY_WEBHOOK_URL?: string;
+  /** Session blocklist/epoch store; suspension bumps the user's epoch here. */
+  SESSION_BLOCKLIST_KV?: unknown;
+  SESSION_BLOCKLIST_REQUIRED?: string;
 }
 
 export interface DeprovisionReason {
@@ -72,6 +76,25 @@ export class UserDeprovisioning {
       // keeps minting fully-privileged JWTs for up to one cache TTL.
       await invalidateClaims([userRow?.subject], "user.suspend");
 
+      // M9: the claims cache only gates NEW token issuance. A sealed session
+      // cookie / bearer token minted before the suspension stays valid until it
+      // expires unless the user's session epoch is bumped. Don't throw yet —
+      // the security event below must still be written — but do fail the call
+      // afterwards so the caller doesn't treat the suspension as complete.
+      let revocationError: unknown;
+      try {
+        await new SessionManager().revokeAllSessionsIfBound(
+          userId,
+          env as unknown as { [key: string]: any },
+        );
+      } catch (err) {
+        revocationError = err;
+        this.logger.error(
+          `[UserDeprovisioning] Session revocation failed for suspended user ${userId}:`,
+          err,
+        );
+      }
+
       // Log security event
       await this.securityMonitor.logSecurityEvent(
         {
@@ -84,10 +107,13 @@ export class UserDeprovisioning {
             reason: reason.type,
             description: reason.description,
             initiatedBy: reason.initiatedBy,
+            sessionsRevoked: revocationError === undefined,
           },
         },
         env,
       );
+
+      if (revocationError !== undefined) throw revocationError;
 
       this.logger.info(
         `[UserDeprovisioning] User ${userId} suspended: ${reason.type} - ${reason.description}`,

@@ -689,8 +689,7 @@ export const dashboardRoutes: Route[] = [
           region,
           env,
           async (db) =>
-            db.user.findUnique({ where: { id: userId }, select: { role: true } }),
-          QueryTimeoutPresets.STANDARD,
+            db.user.findUnique({ where: { id: userId }, select: { role: true } }),          QueryTimeoutPresets.STANDARD,
         );
         if (!target) {
           return addCorsHeaders(
@@ -756,6 +755,7 @@ export const dashboardRoutes: Route[] = [
                 id: true,
                 email: true,
                 role: true,
+                subject: true,
                 suspended: true,
                 createdAt: true,
               },
@@ -763,6 +763,76 @@ export const dashboardRoutes: Route[] = [
           },
           QueryTimeoutPresets.STANDARD,
         );
+
+        // Same claims-cache freshness rule as the admin role route below: a
+        // pre-token-generation cache HIT skips the RDS read, so a demoted or
+        // suspended user would keep minting old-privilege JWTs for up to one
+        // cache TTL. Invalidate after the write commits.
+        const { invalidateClaims } = await import(
+          "../auth/claims-invalidation.js"
+        );
+        await invalidateClaims(
+          [updatedUser.subject],
+          status === "suspended" || status === "active"
+            ? "user.change_status"
+            : "user.change_global_role",
+        );
+
+        // Best-effort audit (never blocks the response). Records who changed
+        // what; deliberately carries no IP / User-Agent (client-metadata rule).
+        try {
+          const { createAuditLogger } = await import("../audit-composer.js");
+          createAuditLogger(env)
+            .log(
+              {
+                type: "user_action",
+                action: "dashboard.user.update",
+                resource: "user",
+                resourceId: userId,
+                userId: session.userId,
+                region: region as any,
+                severity: "high",
+                success: true,
+                metadata: {
+                  previousRole: target.role,
+                  newRole: updatedUser.role,
+                  status: updatedUser.suspended ? "suspended" : "active",
+                },
+              },
+              env,
+            )
+            .catch((err) => {
+              logger.warn("[Dashboard] user update audit logging failed:", err);
+            });
+        } catch (auditErr) {
+          logger.warn("[Dashboard] user update audit logging failed:", auditErr);
+        }
+
+        // M9: suspension must also kill sessions already issued. Unlike the
+        // claims cache this is not best-effort — don't report success while the
+        // suspended user's sealed sessions still authenticate. The DB write is
+        // idempotent, so the admin can simply retry.
+        if (status === "suspended") {
+          try {
+            await sessionManager.revokeAllSessionsIfBound(userId, env);
+          } catch (revokeErr) {
+            logger.error(
+              "[Dashboard] Suspended user but session revocation failed:",
+              revokeErr,
+            );
+            return addCorsHeaders(
+              securityHeaders.createSecureResponse(
+                JSON.stringify({
+                  error:
+                    "User suspended, but active sessions could not be revoked. Retry the request.",
+                }),
+                { status: 500, headers: { "content-type": "application/json" } },
+              ),
+              request,
+              env,
+            );
+          }
+        }
 
         const response = securityHeaders.createSecureResponse(
           JSON.stringify({

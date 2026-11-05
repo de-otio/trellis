@@ -127,6 +127,65 @@ describe("UserDeprovisioning", () => {
       );
     });
 
+    const reason = {
+      type: "idp_removal" as const,
+      description: "User removed from IdP",
+    };
+
+    it("M9: bumps the suspended user's session epoch so issued sessions die", async () => {
+      const store = new Map<string, string>();
+      const env = {
+        ...mockEnv,
+        SESSION_BLOCKLIST_KV: {
+          get: vi.fn(async (k: string) => store.get(k) ?? null),
+          put: vi.fn(async (k: string, v: string) => void store.set(k, v)),
+        },
+      };
+
+      await deprovisioning.suspendUser("user-123", reason, env);
+
+      expect([...store.keys()]).toEqual(["sessionepoch:user-123"]);
+      const logSpy = (deprovisioning as any).securityMonitor.logSecurityEvent;
+      expect(logSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          metadata: expect.objectContaining({ sessionsRevoked: true }),
+        }),
+        env,
+      );
+    });
+
+    it("M9: with no blocklist KV bound, suspension still succeeds", async () => {
+      await expect(
+        deprovisioning.suspendUser("user-123", reason, mockEnv),
+      ).resolves.toBeUndefined();
+    });
+
+    it("M9: a revocation failure fails the call but the security event is still written", async () => {
+      const env = {
+        ...mockEnv,
+        SESSION_BLOCKLIST_KV: {
+          get: vi.fn(),
+          put: vi.fn(async () => {
+            throw new Error("KV unreachable");
+          }),
+        },
+      };
+
+      await expect(
+        deprovisioning.suspendUser("user-123", reason, env),
+      ).rejects.toThrow("KV unreachable");
+
+      // The row is suspended regardless — the retry is idempotent.
+      expect(mockPrisma.user.update).toHaveBeenCalledTimes(1);
+      const logSpy = (deprovisioning as any).securityMonitor.logSecurityEvent;
+      expect(logSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          metadata: expect.objectContaining({ sessionsRevoked: false }),
+        }),
+        env,
+      );
+    });
+
     it("should handle suspension errors", async () => {
       mockPrisma.user.update.mockRejectedValue(new Error("Database error"));
 

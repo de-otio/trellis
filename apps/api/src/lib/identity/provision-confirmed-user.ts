@@ -94,7 +94,11 @@ export interface ConfirmedUserInput {
  */
 export class ProvisioningIdentityConflictError extends Error {
   constructor() {
-    super("Provisioning refused: email is already bound to a different identity");
+    // Deliberately generic: Cognito relays a PostConfirmation Lambda's error
+    // message to the client, so naming the cause ("email already bound")
+    // would be an account-enumeration oracle. The cause is in the
+    // `postconfirm.identity_conflict` log line.
+    super("Account could not be provisioned");
     this.name = "ProvisioningIdentityConflictError";
   }
 }

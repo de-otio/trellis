@@ -15,7 +15,8 @@ Branch: `claude/youthful-goldberg-c18bkg` (base `30251d0`). Work paused at the
 
 | ID | Change |
 |---|---|
-| H1 | `routes/dashboard.ts` PATCH: self-modification refused; role changes need SUPER_ADMIN; non-SUPER_ADMIN cannot touch a SUPER_ADMIN target. Tests added. |
+| H1 | `routes/dashboard.ts` PATCH: self-modification refused; role changes need SUPER_ADMIN; non-SUPER_ADMIN cannot touch a SUPER_ADMIN target; claims-cache invalidation after the write; best-effort audit event (`dashboard.user.update`, no IP/UA). Tests added. |
+| M9 (part) | `SessionManager.revokeAllSessionsIfBound` (no-op when no blocklist KV bound, throws if `SESSION_BLOCKLIST_REQUIRED=true` or the write fails). Wired into `UserDeprovisioning.suspendUser` (security event still written, then the call fails) and dashboard PATCH `status: "suspended"` (500 + "retry" on failure). |
 | H2 | `reaction-handler.ts` comment add/remove/get: `findFirst({id, tenantId})` + `canReadPost`, uniform 404; `routes/sentiments.ts` comment GET requires session + active tenant, `private, no-store`. |
 | H3 | `media-handler.ts`: entity-avatar ownership heuristic removed; ownership = `uploadedBy === userId`; hide/unhide/delete/metadata-visibility use `requireUploader`; EXIF only for uploader. Optional `tenantId` check added. |
 | H4 | `upload-session-handler.ts`: unowned ids rejected, canonical ids, cap `UPLOAD_SESSION_MAX_MEDIA_IDS` (default 50), `uploadedBy` filter on complete/abandon `updateMany`; `workers/hourly-cron.ts` soft-delete has `posts: { none: {} }`. |
@@ -36,23 +37,28 @@ Branch: `claude/youthful-goldberg-c18bkg` (base `30251d0`). Work paused at the
 
 ## Behaviour changes a human must decide on / follow up
 
-1. **H5 follow-up:** `src/lambda/post-confirmation.ts` now passes
-   `identities[0].providerName`; the Keycloak JIT path (`identity/jit-claims.ts`)
-   does not yet, so domain-based org-tenant auto-membership is off on Keycloak.
-   Nothing maps `ProvisioningIdentityConflictError` to a user-facing result.
-   A native signup may still link onto a subject-less row with the same email.
-2. **H1:** audit event + claims-cache invalidation on the dashboard PATCH not
-   added (the admin twin's pattern should be mirrored).
-3. **H3:** callers don't pass `tenantId` yet (trusted tenant must be resolved
-   in `routes/media.ts`); list/stats code still reads `metadata.avatar` for
-   classification (no mutation rights); `metadata.avatar` is not validated on
-   entity write. Rows with null `uploadedBy` are now immutable.
+1. **H5:** `post-confirmation.ts` passes `identities[0].providerName`. The
+   Keycloak JIT path sets `federated: false` by design (plan 016), so
+   domain-based org-tenant JIT was never available there — not a regression.
+   `ProvisioningIdentityConflictError` now carries a generic message (Cognito
+   relays it to the client; a specific one is an enumeration oracle); on
+   Keycloak the throw already fails closed to a 401. A native signup may
+   still link onto a subject-less row with the same email (deliberate).
+2. **H1:** done (see table).
+3. **H3:** `tenantId` is deliberately NOT wired into the mutation paths: they
+   already require `uploadedBy === userId`, and a multi-tenant user who
+   uploaded under tenant A and acts under tenant B would get 404s on their own
+   media. Decide whether defence-in-depth is worth that before wiring
+   `resolveUploadTenantId` (`routes/media.ts`). List/stats code still reads
+   `metadata.avatar` for classification (no mutation rights);
+   `metadata.avatar` is not validated on entity write. Rows with null
+   `uploadedBy` are now immutable.
 4. **H4:** no tenant filter (session has no tenant); default cap 50 is a guess.
 5. **M6:** with `TRUSTED_PROXY=none` behind a private-network proxy all clients
    share an `ip:unknown` bucket — deployments behind a proxy must set
-   `TRUSTED_PROXY=alb|cloudflare`. Skybber deploy config should be checked.
+   `TRUSTED_PROXY=alb|cloudflare`. Downstream consumers' deploy config should be checked.
 6. **M12:** extensions with secret-shaped config keys not prefixed `EXT_`
-   (possibly skybber `ext-dogs`) now get `undefined` silently. Option: refuse at
+   (possibly some downstream extensions) now get `undefined` silently. Option: refuse at
    boot (`coreSecretEnvKeysIn` → `isCoreSecretEnvKey`).
 7. **M10:** discovered endpoints are DNS-checked once; Keycloak re-resolves later.
 8. **M4:** no DB unique constraint (needs a migration) — concurrent duplicate
@@ -64,7 +70,11 @@ Branch: `claude/youthful-goldberg-c18bkg` (base `30251d0`). Work paused at the
 
 ## Not started
 
-- **M9** wire `revokeAllSessions` into suspension/deprovisioning; add logout.
+- **M9 (rest)** a logout endpoint — trellis has none (auth is Cognito/Amplify
+  client-side; `handleAuthRoutes` 410s everything but magic-link/register/
+  recaptcha), so this is a new public route + contract, needs a human decision.
+  `suspendUser` has no in-repo caller; member removal
+  (`tenant/member-handler.ts`) uses Cognito global sign-out, not the epoch.
 - **M13** AP keyId fetch amplification; **M14** private-group followers/inbox.
 - **L1–L7, L8 (rest), L9, L11, L13, L14, I1 (auth-discover 30/min), I2, I4, I5.**
 - **L10** (`.github/workflows/**`) and **I3** (compose binds) — workflows are

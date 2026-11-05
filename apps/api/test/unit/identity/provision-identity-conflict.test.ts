@@ -53,6 +53,16 @@ describe("provisionConfirmedUser identity conflict (H5)", () => {
     expect(update).not.toHaveBeenCalled();
   });
 
+  it("the error message does not reveal that the email is registered (Cognito relays it to the client)", async () => {
+    const { deps } = makeDeps({ id: "victim", subject: "victim-sub" });
+    const err = await provisionConfirmedUser(
+      { ...base, federated: true },
+      deps as never,
+    ).catch((e: unknown) => e as Error);
+    expect(err).toBeInstanceOf(ProvisioningIdentityConflictError);
+    expect((err as Error).message).not.toMatch(/email|bound|identity|exist|registered/i);
+  });
+
   it("looks up the existing user by subject, not by email OR subject", async () => {
     const { deps, findFirst } = makeDeps({ id: "victim", subject: "victim-sub" });
     await provisionConfirmedUser({ ...base, federated: true }, deps as never).catch(() => {});
