@@ -123,6 +123,25 @@ describe("coreSecretEnvKeysIn", () => {
     ).toEqual(["SESSION_SECRET", "DATABASE_URL"]);
   });
 
+  it("M12: also returns secret-shaped keys that are not on the explicit list", () => {
+    expect(
+      coreSecretEnvKeysIn(["DOG_REGISTRY_URL", "DOG_VISION_API_KEY", "GITHUB_TOKEN"]),
+    ).toEqual(["DOG_VISION_API_KEY", "GITHUB_TOKEN"]);
+  });
+
+  it("M12: agrees with isCoreSecretEnvKey for every key (boot and extraction cannot drift)", () => {
+    const probe = [
+      "DOG_REGISTRY_URL",
+      "DOG_VISION_API_KEY",
+      "EXT_DOG_VISION_API_KEY",
+      "SESSION_SECRET",
+      "EXT_SESSION_SECRET",
+      "service_credentials",
+      "DOG_TIMEOUT_MS",
+    ];
+    expect(coreSecretEnvKeysIn(probe)).toEqual(probe.filter(isCoreSecretEnvKey));
+  });
+
   it("is total for an empty input", () => {
     expect(coreSecretEnvKeysIn([])).toEqual([]);
   });

@@ -16,7 +16,7 @@ Branch: `claude/youthful-goldberg-c18bkg` (base `30251d0`). Work paused at the
 | ID | Change |
 |---|---|
 | H1 | `routes/dashboard.ts` PATCH: self-modification refused; role changes need SUPER_ADMIN; non-SUPER_ADMIN cannot touch a SUPER_ADMIN target; claims-cache invalidation after the write; best-effort audit event (`dashboard.user.update`, no IP/UA). Tests added. |
-| M9 (part) | `SessionManager.revokeAllSessionsIfBound` (no-op when no blocklist KV bound, throws if `SESSION_BLOCKLIST_REQUIRED=true` or the write fails). Wired into `UserDeprovisioning.suspendUser` (security event still written, then the call fails) and dashboard PATCH `status: "suspended"` (500 + "retry" on failure). |
+| M9 (part) | `SessionManager.revokeAllSessionsIfBound` (no-op when no blocklist KV bound, throws if `SESSION_BLOCKLIST_REQUIRED=true` or the write fails). Wired into `UserDeprovisioning.suspendUser` (security event still written, then the call fails) and dashboard PATCH `status: "suspended"` (500 + "retry" on failure). **Scope: only routes authenticating through `SessionManager.getSession` honour the epoch — see "Not started" for the `authMiddleware` gap.** |
 | H2 | `reaction-handler.ts` comment add/remove/get: `findFirst({id, tenantId})` + `canReadPost`, uniform 404; `routes/sentiments.ts` comment GET requires session + active tenant, `private, no-store`. |
 | H3 | `media-handler.ts`: entity-avatar ownership heuristic removed; ownership = `uploadedBy === userId`; hide/unhide/delete/metadata-visibility use `requireUploader`; EXIF only for uploader. Optional `tenantId` check added. |
 | H4 | `upload-session-handler.ts`: unowned ids rejected, canonical ids, cap `UPLOAD_SESSION_MAX_MEDIA_IDS` (default 50), `uploadedBy` filter on complete/abandon `updateMany`; `workers/hourly-cron.ts` soft-delete has `posts: { none: {} }`. |
@@ -31,7 +31,7 @@ Branch: `claude/youthful-goldberg-c18bkg` (base `30251d0`). Work paused at the
 | M8 | Compiled-in `*.pages.dev` CORS allow-list removed. |
 | M10 | Issuer probe: `conf.issuer` must equal probed URL (`ISSUER_MISMATCH`); every discovered endpoint gets the issuer's egress checks. |
 | M11 | Invitation redemption: `updateMany({ id, used: false })` + count check. |
-| M12 | Extension config denylist extended + pattern `/(SECRET|PASSWORD|PRIVATE_KEY|_KEY$|TOKEN|KEK|CREDENTIAL)/i` unless `EXT_`-prefixed. |
+| M12 | Extension config denylist extended + pattern `/(SECRET|PASSWORD|PRIVATE_KEY|_KEY$|TOKEN|KEK|CREDENTIAL)/i` unless `EXT_`-prefixed; boot now refuses pattern matches too (not just the explicit list), with an actionable message. |
 | L8 (part) | Invitation code/email removed from redemption log lines. |
 | L12 | `/oauth2/device_authorization` per-IP limit (`DEVICE_AUTHORIZATION_RATE_LIMIT` default 10 / `..._WINDOW_SECONDS` 60). |
 
@@ -57,9 +57,12 @@ Branch: `claude/youthful-goldberg-c18bkg` (base `30251d0`). Work paused at the
 5. **M6:** with `TRUSTED_PROXY=none` behind a private-network proxy all clients
    share an `ip:unknown` bucket — deployments behind a proxy must set
    `TRUSTED_PROXY=alb|cloudflare`. Downstream consumers' deploy config should be checked.
-6. **M12:** extensions with secret-shaped config keys not prefixed `EXT_`
-   (possibly some downstream extensions) now get `undefined` silently. Option: refuse at
-   boot (`coreSecretEnvKeysIn` → `isCoreSecretEnvKey`).
+6. **M12 (decided: refuse at boot):** `coreSecretEnvKeysIn` now uses
+   `isCoreSecretEnvKey`, so a secret-shaped config key without the `EXT_`
+   prefix refuses boot with a message naming the fix, instead of silently
+   becoming `undefined`. **Upgrade note:** any extension declaring such a key
+   (e.g. `*_API_KEY`) must rename it to `EXT_<NAME>` before taking this
+   version. Documented in `docs/reference/extension-api.md`.
 7. **M10:** discovered endpoints are DNS-checked once; Keycloak re-resolves later.
 8. **M4:** no DB unique constraint (needs a migration) — concurrent duplicate
    reports possible.
@@ -70,11 +73,21 @@ Branch: `claude/youthful-goldberg-c18bkg` (base `30251d0`). Work paused at the
 
 ## Not started
 
-- **M9 (rest)** a logout endpoint — trellis has none (auth is Cognito/Amplify
-  client-side; `handleAuthRoutes` 410s everything but magic-link/register/
-  recaptcha), so this is a new public route + contract, needs a human decision.
+- **M9 (rest) — BLOCKED on a finding.** The session blocklist and epoch are
+  consulted ONLY by `SessionManager.getSession` (sealed cookie + JWT-via-
+  getSession). `authMiddleware` / `verifyJwt` — used by ~32 route files
+  (agent-sessions, deletion, tenants, posts, feeds, …) — check neither. So
+  today the M9 epoch bump on suspension does NOT stop a still-valid Cognito
+  JWT on those routes (it is bounded only by token expiry and the claims-cache
+  invalidation that blocks refresh), and a blocklist-based logout would be
+  equally ineffective there. Decision: logout was approved as a minimal
+  `POST /auth/logout` (revoke presented token + clear cookie), but it should
+  not ship until `authMiddleware` honours the blocklist/epoch (or the gap is
+  accepted in writing). Cost to weigh: 1–2 KV reads per authenticated request.
   `suspendUser` has no in-repo caller; member removal
   (`tenant/member-handler.ts`) uses Cognito global sign-out, not the epoch.
+- **H3 (decided: don't wire `tenantId`)** — uploader check stays the sole gate;
+  the optional `tenantId` seam on `getMediaDetails` stays unused.
 - **M13** AP keyId fetch amplification; **M14** private-group followers/inbox.
 - **L1–L7, L8 (rest), L9, L11, L13, L14, I1 (auth-discover 30/min), I2, I4, I5.**
 - **L10** (`.github/workflows/**`) and **I3** (compose binds) — workflows are

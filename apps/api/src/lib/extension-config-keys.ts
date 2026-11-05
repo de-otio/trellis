@@ -99,9 +99,10 @@ export function isCoreSecretEnvKey(key: string): boolean {
 export function coreSecretEnvKeysIn(keys: Iterable<string>): string[] {
   const found: string[] = [];
   for (const key of keys) {
-    // Boot refusal stays on the explicit list; the name-pattern denial in
-    // isCoreSecretEnvKey applies at extraction (extractExtensionConfig).
-    if (DENIED.has(key) && !found.includes(key)) found.push(key);
+    // Same predicate as extraction (extractExtensionConfig) so the two
+    // enforcement points cannot drift: a key that would be silently dropped
+    // at runtime is refused at boot instead (M12).
+    if (isCoreSecretEnvKey(key) && !found.includes(key)) found.push(key);
   }
   return found;
 }

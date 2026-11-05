@@ -443,6 +443,26 @@ describe("validateExtensions", () => {
       );
     });
 
+    it("M12: REJECTS an un-namespaced secret-shaped key (was silently dropped to undefined at runtime)", () => {
+      const ext = makeExtension({
+        id: "dog",
+        configSchema: z.object({ DOG_VISION_API_KEY: z.string() }),
+      });
+      expect(() => validateExtensions([ext])).toThrow(
+        /configSchema: DOG_VISION_API_KEY/,
+      );
+      // The message must tell the author the fix, not just the problem.
+      expect(() => validateExtensions([ext])).toThrow(/EXT_/);
+    });
+
+    it("M12: ACCEPTS the same secret under the EXT_ namespace", () => {
+      const ext = makeExtension({
+        id: "dog",
+        configSchema: z.object({ EXT_DOG_VISION_API_KEY: z.string() }),
+      });
+      expect(() => validateExtensions([ext])).not.toThrow();
+    });
+
     it("REJECTS every key on the core-secret list, one at a time", () => {
       for (const key of CORE_SECRET_ENV_KEYS) {
         const ext = makeExtension({
@@ -481,7 +501,8 @@ describe("validateExtensions", () => {
         id: "dog",
         configSchema: z.object({
           DOG_REGISTRY_URL: z.string().optional(),
-          DOG_VISION_API_KEY: z.string().optional(),
+          // M12: an extension's own secret must be EXT_-namespaced.
+          EXT_DOG_VISION_API_KEY: z.string().optional(),
         }),
       });
       expect(() => validateExtensions([ext])).not.toThrow();

@@ -243,6 +243,13 @@ credentials in all three accepted forms, `SESSION_SECRET`/`SESSION_SECRET_ARN`/
 ambient AWS credential trio. If an extension needs a secret of its own, give it
 its own env var and its own value.
 
+Secret-*shaped* names are refused too: any key containing `SECRET`, `PASSWORD`,
+`PRIVATE_KEY`, `TOKEN`, `KEK` or `CREDENTIAL`, or ending in `_KEY`, is refused at
+boot unless it carries the `EXT_` prefix. Name an extension's own secret
+`EXT_<NAME>` (for example `EXT_VISION_API_KEY`); the prefix is what tells core
+the value is the extension's, not a core credential. The `EXT_` prefix never
+unlocks a key on the `CORE_SECRET_ENV_KEYS` list.
+
 ### `shutdown`
 
 ```ts

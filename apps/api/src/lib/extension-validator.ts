@@ -323,8 +323,11 @@ export function validateExtensions(
           `Extension "${ext.id}" declares core secret env key(s) in its configSchema: ` +
             `${denied.join(", ")}. ExtensionContext.config carries the extension's own ` +
             `configuration only — core credentials are never handed across the seam. ` +
-            `Remove the key(s); if the extension genuinely needs a secret, give it its ` +
-            `own env var and its own value.`,
+            `Remove the key(s). If the extension genuinely needs a secret of its own ` +
+            `(a third-party API key, say), give it its own env var with the "EXT_" ` +
+            `prefix, e.g. EXT_<NAME> — secret-shaped names (SECRET, PASSWORD, TOKEN, ` +
+            `KEK, CREDENTIAL, *_KEY) without that prefix are refused, because core ` +
+            `would otherwise drop them silently at runtime.`,
         );
       }
     }
