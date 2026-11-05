@@ -55,8 +55,8 @@ describe("normalizeClaims — Cognito mapping", () => {
     });
   });
 
-  it("folds legacy custom:role into globalRole when custom:globalRole absent", () => {
-    expect(cognito({ sub: "s", "custom:role": "END_USER" }).globalRole).toBe("END_USER");
+  it("never folds legacy custom:role into globalRole (H6: IdP-mappable claim)", () => {
+    expect(cognito({ sub: "s", "custom:role": "SUPER_ADMIN" }).globalRole).toBeUndefined();
   });
 
   it("prefers custom:globalRole over legacy custom:role", () => {

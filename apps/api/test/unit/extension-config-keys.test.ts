@@ -68,8 +68,43 @@ describe("CORE_SECRET_ENV_KEYS", () => {
 
   it("leaves an extension's own keys alone", () => {
     expect(isCoreSecretEnvKey("DOG_REGISTRY_URL")).toBe(false);
-    expect(isCoreSecretEnvKey("DOG_VISION_API_KEY")).toBe(false);
+    expect(isCoreSecretEnvKey("EXT_DOG_VISION_API_KEY")).toBe(false);
+    expect(isCoreSecretEnvKey("EXT_DOG_WEBHOOK_SECRET")).toBe(false);
+    expect(isCoreSecretEnvKey("KEYCLOAK_URL")).toBe(false);
     expect(isCoreSecretEnvKey("")).toBe(false);
+  });
+
+  it("covers the M12 additions by name", () => {
+    for (const key of [
+      "SESSION_SECRET_FALLBACK",
+      "ACTIVITYPUB_KEY_ENCRYPTION_KEY",
+      "EMAIL_SUB_HMAC_SECRET",
+      "EMAIL_SUB_ENC_KEY",
+      "DEVICE_AUTH_KEK_BASE64",
+      "REPORT_PSEUDONYM_SECRET",
+      "SUPABASE_SERVICE_ROLE_KEY",
+      "OPENAI_API_KEY",
+      "RESEND_API_KEY",
+      "RECAPTCHA_SECRET_KEY",
+      "SMTP_PASSWORD",
+      "CURSOR_SECRET",
+    ]) {
+      expect(isCoreSecretEnvKey(key), key).toBe(true);
+    }
+  });
+
+  it("denies un-namespaced secret-shaped keys not on the list", () => {
+    for (const key of [
+      "DOG_VISION_API_KEY",
+      "FOO_SIGNING_KEY",
+      "SOME_PRIVATE_KEY_PEM",
+      "GITHUB_TOKEN",
+      "BAR_KEK",
+      "service_credentials",
+      "ADMIN_PASSWORD",
+    ]) {
+      expect(isCoreSecretEnvKey(key), key).toBe(true);
+    }
   });
 
   it("has no duplicates", () => {

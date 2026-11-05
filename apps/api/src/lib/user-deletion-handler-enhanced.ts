@@ -281,8 +281,39 @@ export class UserDeletionHandlerEnhanced {
     if (!stored) {
       throw new Error("Confirmation code expired or not found. Please request deletion again.");
     }
-    const { code } = JSON.parse(stored) as { code: string };
-    if (code !== confirmationCode) {
+    const record = JSON.parse(stored) as {
+      code: string;
+      createdAt?: string;
+      attempts?: number;
+    };
+    // M5: constant-time compare plus a bounded attempt counter, so the
+    // 6-digit code cannot be brute-forced within its 24h lifetime.
+    const supplied = Buffer.from(String(confirmationCode ?? ""));
+    const expected = Buffer.from(String(record.code));
+    const matches =
+      supplied.length === expected.length &&
+      crypto.timingSafeEqual(supplied, expected);
+    if (!matches) {
+      const maxAttempts = Math.max(
+        1,
+        Number.parseInt(process.env.DELETION_CONFIRM_MAX_ATTEMPTS ?? "", 10) || 5,
+      );
+      const attempts = (record.attempts ?? 0) + 1;
+      if (attempts >= maxAttempts) {
+        await env.DELETE_JOBS_KV.delete(`deletion-confirm:${userId}`);
+        throw new Error(
+          "Too many invalid confirmation attempts. Please request deletion again.",
+        );
+      }
+      const createdMs = record.createdAt ? Date.parse(record.createdAt) : NaN;
+      const remainingTtl = Number.isFinite(createdMs)
+        ? Math.max(60, Math.floor((createdMs + 86400_000 - Date.now()) / 1000))
+        : 86400;
+      await env.DELETE_JOBS_KV.put(
+        `deletion-confirm:${userId}`,
+        JSON.stringify({ ...record, attempts }),
+        { expirationTtl: remainingTtl },
+      );
       throw new Error("Invalid confirmation code");
     }
     // One-time use: delete after successful validation

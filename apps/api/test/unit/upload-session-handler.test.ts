@@ -5,7 +5,10 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { UploadSessionHandler } from "../../src/lib/upload-session-handler.js";
+import {
+  UploadSessionHandler,
+  getMaxMediaIdsPerSession,
+} from "../../src/lib/upload-session-handler.js";
 
 // Mock dependencies
 vi.mock("../../src/lib/database-connection-manager", () => ({
@@ -304,9 +307,9 @@ describe("UploadSessionHandler", () => {
       });
     });
 
-    it("should add media to session even if media not yet reconciled in database", async () => {
-      // When media is not found, the handler adds it to the session anyway
-      // to handle async reconciliation (upload just completed, DB not yet updated).
+    it("should reject media not found or not owned by the user (H4)", async () => {
+      // H4: an id that does not resolve to a MediaFile owned by the caller
+      // must be rejected and never appended to the session.
       const sessionId = "session-456";
       const userId = "user-123";
       const mediaId = "media-789";
@@ -354,8 +357,8 @@ describe("UploadSessionHandler", () => {
         mockEnv,
       );
 
-      // Source intentionally succeeds when media not found — adds mediaId for async reconciliation
-      expect(result).toEqual({ success: true });
+      expect(result).toEqual({ success: false, error: "Media not found" });
+      expect(mockDb.uploadSession.update).not.toHaveBeenCalled();
     });
   });
 
@@ -412,7 +415,7 @@ describe("UploadSessionHandler", () => {
         data: { status: "completed" },
       });
       expect(mockDb.mediaFile.updateMany).toHaveBeenCalledWith({
-        where: { id: { in: ["media-1", "media-2"] } },
+        where: { id: { in: ["media-1", "media-2"] }, uploadedBy: userId },
         data: {
           attachedToPost: true,
           orphanedAt: null,
@@ -502,7 +505,7 @@ describe("UploadSessionHandler", () => {
         data: { status: "abandoned" },
       });
       expect(mockDb.mediaFile.updateMany).toHaveBeenCalledWith({
-        where: { id: { in: ["media-1", "media-2"] } },
+        where: { id: { in: ["media-1", "media-2"] }, uploadedBy: userId },
         data: {
           orphanedAt: expect.any(Date),
           attachedToPost: false,
@@ -537,5 +540,23 @@ describe("UploadSessionHandler", () => {
         error: "Session not found or expired",
       });
     });
+  });
+});
+
+describe("getMaxMediaIdsPerSession", () => {
+  it("uses a positive default when unset or invalid", () => {
+    expect(getMaxMediaIdsPerSession({})).toBeGreaterThan(0);
+    expect(
+      getMaxMediaIdsPerSession({ UPLOAD_SESSION_MAX_MEDIA_IDS: "abc" }),
+    ).toBe(getMaxMediaIdsPerSession({}));
+    expect(
+      getMaxMediaIdsPerSession({ UPLOAD_SESSION_MAX_MEDIA_IDS: "0" }),
+    ).toBe(getMaxMediaIdsPerSession({}));
+  });
+
+  it("honours the env override", () => {
+    expect(
+      getMaxMediaIdsPerSession({ UPLOAD_SESSION_MAX_MEDIA_IDS: "7" }),
+    ).toBe(7);
   });
 });

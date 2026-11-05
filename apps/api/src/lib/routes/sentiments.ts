@@ -353,6 +353,16 @@ export const sentimentsRoutes: Route[] = [
         );
       }
 
+      // H2: the comment sentiment routes need the caller's ACTIVE tenant to
+      // load the comment tenant-scoped and run the post's read check.
+      const auth = await authMiddleware(request, env);
+      if (!auth || !auth.activeTenantId) {
+        return securityHeaders.createSecureResponse(
+          JSON.stringify({ error: "Unauthorized" }),
+          { status: 401, headers: { "content-type": "application/json" } },
+        );
+      }
+
       try {
         if (!requestContext) {
           return securityHeaders.createSecureResponse(
@@ -376,6 +386,7 @@ export const sentimentsRoutes: Route[] = [
           session,
           env as any,
           requestContext,
+          auth.activeTenantId,
         );
         return securityHeaders.addSecurityHeaders(response);
       } catch (error) {
@@ -416,6 +427,16 @@ export const sentimentsRoutes: Route[] = [
         );
       }
 
+      // H2: the comment sentiment routes need the caller's ACTIVE tenant to
+      // load the comment tenant-scoped and run the post's read check.
+      const auth = await authMiddleware(request, env);
+      if (!auth || !auth.activeTenantId) {
+        return securityHeaders.createSecureResponse(
+          JSON.stringify({ error: "Unauthorized" }),
+          { status: 401, headers: { "content-type": "application/json" } },
+        );
+      }
+
       try {
         if (!requestContext) {
           return securityHeaders.createSecureResponse(
@@ -432,6 +453,7 @@ export const sentimentsRoutes: Route[] = [
           session,
           env as any,
           requestContext,
+          auth.activeTenantId,
         );
         return securityHeaders.addSecurityHeaders(response);
       } catch (error) {
@@ -458,6 +480,29 @@ export const sentimentsRoutes: Route[] = [
       const logger = getLogger();
       const validator = new Validator();
       const reactionHandler = new ReactionHandler();
+      const sessionManager = new SessionManager();
+      const session = await sessionManager.getSession(
+        request,
+        env.SESSION_SECRET,
+        env,
+      );
+
+      // H2: this endpoint required no session and was publicly cacheable,
+      // while the comment it describes is only as readable as its post.
+      if (!session) {
+        return securityHeaders.createSecureResponse(
+          JSON.stringify({ error: "Unauthorized" }),
+          { status: 401, headers: { "content-type": "application/json" } },
+        );
+      }
+
+      const auth = await authMiddleware(request, env);
+      if (!auth || !auth.activeTenantId) {
+        return securityHeaders.createSecureResponse(
+          JSON.stringify({ error: "Unauthorized" }),
+          { status: 401, headers: { "content-type": "application/json" } },
+        );
+      }
 
       try {
         if (!requestContext) {
@@ -472,8 +517,10 @@ export const sentimentsRoutes: Route[] = [
           .split("/sentiments")[0];
         const response = await reactionHandler.getCommentSentiments(
           commentId,
+          session,
           env as any,
           requestContext,
+          auth.activeTenantId,
         );
         return securityHeaders.addSecurityHeaders(response);
       } catch (error) {

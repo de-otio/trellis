@@ -91,6 +91,7 @@ describe("ReactionHandler - Caching", () => {
       },
       postComment: {
         findUnique: vi.fn(),
+        findFirst: vi.fn(),
       },
       postSentiment: {
         findUnique: vi.fn(),
@@ -358,7 +359,7 @@ describe("ReactionHandler - Caching", () => {
 
   describe("getCommentSentiments - Caching", () => {
     beforeEach(() => {
-      mockDb.postComment.findUnique.mockResolvedValue({
+      mockDb.postComment.findFirst.mockResolvedValue({
         id: "comment-123",
         post: { dataRegion: "US" },
       });
@@ -370,8 +371,10 @@ describe("ReactionHandler - Caching", () => {
 
       const response = await handler.getCommentSentiments(
         "comment-123",
+        mockSession,
         mockEnv,
         mockRequestContext,
+        "tenant-1",
       );
 
       expect(response.status).toBe(200);
@@ -390,8 +393,10 @@ describe("ReactionHandler - Caching", () => {
 
       const response = await handler.getCommentSentiments(
         "comment-123",
+        mockSession,
         mockEnv,
         mockRequestContext,
+        "tenant-1",
       );
 
       expect(response.status).toBe(200);
@@ -411,12 +416,14 @@ describe("ReactionHandler - Caching", () => {
 
       const response = await handler.getCommentSentiments(
         "comment-123",
+        mockSession,
         mockEnv,
         mockRequestContext,
+        "tenant-1",
       );
 
       expect(response.headers.get("cache-control")).toBe(
-        "public, max-age=30, stale-while-revalidate=60",
+        "private, no-store",
       );
     });
 
@@ -428,8 +435,10 @@ describe("ReactionHandler - Caching", () => {
 
       const response = await handler.getCommentSentiments(
         "comment-123",
+        mockSession,
         mockEnv,
         mockRequestContext,
+        "tenant-1",
       );
 
       expect(response.status).toBe(200);
@@ -467,7 +476,7 @@ describe("ReactionHandler - Caching", () => {
     });
 
     it("should invalidate comment sentiment cache on add", async () => {
-      mockDb.postComment.findUnique.mockResolvedValue({
+      mockDb.postComment.findFirst.mockResolvedValue({
         id: "comment-123",
         post: { dataRegion: "US" },
       });
@@ -479,6 +488,7 @@ describe("ReactionHandler - Caching", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        "tenant-1",
       );
 
       expect(mockKV.delete).toHaveBeenCalledWith(
@@ -487,7 +497,7 @@ describe("ReactionHandler - Caching", () => {
     });
 
     it("should invalidate comment sentiment cache on remove", async () => {
-      mockDb.postComment.findUnique.mockResolvedValue({
+      mockDb.postComment.findFirst.mockResolvedValue({
         id: "comment-123",
         post: { dataRegion: "US" },
       });
@@ -498,6 +508,7 @@ describe("ReactionHandler - Caching", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        "tenant-1",
       );
 
       expect(mockKV.delete).toHaveBeenCalledWith(

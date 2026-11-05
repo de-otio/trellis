@@ -293,6 +293,44 @@ describe("SessionManager", () => {
       expect(session?.role).toBe("SUPER_ADMIN");
     });
 
+    it("SECURITY (H6): JWT Bearer never seats custom:role; DB-derived role wins", async () => {
+      mockResolveJitClaims.mockResolvedValue({
+        userId: "cmqurmq7x000002i80nqmgfr8",
+        globalRole: "END_USER",
+        activeTenantId: "cmqurmq7x000002i80nqmgfr9",
+        tenantSlug: "acme",
+        tenantRole: "MEMBER",
+        handle: "someone",
+      });
+      mockVerifyCognitoJwt.mockResolvedValue({
+        sub: "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+        email: "kc@example.com",
+        username: "kc@example.com",
+        "custom:role": "SUPER_ADMIN",
+        "custom:globalRole": "SUPER_ADMIN",
+      });
+
+      const session = await sessionManager.getSession(bearerReq(), testSecret, testEnv);
+
+      expect(session?.role).toBe("END_USER");
+    });
+
+    it("SECURITY (H6): JWT Bearer ignores custom:role without JIT (defaults END_USER)", async () => {
+      mockResolveJitClaims.mockResolvedValue(null);
+      mockVerifyCognitoJwt.mockResolvedValue({
+        sub: "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+        "custom:userId": "cmqurmq7x000002i80nqmgfr8",
+        "custom:activeTenantId": "cmqurmq7x000002i80nqmgfr9",
+        email: "c@example.com",
+        username: "c@example.com",
+        "custom:role": "SUPER_ADMIN",
+      });
+
+      const session = await sessionManager.getSession(bearerReq(), testSecret, testEnv);
+
+      expect(session?.role).toBe("END_USER");
+    });
+
     it("JWT Bearer: ignores a JIT result whose userId is not a cuid", async () => {
       mockResolveJitClaims.mockResolvedValue({
         userId: "still-not-a-cuid",

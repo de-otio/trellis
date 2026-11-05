@@ -666,6 +666,46 @@ export const dashboardRoutes: Route[] = [
         };
         const { role, status } = body;
 
+        // H1: no self-modification through this route, and only a
+        // SUPER_ADMIN may change roles or touch a SUPER_ADMIN account.
+        const deny = (msg: string) =>
+          addCorsHeaders(
+            securityHeaders.createSecureResponse(
+              JSON.stringify({ error: msg }),
+              { status: 403, headers: { "content-type": "application/json" } },
+            ),
+            request,
+            env,
+          );
+        if (userId === session.userId) {
+          return deny("Forbidden: cannot modify your own account");
+        }
+        const callerIsSuperAdmin = user.role === "SUPER_ADMIN";
+        if (role && !callerIsSuperAdmin) {
+          return deny("Forbidden: role changes require SUPER_ADMIN");
+        }
+        const target = await withQueryTimeoutAndRetry(
+          dbManager,
+          region,
+          env,
+          async (db) =>
+            db.user.findUnique({ where: { id: userId }, select: { role: true } }),
+          QueryTimeoutPresets.STANDARD,
+        );
+        if (!target) {
+          return addCorsHeaders(
+            securityHeaders.createSecureResponse(
+              JSON.stringify({ error: "User not found" }),
+              { status: 404, headers: { "content-type": "application/json" } },
+            ),
+            request,
+            env,
+          );
+        }
+        if (target.role === "SUPER_ADMIN" && !callerIsSuperAdmin) {
+          return deny("Forbidden: cannot modify a SUPER_ADMIN account");
+        }
+
         // Build update data
         const updateData: any = {};
         if (role) {

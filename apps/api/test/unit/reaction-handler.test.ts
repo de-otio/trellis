@@ -84,6 +84,7 @@ describe("ReactionHandler", () => {
       },
       postComment: {
         findUnique: vi.fn(),
+        findFirst: vi.fn(),
       },
       postSentiment: {
         findUnique: vi.fn(),
@@ -441,7 +442,7 @@ describe("ReactionHandler", () => {
 
   describe("addCommentSentiment", () => {
     it("should add sentiment reaction to comment successfully", async () => {
-      mockDb.postComment.findUnique.mockResolvedValue({
+      mockDb.postComment.findFirst.mockResolvedValue({
         id: "comment-123",
         post: { dataRegion: "US" },
       });
@@ -453,6 +454,7 @@ describe("ReactionHandler", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        "tenant-1",
       );
 
       expect(response.status).toBe(200);
@@ -471,13 +473,14 @@ describe("ReactionHandler", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        "tenant-1",
       );
 
       expect(response.status).toBe(400);
     });
 
     it("should return 404 if comment not found", async () => {
-      mockDb.postComment.findUnique.mockResolvedValue(null);
+      mockDb.postComment.findFirst.mockResolvedValue(null);
 
       const response = await handler.addCommentSentiment(
         "comment-123",
@@ -485,13 +488,14 @@ describe("ReactionHandler", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        "tenant-1",
       );
 
       expect(response.status).toBe(404);
     });
 
     it("should use timeout/retry logic", async () => {
-      mockDb.postComment.findUnique.mockResolvedValue({
+      mockDb.postComment.findFirst.mockResolvedValue({
         id: "comment-123",
         post: { dataRegion: "US" },
       });
@@ -503,6 +507,7 @@ describe("ReactionHandler", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        "tenant-1",
       );
 
       // Verify withQueryTimeoutAndRetry was called twice (find + upsert)
@@ -512,7 +517,7 @@ describe("ReactionHandler", () => {
 
   describe("removeCommentSentiment", () => {
     it("should remove sentiment reaction from comment successfully", async () => {
-      mockDb.postComment.findUnique.mockResolvedValue({
+      mockDb.postComment.findFirst.mockResolvedValue({
         post: { dataRegion: "US" },
       });
       mockDb.commentSentiment.deleteMany.mockResolvedValue({ count: 1 });
@@ -522,6 +527,7 @@ describe("ReactionHandler", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        "tenant-1",
       );
 
       expect(response.status).toBe(200);
@@ -533,20 +539,21 @@ describe("ReactionHandler", () => {
     });
 
     it("should return 404 if comment not found", async () => {
-      mockDb.postComment.findUnique.mockResolvedValue(null);
+      mockDb.postComment.findFirst.mockResolvedValue(null);
 
       const response = await handler.removeCommentSentiment(
         "comment-123",
         mockSession,
         mockEnv,
         mockRequestContext,
+        "tenant-1",
       );
 
       expect(response.status).toBe(404);
     });
 
     it("should use timeout/retry logic", async () => {
-      mockDb.postComment.findUnique.mockResolvedValue({
+      mockDb.postComment.findFirst.mockResolvedValue({
         post: { dataRegion: "US" },
       });
       mockDb.commentSentiment.deleteMany.mockResolvedValue({ count: 1 });
@@ -556,6 +563,7 @@ describe("ReactionHandler", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        "tenant-1",
       );
 
       // Verify withQueryTimeoutAndRetry was called twice (find + delete)
@@ -564,8 +572,33 @@ describe("ReactionHandler", () => {
   });
 
   describe("getCommentSentiments", () => {
+    it("H2: loads tenant-scoped and refuses an unreadable post's comment with the not-found 404", async () => {
+      mockDb.postComment.findFirst.mockResolvedValue({
+        postId: "post-1",
+        post: { dataRegion: "US" },
+      });
+      mockCanReadPost.mockResolvedValue(false);
+
+      const response = await handler.getCommentSentiments(
+        "comment-123",
+        mockSession,
+        mockEnv,
+        mockRequestContext,
+        "tenant-1",
+      );
+
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({ error: "Comment not found" });
+      expect(mockDb.postComment.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: "comment-123", tenantId: "tenant-1" },
+        }),
+      );
+      expect(mockDb.commentSentiment.groupBy).not.toHaveBeenCalled();
+    });
+
     it("should return sentiment counts for a comment", async () => {
-      mockDb.postComment.findUnique.mockResolvedValue({
+      mockDb.postComment.findFirst.mockResolvedValue({
         post: { dataRegion: "US" },
       });
       mockDb.commentSentiment.groupBy.mockResolvedValue([
@@ -575,8 +608,10 @@ describe("ReactionHandler", () => {
 
       const response = await handler.getCommentSentiments(
         "comment-123",
+        mockSession,
         mockEnv,
         mockRequestContext,
+        "tenant-1",
       );
 
       expect(response.status).toBe(200);
@@ -591,27 +626,31 @@ describe("ReactionHandler", () => {
     });
 
     it("should return 404 if comment not found", async () => {
-      mockDb.postComment.findUnique.mockResolvedValue(null);
+      mockDb.postComment.findFirst.mockResolvedValue(null);
 
       const response = await handler.getCommentSentiments(
         "comment-123",
+        mockSession,
         mockEnv,
         mockRequestContext,
+        "tenant-1",
       );
 
       expect(response.status).toBe(404);
     });
 
     it("should use timeout/retry logic", async () => {
-      mockDb.postComment.findUnique.mockResolvedValue({
+      mockDb.postComment.findFirst.mockResolvedValue({
         post: { dataRegion: "US" },
       });
       mockDb.commentSentiment.groupBy.mockResolvedValue([]);
 
       await handler.getCommentSentiments(
         "comment-123",
+        mockSession,
         mockEnv,
         mockRequestContext,
+        "tenant-1",
       );
 
       // Verify withQueryTimeoutAndRetry was called twice (find + groupBy)

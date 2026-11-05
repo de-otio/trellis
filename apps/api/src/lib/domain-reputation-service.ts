@@ -73,8 +73,15 @@ export class DomainReputationService {
     auto_unblock: +20,
   };
 
-  // Auto-block threshold (number of reports before auto-blocking)
-  private readonly AUTO_BLOCK_REPORT_THRESHOLD = 5;
+  // Auto-block threshold (number of distinct reporters before auto-blocking).
+  // Runtime config (threshold-secrecy rule); default 5.
+  private get AUTO_BLOCK_REPORT_THRESHOLD(): number {
+    const parsed = Number.parseInt(
+      process.env.DOMAIN_AUTOBLOCK_REPORT_THRESHOLD ?? "",
+      10,
+    );
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 5;
+  }
 
   constructor(env?: Env) {
     this.logger = getLogger();
@@ -310,8 +317,10 @@ export class DomainReputationService {
     const db = DataRouter.getDatabaseForRegion(region, env);
 
     try {
-      // Count pending/reviewed LINK reports for this domain (P4: Report model).
-      const reportCount = await db.report.count({
+      // Count DISTINCT reporters of pending/reviewed LINK reports for this
+      // domain (P4: Report model), so one user cannot trigger an auto-block.
+      // Bounded by the threshold: we only need to know whether it is reached.
+      const reporters = await db.report.findMany({
         where: {
           reportType: "LINK",
           domain: normalizedDomain,
@@ -319,7 +328,11 @@ export class DomainReputationService {
             in: ["pending", "reviewed"],
           },
         },
+        distinct: ["reporterUserId"],
+        select: { reporterUserId: true },
+        take: this.AUTO_BLOCK_REPORT_THRESHOLD,
       });
+      const reportCount = reporters.length;
 
       // Check if threshold exceeded
       if (reportCount >= this.AUTO_BLOCK_REPORT_THRESHOLD) {

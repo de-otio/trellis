@@ -64,6 +64,18 @@ export interface CreatorRecommendation {
   reason: string;
 }
 
+/**
+ * Thrown by `getRelatedContent` when the source post does not exist or the
+ * viewer may not read it. The route maps it to 404 so "absent" and "refused"
+ * are indistinguishable.
+ */
+export class RelatedContentNotFoundError extends Error {
+  constructor() {
+    super("Post not found");
+    this.name = "RelatedContentNotFoundError";
+  }
+}
+
 export class ContentDiscovery {
   /**
    * Get related content based on taxonomy tags
@@ -86,6 +98,25 @@ export class ContentDiscovery {
   ): Promise<ContentRecommendation[]> {
     const limit = options.limit || 10;
     const minMatchingTags = options.minMatchingTags || 1;
+
+    // Gate the source post through the shared read authorizer (same tenant +
+    // audience + exclusion predicate as the single-post read). Fail closed:
+    // no viewer or tenant, or a post the viewer cannot read, is "not found".
+    const viewerUserId = options.viewerUserId;
+    if (!viewerUserId || !tenantId) {
+      throw new RelatedContentNotFoundError();
+    }
+    const { canReadPost } = await import("./post-read-authorizer.js");
+    const readable = await canReadPost({
+      postId,
+      viewerUserId,
+      tenantId,
+      region,
+      env: env as any,
+    });
+    if (!readable) {
+      throw new RelatedContentNotFoundError();
+    }
 
     // Get database
     const db = DataRouter.getDatabaseForRegion(region, env, request);
@@ -112,22 +143,23 @@ export class ContentDiscovery {
     const taxonIdStrings = postTags.map((pt) => pt.taxon.taxonId);
 
     // Get post author to optionally exclude
-    const post = await db.post.findUnique({
-      where: { id: postId },
+    const post = await db.post.findFirst({
+      where: { id: postId, tenantId },
       select: { authorId: true },
     });
 
     if (!post) {
-      return [];
+      throw new RelatedContentNotFoundError();
     }
 
-    // Block exclusion (M2). The viewer is optional on this call — an
-    // unauthenticated caller cannot have blocks — but when it is present the
-    // same bidirectional set the feed uses applies here too.
+    // Block exclusion (M2) and audience: the related set is filtered by the
+    // same tenant + audience predicate the feed uses, so a related-content
+    // list can never surface a post the viewer could not open directly.
     const { resolveMutualBlockIds } = await import("./block-visibility.js");
-    const blockedIds = options.viewerUserId
-      ? await resolveMutualBlockIds(db, tenantId, options.viewerUserId)
-      : [];
+    const { getFriendUserIds } = await import("./friend-ids.js");
+    const { buildPostAudienceFilter } = await import("./feed-handler.js");
+    const blockedIds = await resolveMutualBlockIds(db, tenantId, viewerUserId);
+    const friendIds = await getFriendUserIds(db, viewerUserId, tenantId);
 
     // Find posts with matching taxonomy tags
     const relatedPosts = await db.postTaxonomyTag.findMany({
@@ -135,14 +167,15 @@ export class ContentDiscovery {
         taxonId: { in: taxonIds },
         postId: { not: postId },
         post: {
+          tenantId,
           deletedAt: null,
           hiddenByAuthor: false,
-          ...(options.includeSameAuthor
-            ? {}
-            : { authorId: { not: post.authorId } }),
-          ...(blockedIds.length > 0
-            ? { AND: [{ authorId: { notIn: blockedIds } }] }
-            : {}),
+          AND: [
+            buildPostAudienceFilter(viewerUserId, friendIds, blockedIds),
+            ...(options.includeSameAuthor
+              ? []
+              : [{ authorId: { not: post.authorId } }]),
+          ],
         },
       },
       include: {

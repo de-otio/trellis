@@ -463,7 +463,7 @@ describe("PostConfirmation Lambda — federated sign-up", () => {
       tenant: {
         id: "t_org_001",
         slug: "acme",
-        identityProvider: { status: "ACTIVE", defaultRole: "MEMBER" },
+        identityProvider: { status: "ACTIVE", defaultRole: "MEMBER", cognitoIdpName: "tenant-abc" },
         roleMappings: [
           { idpGroupName: "trellis-admins", tenantRole: "ADMIN", priority: 10 },
           { idpGroupName: "trellis-employees", tenantRole: "MEMBER", priority: 100 },
@@ -506,7 +506,7 @@ describe("PostConfirmation Lambda — federated sign-up", () => {
       tenant: {
         id: "t_org",
         slug: "acme",
-        identityProvider: { status: "ACTIVE", defaultRole: "MEMBER" },
+        identityProvider: { status: "ACTIVE", defaultRole: "MEMBER", cognitoIdpName: "tenant-abc" },
         roleMappings: [],
       },
     });
@@ -526,7 +526,7 @@ describe("PostConfirmation Lambda — federated sign-up", () => {
       tenant: {
         id: "t_org",
         slug: "acme",
-        identityProvider: { status: "ACTIVE", defaultRole: "GUEST" },
+        identityProvider: { status: "ACTIVE", defaultRole: "GUEST", cognitoIdpName: "tenant-abc" },
         roleMappings: [
           { idpGroupName: "trellis-admins", tenantRole: "ADMIN", priority: 10 },
         ],
@@ -593,7 +593,7 @@ describe("PostConfirmation Lambda — federated sign-up", () => {
       tenant: {
         id: "t_a",
         slug: "tenant-a",
-        identityProvider: { status: "ACTIVE", defaultRole: "MEMBER" },
+        identityProvider: { status: "ACTIVE", defaultRole: "MEMBER", cognitoIdpName: "tenant-abc" },
         roleMappings: [],
       },
     });
@@ -604,7 +604,7 @@ describe("PostConfirmation Lambda — federated sign-up", () => {
       tenant: {
         id: "t_b",
         slug: "tenant-b",
-        identityProvider: { status: "ACTIVE", defaultRole: "MEMBER" },
+        identityProvider: { status: "ACTIVE", defaultRole: "MEMBER", cognitoIdpName: "tenant-abc" },
         roleMappings: [],
       },
     });
@@ -637,7 +637,7 @@ describe("PostConfirmation Lambda — federated sign-up", () => {
       tenant: {
         id: "t_unverified",
         slug: "unverified",
-        identityProvider: { status: "ACTIVE", defaultRole: "MEMBER" },
+        identityProvider: { status: "ACTIVE", defaultRole: "MEMBER", cognitoIdpName: "tenant-abc" },
         roleMappings: [],
       },
     }));
@@ -668,7 +668,7 @@ describe("PostConfirmation Lambda — federated sign-up", () => {
       tenant: {
         id: "t_org_001",
         slug: "acme",
-        identityProvider: { status: "ACTIVE", defaultRole: "MEMBER" },
+        identityProvider: { status: "ACTIVE", defaultRole: "MEMBER", cognitoIdpName: "tenant-abc" },
         roleMappings: [],
       },
     });
@@ -689,7 +689,7 @@ describe("PostConfirmation Lambda — federated sign-up", () => {
       tenant: {
         id: "t_org_001",
         slug: "acme",
-        identityProvider: { status: "ACTIVE", defaultRole: "MEMBER" },
+        identityProvider: { status: "ACTIVE", defaultRole: "MEMBER", cognitoIdpName: "tenant-abc" },
         roleMappings: [],
       },
     });

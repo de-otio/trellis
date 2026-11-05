@@ -369,6 +369,7 @@ describe("Media Metadata Visibility Routes", () => {
         "user-123",
         mockEnv,
         expect.any(Request),
+        { requireUploader: true },
       );
     });
 

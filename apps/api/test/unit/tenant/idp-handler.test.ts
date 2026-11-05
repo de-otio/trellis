@@ -417,6 +417,34 @@ describe("IdpHandler.handleCreate", () => {
     expect(body.error).toBe("VALIDATION_ERROR");
   });
 
+  it.each(["custom:role", "custom:globalRole", "custom:userId", "CUSTOM:role"])(
+    "SECURITY (H6): attributeMapping target %s → 400, no DB call",
+    async (key) => {
+      const h = makeHandler();
+      const req = makeRequest("POST", `https://api.example.com/api/tenants/${TENANT_ID}/identity-provider`, {
+        ...VALID_BODY,
+        attributeMapping: { email: "email", [key]: "role" },
+      });
+      const res = await h.handleCreate(TENANT_ID, req, makeAuth(), mockEnv);
+
+      expect(res.status).toBe(400);
+      const body = await res.json() as { error: string };
+      expect(body.error).toBe("VALIDATION_ERROR");
+      expect((mockPrisma.tenant as { findUnique: ReturnType<typeof vi.fn> }).findUnique).not.toHaveBeenCalled();
+    },
+  );
+
+  it("attributeMapping allows standard names and custom:idpGroups", async () => {
+    const h = makeHandler();
+    const req = makeRequest("POST", `https://api.example.com/api/tenants/${TENANT_ID}/identity-provider`, {
+      ...VALID_BODY,
+      attributeMapping: { email: "email", given_name: "given_name", "custom:idpGroups": "groups" },
+    });
+    const res = await h.handleCreate(TENANT_ID, req, makeAuth(), mockEnv);
+
+    expect(res.status).not.toBe(400);
+  });
+
   // ── PRE-FLIGHT INVARIANTS ─────────────────────────────────────────────────────
 
   it("SECURITY: tenant not found → 404 — no IdP created", async () => {

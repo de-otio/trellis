@@ -21,9 +21,29 @@ interface RemoteAddrEnv {
   TRUSTED_PROXY?: string;
 }
 
+/**
+ * Internal header carrying the Node socket's remote address. `server.ts`
+ * strips any client-supplied copy and sets it from `req.socket.remoteAddress`
+ * before building the Fetch `Request`, so in `none` mode it is the only
+ * trustworthy source (a Fetch `Request` has no `socket`).
+ */
+export const INTERNAL_REMOTE_ADDR_HEADER = "x-trellis-remote-addr";
+
 export function trustedClientIp(request: Request, env: RemoteAddrEnv): string {
   const raw = (env.TRUSTED_PROXY ?? "none").toLowerCase();
   const mode: TrustedProxyMode =
     raw === "alb" || raw === "cloudflare" ? raw : "none";
+  if (mode === "none") {
+    const socketAddr = request.headers.get(INTERNAL_REMOTE_ADDR_HEADER);
+    if (socketAddr) {
+      // Feed the socket address through foundation's validation pipeline
+      // (shape + reserved-range checks) via its `socket.remoteAddress` path.
+      const shim = {
+        headers: request.headers,
+        socket: { remoteAddress: socketAddr.trim() },
+      } as unknown as Request;
+      return foundationTrustedClientIp(shim, { mode });
+    }
+  }
   return foundationTrustedClientIp(request, { mode });
 }

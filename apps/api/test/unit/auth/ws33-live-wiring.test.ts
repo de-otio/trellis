@@ -132,9 +132,9 @@ describe("normalizeClaims — generic (Keycloak) mapping", () => {
     expect(() => normalizeClaims("generic", { sub: "", preferred_username: "u" })).toThrow();
   });
 
-  it("falls back to legacy custom:role for globalRole (parity with the Cognito table)", () => {
-    const claims = normalizeClaims("generic", { sub: "s-1", "custom:role": "END_USER" });
-    expect(claims.globalRole).toBe("END_USER");
+  it("never falls back to legacy custom:role for globalRole (H6)", () => {
+    const claims = normalizeClaims("generic", { sub: "s-1", "custom:role": "SUPER_ADMIN" });
+    expect(claims.globalRole).toBeUndefined();
   });
 });
 

@@ -22,6 +22,23 @@ export interface CreateSessionResult {
   expiresAt: string;
 }
 
+/** Default cap on media ids per upload session; override via env. */
+const DEFAULT_MAX_MEDIA_IDS_PER_SESSION = 50;
+
+/**
+ * Max media ids per session. Runtime config (UPLOAD_SESSION_MAX_MEDIA_IDS)
+ * with a default, per the threshold-secrecy rule.
+ */
+export function getMaxMediaIdsPerSession(
+  source: NodeJS.ProcessEnv = process.env,
+): number {
+  const raw = source.UPLOAD_SESSION_MAX_MEDIA_IDS;
+  const parsed = raw ? Number.parseInt(raw, 10) : NaN;
+  return Number.isFinite(parsed) && parsed > 0
+    ? parsed
+    : DEFAULT_MAX_MEDIA_IDS_PER_SESSION;
+}
+
 export class UploadSessionHandler {
   private logger: Logger;
 
@@ -197,18 +214,31 @@ export class UploadSessionHandler {
       );
 
       if (!media) {
-        // Media not found - this is expected if the upload just completed
-        // and the reconciliation queue hasn't processed it yet
-        // We'll still add the mediaId to the session for tracking
-        this.logger.info("Media not yet reconciled, adding to session anyway", {
+        // Reject ids the caller does not own (or that do not exist yet).
+        // Appending an unverified id would let a later complete/abandon
+        // mutate another user's MediaFile rows.
+        this.logger.warn("Rejected unowned or unknown mediaId for session", {
           sessionId,
           userId,
-          mediaId,
         });
+        return {
+          success: false,
+          error: "Media not found",
+        };
+      }
+
+      const maxMediaIds = getMaxMediaIdsPerSession();
+      if (session.mediaIds.length >= maxMediaIds) {
+        return {
+          success: false,
+          error: "Session media limit reached",
+        };
       }
 
       // Add media to session's mediaIds array
-      const updatedMediaIds = [...session.mediaIds, mediaId];
+      const updatedMediaIds = session.mediaIds.includes(media.id)
+        ? session.mediaIds
+        : [...session.mediaIds, media.id];
 
       await withQueryTimeoutAndRetry(
         sharedDatabaseConnectionManager,
@@ -224,8 +254,8 @@ export class UploadSessionHandler {
         QueryTimeoutPresets.STANDARD,
       );
 
-      // Update media lastAccessedAt if it exists
-      if (media) {
+      // Update media lastAccessedAt
+      {
         await withQueryTimeoutAndRetry(
           sharedDatabaseConnectionManager,
           region,
@@ -321,6 +351,7 @@ export class UploadSessionHandler {
             db.mediaFile.updateMany({
               where: {
                 id: { in: session.mediaIds },
+                uploadedBy: userId,
               },
               data: {
                 attachedToPost: true,
@@ -409,6 +440,7 @@ export class UploadSessionHandler {
             db.mediaFile.updateMany({
               where: {
                 id: { in: session.mediaIds },
+                uploadedBy: userId,
               },
               data: {
                 orphanedAt: new Date(),

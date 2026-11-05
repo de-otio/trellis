@@ -57,13 +57,38 @@ export const CORE_SECRET_ENV_KEYS: readonly string[] = [
   "AWS_ACCESS_KEY_ID",
   "AWS_SECRET_ACCESS_KEY",
   "AWS_SESSION_TOKEN",
+  // M12: further core secrets, listed explicitly even where the pattern
+  // below would also catch them.
+  "SESSION_SECRET_FALLBACK",
+  "ACTIVITYPUB_KEY_ENCRYPTION_KEY",
+  "EMAIL_SUB_HMAC_SECRET",
+  "EMAIL_SUB_ENC_KEY",
+  "DEVICE_AUTH_KEK_BASE64",
+  "REPORT_PSEUDONYM_SECRET",
+  "SUPABASE_SERVICE_ROLE_KEY",
+  "OPENAI_API_KEY",
+  "RESEND_API_KEY",
+  "RECAPTCHA_SECRET_KEY",
+  "SMTP_PASSWORD",
+  "CURSOR_SECRET",
 ];
 
 const DENIED = new Set(CORE_SECRET_ENV_KEYS);
 
+/**
+ * Secret-shaped key names. An explicit list always lags the env, so any key
+ * whose NAME looks like a credential is denied too — unless it is
+ * extension-namespaced (`EXT_` prefix), which is how an extension declares a
+ * secret of its own.
+ */
+const SECRET_SHAPED = /(SECRET|PASSWORD|PRIVATE_KEY|_KEY$|TOKEN|KEK|CREDENTIAL)/i;
+const EXTENSION_NAMESPACE_PREFIX = "EXT_";
+
 /** True when `key` names a core secret an extension may not read. */
 export function isCoreSecretEnvKey(key: string): boolean {
-  return DENIED.has(key);
+  if (DENIED.has(key)) return true;
+  if (key.startsWith(EXTENSION_NAMESPACE_PREFIX)) return false;
+  return SECRET_SHAPED.test(key);
 }
 
 /**
@@ -74,6 +99,8 @@ export function isCoreSecretEnvKey(key: string): boolean {
 export function coreSecretEnvKeysIn(keys: Iterable<string>): string[] {
   const found: string[] = [];
   for (const key of keys) {
+    // Boot refusal stays on the explicit list; the name-pattern denial in
+    // isCoreSecretEnvKey applies at extraction (extractExtensionConfig).
     if (DENIED.has(key) && !found.includes(key)) found.push(key);
   }
   return found;

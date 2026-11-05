@@ -48,12 +48,14 @@ vi.mock("../../../src/lib/validation", () => ({
 const mockLinkCheckFindUnique = vi.fn();
 // P4: link reports now write the generalized Report model.
 const mockLinkReportCreate = vi.fn();
+const mockLinkReportFindFirst = vi.fn();
 const mockDb = {
   linkCheck: {
     findUnique: mockLinkCheckFindUnique,
   },
   report: {
     create: mockLinkReportCreate,
+    findFirst: mockLinkReportFindFirst,
   },
 };
 vi.mock("../../../src/lib/data-router", () => ({
@@ -498,6 +500,48 @@ describe("Link Report Routes", () => {
         "EU",
         mockEnv,
       );
+    });
+
+    it("returns the existing report idempotently for a repeat reporter", async () => {
+      const now = new Date();
+      mockLinkCheckFindUnique.mockResolvedValue({
+        id: "link-1",
+        postId: "post-1",
+        normalizedUrl: "https://example.org/page",
+        originalUrl: "https://example.org/page",
+      });
+      mockLinkReportFindFirst.mockResolvedValueOnce({
+        id: "report-existing",
+        status: "pending",
+        createdAt: now,
+      });
+      mockLinkReportCreate.mockClear();
+      mockUpdateReputation.mockClear();
+
+      const request = new Request(
+        "https://example.com/api/posts/post-1/links/link-1/report",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        },
+      );
+
+      const response = await route!.handler(request, mockEnv, {
+        url: new URL(
+          "https://example.com/api/posts/post-1/links/link-1/report",
+        ),
+        pathname: "/api/posts/post-1/links/link-1/report",
+        params: {},
+        requestContext: mockRequestContext,
+      });
+
+      expect(response.status).toBe(200);
+      const json = (await response.json()) as any;
+      expect(json.success).toBe(true);
+      expect(json.report.id).toBe("report-existing");
+      expect(mockLinkReportCreate).not.toHaveBeenCalled();
+      expect(mockUpdateReputation).not.toHaveBeenCalled();
     });
 
     it("should strip www. prefix from domain", async () => {

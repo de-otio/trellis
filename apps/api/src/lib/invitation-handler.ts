@@ -1764,28 +1764,29 @@ export class InvitationHandler {
         try {
           this.logger.info("[InvitationHandler] Marking invitation as used:", {
             invitationId: invitation.id,
-            code: sanitizedCode,
             userId: userId,
-            email: email,
           });
 
-          const updated = await tx.invitation.update({
-            where: { id: invitation.id },
+          // M11: conditional update — only the first concurrent redeemer
+          // flips used=false→true; everyone else sees count 0.
+          const updated = await tx.invitation.updateMany({
+            where: { id: invitation.id, used: false },
             data: {
               used: true,
               usedBy: userId,
               usedAt: new Date(),
             },
           });
+          if (updated.count !== 1) {
+            return {
+              success: false,
+              error: "Invitation code has already been used",
+            };
+          }
 
           this.logger.info(
             "[InvitationHandler] Successfully marked invitation as used:",
-            {
-              invitationId: updated.id,
-              used: updated.used,
-              usedBy: updated.usedBy,
-              usedAt: updated.usedAt,
-            },
+            { invitationId: invitation.id, usedBy: userId },
           );
 
           return {
@@ -1800,7 +1801,6 @@ export class InvitationHandler {
             "[InvitationHandler] Failed to mark invitation as used:",
             {
               invitationId: invitation.id,
-              code: sanitizedCode,
               error: error.message,
               errorCode: error.code,
             },

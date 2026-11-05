@@ -43,6 +43,7 @@ import { createDefaultDynamoClient } from "@de-otio/saas-foundation/kv";
 
 import { resolveKvProvider, getKvSqlExecutor } from "./kv/kv-provider.js";
 import { getLogger, type LoggerEnv } from "./logger.js";
+import { trustedClientIp } from "./net/trusted-client-ip.js";
 
 interface RateLimitStore {
   [key: string]: BucketState;
@@ -253,21 +254,16 @@ export class RateLimiter {
 
     // For unauthenticated requests, use IP (least privacy-preserving).
     //
-    // SECURITY NOTE (G4 CRITICAL-3 / LOW-1): the IP fallback below is
-    // *not* trusted-proxy-aware on purpose — most call sites pass a
-    // userId/sessionId/email and never reach this branch. Routes that
-    // depend on a meaningful IP partition (e.g. /agents/authorize)
-    // either supply an explicit `userId` keying the bucket or apply the
-    // `trustedClientIp` helper at the call site. When neither header is
-    // present here the bucket collapses to "unknown", which makes the
-    // limiter behave as a global ceiling for that endpoint — safe-fail
-    // by design.
-    const cfIp = request.headers.get("CF-Connecting-IP");
-    const forwardedFor = request.headers.get("X-Forwarded-For");
-    const ip =
-      cfIp ||
-      (forwardedFor ? forwardedFor.split(",")[0]?.trim() : null) ||
-      "unknown";
+    // SECURITY (M6): the IP is derived through `trustedClientIp`, honouring
+    // `TRUSTED_PROXY`. In the default `none` mode client-supplied
+    // CF-Connecting-IP / X-Forwarded-For are ignored and the socket address
+    // (injected by server.ts as an internal header) is used instead, so a
+    // spoofed header cannot mint fresh buckets. When nothing trustworthy is
+    // available the bucket collapses to "unknown" — a global ceiling for the
+    // endpoint, safe-fail by design.
+    const ip = trustedClientIp(request, {
+      TRUSTED_PROXY: process.env.TRUSTED_PROXY,
+    });
 
     return `ratelimit:${endpoint}:ip:${ip}`;
   }

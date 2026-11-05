@@ -224,10 +224,25 @@ describe("hourly-cron handler", () => {
         moderationJobs: [{ decision: "approved" }],
       }),
     ];
-    mockGetPrisma.mockResolvedValue(makeDb(rows));
+    const db = makeDb(rows);
+    // The fake media DB has no `posts` relation; the row has no posts, so
+    // assert the guard is present and then evaluate the rest of the filter.
+    const realUpdateMany = db.mediaFile.updateMany;
+    let sawPostsGuard = false;
+    db.mediaFile.updateMany = vi.fn(async (args: any) => {
+      if (args?.where?.posts !== undefined) {
+        expect(args.where.posts).toEqual({ none: {} });
+        sawPostsGuard = true;
+        const { posts: _posts, ...where } = args.where;
+        return realUpdateMany({ ...args, where });
+      }
+      return realUpdateMany(args);
+    }) as typeof realUpdateMany;
+    mockGetPrisma.mockResolvedValue(db);
 
     await handler();
 
+    expect(sawPostsGuard).toBe(true);
     expect(rows[0].deletedAt).not.toBeNull();
   });
 

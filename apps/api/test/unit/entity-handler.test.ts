@@ -1566,6 +1566,15 @@ describe("EntityHandler", () => {
 
   describe("getEntityProfile", () => {
     beforeEach(() => {
+      // getEntityProfile reads tenant-scoped via findFirst; route it to the
+      // findUnique mock each test configures, and give the caller a tenant.
+      mockDb.entity.findFirst = vi.fn((...args: any[]) =>
+        mockDb.entity.findUnique(...args),
+      );
+      mockSession.activeTenantId = "tenant-1";
+    });
+
+    beforeEach(() => {
       // Reset mocks for getEntityProfile tests
       mockGetDatabaseForRegion.mockReturnValue(mockDb);
       mockCreatePrisma.mockReturnValue(mockDb);

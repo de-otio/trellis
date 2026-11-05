@@ -251,13 +251,22 @@ describe("EntityHandler - Extended", () => {
   });
 
   describe("getEntityProfile - cross-region search", () => {
-    it("should find entity in different region than user dataRegion", async () => {
+    beforeEach(() => {
+      // getEntityProfile reads tenant-scoped via findFirst; route it to the
+      // findUnique mock each test configures, and give the caller a tenant.
+      mockDb.entity.findFirst = vi.fn((...args: any[]) =>
+        mockDb.entity.findUnique(...args),
+      );
+      mockSession.activeTenantId = "tenant-1";
+    });
+
+    it("does NOT search other regions: an entity outside the caller's region is 404", async () => {
       const mockDbEU = {
-        entity: { findUnique: vi.fn().mockResolvedValue(null) },
+        entity: { findFirst: vi.fn().mockResolvedValue(null) },
       };
       const mockDbUS = {
         entity: {
-          findUnique: vi.fn().mockResolvedValue({
+          findFirst: vi.fn().mockResolvedValue({
             id: "entity-123",
             name: "Buddy",
             entityType: "dog",
@@ -268,13 +277,9 @@ describe("EntityHandler - Extended", () => {
           }),
         },
       };
-
-      // First call returns EU db (user region), second returns US db
-      let callCount = 0;
-      mockGetDatabaseForRegion.mockImplementation(() => {
-        callCount++;
-        return callCount === 1 ? mockDbEU : mockDbUS;
-      });
+      mockGetDatabaseForRegion.mockImplementation((region: string) =>
+        region === "EU" ? mockDbEU : mockDbUS,
+      );
 
       const sessionWithEU = { ...mockSession, dataRegion: "EU" } as any;
       const response = await handler.getEntityProfile(
@@ -283,9 +288,37 @@ describe("EntityHandler - Extended", () => {
         mockEnv,
       );
 
-      expect(response.status).toBe(200);
-      const data = await response.json();
-      expect(data.name).toBe("Buddy");
+      expect(response.status).toBe(404);
+      expect(mockDbUS.entity.findFirst).not.toHaveBeenCalled();
+      expect(mockDbEU.entity.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: "entity-123", tenantId: "tenant-1" },
+        }),
+      );
+    });
+
+    it("treats any ACTIVE co-owner as owner and enforces followers-privacy for others", async () => {
+      mockDb.entity.findUnique.mockResolvedValue({
+        id: "entity-123",
+        name: "Buddy",
+        entityType: "dog",
+        metadata: { privacy: "followers" },
+        createdAt: new Date("2024-01-01"),
+        updatedAt: new Date("2024-01-01"),
+        owners: [
+          { userId: "other-owner", role: "PRIMARY" },
+          { userId: "user-123", role: "CO_OWNER" },
+        ],
+      });
+      const ownerRes = await handler.getEntityProfile("entity-123", mockSession, mockEnv);
+      expect(ownerRes.status).toBe(200);
+
+      const strangerRes = await handler.getEntityProfile(
+        "entity-123",
+        { ...mockSession, userId: "stranger" } as any,
+        mockEnv,
+      );
+      expect(strangerRes.status).toBe(403);
     });
 
     it("should return 500 when all region searches fail with db errors", async () => {

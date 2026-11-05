@@ -498,9 +498,10 @@ export class PostHandler {
               error: "INVALID_MEDIA",
               message: "One or more media files not found or not owned by user",
               details: {
+                // M3: the diagnostic (cross-owner) data stays in server
+                // logs only; the client gets a constant-shape body.
                 requested: mediaIds.length,
                 found: mediaFiles.length,
-                ...diagnosticInfo,
               },
             }),
             { status: 400, headers: { "content-type": "application/json" } },

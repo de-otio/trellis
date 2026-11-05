@@ -145,25 +145,25 @@ describe("createExtensionContext", () => {
   });
 
   it("extracts only declared config keys from process.env", () => {
-    const originalEnv = process.env.DOG_BREED_API_KEY;
-    process.env.DOG_BREED_API_KEY = "test-breed-key";
+    const originalEnv = process.env.EXT_DOG_BREED_API_KEY;
+    process.env.EXT_DOG_BREED_API_KEY = "test-breed-key";
 
     const ext = makeExtension({
       configSchema: z.object({
-        DOG_BREED_API_KEY: z.string().optional(),
+        EXT_DOG_BREED_API_KEY: z.string().optional(),
       }),
     });
 
     const ctx = createExtensionContext(ext, mockEnv, mockPrisma, mockGraph);
-    expect(ctx.config.DOG_BREED_API_KEY).toBe("test-breed-key");
+    expect(ctx.config.EXT_DOG_BREED_API_KEY).toBe("test-breed-key");
     // Core secrets not leaked even though they're in process.env
     expect(ctx.config.SESSION_SECRET).toBeUndefined();
 
     // Cleanup
     if (originalEnv === undefined) {
-      delete process.env.DOG_BREED_API_KEY;
+      delete process.env.EXT_DOG_BREED_API_KEY;
     } else {
-      process.env.DOG_BREED_API_KEY = originalEnv;
+      process.env.EXT_DOG_BREED_API_KEY = originalEnv;
     }
   });
 

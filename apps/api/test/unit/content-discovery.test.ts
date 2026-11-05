@@ -17,6 +17,7 @@ vi.mock("../../src/lib/data-router", () => {
     },
     post: {
       findUnique: vi.fn(),
+      findFirst: vi.fn(),
       findMany: vi.fn(),
     },
     entityTaxonomyTag: {
@@ -37,6 +38,16 @@ vi.mock("../../src/lib/data-router", () => {
     },
   };
 });
+
+// M2: the source post is gated through the shared read authorizer; the
+// audience filter needs the viewer's friend set. Default = readable, no friends.
+const mockCanReadPost = vi.fn().mockResolvedValue(true);
+vi.mock("../../src/lib/post-read-authorizer", () => ({
+  canReadPost: (...args: any[]) => mockCanReadPost(...args),
+}));
+vi.mock("../../src/lib/friend-ids", () => ({
+  getFriendUserIds: vi.fn().mockResolvedValue([]),
+}));
 
 vi.mock("../../src/lib/database-wrapper-helper", () => {
   const mockWrappedDb = {
@@ -99,12 +110,29 @@ describe("ContentDiscovery", () => {
     // Reset all mock implementations to ensure clean state
     mockDb.postTaxonomyTag.findMany.mockReset();
     mockDb.post.findUnique.mockReset();
+    mockDb.post.findFirst = vi.fn((...args: any[]) =>
+      mockDb.post.findUnique(...args),
+    );
+    mockCanReadPost.mockResolvedValue(true);
     mockDb.post.findMany.mockReset();
     mockDb.user.findMany.mockReset();
     mockWrappedDb.taxonomyTaxon.findMany.mockReset();
   });
 
   describe("getRelatedContent", () => {
+    it("throws RelatedContentNotFoundError when the viewer cannot read the source post", async () => {
+      const { RelatedContentNotFoundError } = await import(
+        "../../src/lib/content-discovery"
+      );
+      mockCanReadPost.mockResolvedValue(false);
+      await expect(
+        ContentDiscovery.getRelatedContent("post-123", tenantId, region, {} as any, mockRequest, {
+          viewerUserId: "viewer-1",
+        }),
+      ).rejects.toBeInstanceOf(RelatedContentNotFoundError);
+      expect(mockDb.postTaxonomyTag.findMany).not.toHaveBeenCalled();
+    });
+
     it("should return empty array when post has no taxonomy tags", async () => {
       mockDb.postTaxonomyTag.findMany.mockResolvedValue([]);
 
@@ -114,6 +142,7 @@ describe("ContentDiscovery", () => {
         region,
         {} as any,
         mockRequest,
+        { viewerUserId: "viewer-1" },
       );
 
       expect(result).toEqual([]);
@@ -163,7 +192,7 @@ describe("ContentDiscovery", () => {
         region,
         {} as any,
         mockRequest,
-        { limit: 10 },
+        { viewerUserId: "viewer-1", limit: 10 },
       );
 
       expect(result.length).toBeGreaterThan(0);
@@ -193,11 +222,15 @@ describe("ContentDiscovery", () => {
         region,
         {} as any,
         mockRequest,
+        { viewerUserId: "viewer-1" },
       );
 
       // Verify query excludes same author
       const findManyCall = mockDb.postTaxonomyTag.findMany.mock.calls[1][0];
-      expect(findManyCall.where.post.authorId.not).toBe("user-123");
+      expect(findManyCall.where.post.AND).toContainEqual({
+        authorId: { not: "user-123" },
+      });
+      expect(findManyCall.where.post.tenantId).toBe(tenantId);
     });
 
     it("should include posts from same author when includeSameAuthor is true", async () => {
@@ -222,7 +255,7 @@ describe("ContentDiscovery", () => {
         region,
         {} as any,
         mockRequest,
-        { includeSameAuthor: true },
+        { viewerUserId: "viewer-1", includeSameAuthor: true },
       );
 
       // Verify query doesn't exclude same author
@@ -270,7 +303,7 @@ describe("ContentDiscovery", () => {
         region,
         {} as any,
         mockRequest,
-        { minMatchingTags: 2 },
+        { viewerUserId: "viewer-1", minMatchingTags: 2 },
       );
 
       // Should filter out posts with only 1 matching tag
@@ -316,6 +349,7 @@ describe("ContentDiscovery", () => {
         region,
         {} as any,
         mockRequest,
+        { viewerUserId: "viewer-1" },
       );
 
       // Recent post should have higher relevance

@@ -40,6 +40,7 @@ vi.mock("../../../src/lib/content-discovery", () => ({
     getCreatorRecommendations: (...args: any[]) =>
       mockGetCreatorRecommendations(...args),
   },
+  RelatedContentNotFoundError: class RelatedContentNotFoundError extends Error {},
 }));
 
 // Mock createRequestContext
@@ -187,7 +188,21 @@ describe("Content Discovery Routes", () => {
 
             expect(response.status).toBe(500);
       const body = await response.json();
-      expect(body.error).toBe("Database error");
+      // Never echo raw error text to the client.
+      expect(body.error).toBe("Internal server error");
+    });
+
+    it("returns 404 when the source post is absent or unreadable", async () => {
+      const { RelatedContentNotFoundError } = await import(
+        "../../../src/lib/content-discovery"
+      );
+      mockGetRelatedContent.mockRejectedValue(new RelatedContentNotFoundError());
+
+      const response = await route!.handler(mockRequest, mockEnv, {
+        pathname: "/api/posts/post-123/related",
+      });
+
+      expect(response.status).toBe(404);
     });
   });
 

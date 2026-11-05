@@ -100,6 +100,22 @@ export const deletionRoutes: Route[] = [
         );
       }
 
+      // M5: bound confirmation attempts per user (the handler also keeps an
+      // attempt counter on the code itself).
+      const confirmRateLimit = await new RateLimiter().applyRateLimitKV(
+        env as any,
+        request,
+        "/api/user/delete-account/confirm",
+        10,
+        3600,
+        undefined,
+        undefined,
+        session.userId,
+      );
+      if (confirmRateLimit) {
+        return securityHeaders.addSecurityHeaders(confirmRateLimit);
+      }
+
       try {
         const validation = await validateRequest(
           request,

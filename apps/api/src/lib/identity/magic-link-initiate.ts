@@ -29,6 +29,7 @@
  * hard gate — this is defense-in-depth, not the boundary.
  */
 
+import { randomBytes } from "node:crypto";
 import type { Env } from "../../env.js";
 import {
   IdentityProviderError,
@@ -211,7 +212,18 @@ export async function handleMagicLinkInitiate(
     if (err instanceof IdentityProviderError && err.reason === "unknown_user") {
       // C-13/F10 enumeration stance: indistinguishable from success.
       logger.info("magic-link.unknown_email", { emailDomain: email.split("@")[1] });
-      return jsonResponse(200, { status: "sent" }, corsHeaders);
+      // M7: providers that return a continuation handle (Cognito) must not
+      // reveal an unknown user by its absence — return a decoy handle of the
+      // same shape. Keycloak returns no handle for anyone.
+      const providerUsesHandle =
+        (env.IDENTITY_PROVIDER ?? process.env.IDENTITY_PROVIDER ?? "cognito") === "cognito";
+      return jsonResponse(
+        200,
+        providerUsesHandle
+          ? { status: "sent", session: randomBytes(690).toString("base64url") }
+          : { status: "sent" },
+        corsHeaders,
+      );
     }
     logger.error("magic-link.initiate_failed", {
       reason: err instanceof IdentityProviderError ? err.reason : "unexpected",

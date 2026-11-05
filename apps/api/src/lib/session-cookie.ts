@@ -38,6 +38,15 @@ export type UserRole =
   | "CONTENT_CREATOR"
   | "SUPER_ADMIN";
 
+const KNOWN_USER_ROLES: readonly UserRole[] = [
+  "END_USER",
+  "B2B_PARTNER",
+  "PARTNER_ADMIN",
+  "INTERNAL",
+  "CONTENT_CREATOR",
+  "SUPER_ADMIN",
+];
+
 export interface Session {
   userId: string; // Supabase Auth user_id (UUID)
   email: string;
@@ -557,7 +566,17 @@ export class SessionManager {
             typeof rawUserId === "string" && CUID_RE.test(rawUserId)
               ? rawUserId
               : undefined;
-          let role = claimsRecord["custom:role"] as UserRole | undefined;
+          // H6: the global role comes ONLY from `custom:globalRole` (written
+          // by the pre-token-generation Lambda, which overwrites whatever the
+          // IdP sent) or from the DB via JIT resolution below. `custom:role`
+          // is NOT overwritten by the Lambda, so a federated IdP attribute
+          // mapping could set it to SUPER_ADMIN — it is never read here.
+          const rawGlobalRole = claimsRecord["custom:globalRole"];
+          let role: UserRole | undefined =
+            typeof rawGlobalRole === "string" &&
+            (KNOWN_USER_ROLES as readonly string[]).includes(rawGlobalRole)
+              ? (rawGlobalRole as UserRole)
+              : undefined;
 
           if (!userId || !activeTenantId) {
             // The same server-side resolution `auth-middleware.ts` performs
@@ -587,7 +606,15 @@ export class SessionManager {
                   if (!activeTenantId && CUID_RE.test(jit.activeTenantId)) {
                     activeTenantId = jit.activeTenantId;
                   }
-                  if (!role && jit.globalRole) role = jit.globalRole as UserRole;
+                  // The DB-derived role always wins over any token claim.
+                  if (
+                    typeof jit.globalRole === "string" &&
+                    (KNOWN_USER_ROLES as readonly string[]).includes(
+                      jit.globalRole,
+                    )
+                  ) {
+                    role = jit.globalRole as UserRole;
+                  }
                 }
               } catch (jitErr) {
                 // Fail closed via the guard below — never widen access.

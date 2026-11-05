@@ -9,7 +9,10 @@
 
 import type { Env } from "../../env.js";
 import { authMiddleware } from "../auth/auth-middleware.js";
-import { ContentDiscovery } from "../content-discovery.js";
+import {
+  ContentDiscovery,
+  RelatedContentNotFoundError,
+} from "../content-discovery.js";
 import { getLogger, Logger } from "../logger.js";
 import { corsMiddleware } from "../middleware.js";
 import { createRequestContext } from "../request-context.js";
@@ -100,9 +103,15 @@ export const contentDiscoveryRoutes: Route[] = [
           },
         );
       } catch (error: any) {
+        if (error instanceof RelatedContentNotFoundError) {
+          return new Response(JSON.stringify({ error: "Post not found" }), {
+            status: 404,
+            headers: { "content-type": "application/json" },
+          });
+        }
         getLogger().error("Error getting related content:", error);
         return new Response(
-          JSON.stringify({ error: error.message || "Internal server error" }),
+          JSON.stringify({ error: "Internal server error" }),
           {
             status: 500,
             headers: { "content-type": "application/json" },
@@ -157,7 +166,7 @@ export const contentDiscoveryRoutes: Route[] = [
       } catch (error: any) {
         getLogger().error("Error getting trending topics:", error);
         return new Response(
-          JSON.stringify({ error: error.message || "Internal server error" }),
+          JSON.stringify({ error: "Internal server error" }),
           {
             status: 500,
             headers: { "content-type": "application/json" },
@@ -234,7 +243,7 @@ export const contentDiscoveryRoutes: Route[] = [
         );
         const securityHeaders = new SecurityHeaders(env);
         return securityHeaders.createSecureResponse(
-          JSON.stringify({ error: error.message || "Internal server error" }),
+          JSON.stringify({ error: "Internal server error" }),
           {
             status: 500,
             headers: { "content-type": "application/json" },
@@ -322,7 +331,7 @@ export const contentDiscoveryRoutes: Route[] = [
         );
         const securityHeaders = new SecurityHeaders(env);
         return securityHeaders.createSecureResponse(
-          JSON.stringify({ error: error.message || "Internal server error" }),
+          JSON.stringify({ error: "Internal server error" }),
           {
             status: 500,
             headers: { "content-type": "application/json" },

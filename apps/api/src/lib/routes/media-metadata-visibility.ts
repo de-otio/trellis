@@ -108,10 +108,12 @@ export const mediaMetadataVisibilityRoutes: Route[] = [
         undefined,
       );
 
-      // Ownership: reuse MediaHandler.getMediaDetails ownership semantics
+      // Ownership [SR:H3]: only the uploader may change visibility flags.
       const { MediaHandler } = await import("../media-handler.js");
       const mediaHandler = MediaHandler.create(env);
-      await mediaHandler.getMediaDetails(mediaId, session.userId, env, request);
+      await mediaHandler.getMediaDetails(mediaId, session.userId, env, request, {
+        requireUploader: true,
+      });
 
       const updated = await withQueryTimeoutAndRetry(
         sharedDatabaseConnectionManager,

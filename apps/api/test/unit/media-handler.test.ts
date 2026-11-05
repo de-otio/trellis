@@ -870,6 +870,7 @@ describe("MediaHandler", () => {
               ...mockDb,
               mediaFile: {
                 findUnique: vi.fn().mockResolvedValue({
+                  uploadedBy: "user-123",
                   id: "media-1",
                   contentHash: "hash-1",
                   mimeType: "image/jpeg",
@@ -904,9 +905,9 @@ describe("MediaHandler", () => {
               },
             });
           }
-          // Fourth call: userEntities (entity.findMany), handled by mockDb default
+          // (entity-avatar ownership query removed — SR:H3)
           // Fifth call: findMany posts with media (postsWithMedia)
-          if (callCount === 5) {
+          if (callCount === 4) {
             return await queryFn({
               ...mockDb,
               post: {
@@ -922,7 +923,7 @@ describe("MediaHandler", () => {
             });
           }
           // Sixth call: findMany all posts with media (checkShared)
-          if (callCount === 6) {
+          if (callCount === 5) {
             return await queryFn({
               ...mockDb,
               postMedia: {
@@ -975,6 +976,7 @@ describe("MediaHandler", () => {
               ...mockDb,
               mediaFile: {
                 findUnique: vi.fn().mockResolvedValue({
+                  uploadedBy: "someone-else",
                   id: "media-1",
                   contentHash: "hash-1",
                   mimeType: "image/jpeg",
@@ -1021,6 +1023,7 @@ describe("MediaHandler", () => {
               ...mockDb,
               mediaFile: {
                 findUnique: vi.fn().mockResolvedValue({
+                  uploadedBy: "someone-else",
                   id: "media-1",
                   contentHash: "hash-1",
                   mimeType: "image/jpeg",
@@ -1075,6 +1078,7 @@ describe("MediaHandler", () => {
               ...mockDb,
               mediaFile: {
                 findUnique: vi.fn().mockResolvedValue({
+                  uploadedBy: "user-123",
                   id: "media-1",
                   contentHash: "hash-1",
                   mimeType: "image/jpeg",
@@ -1104,8 +1108,8 @@ describe("MediaHandler", () => {
               },
             });
           }
-          // callCount === 4 is userEntities (entity.findMany), handled by mockDb default
-          if (callCount === 5) {
+          // (entity-avatar ownership query removed — SR:H3)
+          if (callCount === 4) {
             return await queryFn({
               ...mockDb,
               post: {
@@ -1113,7 +1117,7 @@ describe("MediaHandler", () => {
               },
             });
           }
-          if (callCount === 6) {
+          if (callCount === 5) {
             return await queryFn({
               ...mockDb,
               postMedia: {
@@ -1169,8 +1173,8 @@ describe("MediaHandler", () => {
               },
             });
           }
-          // callCount === 4: userEntities — handled by mockDb default (returns [])
-          if (callCount === 5) {
+          // (entity-avatar ownership query removed — SR:H3)
+          if (callCount === 4) {
             return await queryFn({
               ...mockDb,
               post: {
@@ -1185,7 +1189,7 @@ describe("MediaHandler", () => {
               },
             });
           }
-          if (callCount === 6) {
+          if (callCount === 5) {
             return await queryFn({
               ...mockDb,
               postMedia: {
@@ -1227,6 +1231,7 @@ describe("MediaHandler", () => {
 
     it("should include exif/iptc/dateTaken when metadataVisible is true", async () => {
       setupGetMediaDetailsMocks({
+        uploadedBy: "user-123",
         id: "media-1",
         contentHash: "abc123",
         mimeType: "image/jpeg",
@@ -1296,12 +1301,13 @@ describe("MediaHandler", () => {
         ) => {
           callCount++;
           // Calls 1-6: getMediaDetails queries
-          if (callCount <= 6) {
+          if (callCount <= 5) {
             if (callCount === 1) {
               return await queryFn({
                 ...mockDb,
                 mediaFile: {
                   findUnique: vi.fn().mockResolvedValue({
+                  uploadedBy: "user-123",
                     id: "media-1",
                     contentHash: "hash-1",
                     mimeType: "image/jpeg",
@@ -1331,8 +1337,8 @@ describe("MediaHandler", () => {
                 },
               });
             }
-            // callCount === 4 is userEntities (entity.findMany), handled by mockDb default
-            if (callCount === 5) {
+            // (entity-avatar ownership query removed — SR:H3)
+            if (callCount === 4) {
               return await queryFn({
                 ...mockDb,
                 post: {
@@ -1340,7 +1346,7 @@ describe("MediaHandler", () => {
                 },
               });
             }
-            if (callCount === 6) {
+            if (callCount === 5) {
               return await queryFn({
                 ...mockDb,
                 postMedia: {
@@ -1350,7 +1356,7 @@ describe("MediaHandler", () => {
             }
           }
           // Call 7: hideMedia update
-          if (callCount === 7) {
+          if (callCount === 6) {
             return await queryFn({
               ...mockDb,
               mediaFile: {
@@ -1390,6 +1396,7 @@ describe("MediaHandler", () => {
               ...mockDb,
               mediaFile: {
                 findUnique: vi.fn().mockResolvedValue({
+                  uploadedBy: "user-123",
                   id: "media-1",
                   contentHash: "hash-1",
                   mimeType: "image/jpeg",
@@ -1422,8 +1429,8 @@ describe("MediaHandler", () => {
               },
             });
           }
-          // callCount === 4 is userEntities (entity.findMany), handled by mockDb default
-          if (callCount === 5) {
+          // (entity-avatar ownership query removed — SR:H3)
+          if (callCount === 4) {
             return await queryFn({
               ...mockDb,
               post: {
@@ -1431,7 +1438,7 @@ describe("MediaHandler", () => {
               },
             });
           }
-          if (callCount === 6) {
+          if (callCount === 5) {
             return await queryFn({
               ...mockDb,
               postMedia: {
@@ -1464,6 +1471,7 @@ describe("MediaHandler", () => {
               ...mockDb,
               mediaFile: {
                 findUnique: vi.fn().mockResolvedValue({
+                  uploadedBy: "user-123",
                   id: "media-1",
                   contentHash: "hash-1",
                   mimeType: "image/jpeg",
@@ -1493,8 +1501,8 @@ describe("MediaHandler", () => {
               },
             });
           }
-          // callCount === 4 is userEntities (entity.findMany), handled by mockDb default
-          if (callCount === 5) {
+          // (entity-avatar ownership query removed — SR:H3)
+          if (callCount === 4) {
             return await queryFn({
               ...mockDb,
               post: {
@@ -1502,7 +1510,7 @@ describe("MediaHandler", () => {
               },
             });
           }
-          if (callCount === 6) {
+          if (callCount === 5) {
             return await queryFn({
               ...mockDb,
               postMedia: {
@@ -1533,13 +1541,14 @@ describe("MediaHandler", () => {
           queryFn: (db: any) => Promise<any>,
         ) => {
           callCount++;
-          if (callCount <= 6) {
+          if (callCount <= 5) {
             // getMediaDetails queries
             if (callCount === 1) {
               return await queryFn({
                 ...mockDb,
                 mediaFile: {
                   findUnique: vi.fn().mockResolvedValue({
+                  uploadedBy: "user-123",
                     id: "media-1",
                     contentHash: "hash-1",
                     mimeType: "image/jpeg",
@@ -1569,8 +1578,8 @@ describe("MediaHandler", () => {
                 },
               });
             }
-            // callCount === 4 is userEntities (entity.findMany), handled by mockDb default
-            if (callCount === 5) {
+            // (entity-avatar ownership query removed — SR:H3)
+            if (callCount === 4) {
               return await queryFn({
                 ...mockDb,
                 post: {
@@ -1578,7 +1587,7 @@ describe("MediaHandler", () => {
                 },
               });
             }
-            if (callCount === 6) {
+            if (callCount === 5) {
               return await queryFn({
                 ...mockDb,
                 postMedia: {
@@ -1588,7 +1597,7 @@ describe("MediaHandler", () => {
             }
           }
           // hideMedia update
-          if (callCount === 7) {
+          if (callCount === 6) {
             return await queryFn({
               ...mockDb,
               mediaFile: {
@@ -1621,13 +1630,14 @@ describe("MediaHandler", () => {
           queryFn: (db: any) => Promise<any>,
         ) => {
           callCount++;
-          if (callCount <= 6) {
+          if (callCount <= 5) {
             // getMediaDetails queries
             if (callCount === 1) {
               return await queryFn({
                 ...mockDb,
                 mediaFile: {
                   findUnique: vi.fn().mockResolvedValue({
+                  uploadedBy: "user-123",
                     id: "media-1",
                     contentHash: "hash-1",
                     mimeType: "image/jpeg",
@@ -1657,8 +1667,8 @@ describe("MediaHandler", () => {
                 },
               });
             }
-            // callCount === 4 is userEntities (entity.findMany), handled by mockDb default
-            if (callCount === 5) {
+            // (entity-avatar ownership query removed — SR:H3)
+            if (callCount === 4) {
               return await queryFn({
                 ...mockDb,
                 post: {
@@ -1666,7 +1676,7 @@ describe("MediaHandler", () => {
                 },
               });
             }
-            if (callCount === 6) {
+            if (callCount === 5) {
               return await queryFn({
                 ...mockDb,
                 postMedia: {
@@ -1676,7 +1686,7 @@ describe("MediaHandler", () => {
             }
           }
           // hideMedia update
-          if (callCount === 7) {
+          if (callCount === 6) {
             return await queryFn({
               ...mockDb,
               mediaFile: {
@@ -1720,13 +1730,14 @@ describe("MediaHandler", () => {
           queryFn: (db: any) => Promise<any>,
         ) => {
           callCount++;
-          if (callCount <= 6) {
+          if (callCount <= 5) {
             // getMediaDetails queries
             if (callCount === 1) {
               return await queryFn({
                 ...mockDb,
                 mediaFile: {
                   findUnique: vi.fn().mockResolvedValue({
+                  uploadedBy: "user-123",
                     id: "media-1",
                     contentHash: "hash-1",
                     mimeType: "image/jpeg",
@@ -1756,8 +1767,8 @@ describe("MediaHandler", () => {
                 },
               });
             }
-            // callCount === 4 is userEntities (entity.findMany), handled by mockDb default
-            if (callCount === 5) {
+            // (entity-avatar ownership query removed — SR:H3)
+            if (callCount === 4) {
               return await queryFn({
                 ...mockDb,
                 post: {
@@ -1765,7 +1776,7 @@ describe("MediaHandler", () => {
                 },
               });
             }
-            if (callCount === 6) {
+            if (callCount === 5) {
               return await queryFn({
                 ...mockDb,
                 postMedia: {
@@ -1775,7 +1786,7 @@ describe("MediaHandler", () => {
             }
           }
           // unhideMedia update
-          if (callCount === 7) {
+          if (callCount === 6) {
             return await queryFn({
               ...mockDb,
               mediaFile: {
@@ -1815,6 +1826,7 @@ describe("MediaHandler", () => {
               ...mockDb,
               mediaFile: {
                 findUnique: vi.fn().mockResolvedValue({
+                  uploadedBy: "user-123",
                   id: "media-1",
                   contentHash: "hash-1",
                   mimeType: "image/jpeg",
@@ -1847,8 +1859,8 @@ describe("MediaHandler", () => {
               },
             });
           }
-          // callCount === 4 is userEntities (entity.findMany), handled by mockDb default
-          if (callCount === 5) {
+          // (entity-avatar ownership query removed — SR:H3)
+          if (callCount === 4) {
             return await queryFn({
               ...mockDb,
               post: {
@@ -1856,7 +1868,7 @@ describe("MediaHandler", () => {
               },
             });
           }
-          if (callCount === 6) {
+          if (callCount === 5) {
             return await queryFn({
               ...mockDb,
               postMedia: {
@@ -1888,6 +1900,7 @@ describe("MediaHandler", () => {
               ...mockDb,
               mediaFile: {
                 findUnique: vi.fn().mockResolvedValue({
+                  uploadedBy: "user-123",
                   id: "media-1",
                   contentHash: "hash-1",
                   mimeType: "image/jpeg",
@@ -1917,8 +1930,8 @@ describe("MediaHandler", () => {
               },
             });
           }
-          // callCount === 4 is userEntities (entity.findMany), handled by mockDb default
-          if (callCount === 5) {
+          // (entity-avatar ownership query removed — SR:H3)
+          if (callCount === 4) {
             return await queryFn({
               ...mockDb,
               post: {
@@ -1926,7 +1939,7 @@ describe("MediaHandler", () => {
               },
             });
           }
-          if (callCount === 6) {
+          if (callCount === 5) {
             return await queryFn({
               ...mockDb,
               postMedia: {
@@ -1957,13 +1970,14 @@ describe("MediaHandler", () => {
           queryFn: (db: any) => Promise<any>,
         ) => {
           callCount++;
-          if (callCount <= 6) {
+          if (callCount <= 5) {
             // getMediaDetails queries
             if (callCount === 1) {
               return await queryFn({
                 ...mockDb,
                 mediaFile: {
                   findUnique: vi.fn().mockResolvedValue({
+                  uploadedBy: "user-123",
                     id: "media-1",
                     contentHash: "hash-1",
                     mimeType: "image/jpeg",
@@ -1993,8 +2007,8 @@ describe("MediaHandler", () => {
                 },
               });
             }
-            // callCount === 4 is userEntities (entity.findMany), handled by mockDb default
-            if (callCount === 5) {
+            // (entity-avatar ownership query removed — SR:H3)
+            if (callCount === 4) {
               return await queryFn({
                 ...mockDb,
                 post: {
@@ -2002,7 +2016,7 @@ describe("MediaHandler", () => {
                 },
               });
             }
-            if (callCount === 6) {
+            if (callCount === 5) {
               return await queryFn({
                 ...mockDb,
                 postMedia: {
@@ -2012,7 +2026,7 @@ describe("MediaHandler", () => {
             }
           }
           // unhideMedia update
-          if (callCount === 7) {
+          if (callCount === 6) {
             return await queryFn({
               ...mockDb,
               mediaFile: {
@@ -2045,13 +2059,14 @@ describe("MediaHandler", () => {
           queryFn: (db: any) => Promise<any>,
         ) => {
           callCount++;
-          if (callCount <= 6) {
+          if (callCount <= 5) {
             // getMediaDetails queries
             if (callCount === 1) {
               return await queryFn({
                 ...mockDb,
                 mediaFile: {
                   findUnique: vi.fn().mockResolvedValue({
+                  uploadedBy: "user-123",
                     id: "media-1",
                     contentHash: "hash-1",
                     mimeType: "image/jpeg",
@@ -2081,8 +2096,8 @@ describe("MediaHandler", () => {
                 },
               });
             }
-            // callCount === 4 is userEntities (entity.findMany), handled by mockDb default
-            if (callCount === 5) {
+            // (entity-avatar ownership query removed — SR:H3)
+            if (callCount === 4) {
               return await queryFn({
                 ...mockDb,
                 post: {
@@ -2090,7 +2105,7 @@ describe("MediaHandler", () => {
                 },
               });
             }
-            if (callCount === 6) {
+            if (callCount === 5) {
               return await queryFn({
                 ...mockDb,
                 postMedia: {
@@ -2100,7 +2115,7 @@ describe("MediaHandler", () => {
             }
           }
           // unhideMedia update
-          if (callCount === 7) {
+          if (callCount === 6) {
             return await queryFn({
               ...mockDb,
               mediaFile: {
@@ -2144,13 +2159,14 @@ describe("MediaHandler", () => {
           queryFn: (db: any) => Promise<any>,
         ) => {
           callCount++;
-          if (callCount <= 6) {
+          if (callCount <= 5) {
             // getMediaDetails queries
             if (callCount === 1) {
               return await queryFn({
                 ...mockDb,
                 mediaFile: {
                   findUnique: vi.fn().mockResolvedValue({
+                  uploadedBy: "user-123",
                     id: "media-1",
                     contentHash: "hash-1",
                     mimeType: "image/jpeg",
@@ -2180,8 +2196,8 @@ describe("MediaHandler", () => {
                 },
               });
             }
-            // callCount === 4 is userEntities (entity.findMany), handled by mockDb default
-            if (callCount === 5) {
+            // (entity-avatar ownership query removed — SR:H3)
+            if (callCount === 4) {
               return await queryFn({
                 ...mockDb,
                 post: {
@@ -2189,7 +2205,7 @@ describe("MediaHandler", () => {
                 },
               });
             }
-            if (callCount === 6) {
+            if (callCount === 5) {
               return await queryFn({
                 ...mockDb,
                 postMedia: {
@@ -2199,7 +2215,7 @@ describe("MediaHandler", () => {
             }
           }
           // deleteMedia checkShared
-          if (callCount === 7) {
+          if (callCount === 6) {
             return await queryFn({
               ...mockDb,
               postMedia: {
@@ -2212,7 +2228,7 @@ describe("MediaHandler", () => {
             });
           }
           // deleteMedia update
-          if (callCount === 8) {
+          if (callCount === 7) {
             return await queryFn({
               ...mockDb,
               mediaFile: {
@@ -2244,13 +2260,14 @@ describe("MediaHandler", () => {
           queryFn: (db: any) => Promise<any>,
         ) => {
           callCount++;
-          if (callCount <= 6) {
+          if (callCount <= 5) {
             // getMediaDetails queries
             if (callCount === 1) {
               return await queryFn({
                 ...mockDb,
                 mediaFile: {
                   findUnique: vi.fn().mockResolvedValue({
+                  uploadedBy: "user-123",
                     id: "media-1",
                     contentHash: "hash-1",
                     mimeType: "image/jpeg",
@@ -2280,8 +2297,8 @@ describe("MediaHandler", () => {
                 },
               });
             }
-            // callCount === 4 is userEntities (entity.findMany), handled by mockDb default
-            if (callCount === 5) {
+            // (entity-avatar ownership query removed — SR:H3)
+            if (callCount === 4) {
               return await queryFn({
                 ...mockDb,
                 post: {
@@ -2289,7 +2306,7 @@ describe("MediaHandler", () => {
                 },
               });
             }
-            if (callCount === 6) {
+            if (callCount === 5) {
               return await queryFn({
                 ...mockDb,
                 postMedia: {
@@ -2299,7 +2316,7 @@ describe("MediaHandler", () => {
             }
           }
           // deleteMedia checkShared - has other user's posts
-          if (callCount === 7) {
+          if (callCount === 6) {
             return await queryFn({
               ...mockDb,
               postMedia: {
@@ -2314,14 +2331,15 @@ describe("MediaHandler", () => {
               },
             });
           }
-          // hideMedia queries (calls 8-14)
-          if (callCount >= 8 && callCount <= 14) {
-            const hideCall = callCount - 7;
+          // hideMedia queries (calls 7-13)
+          if (callCount >= 7 && callCount <= 13) {
+            const hideCall = callCount - 6;
             if (hideCall === 1) {
               return await queryFn({
                 ...mockDb,
                 mediaFile: {
                   findUnique: vi.fn().mockResolvedValue({
+                  uploadedBy: "user-123",
                     id: "media-1",
                     contentHash: "hash-1",
                     mimeType: "image/jpeg",
@@ -2351,8 +2369,8 @@ describe("MediaHandler", () => {
                 },
               });
             }
-            // hideCall === 4 is userEntities (entity.findMany), handled by mockDb default
-            if (hideCall === 5) {
+            // (entity-avatar query removed — SR:H3)
+            if (hideCall === 4) {
               return await queryFn({
                 ...mockDb,
                 post: {
@@ -2360,7 +2378,7 @@ describe("MediaHandler", () => {
                 },
               });
             }
-            if (hideCall === 6) {
+            if (hideCall === 5) {
               return await queryFn({
                 ...mockDb,
                 postMedia: {
@@ -2368,7 +2386,7 @@ describe("MediaHandler", () => {
                 },
               });
             }
-            if (hideCall === 7) {
+            if (hideCall === 6) {
               return await queryFn({
                 ...mockDb,
                 mediaFile: {
@@ -2400,13 +2418,14 @@ describe("MediaHandler", () => {
           queryFn: (db: any) => Promise<any>,
         ) => {
           callCount++;
-          if (callCount <= 6) {
+          if (callCount <= 5) {
             // getMediaDetails queries
             if (callCount === 1) {
               return await queryFn({
                 ...mockDb,
                 mediaFile: {
                   findUnique: vi.fn().mockResolvedValue({
+                  uploadedBy: "user-123",
                     id: "media-1",
                     contentHash: "hash-1",
                     mimeType: "image/jpeg",
@@ -2436,8 +2455,8 @@ describe("MediaHandler", () => {
                 },
               });
             }
-            // callCount === 4 is userEntities (entity.findMany), handled by mockDb default
-            if (callCount === 5) {
+            // (entity-avatar ownership query removed — SR:H3)
+            if (callCount === 4) {
               return await queryFn({
                 ...mockDb,
                 post: {
@@ -2445,7 +2464,7 @@ describe("MediaHandler", () => {
                 },
               });
             }
-            if (callCount === 6) {
+            if (callCount === 5) {
               return await queryFn({
                 ...mockDb,
                 postMedia: {
@@ -2455,7 +2474,7 @@ describe("MediaHandler", () => {
             }
           }
           // deleteMedia checkShared
-          if (callCount === 7) {
+          if (callCount === 6) {
             return await queryFn({
               ...mockDb,
               postMedia: {
@@ -2466,7 +2485,7 @@ describe("MediaHandler", () => {
             });
           }
           // deleteMedia update
-          if (callCount === 8) {
+          if (callCount === 7) {
             return await queryFn({
               ...mockDb,
               mediaFile: {
@@ -2519,6 +2538,7 @@ describe("MediaHandler", () => {
               ...mockDb,
               mediaFile: {
                 findUnique: vi.fn().mockResolvedValue({
+                  uploadedBy: "user-123",
                   id: "media-1",
                   contentHash: "hash-1",
                   mimeType: "image/jpeg",
@@ -2553,8 +2573,8 @@ describe("MediaHandler", () => {
               },
             });
           }
-          // callCount === 4 is userEntities (entity.findMany), handled by mockDb default
-          if (callCount === 5) {
+          // (entity-avatar ownership query removed — SR:H3)
+          if (callCount === 4) {
             // getMediaDetails - findMany posts with details (postsWithMedia)
             return await queryFn({
               ...mockDb,
@@ -2570,7 +2590,7 @@ describe("MediaHandler", () => {
               },
             });
           }
-          if (callCount === 6) {
+          if (callCount === 5) {
             // getMediaDetails - findMany postMedia (checkShared)
             return await queryFn({
               ...mockDb,
@@ -2620,6 +2640,7 @@ describe("MediaHandler", () => {
                 ...mockDb,
                 mediaFile: {
                   findUnique: vi.fn().mockResolvedValue({
+                  uploadedBy: "user-123",
                     id: "media-1",
                     contentHash: "hash-1",
                     mimeType: "image/jpeg",
@@ -2664,7 +2685,7 @@ describe("MediaHandler", () => {
                 },
               });
             }
-            if (callCount === 5) {
+            if (callCount === 4) {
               return await queryFn({
                 ...mockDb,
                 postMedia: {
@@ -2679,7 +2700,7 @@ describe("MediaHandler", () => {
             }
           }
           // deleteMedia checkShared - has other user's posts
-          if (callCount === 6) {
+          if (callCount === 5) {
             return await queryFn({
               ...mockDb,
               postMedia: {
@@ -2694,14 +2715,15 @@ describe("MediaHandler", () => {
               },
             });
           }
-          if (callCount >= 7 && callCount <= 12) {
+          if (callCount >= 6 && callCount <= 12) {
             // hideMedia queries (6 calls)
-            const hideCall = callCount - 6;
+            const hideCall = callCount - 5;
             if (hideCall === 1) {
               return await queryFn({
                 ...mockDb,
                 mediaFile: {
                   findUnique: vi.fn().mockResolvedValue({
+                  uploadedBy: "user-123",
                     id: "media-1",
                     contentHash: "hash-1",
                     mimeType: "image/jpeg",
@@ -2795,6 +2817,7 @@ describe("MediaHandler", () => {
               ...mockDb,
               mediaFile: {
                 findUnique: vi.fn().mockResolvedValue({
+                  uploadedBy: "user-123",
                   id: "media-1",
                   contentHash: "hash-1",
                   mimeType: "image/jpeg",
@@ -2829,8 +2852,8 @@ describe("MediaHandler", () => {
               },
             });
           }
-          // callCount === 4 is userEntities (entity.findMany), handled by mockDb default
-          if (callCount === 5) {
+          // (entity-avatar ownership query removed — SR:H3)
+          if (callCount === 4) {
             // getMediaDetails - findMany posts with details (postsWithMedia)
             return await queryFn({
               ...mockDb,
@@ -2846,7 +2869,7 @@ describe("MediaHandler", () => {
               },
             });
           }
-          if (callCount === 6) {
+          if (callCount === 5) {
             // getMediaDetails - findMany postMedia (checkShared)
             return await queryFn({
               ...mockDb,
@@ -2859,7 +2882,7 @@ describe("MediaHandler", () => {
               },
             });
           }
-          if (callCount === 7) {
+          if (callCount === 6) {
             // deleteMedia checkShared - media is not shared
             return await queryFn({
               ...mockDb,
@@ -2872,7 +2895,7 @@ describe("MediaHandler", () => {
               },
             });
           }
-          if (callCount === 8) {
+          if (callCount === 7) {
             // Delete call
             return await queryFn({
               ...mockDb,
@@ -4081,6 +4104,7 @@ describe("MediaHandler", () => {
     // postsWithMedia are skipped. Sequence: findUnique, post.findMany([]),
     // entity.findMany, postMedia.findMany (checkShared).
     function wireAvatarOnly(media: any, entities: any[], shared: any[] = []) {
+      // Sequence after SR:H3: findUnique, post.findMany([]), postMedia.findMany.
       let call = 0;
       mockWithQueryTimeoutAndRetry.mockImplementation(
         async (_m: any, _r: string, _e: any, queryFn: (db: any) => Promise<any>) => {
@@ -4090,9 +4114,8 @@ describe("MediaHandler", () => {
           if (call === 2)
             return queryFn({ ...mockDb, post: { findMany: vi.fn().mockResolvedValue([]) } });
           if (call === 3)
-            return queryFn({ ...mockDb, entity: { findMany: vi.fn().mockResolvedValue(entities) } });
-          if (call === 4)
             return queryFn({ ...mockDb, postMedia: { findMany: vi.fn().mockResolvedValue(shared) } });
+          void entities; // entity-avatar query removed (SR:H3)
           return queryFn(mockDb);
         },
       );
@@ -4120,52 +4143,40 @@ describe("MediaHandler", () => {
       deletedAt: null,
     };
 
-    it("detects avatar ownership when avatarUrl === media.id", async () => {
-      wireAvatarOnly(baseMedia, [{ metadata: { avatar: baseMedia.id } }]);
+    // [SR:H3] Ownership is media.uploadedBy only; entity metadata.avatar is
+    // client-writable and must never confer ownership.
+    it("grants access to the uploader with no posts", async () => {
+      wireAvatarOnly({ ...baseMedia, uploadedBy: "user-123" }, []);
       const result = await handler.getMediaDetails(baseMedia.id, "user-123", mockEnv);
       expect(result.id).toBe(baseMedia.id);
       expect(result.posts).toEqual([]);
     });
 
-    it("detects avatar ownership when avatarUrl === media.contentHash", async () => {
-      wireAvatarOnly(baseMedia, [{ metadata: { avatar: baseMedia.contentHash } }]);
-      const result = await handler.getMediaDetails(baseMedia.id, "user-123", mockEnv);
-      expect(result.contentHash).toBe(baseMedia.contentHash);
-    });
-
-    it("detects avatar ownership via URL-extracted contentHash === media.contentHash", async () => {
-      wireAvatarOnly(baseMedia, [
-        { metadata: { avatar: `https://api.test.com/api/media/${baseMedia.contentHash}?variant=optimized` } },
+    it("does NOT grant ownership via a matching entity avatar (SR:H3)", async () => {
+      wireAvatarOnly({ ...baseMedia, uploadedBy: "someone-else" }, [
+        { metadata: { avatar: baseMedia.id } },
+        { metadata: { avatar: baseMedia.contentHash } },
+        { metadata: { avatar: `/api/media/${baseMedia.contentHash}?variant=optimized` } },
       ]);
-      const result = await handler.getMediaDetails(baseMedia.id, "user-123", mockEnv);
-      expect(result.id).toBe(baseMedia.id);
-    });
-
-    it("detects avatar ownership via URL-extracted media id === media.id", async () => {
-      // contentHash must NOT be hex-extractable so the second regex matches the id
-      const media = { ...baseMedia, contentHash: "zz-not-hex" };
-      wireAvatarOnly(media, [{ metadata: { avatar: `/api/media/${media.id}` } }]);
-      const result = await handler.getMediaDetails(media.id, "user-123", mockEnv);
-      expect(result.id).toBe(media.id);
-    });
-
-    it("throws 'Media not found' when not in posts and no avatar match", async () => {
-      wireAvatarOnly(baseMedia, [{ metadata: { avatar: "unrelated-value" } }]);
       await expect(
         handler.getMediaDetails(baseMedia.id, "user-123", mockEnv),
       ).rejects.toThrow("Media not found");
     });
 
-    it("skips non-string/null avatar entities while scanning for ownership", async () => {
-      wireAvatarOnly(baseMedia, [
-        { metadata: null },
-        { metadata: "string-meta" },
-        { metadata: { avatar: 999 } },
-        { metadata: { avatar: null } },
-        { metadata: { avatar: baseMedia.id } }, // finally a match
-      ]);
-      const result = await handler.getMediaDetails(baseMedia.id, "user-123", mockEnv);
-      expect(result.id).toBe(baseMedia.id);
+    it("throws 'Media not found' when not in posts and not the uploader", async () => {
+      wireAvatarOnly({ ...baseMedia, uploadedBy: "someone-else" }, []);
+      await expect(
+        handler.getMediaDetails(baseMedia.id, "user-123", mockEnv),
+      ).rejects.toThrow("Media not found");
+    });
+
+    it("rejects a tenant mismatch when tenantId is supplied", async () => {
+      wireAvatarOnly({ ...baseMedia, uploadedBy: "user-123", tenantId: "t-a" }, []);
+      await expect(
+        handler.getMediaDetails(baseMedia.id, "user-123", mockEnv, undefined, {
+          tenantId: "t-b",
+        }),
+      ).rejects.toThrow("Media not found");
     });
   });
 
@@ -4185,10 +4196,10 @@ describe("MediaHandler", () => {
             return queryFn({ ...mockDb, post: { findMany: vi.fn().mockResolvedValue([{ id: "post-1" }]) } });
           if (call === 3)
             return queryFn({ ...mockDb, postMedia: { findFirst: vi.fn().mockResolvedValue({ mediaId: media.id, postId: "post-1" }) } });
-          // call 4 = entities (default [])
-          if (call === 5)
+          // (entity-avatar query removed — SR:H3)
+          if (call === 4)
             return queryFn({ ...mockDb, post: { findMany: vi.fn().mockResolvedValue(opts.postsWithMedia ?? []) } });
-          if (call === 6)
+          if (call === 5)
             return queryFn({ ...mockDb, postMedia: { findMany: vi.fn().mockResolvedValue(opts.shared ?? [{ post: { authorId: "user-123" } }]) } });
           return queryFn(mockDb);
         },
@@ -4196,6 +4207,7 @@ describe("MediaHandler", () => {
     }
 
     const m = (over: any = {}) => ({
+      uploadedBy: "user-123",
       id: "cmgmdid000000000000000000",
       contentHash: "cd".repeat(20),
       cid: null,
@@ -4308,6 +4320,21 @@ describe("MediaHandler", () => {
       await expect(
         handler.getMediaDetails("cmgmdid000000000000000000", "user-123", mockEnv),
       ).rejects.toBeTruthy();
+    });
+
+    it("[SR:H3] requireUploader rejects a post author who is not the uploader", async () => {
+      wireInPosts(m({ uploadedBy: "someone-else" }));
+      await expect(
+        handler.getMediaDetails("cmgmdid000000000000000000", "user-123", mockEnv, undefined, {
+          requireUploader: true,
+        }),
+      ).rejects.toThrow("Media not found");
+    });
+
+    it("[SR:H3] withholds exif from a non-uploader even when metadataVisible", async () => {
+      wireInPosts(m({ uploadedBy: "someone-else", metadataVisible: true, exifData: { make: "X" } }));
+      const r = await handler.getMediaDetails("cmgmdid000000000000000000", "user-123", mockEnv);
+      expect(r.exifData).toBeUndefined();
     });
   });
 
@@ -4529,6 +4556,7 @@ describe("MediaHandler", () => {
               ...mockDb,
               mediaFile: {
                 findUnique: vi.fn().mockResolvedValue({
+                  uploadedBy: "user-123",
                   id: "cmhidea000000000000000000",
                   contentHash: "ee".repeat(20),
                   mimeType: "image/jpeg",
@@ -4556,12 +4584,12 @@ describe("MediaHandler", () => {
             return queryFn({ ...mockDb, post: { findMany: vi.fn().mockResolvedValue([{ id: "post-1" }]) } });
           if (call === 3)
             return queryFn({ ...mockDb, postMedia: { findFirst: vi.fn().mockResolvedValue({}) } });
-          // call 4 entities default []
-          if (call === 5)
+          // (entity-avatar query removed — SR:H3)
+          if (call === 4)
             return queryFn({ ...mockDb, post: { findMany: vi.fn().mockResolvedValue([]) } });
-          if (call === 6)
+          if (call === 5)
             return queryFn({ ...mockDb, postMedia: { findMany: vi.fn().mockResolvedValue([{ post: { authorId: "user-123" } }]) } });
-          if (call === 7)
+          if (call === 6)
             return queryFn({ ...mockDb, mediaFile: { update: vi.fn().mockResolvedValue(mutationResult) } });
           return queryFn(mockDb);
         },
@@ -4645,6 +4673,7 @@ describe("MediaHandler", () => {
               ...mockDb,
               mediaFile: {
                 findUnique: vi.fn().mockResolvedValue({
+                  uploadedBy: "user-123",
                   id: "cmdelid000000000000000000",
                   contentHash: "dd".repeat(20),
                   mimeType: "image/jpeg",
@@ -4671,14 +4700,14 @@ describe("MediaHandler", () => {
             return queryFn({ ...mockDb, post: { findMany: vi.fn().mockResolvedValue([{ id: "post-1" }]) } });
           if (call === 3)
             return queryFn({ ...mockDb, postMedia: { findFirst: vi.fn().mockResolvedValue({}) } });
-          if (call === 5)
+          if (call === 4)
             return queryFn({ ...mockDb, post: { findMany: vi.fn().mockResolvedValue([]) } });
-          if (call === 6)
+          if (call === 5)
             return queryFn({ ...mockDb, postMedia: { findMany: vi.fn().mockResolvedValue([{ post: { authorId: "user-123" } }]) } });
-          if (call === 7)
+          if (call === 6)
             // deleteMedia checkShared: only this user's posts -> not shared
             return queryFn({ ...mockDb, postMedia: { findMany: vi.fn().mockResolvedValue([{ post: { authorId: "user-123" } }]) } });
-          if (call === 8)
+          if (call === 7)
             return queryFn({ ...mockDb, mediaFile: { update: vi.fn().mockResolvedValue({ id: "cmdelid000000000000000000", deletedAt: new Date() }) } });
           return queryFn(mockDb);
         },

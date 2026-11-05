@@ -70,7 +70,7 @@ describe("probeOidcIssuer", () => {
       expect(String(input)).toContain("/.well-known/openid-configuration");
       return jsonResponse(VALID_DISCOVERY);
     };
-    const result = await probeOidcIssuer("https://idp.example.com/", {
+    const result = await probeOidcIssuer(VALID_DISCOVERY.issuer, {
       fetchImpl: fetchImpl as typeof fetch,
       resolveHostname: publicResolve,
     });
@@ -304,7 +304,9 @@ describe("probeOidcIssuer", () => {
     // dispatcher's connect step to the first-resolved IP rather than re-
     // resolving DNS at request time.
     let resolveCalls = 0;
-    const resolveHostname = async () => {
+    const resolveHostname = async (hostname: string) => {
+      // Discovered endpoints live on a separate (stable, public) host.
+      if (hostname !== "idp.example.com") return ["52.10.10.11"];
       resolveCalls += 1;
       if (resolveCalls === 1) return ["52.10.10.10"];
       return ["10.0.0.1"];
@@ -315,7 +317,7 @@ describe("probeOidcIssuer", () => {
 
     const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {
       dispatcherSeen = (init as unknown as { dispatcher?: unknown })?.dispatcher;
-      return jsonResponse(VALID_DISCOVERY);
+      return jsonResponse({ ...VALID_DISCOVERY, issuer: "https://idp.example.com/" });
     }) as typeof fetch;
 
     const dispatcherFactory = (ip: string, family: 4 | 6) => {
@@ -346,7 +348,7 @@ describe("probeOidcIssuer", () => {
   it("pins IPv6 connect step with family 6", async () => {
     const factoryArgs: Array<{ ip: string; family: 4 | 6 }> = [];
     const fetchImpl = (async () => jsonResponse(VALID_DISCOVERY)) as typeof fetch;
-    const result = await probeOidcIssuer("https://idp.example.com/", {
+    const result = await probeOidcIssuer(VALID_DISCOVERY.issuer, {
       fetchImpl,
       resolveHostname: async () => ["2606:4700:4700::1111"],
       dispatcherFactory: (ip, family) => {
@@ -358,4 +360,63 @@ describe("probeOidcIssuer", () => {
     expect(factoryArgs).toEqual([{ ip: "2606:4700:4700::1111", family: 6 }]);
   });
 
+
+  describe("discovery document validation (SSRF)", () => {
+    const ISSUER = VALID_DISCOVERY.issuer;
+    const probeWith = (doc: Record<string, unknown>, resolveHostname = publicResolve) =>
+      probeOidcIssuer(ISSUER, {
+        fetchImpl: (async () => jsonResponse(doc)) as unknown as typeof fetch,
+        resolveHostname,
+        dispatcherFactory: () => undefined,
+      });
+
+    it("rejects when discovery issuer differs from the probed issuer", async () => {
+      const result = await probeWith({ ...VALID_DISCOVERY, issuer: "https://evil.example.com/" });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.reason).toBe("ISSUER_MISMATCH");
+    });
+
+    it("accepts an issuer differing only by a single trailing slash", async () => {
+      const result = await probeWith({ ...VALID_DISCOVERY, issuer: ISSUER + "/" });
+      expect(result.ok).toBe(true);
+    });
+
+    it.each(["authorization_endpoint", "token_endpoint", "jwks_uri", "userinfo_endpoint"])(
+      "rejects a non-https %s",
+      async (field) => {
+        const result = await probeWith({ ...VALID_DISCOVERY, [field]: "http://login.microsoftonline.com/x" });
+        expect(result.ok).toBe(false);
+        if (!result.ok) expect(result.reason).toBe("INSECURE_SCHEME");
+      },
+    );
+
+    it.each([
+      ["token_endpoint", "https://169.254.169.254/latest/meta-data"],
+      ["jwks_uri", "https://127.0.0.1/keys"],
+      ["authorization_endpoint", "https://10.0.0.1/auth"],
+      ["userinfo_endpoint", "https://[fe80::1]/userinfo"],
+    ])("rejects %s on a private/loopback/link-local host", async (field, value) => {
+      const resolve = async (h: string) => (isIPLiteral(h) ? [h] : ["52.10.10.10"]);
+      const result = await probeWith({ ...VALID_DISCOVERY, [field]: value }, resolve);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.reason).toBe("PRIVATE_HOST");
+    });
+
+    it("rejects an endpoint whose hostname resolves to a private IP", async () => {
+      const resolve = async (h: string) => (h === "internal.example.com" ? ["10.1.2.3"] : ["52.10.10.10"]);
+      const result = await probeWith({ ...VALID_DISCOVERY, token_endpoint: "https://internal.example.com/token" }, resolve);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.reason).toBe("PRIVATE_HOST");
+    });
+
+    it("rejects an endpoint that is not a valid URL", async () => {
+      const result = await probeWith({ ...VALID_DISCOVERY, jwks_uri: "not a url" });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.reason).toBe("INVALID_URL");
+    });
+  });
 });
+
+function isIPLiteral(h: string): boolean {
+  return /^[0-9.]+$/.test(h) || h.includes(":");
+}

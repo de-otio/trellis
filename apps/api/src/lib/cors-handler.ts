@@ -145,38 +145,15 @@ export class CorsHandler {
       return null;
     }
 
-    // Allow Cloudflare Pages domains (only specific known projects)
-    if (normalizedRequestOrigin.includes(".pages.dev")) {
-      const allowedPagesProjects = [
-        "trellis-web",
-        "trellis-preview",
-        "trellis-at",
-      ];
-      const pagesDomainMatch = normalizedRequestOrigin.match(
-        /^https:\/\/([^.]+)\.pages\.dev$/,
-      );
-      if (
-        pagesDomainMatch &&
-        allowedPagesProjects.includes(pagesDomainMatch[1])
-      ) {
-        getLogger().info(
-          `[CORS] Allowing Cloudflare Pages project: ${pagesDomainMatch[1]}`,
-        );
-        return normalizedRequestOrigin;
-      }
-      getLogger().info(
-        `[CORS] Cloudflare Pages project not in whitelist: ${normalizedRequestOrigin}`,
-      );
-      return null;
-    }
-
     // No compiled-in allow-list. S1.6 used to keep a fixed "known domains"
     // list here (suffix-matched, credentialed) — the author's own domain at
     // the time, shipped to every deployment of the core, so any subdomain of
     // it could make credentialed cross-origin requests to every Trellis
     // install. SEC M4 removed `example.com` from that list; this removes the
     // list. The only origins ever allowed are the loopback set above and what
-    // APP_DOMAIN / ALLOWED_ORIGINS name.
+    // APP_DOMAIN / ALLOWED_ORIGINS name. The same goes for the former
+    // compiled-in Cloudflare Pages project list (M8): a `*.pages.dev` origin
+    // is allowed only if configuration names it.
 
     // Origin not allowed
     getLogger().info(

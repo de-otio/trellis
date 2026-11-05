@@ -57,6 +57,24 @@ function isFederatedEvent(event: PostConfirmationTriggerEvent): boolean {
   }
 }
 
+/**
+ * H5: the asserting IdP's name (Cognito `identities[0].providerName`), so
+ * domain-based org-tenant membership can be bound to the tenant's own IdP.
+ */
+function assertingProviderName(
+  event: PostConfirmationTriggerEvent,
+): string | undefined {
+  const identitiesRaw = event.request.userAttributes["identities"];
+  if (!identitiesRaw) return undefined;
+  try {
+    const parsed = JSON.parse(identitiesRaw);
+    const name = Array.isArray(parsed) ? parsed[0]?.providerName : undefined;
+    return typeof name === "string" && name.length > 0 ? name : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 const SUPPORTED_TRIGGERS = new Set([
   "PostConfirmation_ConfirmSignUp",
   "PostConfirmation_ConfirmForgotPassword",
@@ -83,6 +101,7 @@ export const handler: PostConfirmationTriggerHandler = async (event) => {
       email: attrs.email,
       emailVerified: attrs.email_verified === "true",
       federated: isFederatedEvent(event),
+      identityProviderName: assertingProviderName(event),
       idpGroupsRaw: attrs["custom:idpGroups"],
       dateOfBirthRaw: attrs["custom:dateOfBirth"],
       providedHandle: attrs["custom:handle"],

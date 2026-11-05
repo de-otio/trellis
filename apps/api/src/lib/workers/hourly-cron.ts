@@ -104,6 +104,7 @@ export async function runHourlyCron(
             attachedToPost: false,
             orphanedAt: { lte: gracePeriodCutoff },
             deletedAt: null,
+            posts: { none: {} }, // Skip files still referenced by posts
           },
           data: { deletedAt: new Date(ctx.clock()) },
         });

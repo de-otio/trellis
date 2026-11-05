@@ -69,6 +69,32 @@ function notFound(): Response {
 
 const auditEmitter = new TenantAuditEmitter();
 
+
+/**
+ * H6: attribute-mapping target keys go verbatim into Cognito's
+ * AttributeMapping. A tenant admin must not be able to map an IdP claim onto
+ * a privileged custom attribute (e.g. `custom:role`, `custom:globalRole`,
+ * `custom:userId`, `custom:activeTenantId`). Standard OIDC/Cognito attribute
+ * names stay allowed; the only permitted `custom:` target is
+ * `custom:idpGroups`.
+ */
+const ALLOWED_CUSTOM_ATTRIBUTE_TARGETS: ReadonlySet<string> = new Set([
+  "custom:idpGroups",
+]);
+
+export function isAllowedAttributeMappingKey(key: string): boolean {
+  if (key.length === 0 || key.length > 128) return false;
+  if (key.toLowerCase().startsWith("custom:")) {
+    return ALLOWED_CUSTOM_ATTRIBUTE_TARGETS.has(key);
+  }
+  // Standard OIDC / Cognito attribute names (e.g. email, given_name,
+  // preferred_username, phone_number, address, updated_at, username).
+  return /^[A-Za-z][A-Za-z0-9_]*$/.test(key);
+}
+
+const ATTRIBUTE_MAPPING_KEY_MESSAGE =
+  "attributeMapping keys must be standard attribute names; the only allowed custom attribute is custom:idpGroups";
+
 export interface IdpHandlerDependencies {
   /** Override the federation admin adapter (tests). */
   idp?: IdpAdminPort;
@@ -227,7 +253,12 @@ export class IdpHandler {
       clientSecret: z.string().min(1).max(2048),
       defaultRole: z.enum(["ADMIN", "MEMBER", "GUEST"]).optional(),
       scopes: z.string().max(1024).optional(),
-      attributeMapping: z.record(z.string(), z.string()).optional(),
+      attributeMapping: z
+        .record(z.string(), z.string().max(2048))
+        .refine((m) => Object.keys(m).every(isAllowedAttributeMappingKey), {
+          message: ATTRIBUTE_MAPPING_KEY_MESSAGE,
+        })
+        .optional(),
     });
     const parsed = schema.safeParse(raw);
     if (!parsed.success) {
@@ -515,7 +546,12 @@ export class IdpHandler {
 
     const schema = z.object({
       clientSecret: z.string().min(1).max(2048).optional(),
-      attributeMapping: z.record(z.string(), z.string()).optional(),
+      attributeMapping: z
+        .record(z.string(), z.string().max(2048))
+        .refine((m) => Object.keys(m).every(isAllowedAttributeMappingKey), {
+          message: ATTRIBUTE_MAPPING_KEY_MESSAGE,
+        })
+        .optional(),
       defaultRole: z
         .enum(["ADMIN", "MEMBER", "GUEST"])
         .nullable()

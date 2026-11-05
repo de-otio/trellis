@@ -268,7 +268,7 @@ describe("CorsHandler", () => {
       }
     });
 
-    it("should allow Cloudflare Pages domains for whitelisted projects", () => {
+    it("ships no compiled-in Cloudflare Pages list: an unconfigured *.pages.dev origin is denied", () => {
       mockRequest = new Request("https://api.example.com/test", {
         method: "GET",
         headers: {
@@ -276,7 +276,7 @@ describe("CorsHandler", () => {
         },
       });
       const origin = CorsHandler.getAllowedOrigin(mockRequest, mockEnv);
-      expect(origin).toBe("https://trellis-web.pages.dev");
+      expect(origin).toBeNull();
           });
 
     it("should reject Cloudflare Pages domains for non-whitelisted projects", () => {

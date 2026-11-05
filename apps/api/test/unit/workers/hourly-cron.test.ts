@@ -113,6 +113,17 @@ describe("runHourlyCron", () => {
     expect(interaction.metrics.find((m) => m.name === "PruneFailed")?.value).toBe(0);
   });
 
+  it("orphan soft-delete skips media still referenced by posts", async () => {
+    const db = makeDb();
+    await runHourlyCron(ctx({ getDb: async () => db as never }) as never);
+
+    const softDelete = db.mediaFile.updateMany.mock.calls.find(
+      (c: any[]) => c[0]?.where?.attachedToPost === false,
+    );
+    expect(softDelete).toBeDefined();
+    expect(softDelete![0].where.posts).toEqual({ none: {} });
+  });
+
   it("a tripped circuit breaker is flagged on the metric", async () => {
     mockOpsPrune.mockResolvedValue({ deleted: 0, circuitBreakerTripped: true });
     const metrics = new CapturingMetrics();

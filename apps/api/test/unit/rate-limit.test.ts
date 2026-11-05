@@ -167,11 +167,30 @@ describe("RateLimiter (token-bucket)", () => {
       ).toBe(true);
     });
 
-    it("keys separate IP buckets when no identity is supplied", () => {
-      const r1 = rateLimiter.checkRateLimit(makeRequest("10.0.0.1"), "/test", 10, 60);
-      const r2 = rateLimiter.checkRateLimit(makeRequest("10.0.0.2"), "/test", 10, 60);
+    it("keys separate IP buckets on the server-injected socket address", () => {
+      const sock = (ip: string) =>
+        new Request("https://api.example.com/test", {
+          headers: { "x-trellis-remote-addr": ip },
+        });
+      const r1 = rateLimiter.checkRateLimit(sock("8.8.8.8"), "/test", 10, 60);
+      const r2 = rateLimiter.checkRateLimit(sock("1.1.1.1"), "/test", 10, 60);
       expect(r1.remaining).toBe(9);
       expect(r2.remaining).toBe(9);
+    });
+
+    it("M6: ignores spoofed CF-Connecting-IP / X-Forwarded-For in default mode", () => {
+      const spoof = (ip: string) =>
+        new Request("https://api.example.com/test", {
+          headers: {
+            "CF-Connecting-IP": ip,
+            "X-Forwarded-For": ip,
+            "x-trellis-remote-addr": "8.8.4.4",
+          },
+        });
+      const r1 = rateLimiter.checkRateLimit(spoof("9.9.9.9"), "/spoof", 10, 60);
+      const r2 = rateLimiter.checkRateLimit(spoof("9.9.9.10"), "/spoof", 10, 60);
+      expect(r1.remaining).toBe(9);
+      expect(r2.remaining).toBe(8);
     });
   });
 

@@ -78,6 +78,25 @@ export interface ConfirmedUserInput {
   invitationCode?: string | undefined;
   /** Raw signupMethod hint from the client metadata, if any. */
   signupMethodHint?: string | undefined;
+  /**
+   * Name of the federated IdP that asserted this identity (Cognito
+   * `identities[].providerName`), if the entrypoint knows it. Org-tenant JIT
+   * membership by email domain is granted ONLY when this equals the domain
+   * tenant's registered `cognitoIdpName`; absent → no auto-membership (H5).
+   */
+  identityProviderName?: string | undefined;
+}
+
+/**
+ * H5: an email collision with an existing User whose `subject` differs (or,
+ * for federated sign-ups, is unset) is refused rather than merged — merging
+ * would map the asserting `sub` onto someone else's account.
+ */
+export class ProvisioningIdentityConflictError extends Error {
+  constructor() {
+    super("Provisioning refused: email is already bound to a different identity");
+    this.name = "ProvisioningIdentityConflictError";
+  }
 }
 
 export interface ProvisionDeps {
@@ -299,6 +318,7 @@ export async function provisionConfirmedUser(
             providedHandle: input.providedHandle,
             invitationCode,
             requestedMethod,
+            identityProviderName: input.identityProviderName?.trim() || undefined,
           }),
           { timeout: 8000 },
         ),
@@ -394,6 +414,8 @@ interface ProvisioningInput {
   invitationCode: string | undefined;
   /** Explicit signupMethod hint from clientMetadata, if recognized. */
   requestedMethod: SignupMethod | undefined;
+  /** Asserting federated IdP name, if known (H5 org-JIT binding). */
+  identityProviderName?: string | undefined;
 }
 
 async function provisionUserAndTenancy(
@@ -414,9 +436,26 @@ async function provisionUserAndTenancy(
     requestedMethod,
   } = input;
 
-  const existing = await tx.user.findFirst({
-    where: { OR: [{ subject: sub }, { email }] },
-  });
+  // H5: match on `subject` only. An email-only match is never silently
+  // merged: a federated identity (whose IdP may self-assert any email) or a
+  // row already bound to another subject is a conflict. The one retained
+  // link path is a NATIVE sign-up (provider-verified email ownership) onto a
+  // pre-existing row that has no subject yet.
+  let existing = await tx.user.findFirst({ where: { subject: sub } });
+  if (!existing) {
+    const byEmail = await tx.user.findFirst({ where: { email } });
+    if (byEmail) {
+      if (federated || byEmail.subject) {
+        logger.warn("postconfirm.identity_conflict", {
+          sub,
+          federated,
+          existingHasSubject: !!byEmail.subject,
+        });
+        throw new ProvisioningIdentityConflictError();
+      }
+      existing = byEmail;
+    }
+  }
 
   // Signup-metadata (P3): resolve the redeemed Prisma Invitation (if the code
   // presented at signup matches one) so we can set the FK. Codes are stored
@@ -571,7 +610,7 @@ async function provisionUserAndTenancy(
           tenant: {
             include: {
               identityProvider: {
-                select: { status: true, defaultRole: true },
+                select: { status: true, defaultRole: true, cognitoIdpName: true },
               },
               roleMappings: {
                 select: { idpGroupName: true, tenantRole: true, priority: true },
@@ -595,6 +634,17 @@ async function provisionUserAndTenancy(
         logger.warn("postconfirm.federated.inactive_idp", {
           sub,
           tenantId: tenantDomain.tenantId,
+        });
+      } else if (
+        !input.identityProviderName ||
+        input.identityProviderName !== tenantDomain.tenant.identityProvider.cognitoIdpName
+      ) {
+        // H5: the email domain alone is an assertion by whichever IdP signed
+        // the user in. Only the tenant's own registered IdP may JIT a member.
+        logger.warn("postconfirm.federated.idp_mismatch", {
+          sub,
+          tenantId: tenantDomain.tenantId,
+          providerKnown: !!input.identityProviderName,
         });
       } else {
         const role = resolveTenantRole(

@@ -18,6 +18,7 @@ import {
 } from "../oauth/device-authorization.js";
 import { corsMiddleware } from "../middleware.js";
 import { trustedClientIp } from "../net/trusted-client-ip.js";
+import { RateLimiter } from "../rate-limit.js";
 import { SecurityHeaders } from "../security-headers.js";
 // structuredError imported for consistency with federation surface error format.
 // RFC 8628 §5.2 prescribes its own error codes (snake_case) for /oauth2/* endpoints;
@@ -161,6 +162,27 @@ export const oauthRoutes: Route[] = [
     path: DEVICE_AUTHORIZATION_RE,
     method: "POST",
     handler: async (request, env) => {
+      // L12: per-IP rate limit on device authorization (limit from env).
+      const deviceAuthLimit =
+        Number.parseInt(
+          String((env as any).DEVICE_AUTHORIZATION_RATE_LIMIT ?? ""),
+          10,
+        ) || 10;
+      const deviceAuthWindow =
+        Number.parseInt(
+          String((env as any).DEVICE_AUTHORIZATION_RATE_WINDOW_SECONDS ?? ""),
+          10,
+        ) || 60;
+      const limited = await new RateLimiter().applyRateLimitKV(
+        env as any,
+        request,
+        "/oauth2/device_authorization",
+        deviceAuthLimit,
+        deviceAuthWindow,
+        `ip:${trustedClientIp(request, env)}`,
+      );
+      if (limited) return limited;
+
       const form = await readForm(request);
       const parsed = DeviceAuthorizationRequestSchema.safeParse(form);
       if (!parsed.success) {

@@ -19,6 +19,7 @@ vi.mock("../../src/lib/data-router", () => {
     },
     report: {
       count: vi.fn(),
+      findMany: vi.fn(),
     },
   };
 
@@ -425,9 +426,52 @@ describe("DomainReputationService", () => {
   });
 
   describe("shouldAutoBlock", () => {
+    it("counts distinct reporters, not raw reports", async () => {
+      mockDb.report.findMany.mockResolvedValue([{ reporterUserId: "u1" }]);
+      mockDb.domainReputation.findUnique.mockResolvedValue({
+        domain: "example.com",
+        status: "warning",
+      });
+
+      const result = await service.shouldAutoBlock(
+        "example.com",
+        region,
+        mockEnv,
+      );
+
+      expect(result).toBe(false);
+      expect(mockDb.report.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ distinct: ["reporterUserId"] }),
+      );
+    });
+
+    it("reads the threshold from DOMAIN_AUTOBLOCK_REPORT_THRESHOLD", async () => {
+      process.env.DOMAIN_AUTOBLOCK_REPORT_THRESHOLD = "2";
+      try {
+        mockDb.report.findMany.mockResolvedValue([
+          { reporterUserId: "u1" },
+          { reporterUserId: "u2" },
+        ]);
+        mockDb.domainReputation.findUnique.mockResolvedValue({
+          domain: "example.com",
+          status: "warning",
+        });
+        const result = await service.shouldAutoBlock(
+          "example.com",
+          region,
+          mockEnv,
+        );
+        expect(result).toBe(true);
+      } finally {
+        delete process.env.DOMAIN_AUTOBLOCK_REPORT_THRESHOLD;
+      }
+    });
+
     it("should return true when report threshold exceeded", async () => {
       // Arrange
-      mockDb.report.count.mockResolvedValue(5); // Threshold is 5
+      mockDb.report.findMany.mockResolvedValue(
+        Array.from({ length: 5 }, (_, i) => ({ reporterUserId: `u${i}` })),
+      ); // Threshold is 5
       mockDb.domainReputation.findUnique.mockResolvedValue({
         id: "1",
         domain: "example.com",
@@ -451,7 +495,9 @@ describe("DomainReputationService", () => {
 
     it("should return false when report threshold not exceeded", async () => {
       // Arrange
-      mockDb.report.count.mockResolvedValue(3); // Below threshold
+      mockDb.report.findMany.mockResolvedValue(
+        Array.from({ length: 3 }, (_, i) => ({ reporterUserId: `u${i}` })),
+      ); // Below threshold
 
       // Act
       const result = await service.shouldAutoBlock(
@@ -466,7 +512,9 @@ describe("DomainReputationService", () => {
 
     it("should return false when domain already blocked", async () => {
       // Arrange
-      mockDb.report.count.mockResolvedValue(10);
+      mockDb.report.findMany.mockResolvedValue(
+        Array.from({ length: 10 }, (_, i) => ({ reporterUserId: `u${i}` })),
+      );
       mockDb.domainReputation.findUnique.mockResolvedValue({
         id: "1",
         domain: "example.com",

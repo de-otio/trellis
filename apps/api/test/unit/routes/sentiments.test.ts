@@ -502,6 +502,7 @@ describe("Sentiments Routes", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
       expect(mockAddSecurityHeaders).toHaveBeenCalledWith(mockResponse);
       expect(response.status).toBe(200);
@@ -588,6 +589,7 @@ describe("Sentiments Routes", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
       expect(mockAddSecurityHeaders).toHaveBeenCalledWith(mockResponse);
       expect(response.status).toBe(200);
@@ -645,8 +647,10 @@ describe("Sentiments Routes", () => {
 
       expect(mockGetCommentSentiments).toHaveBeenCalledWith(
         "comment-123",
+        mockSession,
         mockEnv,
         mockRequestContext,
+        TENANT,
       );
       expect(mockAddSecurityHeaders).toHaveBeenCalledWith(mockResponse);
       expect(response.status).toBe(200);

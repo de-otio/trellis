@@ -33,6 +33,7 @@ export type IssuerProbeFailureReason =
   | "BODY_TOO_LARGE"
   | "INVALID_JSON"
   | "MISSING_ENDPOINTS"
+  | "ISSUER_MISMATCH"
   | "TIMEOUT"
   | "NETWORK_ERROR";
 
@@ -185,48 +186,10 @@ export async function probeOidcIssuer(
 ): Promise<IssuerProbeResult> {
   const timeoutMs = options.timeoutMs ?? PROBE_TIMEOUT_MS;
 
-  if (issuerUrl.length > MAX_ISSUER_URL_LENGTH) {
-    return fail("INVALID_URL", "issuerUrl exceeds maximum length");
-  }
-
-  let url: URL;
-  try {
-    url = new URL(issuerUrl);
-  } catch {
-    return fail("INVALID_URL", "issuerUrl must be a valid absolute URL");
-  }
-
-  if (url.protocol !== "https:") {
-    return fail("INSECURE_SCHEME", "issuerUrl must use https://");
-  }
-
-  if (url.username || url.password) {
-    return fail("INVALID_URL", "issuerUrl must not include credentials");
-  }
-
-  const hostname = url.hostname.replace(/^\[|\]$/g, "");
   const resolve = options.resolveHostname ?? defaultResolve;
-
-  let addresses: string[];
-  try {
-    addresses = await resolve(hostname);
-  } catch {
-    return fail("DNS_ERROR", "Could not resolve issuerUrl hostname");
-  }
-  if (addresses.length === 0) {
-    return fail("DNS_ERROR", "Could not resolve issuerUrl hostname");
-  }
-  for (const addr of addresses) {
-    if (addr.includes(":")) {
-      if (isPrivateIPv6(addr)) {
-        return fail("PRIVATE_HOST", "issuerUrl resolves to a private or loopback IP");
-      }
-    } else {
-      if (isPrivateIPv4(addr)) {
-        return fail("PRIVATE_HOST", "issuerUrl resolves to a private or loopback IP");
-      }
-    }
-  }
+  const validated = await validateEgressUrl(issuerUrl, "issuerUrl", resolve);
+  if (!validated.ok) return validated;
+  const { url, addresses } = validated;
 
   // Pin the connect step to the IP we just validated. Without this, Node's
   // fetch performs its own DNS lookup at request time, which lets a TTL=0
@@ -249,7 +212,9 @@ export async function probeOidcIssuer(
   }
 
   try {
-    return await runProbe(probeUrl, fetchImpl, controller, timer, pinnedDispatcher);
+    const result = await runProbe(probeUrl, fetchImpl, controller, timer, pinnedDispatcher);
+    if (!result.ok) return result;
+    return await validateDiscovery(result, issuerUrl, resolve);
   } finally {
     if (pinnedDispatcher && typeof (pinnedDispatcher as { close?: () => Promise<void> }).close === "function") {
       await (pinnedDispatcher as { close: () => Promise<void> })
@@ -257,6 +222,88 @@ export async function probeOidcIssuer(
         .catch(() => undefined);
     }
   }
+}
+
+interface ValidatedEgressUrl {
+  ok: true;
+  url: URL;
+  addresses: string[];
+}
+
+/**
+ * Validate a URL the server (or Keycloak on its behalf) will fetch: length,
+ * absolute, https only, no credentials, and every resolved address must be
+ * public (non-private/loopback/link-local). Applied to the issuer URL and to
+ * every URL taken from its discovery document (SSRF guard).
+ */
+async function validateEgressUrl(
+  raw: string,
+  label: string,
+  resolve: (hostname: string) => Promise<string[]>,
+): Promise<ValidatedEgressUrl | IssuerProbeFailure> {
+  if (raw.length > MAX_ISSUER_URL_LENGTH) {
+    return fail("INVALID_URL", `${label} exceeds maximum length`);
+  }
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return fail("INVALID_URL", `${label} must be a valid absolute URL`);
+  }
+  if (url.protocol !== "https:") {
+    return fail("INSECURE_SCHEME", `${label} must use https://`);
+  }
+  if (url.username || url.password) {
+    return fail("INVALID_URL", `${label} must not include credentials`);
+  }
+  const hostname = url.hostname.replace(/^\[|\]$/g, "");
+  let addresses: string[];
+  try {
+    addresses = await resolve(hostname);
+  } catch {
+    return fail("DNS_ERROR", `Could not resolve ${label} hostname`);
+  }
+  if (addresses.length === 0) {
+    return fail("DNS_ERROR", `Could not resolve ${label} hostname`);
+  }
+  for (const addr of addresses) {
+    const isPrivate = addr.includes(":") ? isPrivateIPv6(addr) : isPrivateIPv4(addr);
+    if (isPrivate) {
+      return fail("PRIVATE_HOST", `${label} resolves to a private or loopback IP`);
+    }
+  }
+  return { ok: true, url, addresses };
+}
+
+function stripOneTrailingSlash(s: string): string {
+  return s.endsWith("/") ? s.slice(0, -1) : s;
+}
+
+/**
+ * Discovery-document checks: `issuer` must equal the probed issuer URL
+ * (modulo a single trailing slash), and every endpoint handed downstream
+ * must pass the same egress validation as the issuer itself.
+ */
+async function validateDiscovery(
+  result: IssuerProbeSuccess,
+  probedIssuer: string,
+  resolve: (hostname: string) => Promise<string[]>,
+): Promise<IssuerProbeResult> {
+  if (stripOneTrailingSlash(result.issuer) !== stripOneTrailingSlash(probedIssuer)) {
+    return fail("ISSUER_MISMATCH", "Issuer well-known `issuer` does not match issuerUrl");
+  }
+  const checks: Array<[string, string | undefined]> = [
+    ["authorization_endpoint", result.authorizationEndpoint],
+    ["token_endpoint", result.tokenEndpoint],
+    ["jwks_uri", result.jwksUri],
+    ["userinfo_endpoint", result.userinfoEndpoint],
+  ];
+  for (const [label, value] of checks) {
+    if (value === undefined) continue;
+    const v = await validateEgressUrl(value, label, resolve);
+    if (!v.ok) return v;
+  }
+  return result;
 }
 
 function defaultPinnedDispatcher(validatedIp: string, family: 4 | 6): Agent {

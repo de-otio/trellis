@@ -30,6 +30,7 @@ import { getExtensions } from "./extensions.js";
 import { assertModerationProviderAllowed } from "./lib/media/moderation-provider.js";
 import { getMediaModerationProvider } from "./lib/media/request-moderation.js";
 import { validateExtensions } from "./lib/extension-validator.js";
+import { INTERNAL_REMOTE_ADDR_HEADER } from "./lib/net/trusted-client-ip.js";
 import {
   setExtensionModelRegistry,
   freezeExtensionModelRegistry,
@@ -291,6 +292,12 @@ export async function startServer(
       for (const [k, v] of Object.entries(req.headers)) {
         if (v) headers[k] = Array.isArray(v) ? v.join(", ") : v;
       }
+      // M6: the internal remote-address header is server-set only. Drop any
+      // client-supplied copy, then inject the real socket peer address so
+      // `trustedClientIp` has a trustworthy fallback in `none` mode.
+      delete headers[INTERNAL_REMOTE_ADDR_HEADER];
+      const remoteAddr = req.socket?.remoteAddress;
+      if (remoteAddr) headers[INTERNAL_REMOTE_ADDR_HEADER] = remoteAddr;
 
       // Only include body for methods that have one
       const hasBody = !["GET", "HEAD", "OPTIONS"].includes(method);

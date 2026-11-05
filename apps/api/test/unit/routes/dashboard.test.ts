@@ -731,9 +731,62 @@ describe("Dashboard Routes", () => {
       expect(response.status).toBe(400);
     });
 
-    it("should update user role successfully", async () => {
+    it("H1: INTERNAL cannot change roles (incl. promoting to SUPER_ADMIN)", async () => {
+      mockDb.user.findUnique.mockResolvedValue({ role: "INTERNAL" });
+      const request = new Request(
+        "http://test.com/api/dashboard/users/user-456",
+        {
+          method: "PATCH",
+          body: JSON.stringify({ role: "SUPER_ADMIN" }),
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+      const response = await route.handler(request, mockEnv, {
+        pathname: "/api/dashboard/users/user-456",
+      });
+      expect(response.status).toBe(403);
+      expect(mockDb.user.update).not.toHaveBeenCalled();
+    });
+
+    it("H1: caller cannot modify their own account", async () => {
+      mockDb.user.findUnique.mockResolvedValue({ role: "SUPER_ADMIN" });
+      const request = new Request(
+        "http://test.com/api/dashboard/users/user-123",
+        {
+          method: "PATCH",
+          body: JSON.stringify({ status: "active" }),
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+      const response = await route.handler(request, mockEnv, {
+        pathname: "/api/dashboard/users/user-123",
+      });
+      expect(response.status).toBe(403);
+      expect(mockDb.user.update).not.toHaveBeenCalled();
+    });
+
+    it("H1: INTERNAL cannot suspend a SUPER_ADMIN", async () => {
       mockDb.user.findUnique
         .mockResolvedValueOnce({ role: "INTERNAL" })
+        .mockResolvedValueOnce({ role: "SUPER_ADMIN" });
+      const request = new Request(
+        "http://test.com/api/dashboard/users/user-456",
+        {
+          method: "PATCH",
+          body: JSON.stringify({ status: "suspended" }),
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+      const response = await route.handler(request, mockEnv, {
+        pathname: "/api/dashboard/users/user-456",
+      });
+      expect(response.status).toBe(403);
+      expect(mockDb.user.update).not.toHaveBeenCalled();
+    });
+
+    it("should update user role successfully", async () => {
+      mockDb.user.findUnique
+        .mockResolvedValueOnce({ role: "SUPER_ADMIN" })
         .mockResolvedValueOnce({
           id: "user-123",
           email: "user@example.com",
@@ -750,7 +803,7 @@ describe("Dashboard Routes", () => {
       });
 
       const request = new Request(
-        "http://test.com/api/dashboard/users/user-123",
+        "http://test.com/api/dashboard/users/user-456",
         {
           method: "PATCH",
           body: JSON.stringify({ role: "INTERNAL" }),
@@ -758,7 +811,7 @@ describe("Dashboard Routes", () => {
         },
       );
       const response = await route.handler(request, mockEnv, {
-        pathname: "/api/dashboard/users/user-123",
+        pathname: "/api/dashboard/users/user-456",
       });
 
       expect(response.status).toBe(200);
@@ -777,7 +830,7 @@ describe("Dashboard Routes", () => {
       });
 
       const request = new Request(
-        "http://test.com/api/dashboard/users/user-123",
+        "http://test.com/api/dashboard/users/user-456",
         {
           method: "PATCH",
           body: JSON.stringify({ status: "suspended" }),
@@ -785,7 +838,7 @@ describe("Dashboard Routes", () => {
         },
       );
       const response = await route.handler(request, mockEnv, {
-        pathname: "/api/dashboard/users/user-123",
+        pathname: "/api/dashboard/users/user-456",
       });
 
       expect(response.status).toBe(200);
@@ -799,10 +852,10 @@ describe("Dashboard Routes", () => {
     });
 
     it("should return 400 for invalid role", async () => {
-      mockDb.user.findUnique.mockResolvedValue({ role: "INTERNAL" });
+      mockDb.user.findUnique.mockResolvedValue({ role: "SUPER_ADMIN" });
 
       const request = new Request(
-        "http://test.com/api/dashboard/users/user-123",
+        "http://test.com/api/dashboard/users/user-456",
         {
           method: "PATCH",
           body: JSON.stringify({ role: "INVALID_ROLE" }),
@@ -810,7 +863,7 @@ describe("Dashboard Routes", () => {
         },
       );
       const response = await route.handler(request, mockEnv, {
-        pathname: "/api/dashboard/users/user-123",
+        pathname: "/api/dashboard/users/user-456",
       });
 
       expect(response.status).toBe(400);
@@ -822,7 +875,7 @@ describe("Dashboard Routes", () => {
       mockDb.user.findUnique.mockResolvedValue({ role: "INTERNAL" });
 
       const request = new Request(
-        "http://test.com/api/dashboard/users/user-123",
+        "http://test.com/api/dashboard/users/user-456",
         {
           method: "PATCH",
           body: JSON.stringify({}),
@@ -830,7 +883,7 @@ describe("Dashboard Routes", () => {
         },
       );
       const response = await route.handler(request, mockEnv, {
-        pathname: "/api/dashboard/users/user-123",
+        pathname: "/api/dashboard/users/user-456",
       });
 
       expect(response.status).toBe(400);
@@ -839,7 +892,7 @@ describe("Dashboard Routes", () => {
     });
 
     it("should return 404 when user not found", async () => {
-      mockDb.user.findUnique.mockResolvedValue({ role: "INTERNAL" });
+      mockDb.user.findUnique.mockResolvedValue({ role: "SUPER_ADMIN" });
       mockDb.user.update.mockRejectedValue({
         code: "P2025",
         message: "Record to update not found",

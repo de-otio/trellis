@@ -446,12 +446,22 @@ describe("block write guard", () => {
   });
 
   it("refuses a reaction to the blocked counterparty's comment", async () => {
+    // H2: the comment is now loaded tenant-scoped via findFirst.
+    mockDb.postComment.findFirst.mockResolvedValueOnce({
+      id: "c-carl",
+      postId: POST_ID,
+      authorId: CARL,
+      tenantId: TENANT,
+      postUri: null,
+      post: { authorId: CARL, dataRegion: "US" },
+    });
     const response = await reactions.addCommentSentiment(
       "c-carl",
       "joy",
       sessionFor(BOB),
       mockEnv,
       requestContext,
+      TENANT,
     );
 
     expect(response.status).toBe(403);

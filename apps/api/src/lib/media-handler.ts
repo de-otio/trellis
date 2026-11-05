@@ -1145,6 +1145,12 @@ export class MediaHandler {
     userId: string,
     env: Env,
     request?: Request,
+    options?: {
+      /** [SR:H3] Require `media.uploadedBy === userId` (mutation paths). */
+      requireUploader?: boolean;
+      /** When known, the media must belong to this tenant. */
+      tenantId?: string;
+    },
   ): Promise<{
     id: string;
     contentHash: string;
@@ -1224,6 +1230,12 @@ export class MediaHandler {
         throw new Error("Media not found");
       }
 
+      // [SR:H3] Tenant scoping: MediaFile.tenantId is NOT NULL. When the
+      // caller's tenant is known, media from another tenant is not found.
+      if (options?.tenantId && media.tenantId !== options.tenantId) {
+        throw new Error("Media not found");
+      }
+
       // Verify user owns this media (check if it's in any of their posts OR used as Entity avatar) - with timeout/retry
       const userPosts = await withQueryTimeoutAndRetry(
         sharedDatabaseConnectionManager,
@@ -1280,76 +1292,21 @@ export class MediaHandler {
         isInPosts = !!postMedia;
       }
 
-      // Check if media is used as Entity avatar - with timeout/retry
-      const userEntities = await withQueryTimeoutAndRetry(
-        sharedDatabaseConnectionManager,
-        region,
-        env as any,
-        async (db) => {
-          return await db.entity.findMany({
-            where: {
-              owners: { some: { userId: userId, status: 'ACTIVE' } },
-            },
-            select: { metadata: true },
-          });
-        },
-        {
-          ...QueryTimeoutPresets.USER_FACING,
-          maxRetries: 3,
-          baseDelayMs: 100,
-          context: {
-            operation: "getMediaDetails_userEntities",
-            userId,
-            mediaId,
-          },
-        },
-      );
+      // [SR:H3] Ownership is the server-recorded uploader only. The former
+      // Entity-avatar heuristic (any of the caller's entities whose
+      // client-writable `metadata.avatar` named this media) let anyone claim
+      // any media, and has been removed deliberately — do not reintroduce it.
+      const isUploader =
+        typeof media.uploadedBy === "string" && media.uploadedBy === userId;
 
-      // Extract contentHashes from Entity avatar URLs
-      // Avatar URLs can be stored in multiple formats:
-      // 1. Full URL: https://api.example.com/api/media/{contentHash}?variant=...
-      // 2. ContentHash: just the hash string
-      // 3. Media ID: the media ID (CUID)
-      let isAvatar = false;
-      for (const entity of userEntities) {
-        if (entity.metadata && typeof entity.metadata === "object") {
-          const metadata = entity.metadata as any;
-          const avatarUrl = metadata.avatar;
-          if (typeof avatarUrl === "string" && avatarUrl) {
-            // Check if avatar URL matches media ID directly
-            if (avatarUrl === media.id) {
-              isAvatar = true;
-              break;
-            }
-
-            // Check if avatar URL matches contentHash directly
-            if (avatarUrl === media.contentHash) {
-              isAvatar = true;
-              break;
-            }
-
-            // Extract contentHash from URL format: /api/media/{contentHash}?variant=...
-            // Or: https://api.example.com/api/media/{contentHash}?variant=...
-            const match = avatarUrl.match(/\/api\/media\/([a-f0-9]+)(?:\?|$)/i);
-            if (match && match[1] === media.contentHash) {
-              isAvatar = true;
-              break;
-            }
-
-            // Also check if URL contains media ID (for URLs like /api/media/{mediaId})
-            const mediaIdMatch = avatarUrl.match(
-              /\/api\/media\/([a-z0-9]+)(?:\?|$)/i,
-            );
-            if (mediaIdMatch && mediaIdMatch[1] === media.id) {
-              isAvatar = true;
-              break;
-            }
-          }
-        }
+      // Read access: the uploader, or an author whose own post embeds the
+      // media. Mutations (hide/unhide/delete/metadata visibility) additionally
+      // require `isUploader` — see `assertMediaUploader`.
+      if (!isUploader && !isInPosts) {
+        throw new Error("Media not found");
       }
 
-      // User must own the media either through posts OR as Entity avatar
-      if (!isInPosts && !isAvatar) {
+      if (options?.requireUploader && !isUploader) {
         throw new Error("Media not found");
       }
 
@@ -1452,7 +1409,7 @@ export class MediaHandler {
         height: media.height ?? undefined,
         duration: media.duration ?? undefined,
         // exifData/iptcData/dateTaken: withheld when metadataVisible is false
-        ...(metadataVisible && {
+        ...(metadataVisible && isUploader && {
           exifData: media.exifData ?? undefined,
           iptcData: media.iptcData ?? undefined,
           dateTaken: media.dateTaken?.toISOString(),
@@ -1542,7 +1499,9 @@ export class MediaHandler {
 
     try {
       // Verify ownership and get media
-      const details = await this.getMediaDetails(mediaId, userId, env, request);
+      const details = await this.getMediaDetails(mediaId, userId, env, request, {
+        requireUploader: true,
+      });
 
       if (details.deletedAt) {
         throw new Error("Cannot hide deleted media");
@@ -1681,7 +1640,9 @@ export class MediaHandler {
 
     try {
       // Verify ownership and get media
-      const details = await this.getMediaDetails(mediaId, userId, env, request);
+      const details = await this.getMediaDetails(mediaId, userId, env, request, {
+        requireUploader: true,
+      });
 
       if (details.deletedAt) {
         throw new Error("Cannot unhide deleted media");
@@ -1817,7 +1778,9 @@ export class MediaHandler {
 
     try {
       // Verify ownership and get media
-      const details = await this.getMediaDetails(mediaId, userId, env, request);
+      const details = await this.getMediaDetails(mediaId, userId, env, request, {
+        requireUploader: true,
+      });
 
       if (details.deletedAt) {
         throw new Error("Media is already deleted");

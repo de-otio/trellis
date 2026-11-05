@@ -64,12 +64,19 @@ export const linkReportRoutes: Route[] = [
         );
       }
 
-      // Apply rate limiting: 10 reports per hour per user
+      // Apply rate limiting: reports per hour per user (runtime config,
+      // default 10 — threshold-secrecy rule).
+      const parsedLimit = Number.parseInt(
+        process.env.LINK_REPORT_RATE_LIMIT_PER_HOUR ?? "",
+        10,
+      );
+      const reportRateLimit =
+        Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : 10;
       const rateLimitResponse = await rateLimiter.applyRateLimitKV(
         env as any,
         request,
         "/link-reports",
-        10,
+        reportRateLimit,
         3600,
         session.userId,
       );
@@ -154,12 +161,40 @@ export const linkReportRoutes: Route[] = [
           );
         }
 
+        const reportedResourceId =
+          linkCheck.normalizedUrl || linkCheck.originalUrl;
+
+        // Dedupe on (reporter, resource): a repeat report by the same user is
+        // idempotent and must not add another reputation/auto-block signal.
+        const existingReport = await db.report.findFirst({
+          where: {
+            reportType: "LINK",
+            resourceType: "url",
+            resourceId: reportedResourceId,
+            reporterUserId: session.userId,
+          },
+          select: { id: true, status: true, createdAt: true },
+        });
+        if (existingReport) {
+          return securityHeaders.createSecureResponse(
+            JSON.stringify({
+              success: true,
+              report: {
+                id: existingReport.id,
+                status: existingReport.status,
+                createdAt: existingReport.createdAt.toISOString(),
+              },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+
         // Create the report (P4: generalized Report model, reportType=LINK).
         const report = await db.report.create({
           data: {
             reportType: "LINK",
             resourceType: "url",
-            resourceId: linkCheck.normalizedUrl || linkCheck.originalUrl,
+            resourceId: reportedResourceId,
             reporterUserId: session.userId,
             domain,
             reason: body.reason || null,

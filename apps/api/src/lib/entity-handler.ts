@@ -449,13 +449,15 @@ export class EntityHandler {
     }
 
     try {
-      // CRITICAL FIX: Search all regions for entity, starting with user's dataRegion
-      // This ensures we find entities even if session.dataRegion doesn't match where entity was created
+      // Tenant-scoped, caller-region-only read. The previous implementation
+      // looped every region with an unscoped `findUnique`, which made any
+      // entity id readable across tenants and regions. The tenant is the
+      // caller's active tenant (session / auth seam), falling back to the
+      // caller's personal tenant; with none resolvable we FAIL CLOSED (404).
       const { DataRouter } = await import("./data-router.js");
       const userDataRegion: string =
         session.dataRegion || env.DEFAULT_REGION || "EU";
 
-      // Search for entity, starting with user's dataRegion
       let entity: {
         id: string;
         name: string;
@@ -467,22 +469,32 @@ export class EntityHandler {
       } | null = null;
       let hadDbError = false;
 
-      const regionsToSearch = [
-        userDataRegion,
-        ...(["EU", "US", "CN"] as const).filter((r) => r !== userDataRegion),
-      ];
+      try {
+        const regionDb = DataRouter.getDatabaseForRegion(
+          userDataRegion,
+          env,
+          request,
+          session.userId,
+        );
 
-      for (const region of regionsToSearch) {
-        try {
-          const regionDb = DataRouter.getDatabaseForRegion(
-            region,
-            env,
-            request,
-            session.userId,
+        let tenantId: string | null = session.activeTenantId || null;
+        if (!tenantId) {
+          const { getCurrentTenantId } = await import(
+            "@de-otio/saas-foundation/tenant"
           );
+          tenantId = getCurrentTenantId() || null;
+        }
+        if (!tenantId) {
+          const user = await regionDb.user.findUnique({
+            where: { id: session.userId },
+            select: { personalTenantId: true },
+          });
+          tenantId = user?.personalTenantId ?? null;
+        }
 
-          entity = await regionDb.entity.findUnique({
-            where: { id: entityId },
+        if (tenantId) {
+          entity = await regionDb.entity.findFirst({
+            where: { id: entityId, tenantId },
             select: {
               id: true,
               name: true,
@@ -490,46 +502,26 @@ export class EntityHandler {
               metadata: true,
               createdAt: true,
               updatedAt: true,
-              owners: { select: { userId: true, role: true }, where: { status: 'ACTIVE' } },
+              owners: {
+                select: { userId: true, role: true },
+                where: { status: "ACTIVE" },
+              },
             },
           });
+        }
 
-          if (entity) {
-            if (region !== userDataRegion) {
-              this.logger.info(
-                "[ENTITY_HANDLER] getEntityProfile: Entity found in different region than user dataRegion",
-                {
-                  entityId,
-                  userId: session.userId,
-                  foundRegion: region,
-                  userDataRegion,
-                },
-              );
-            } else {
-              this.logger.info(
-                "[ENTITY_HANDLER] getEntityProfile: Entity found in user dataRegion",
-                {
-                  entityId,
-                  userId: session.userId,
-                  foundRegion: region,
-                  entityName: entity.name,
-                  entityUpdatedAt: entity.updatedAt,
-                },
-              );
-            }
-            break;
-          }
-        } catch (error: any) {
-          hadDbError = true;
-          // Continue searching other regions
-          this.logger.debug(
-            "[ENTITY_HANDLER] Error searching region for entity",
-            {
-              region,
-              error: error.message,
-            },
+        if (entity) {
+          this.logger.info(
+            "[ENTITY_HANDLER] getEntityProfile: Entity found",
+            { entityId, userId: session.userId, region: userDataRegion },
           );
         }
+      } catch (error: any) {
+        hadDbError = true;
+        this.logger.debug("[ENTITY_HANDLER] Error reading entity", {
+          region: userDataRegion,
+          error: error.message,
+        });
       }
 
       if (!entity) {
@@ -549,8 +541,13 @@ export class EntityHandler {
       // Public profiles can be viewed by anyone, but we still check ownership for private ones
       const metadata = entity.metadata || {};
       const privacy = metadata.privacy || "public";
-      const isOwner = entity.owners?.[0]?.userId === session.userId;
-      if (privacy === "private" && !isOwner) {
+      // Any ACTIVE owner (co-owners included) counts as an owner.
+      const isOwner = (entity.owners ?? []).some(
+        (o) => o.userId === session.userId,
+      );
+      // "followers" is enforced as owner-only until an entity-follow lookup
+      // exists on this path — failing closed rather than exposing it.
+      if ((privacy === "private" || privacy === "followers") && !isOwner) {
         return new Response(JSON.stringify({ error: "Forbidden" }), {
           status: 403,
           headers: { "content-type": "application/json" },

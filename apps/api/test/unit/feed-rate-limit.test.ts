@@ -269,7 +269,11 @@ describe("Feed route rate limiting", () => {
 
     it("falls back to IP-based key when no userId, sessionId, or email", () => {
       const rateLimiter = new RateLimiter();
-      const request = makeRequest("10.0.0.1");
+      const sock = (ip: string) =>
+        new Request("https://api.example.com/api/feeds/home", {
+          headers: { "x-trellis-remote-addr": ip },
+        });
+      const request = sock("8.8.8.8");
 
       const result = rateLimiter.checkRateLimit(
         request,
@@ -281,7 +285,7 @@ describe("Feed route rate limiting", () => {
       expect(result.remaining).toBe(29);
 
       // Different IP should have independent counter
-      const request2 = makeRequest("10.0.0.2");
+      const request2 = sock("1.1.1.1");
       const result2 = rateLimiter.checkRateLimit(
         request2,
         "/api/feeds/home",

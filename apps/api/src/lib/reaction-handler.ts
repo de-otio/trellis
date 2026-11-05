@@ -83,6 +83,17 @@ function sentimentUsersDenyResponse(
   );
 }
 
+/**
+ * The single refusal for the comment sentiment routes (H2): "no such comment",
+ * "another tenant's comment" and "post not readable" are byte-identical.
+ */
+function commentNotFoundResponse(): Response {
+  return new Response(JSON.stringify({ error: "Comment not found" }), {
+    status: 404,
+    headers: { "content-type": "application/json" },
+  });
+}
+
 export class ReactionHandler {
   // No need to create FeedHandler instance - use static methods to avoid circular dependency
 
@@ -548,6 +559,7 @@ export class ReactionHandler {
     session: Session,
     env: Env,
     requestContext: TrellisRequestContext,
+    activeTenantId: string,
   ): Promise<Response> {
     try {
       if (!VALID_SENTIMENTS.includes(sentiment)) {
@@ -573,8 +585,10 @@ export class ReactionHandler {
         region,
         env as any,
         async (db) => {
-          return await db.postComment.findUnique({
-            where: { id: commentId },
+          // H2: tenant-scoped load — a bare `findUnique({ where: { id } })`
+          // resolved any tenant's comment by id.
+          return await db.postComment.findFirst({
+            where: { id: commentId, tenantId: activeTenantId },
             include: { post: true },
           });
         },
@@ -603,6 +617,23 @@ export class ReactionHandler {
           status: 404,
           headers: { "content-type": "application/json" },
         });
+      }
+
+      // H2: the comment is readable only if its post is. Same decision as the
+      // post sentiment routes, refusing with the identical not-found body so
+      // it is not an existence oracle.
+      {
+        const { canReadPost } = await import("./post-read-authorizer.js");
+        const permitted = await canReadPost({
+          postId: comment.postId,
+          viewerUserId: session?.userId ?? "",
+          tenantId: activeTenantId,
+          region,
+          env: env as any,
+        });
+        if (!permitted) {
+          return commentNotFoundResponse();
+        }
       }
 
       // WRITE GUARD (M2): a block in either direction forbids reacting to the
@@ -703,6 +734,7 @@ export class ReactionHandler {
     session: Session,
     env: Env,
     requestContext: TrellisRequestContext,
+    activeTenantId: string,
   ): Promise<Response> {
     try {
       // PREPARATORY: Use DataRouter to get region-specific database
@@ -721,8 +753,10 @@ export class ReactionHandler {
         region,
         env as any,
         async (db) => {
-          return await db.postComment.findUnique({
-            where: { id: commentId },
+          // H2: tenant-scoped load — a bare `findUnique({ where: { id } })`
+          // resolved any tenant's comment by id.
+          return await db.postComment.findFirst({
+            where: { id: commentId, tenantId: activeTenantId },
             include: { post: true },
           });
         },
@@ -751,6 +785,23 @@ export class ReactionHandler {
           status: 404,
           headers: { "content-type": "application/json" },
         });
+      }
+
+      // H2: the comment is readable only if its post is. Same decision as the
+      // post sentiment routes, refusing with the identical not-found body so
+      // it is not an existence oracle.
+      {
+        const { canReadPost } = await import("./post-read-authorizer.js");
+        const permitted = await canReadPost({
+          postId: comment.postId,
+          viewerUserId: session?.userId ?? "",
+          tenantId: activeTenantId,
+          region,
+          env: env as any,
+        });
+        if (!permitted) {
+          return commentNotFoundResponse();
+        }
       }
 
       // Delete sentiment reaction - with timeout/retry
@@ -801,8 +852,10 @@ export class ReactionHandler {
    */
   async getCommentSentiments(
     commentId: string,
+    session: Session,
     env: Env,
     requestContext: TrellisRequestContext,
+    activeTenantId: string,
   ): Promise<Response> {
     try {
       // PREPARATORY: Use DataRouter to get region-specific database
@@ -821,8 +874,10 @@ export class ReactionHandler {
         region,
         env as any,
         async (db) => {
-          return await db.postComment.findUnique({
-            where: { id: commentId },
+          // H2: tenant-scoped load — a bare `findUnique({ where: { id } })`
+          // resolved any tenant's comment by id.
+          return await db.postComment.findFirst({
+            where: { id: commentId, tenantId: activeTenantId },
             include: { post: true },
           });
         },
@@ -850,6 +905,23 @@ export class ReactionHandler {
           status: 404,
           headers: { "content-type": "application/json" },
         });
+      }
+
+      // H2: the comment is readable only if its post is. Same decision as the
+      // post sentiment routes, refusing with the identical not-found body so
+      // it is not an existence oracle.
+      {
+        const { canReadPost } = await import("./post-read-authorizer.js");
+        const permitted = await canReadPost({
+          postId: comment.postId,
+          viewerUserId: session?.userId ?? "",
+          tenantId: activeTenantId,
+          region,
+          env: env as any,
+        });
+        if (!permitted) {
+          return commentNotFoundResponse();
+        }
       }
 
       // Try to get from cache first
@@ -919,7 +991,7 @@ export class ReactionHandler {
         status: 200,
         headers: {
           "content-type": "application/json",
-          "cache-control": "public, max-age=30, stale-while-revalidate=60",
+          "cache-control": "private, no-store",
         },
       });
     } catch (error: any) {

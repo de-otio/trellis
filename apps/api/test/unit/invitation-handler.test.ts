@@ -152,6 +152,7 @@ describe("InvitationHandler", () => {
         findMany: vi.fn(),
         create: vi.fn(),
         update: vi.fn(),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
         delete: vi.fn(),
         deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
         count: vi.fn().mockResolvedValue(0),
@@ -1220,12 +1221,7 @@ describe("InvitationHandler", () => {
               used: false,
               email: null,
             }),
-            update: vi.fn().mockResolvedValue({
-              id: "inv-123",
-              used: true,
-              usedBy: "user-123",
-              usedAt: new Date(),
-            }),
+            updateMany: vi.fn().mockResolvedValue({ count: 1 }),
           },
           user: {
             findUnique: vi.fn().mockResolvedValue({
@@ -1492,12 +1488,7 @@ describe("InvitationHandler", () => {
         used: false,
         email: null,
       });
-      const updateMock = vi.fn().mockResolvedValue({
-        id: "inv-123",
-        used: true,
-        usedBy: "user-123",
-        usedAt: new Date(),
-      });
+      const updateMock = vi.fn().mockResolvedValue({ count: 1 });
 
       mockDb.$transaction.mockImplementation(async (callback) => {
         const txDb = {
@@ -1510,7 +1501,7 @@ describe("InvitationHandler", () => {
           },
           invitation: {
             findUnique: findUniqueMock,
-            update: updateMock,
+            updateMany: updateMock,
           },
         };
         return await callback(txDb);
@@ -1555,12 +1546,7 @@ describe("InvitationHandler", () => {
               used: false,
               email: null,
             }),
-            update: vi.fn().mockResolvedValue({
-              id: "inv-123",
-              used: true,
-              usedBy: "user-123",
-              usedAt: new Date(),
-            }),
+            updateMany: vi.fn().mockResolvedValue({ count: 1 }),
           },
           user: {
             findUnique: vi.fn().mockResolvedValue({

@@ -89,7 +89,7 @@ export interface TrellisClaims {
   emailVerified?: boolean;
   /** was `custom:userId` — Trellis `User.id` (cuid). */
   userId?: string;
-  /** was `custom:globalRole` / legacy `custom:role`. */
+  /** from `custom:globalRole` only — legacy `custom:role` is IdP-mappable and never trusted (H6). */
   globalRole?: string;
   /** was `custom:activeTenantId`. */
   activeTenantId?: string;
@@ -151,7 +151,7 @@ export function normalizeClaims(
       ...pick("email", asString(raw.email)),
       ...pickBool("emailVerified", asBool(raw.email_verified)),
       ...pick("userId", asString(raw["custom:userId"])),
-      ...pick("globalRole", asString(raw["custom:globalRole"]) ?? asString(raw["custom:role"])),
+      ...pick("globalRole", asString(raw["custom:globalRole"])),
       ...pick("activeTenantId", asString(raw["custom:activeTenantId"])),
       ...pick("tenantSlug", asString(raw["custom:tenantSlug"])),
       ...pick("tenantRole", asString(raw["custom:tenantRole"])),
@@ -190,7 +190,7 @@ export function normalizeClaims(
     ...pick("email", asString(raw.email)),
     ...pickBool("emailVerified", asBool(raw.email_verified)),
     ...pick("userId", asString(raw["custom:userId"])),
-    ...pick("globalRole", asString(raw["custom:globalRole"]) ?? asString(raw["custom:role"])),
+    ...pick("globalRole", asString(raw["custom:globalRole"])),
     ...pick("activeTenantId", asString(raw["custom:activeTenantId"])),
     ...pick("tenantSlug", asString(raw["custom:tenantSlug"])),
     ...pick("tenantRole", asString(raw["custom:tenantRole"])),

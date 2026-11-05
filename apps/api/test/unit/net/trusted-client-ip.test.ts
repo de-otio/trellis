@@ -87,3 +87,20 @@ describe("trustedClientIp — reserved-block rejection (SSRF / spoof guard)", ()
     expect(trustedClientIp(r, { TRUSTED_PROXY: "cloudflare" })).toBe("unknown");
   });
 });
+
+describe("trustedClientIp — server-injected socket address (M6)", () => {
+  it("uses x-trellis-remote-addr in none mode", () => {
+    const r = req({ "x-trellis-remote-addr": "8.8.8.8", "CF-Connecting-IP": "1.1.1.1" });
+    expect(trustedClientIp(r, {})).toBe("8.8.8.8");
+  });
+
+  it("ignores x-trellis-remote-addr when a proxy mode is set", () => {
+    const r = req({ "x-trellis-remote-addr": "8.8.8.8", "CF-Connecting-IP": "1.1.1.1" });
+    expect(trustedClientIp(r, { TRUSTED_PROXY: "cloudflare" })).toBe("1.1.1.1");
+  });
+
+  it("still validates the socket address shape", () => {
+    const r = req({ "x-trellis-remote-addr": "not-an-ip" });
+    expect(trustedClientIp(r, {})).toBe("unknown");
+  });
+});
