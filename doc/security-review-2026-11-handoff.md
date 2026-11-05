@@ -7,8 +7,7 @@ Branch: `claude/youthful-goldberg-c18bkg` (base `30251d0`). Work paused at the
 
 - `npm run lint` (tsc --build + gate-polarity) — clean.
 - `npm test` — 12632 passed, 4 failed on first run (post-confirmation H5
-  fixtures, magic-link M7); all 4 fixed and re-run green per file. Full suite
-  not re-run after those fixes.
+  fixtures, magic-link M7); all 4 fixed. Full re-run: 12636 passed, 0 failed.
 - **Not run:** standalone, testkit, graph, schema, integration lanes, smoke-pack
   (no Docker daemon/Postgres in the session).
 
