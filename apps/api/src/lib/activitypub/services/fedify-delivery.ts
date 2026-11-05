@@ -25,6 +25,7 @@ import {
   QueryTimeoutPresets,
 } from "../../db-query-helper.js";
 import { isStandaloneModeEnabled, isRemoteUri } from "../standalone-mode.js";
+import { allowedFetchPorts } from "../remote-fetch-service.js";
 import {
   safeFetch,
   SsrfBlockedError,
@@ -180,6 +181,10 @@ export async function deliverActivityWithFedify(
         headers,
         body,
         allowedProtocols: ["https:"],
+        // safe-fetch now permits only the scheme's default port unless told
+        // otherwise (I4). Delivery shares the federation port policy with key
+        // fetching: 443 by default, ACTIVITYPUB_ALLOWED_FETCH_PORTS to widen.
+        allowedPorts: allowedFetchPorts(),
         // A redirected POST would re-send the signed body to a hop the
         // signature never covered; peers do not redirect inboxes.
         maxRedirects: 0,

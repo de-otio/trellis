@@ -40,6 +40,33 @@ function taxonomyDenyResponse(securityHeaders: SecurityHeaders): Response {
   );
 }
 
+
+/**
+ * The caller's VERIFIED active tenant, when the request carries a valid Bearer
+ * JWT; otherwise `undefined`.
+ *
+ * The four owner-only post mutations authenticate through `getSession`, which
+ * serves cookie-sealed sessions that carry no trustworthy tenant. Requiring
+ * `authMiddleware` there would 401 those clients, so this is opportunistic:
+ * when a verified tenant exists it is handed to the handler (which then also
+ * refuses a post from another tenant with the same uniform 404); when it does
+ * not, behaviour is unchanged and the author-only check still applies.
+ * A failure to verify never grants anything — it just yields `undefined`.
+ */
+async function verifiedActiveTenantId(
+  request: Request,
+  env: unknown,
+): Promise<string | undefined> {
+  try {
+    const auth = await authMiddleware(request, env as never);
+    return auth?.activeTenantId || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Trailing handler argument: present only when a verified tenant exists. */
+const tenantArg = (id: string | undefined): [] | [string] => (id ? [id] : []);
 export const postsRoutes: Route[] = [
   {
     path: "/api/posts",
@@ -167,6 +194,7 @@ export const postsRoutes: Route[] = [
           session,
           env as any,
           requestContext,
+          ...tenantArg(await verifiedActiveTenantId(request, env)),
         );
         return securityHeaders.addSecurityHeaders(response);
       } catch (error) {
@@ -235,6 +263,7 @@ export const postsRoutes: Route[] = [
           session,
           env as any,
           requestContext,
+          ...tenantArg(await verifiedActiveTenantId(request, env)),
         );
         return securityHeaders.addSecurityHeaders(response);
       } catch (error) {
@@ -287,6 +316,7 @@ export const postsRoutes: Route[] = [
           session,
           env as any,
           requestContext,
+          ...tenantArg(await verifiedActiveTenantId(request, env)),
         );
         return securityHeaders.addSecurityHeaders(response);
       } catch (error) {
@@ -339,6 +369,7 @@ export const postsRoutes: Route[] = [
           session,
           env as any,
           requestContext,
+          ...tenantArg(await verifiedActiveTenantId(request, env)),
         );
         return securityHeaders.addSecurityHeaders(response);
       } catch (error) {

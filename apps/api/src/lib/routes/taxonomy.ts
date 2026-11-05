@@ -76,7 +76,7 @@ export const taxonomyRoutes: Route[] = [
       } catch (error: any) {
         getLogger().error("Error listing dimensions:", error);
         return new Response(
-          JSON.stringify({ error: error.message || "Internal server error" }),
+          JSON.stringify({ error: "Internal server error" }),
           {
             status: 500,
             headers: { "content-type": "application/json" },
@@ -156,7 +156,7 @@ export const taxonomyRoutes: Route[] = [
       } catch (error: any) {
         getLogger().error("Error getting dimension:", error);
         return new Response(
-          JSON.stringify({ error: error.message || "Internal server error" }),
+          JSON.stringify({ error: "Internal server error" }),
           {
             status: 500,
             headers: { "content-type": "application/json" },
@@ -468,7 +468,7 @@ export const taxonomyRoutes: Route[] = [
       } catch (error: any) {
         getLogger().error("Error getting taxon:", error);
         return new Response(
-          JSON.stringify({ error: error.message || "Internal server error" }),
+          JSON.stringify({ error: "Internal server error" }),
           {
             status: 500,
             headers: { "content-type": "application/json" },

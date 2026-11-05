@@ -117,6 +117,9 @@ describe("ActivityPub Audiences Routes - Extended", () => {
       customAudience: {
         findUnique: vi.fn(),
       },
+      customAudienceMember: {
+        findUnique: vi.fn(),
+      },
     };
 
     mockGetSession.mockResolvedValue(mockSession);
@@ -292,6 +295,35 @@ describe("ActivityPub Audiences Routes - Extended", () => {
       expect(response.status).toBe(404);
       const body = await response.json();
       expect(body.error).toContain("not found");
+      // L9: generic text, not the raw message.
+      expect(JSON.stringify(body)).not.toContain("Member not found in system");
+    });
+
+    it("L9: a generic create failure never echoes error.message", async () => {
+      mockDb.user.findUnique.mockResolvedValue({
+        id: "user-123",
+        username: "creator",
+        actorUri: "https://example.com/users/creator",
+        publicKey: "key",
+        suspended: false,
+        deletionConfirmedAt: null,
+      });
+      mockCreateAudience.mockRejectedValue(
+        new Error('Unique constraint failed on the fields: (`collection_id`)'),
+      );
+
+      const request = new Request("https://example.com/api/audiences", {
+        method: "POST",
+        body: JSON.stringify({ name: "My Audience", memberIds: ["member-1"] }),
+      });
+      const response = await getRoute().handler(request, mockEnv, {
+        url: new URL(request.url),
+      });
+
+      expect(response.status).toBe(400);
+      const text = await response.text();
+      expect(text).toBe(JSON.stringify({ error: "Failed to create custom audience" }));
+      expect(text).not.toContain("collection_id");
     });
 
     it("should return 404 when error message contains 'not configured'", async () => {
@@ -366,6 +398,15 @@ describe("ActivityPub Audiences Routes - Extended", () => {
       audienceRoutes.find(
         (r) => r.method === "GET" && r.path === "/audiences/:audienceId",
       )!;
+
+    // The signed-in caller (user-123) is the audience's creator unless a test
+    // says otherwise: member lists are creator/member-only (L4).
+    beforeEach(() => {
+      mockDb.customAudience.findUnique.mockResolvedValue({
+        creatorId: "user-123",
+      });
+      mockDb.customAudienceMember.findUnique.mockResolvedValue(null);
+    });
 
     it("should return 400 when audienceId is missing", async () => {
       const request = new Request("https://example.com/audiences/", {
@@ -548,6 +589,139 @@ describe("ActivityPub Audiences Routes - Extended", () => {
     });
   });
 
+  // ---- L4: member list is creator/member-only ----
+
+  describe("GET /audiences/:audienceId - member list visibility (L4)", () => {
+    const getRoute = () =>
+      audienceRoutes.find(
+        (r) => r.method === "GET" && r.path === "/audiences/:audienceId",
+      )!;
+
+    const collectionWith = () => ({
+      type: "OrderedCollection",
+      totalItems: 2,
+      orderedItems: ["https://example.com/users/a", "https://example.com/users/b"],
+      first: "https://example.com/audiences/audience-123?page=1",
+    });
+
+    function arrange() {
+      // Echo whatever collection the route hands to the serializer, so the
+      // assertions are on what would actually go on the wire.
+      mockCreateOrderedCollection.mockImplementation(async () => collectionWith());
+      mockGetFedifyContext.mockReturnValue({});
+      mockRespondWithObject.mockImplementation(
+        async (_req: unknown, collection: unknown) =>
+          new Response(JSON.stringify(collection), {
+            status: 200,
+            headers: { "content-type": "application/activity+json" },
+          }),
+      );
+    }
+
+    const get = () => {
+      const request = new Request("https://example.com/audiences/audience-123?page=3&limit=20");
+      return getRoute().handler(request, mockEnv, {
+        params: { audienceId: "audience-123" },
+        url: new URL(request.url),
+      });
+    };
+
+    it("anonymous caller gets the count only: no items, no first page, zero rows requested", async () => {
+      arrange();
+      mockGetSession.mockResolvedValue(null);
+
+      const response = await get();
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.totalItems).toBe(2);
+      expect(body.orderedItems).toBeUndefined();
+      expect(body.first).toBeUndefined();
+      // Page/limit are forced so no member row is read at all.
+      expect(mockCreateOrderedCollection).toHaveBeenCalledWith(
+        expect.anything(), "audience-123", expect.anything(), expect.any(String), 1, 0,
+      );
+      // No audience lookup is even attempted without a session.
+      expect(mockDb.customAudience.findUnique).not.toHaveBeenCalled();
+    });
+
+    it("signed-in outsider (neither creator nor member) gets the count only", async () => {
+      arrange();
+      mockDb.customAudience.findUnique.mockResolvedValue({ creatorId: "someone-else" });
+      mockDb.customAudienceMember.findUnique.mockResolvedValue(null);
+
+      const body = await (await get()).json();
+      expect(body.totalItems).toBe(2);
+      expect(body.orderedItems).toBeUndefined();
+      expect(mockCreateOrderedCollection).toHaveBeenCalledWith(
+        expect.anything(), "audience-123", expect.anything(), expect.any(String), 1, 0,
+      );
+    });
+
+    it("the creator sees the items, with their requested pagination", async () => {
+      arrange();
+      mockDb.customAudience.findUnique.mockResolvedValue({ creatorId: "user-123" });
+
+      const response = await get();
+      const body = await response.json();
+      expect(body.orderedItems).toHaveLength(2);
+      expect(mockCreateOrderedCollection).toHaveBeenCalledWith(
+        expect.anything(), "audience-123", expect.anything(), expect.any(String), 3, 20,
+      );
+      expect(response.headers.get("cache-control")).toBe("private, no-store");
+      expect(response.headers.get("vary")).toBe("Cookie");
+    });
+
+    it("a member sees the items; the membership lookup is for THIS audience and THIS user", async () => {
+      arrange();
+      mockDb.customAudience.findUnique.mockResolvedValue({ creatorId: "someone-else" });
+      mockDb.customAudienceMember.findUnique.mockResolvedValue({ id: "m1" });
+
+      const body = await (await get()).json();
+      expect(body.orderedItems).toHaveLength(2);
+      expect(mockDb.customAudienceMember.findUnique).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { audienceId_memberId: { audienceId: "audience-123", memberId: "user-123" } },
+        }),
+      );
+    });
+
+    it("count-only responses are marked Vary: Cookie and not private-cached", async () => {
+      arrange();
+      mockGetSession.mockResolvedValue(null);
+      const response = await get();
+      expect(response.headers.get("vary")).toBe("Cookie");
+      expect(response.headers.get("cache-control")).toBeNull();
+    });
+
+    it("fails CLOSED to count-only when the authorization lookup throws", async () => {
+      arrange();
+      mockDb.customAudience.findUnique.mockRejectedValue(new Error("db down"));
+
+      const response = await get();
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.orderedItems).toBeUndefined();
+      expect(mockCreateOrderedCollection).toHaveBeenCalledWith(
+        expect.anything(), "audience-123", expect.anything(), expect.any(String), 1, 0,
+      );
+    });
+
+    it("fails CLOSED to count-only when the session lookup throws", async () => {
+      arrange();
+      mockGetSession.mockRejectedValue(new Error("session store down"));
+
+      const body = await (await get()).json();
+      expect(body.orderedItems).toBeUndefined();
+    });
+
+    it("a nonexistent audience is still a 404 for everyone", async () => {
+      mockGetSession.mockResolvedValue(null);
+      mockCreateOrderedCollection.mockRejectedValue(new Error("Audience not found"));
+      const response = await get();
+      expect(response.status).toBe(404);
+    });
+  });
+
   // ---- POST /api/audiences/:audienceId/members ----
 
   describe("POST /api/audiences/:audienceId/members - Add member", () => {
@@ -685,7 +859,9 @@ describe("ActivityPub Audiences Routes - Extended", () => {
 
       expect(response.status).toBe(400);
       const body = await response.json();
-      expect(body.error).toContain("Duplicate member");
+      // L9: the raw error message is logged, never returned.
+      expect(body.error).toBe("Failed to add member");
+      expect(JSON.stringify(body)).not.toContain("Duplicate member");
     });
   });
 

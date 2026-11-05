@@ -15,7 +15,7 @@
  */
 
 import { z } from "zod";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { createPrisma } from "../../db.js";
 import { Capability } from "../auth/capabilities.js";
 import { requireCapability } from "../auth/require.js";
@@ -128,6 +128,19 @@ function jsonError(env: unknown, body: unknown, status: number): Response {
   });
 }
 
+/**
+ * Constant-time string compare. Both sides are re-hashed to a fixed length so
+ * `timingSafeEqual` can never throw on a length mismatch and a malformed stored
+ * value simply compares unequal.
+ */
+function hashesEqual(a: unknown, b: unknown): boolean {
+  if (typeof a !== "string" || typeof b !== "string") return false;
+  return timingSafeEqual(
+    createHash("sha256").update(a).digest(),
+    createHash("sha256").update(b).digest(),
+  );
+}
+
 function escape(input: string): string {
   return input
     .replace(/&/g, "&amp;")
@@ -206,11 +219,22 @@ async function buildAuthContext(
   // real Cognito JWT auth-middleware path is for token-bearing API calls;
   // here the admin is using the web session.
   if (!session.userId) return null;
-  // We need tenantRole. Look up via Prisma.
+  // L13: the approval is scoped to the session's ACTIVE tenant — never "the
+  // oldest ACTIVE membership", which could mint an agent session for a tenant
+  // the admin is not currently acting in. `activeTenantId` is populated only
+  // from a verified token (see `Session.activeTenantId`); without it we have no
+  // trustworthy tenant, so fail closed.
+  if (!session.activeTenantId) return null;
+  // We need tenantRole. Look up via Prisma, and re-verify the user is an ACTIVE
+  // member of exactly that tenant (membership may have been revoked since the
+  // token was minted).
   const prisma = createPrisma(env as never);
   const memberWithTenant = await prisma.tenantMember.findFirst({
-    where: { userId: session.userId, status: "ACTIVE" },
-    orderBy: { joinedAt: "asc" },
+    where: {
+      userId: session.userId,
+      tenantId: session.activeTenantId,
+      status: "ACTIVE",
+    },
     include: { tenant: true },
   });
   if (!memberWithTenant) return null;
@@ -480,8 +504,9 @@ export const agentAuthorizeRoutes: Route[] = [
       }
 
       // Verify the supplied user_code actually matches the record's hash.
+      // L13: constant-time compare (hash is a lookup key / secret-derived).
       const expected = hashUserCode(userCode);
-      if (expected !== record.userCodeHash) {
+      if (!hashesEqual(expected, record.userCodeHash)) {
         const after = await incrementFailedLookup(deviceCode);
         if (after >= USER_CODE_FAILURE_LIMIT) {
           return structuredError(410, {

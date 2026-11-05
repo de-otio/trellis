@@ -28,6 +28,12 @@ import { processRemoteActivity } from "../services/remote-activity-handler.js";
 import { admitActivity } from "../services/abuse-prevention.js";
 import { getActivityPubBaseUrl } from "../fedify/context.js";
 import { isStandaloneModeEnabled, isRemoteUri } from "../standalone-mode.js";
+import {
+  PAYLOAD_TOO_LARGE_BODY,
+  addresseeLimitViolation,
+  declaredContentLength,
+  inboxMaxBodyBytes,
+} from "../inbox-limits.js";
 
 /**
  * Parse activity using Fedify
@@ -94,6 +100,23 @@ export async function processInboxActivity(
   const logger = getLogger();
 
   try {
+    // L2: a declared oversize body is refused before we read or verify it. The
+    // header is only a hint (chunked bodies carry none), so the authoritative
+    // check on the verified bytes follows.
+    const maxBody = inboxMaxBodyBytes();
+    const declared = declaredContentLength(request);
+    if (declared !== null && declared > maxBody) {
+      logger.warn("[Fedify Inbox] Declared body exceeds the inbox cap", {
+        username,
+        declared,
+        maxBody,
+      });
+      return new Response(PAYLOAD_TOO_LARGE_BODY, {
+        status: 413,
+        headers: { "content-type": "application/json" },
+      });
+    }
+
     // Verify the HTTP Signature. This now also authenticates the BODY (digest
     // must be signed and must match) and bounds the Date, and it hands back
     // the actor URI that owns the signing key.
@@ -113,11 +136,39 @@ export async function processInboxActivity(
       );
     }
 
+    // L2: the verified bytes are the truth about size — refuse BEFORE parsing.
+    if (verification.body.length > maxBody) {
+      logger.warn("[Fedify Inbox] Verified body exceeds the inbox cap", {
+        username,
+        size: verification.body.length,
+        maxBody,
+      });
+      return new Response(PAYLOAD_TOO_LARGE_BODY, {
+        status: 413,
+        headers: { "content-type": "application/json" },
+      });
+    }
+
     // Parse the exact bytes the digest covered.
     const activity = await parseActivity(request, env, verification.body);
     if (!activity) {
       logger.warn("[Fedify Inbox] Failed to parse activity", { username });
       return new Response(JSON.stringify({ error: "Invalid activity" }), {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    // L2: bound the addressing arrays that get stored verbatim. Refused with a
+    // 400 before anything is persisted (truncating would silently change who the
+    // activity is addressed to).
+    const oversizedField = addresseeLimitViolation(activity);
+    if (oversizedField) {
+      logger.warn("[Fedify Inbox] Too many addressees", {
+        username,
+        field: oversizedField,
+      });
+      return new Response(JSON.stringify({ error: "Too many addressees" }), {
         status: 400,
         headers: { "content-type": "application/json" },
       });

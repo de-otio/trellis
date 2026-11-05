@@ -13,6 +13,12 @@ import { assertActorBinding } from "../../activitypub/http-signatures.js";
 import { verifyInboxRequest } from "../../activitypub/listeners/http-signatures.js";
 import { verificationFailureStatus } from "../../activitypub/http-signatures.js";
 import { admitActivity } from "../../activitypub/services/abuse-prevention.js";
+import {
+  PAYLOAD_TOO_LARGE_BODY,
+  addresseeLimitViolation,
+  declaredContentLength,
+  inboxMaxBodyBytes,
+} from "../../activitypub/inbox-limits.js";
 import { sharedDatabaseConnectionManager } from "../../database-connection-manager.js";
 import {
   QueryTimeoutPresets,
@@ -130,7 +136,19 @@ export const groupRoutes: Route[] = [
           },
         );
 
-        if (!group) {
+        // M14: the actor document exposes name / summary / privacy, so for a
+        // non-PUBLIC group it is members-only, with the same 404 as "not found".
+        // PUBLIC groups stay open (and never touch the session).
+        if (
+          !group ||
+          !(await authorizeGroupRead({
+            request,
+            env,
+            region,
+            group,
+            level: "collection",
+          }))
+        ) {
           const errorResponse = securityHeaders.createSecureResponse(
             JSON.stringify({ error: "Group not found" }),
             { status: 404, headers: { "content-type": "application/json" } },
@@ -309,6 +327,23 @@ export const groupRoutes: Route[] = [
       const { groupId } = params;
 
       try {
+        // L2: refuse a declared oversize body before reading or verifying it;
+        // the check on the verified bytes below is the authoritative one.
+        const maxBody = inboxMaxBodyBytes();
+        const declared = declaredContentLength(request);
+        if (declared !== null && declared > maxBody) {
+          logger.warn("[GroupInbox] Declared body exceeds the inbox cap", {
+            groupId,
+            declared,
+            maxBody,
+          });
+          const errorResponse = securityHeaders.createSecureResponse(
+            PAYLOAD_TOO_LARGE_BODY,
+            { status: 413, headers: { "content-type": "application/json" } },
+          );
+          return addCorsHeaders(errorResponse, request, env);
+        }
+
         // Verify HTTP Signature. This authenticates the body (signed digest,
         // constant-time compared), bounds the Date, and returns the actor URI
         // that owns the signing key. Through the inbox entry point so the
@@ -328,6 +363,20 @@ export const groupRoutes: Route[] = [
               error: status === 401 ? "Unauthorized" : "Try again later",
             }),
             { status, headers: { "content-type": "application/json" } },
+          );
+          return addCorsHeaders(errorResponse, request, env);
+        }
+
+        // L2: the verified bytes are the truth about size — refuse BEFORE parsing.
+        if (verification.body.length > maxBody) {
+          logger.warn("[GroupInbox] Verified body exceeds the inbox cap", {
+            groupId,
+            size: verification.body.length,
+            maxBody,
+          });
+          const errorResponse = securityHeaders.createSecureResponse(
+            PAYLOAD_TOO_LARGE_BODY,
+            { status: 413, headers: { "content-type": "application/json" } },
           );
           return addCorsHeaders(errorResponse, request, env);
         }
@@ -356,6 +405,21 @@ export const groupRoutes: Route[] = [
           });
           const errorResponse = securityHeaders.createSecureResponse(
             JSON.stringify({ error: "Invalid activity structure" }),
+            { status: 400, headers: { "content-type": "application/json" } },
+          );
+          return addCorsHeaders(errorResponse, request, env);
+        }
+
+        // L2: bound the addressing arrays stored verbatim. Refuse (400) before
+        // anything is persisted; truncating would change who it is addressed to.
+        const oversizedField = addresseeLimitViolation(activity);
+        if (oversizedField) {
+          logger.warn("[GroupInbox] Too many addressees", {
+            groupId,
+            field: oversizedField,
+          });
+          const errorResponse = securityHeaders.createSecureResponse(
+            JSON.stringify({ error: "Too many addressees" }),
             { status: 400, headers: { "content-type": "application/json" } },
           );
           return addCorsHeaders(errorResponse, request, env);

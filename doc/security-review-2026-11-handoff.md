@@ -1,7 +1,10 @@
 # Security review remediation — handoff (2026-11-05)
 
-Branch: `claude/youthful-goldberg-c18bkg` (base `30251d0`). Work paused at the
-08:59 CET time-box. Finding IDs refer to the 2026-11-05 Trellis security review.
+Branch: `claude/youthful-goldberg-c18bkg` (base `30251d0`). Finding IDs refer to
+the 2026-11-05 Trellis security review (`Trellis Security Review.md`, kept by the
+owner outside the repo). First pass paused at the 08:59 CET time-box; a second
+pass worked the Low/Info items and the gaps in M13/M14 once the review text was
+in hand.
 
 ## Verification done
 
@@ -41,6 +44,25 @@ Branch: `claude/youthful-goldberg-c18bkg` (base `30251d0`). Work paused at the
 | X4 (tenant audit) | `GET /api/tenants/:id/audit` was readable by any tenant member including GUEST (actor ids, source addresses, 10k-row CSV). Now requires `Capability.AuditView` (ADMIN and above), same as the compliance export. **Behaviour change:** MEMBER/GUEST callers now get 403. |
 | X5 (log redaction) | Removed from application logs: email, session id and client address from the rate-limit warning; client address from the SecurityMonitor info line and the whole event object from its no-webhook alert; Cognito `username` from the JWT-verified debug line; email from the e2e-sweeper messages; username and stringified error from the member sign-out warning; the redeemed connection code (now the row id); query strings from the three server error lines (magic-link tokens/emails can ride in them). |
 | I1 | `POST /api/auth/discover`: ceiling is now runtime config (`AUTH_DISCOVER_RATE_LIMIT`, `AUTH_DISCOVER_RATE_WINDOW_SECONDS`, defaults 30 / 60, invalid values fall back), the email is bounded to 254 chars before the regex and DB lookup, and the dead client-IP variable is gone. Failure policy deliberately unchanged (the limiter's in-memory fallback still enforces the limit per process). |
+| M13 (rest) | Per-TARGET-HOST bound on outbound key fetches (`ap:keyfetch:<host>`, `ACTIVITYPUB_KEY_FETCH_RATE_LIMIT`, default 30/min, fail closed) applied before every live fetch incl. the forced refresh; negative cache keyed on origin+path so a varying query/fragment/port/case no longer defeats it; key fetches restricted to port 443 (`ACTIVITYPUB_ALLOWED_FETCH_PORTS`, `*` lifts). |
+| M14 (rest) | `GET /groups/:id` (actor document) returns the same uniform 404 to non-members for non-PUBLIC groups. |
+| L1 | A federated Follow joins only a PUBLIC group (`!== "PUBLIC"`, fails closed on new values). |
+| L2 | Inbox body capped (`ACTIVITYPUB_INBOX_MAX_BODY_BYTES`, default 256 KiB → 413, checked on Content-Length and on the verified bytes) in both inboxes; `to`/`cc`/`bto`/`bcc` capped (`ACTIVITYPUB_MAX_ADDRESSEES`, default 100 → 400; `storeInboxActivity` throws as a backstop). **Retention NOT done** (see below). |
+| L3 | Canonical URIs come from `ACTIVITYPUB_BASE_URL` first; with federation enabled and a base URL set, a mismatched Host on federation paths gets 421 (`ACTIVITYPUB_ALLOWED_HOSTS` for proxies that rewrite Host) and `request.url` is rebuilt on the configured origin. |
+| L4 | `GET /audiences/:id` is count-only for anonymous callers and signed-in non-members/non-creators (fail closed); creator and members still get items. |
+| L5 | Public feature-toggle read no longer returns `changedBy`; its 500 is generic. |
+| L6 | Post delete/edit/hide/unhide: "no such post" and "not yours" are the same 404 (tenant-isolation doc); with a verified Bearer tenant a cross-tenant post is the same 404 (wired opportunistically in `routes/posts.ts`). Collection entity targets are looked up with the collection's `tenantId`. |
+| L7 | A remote Postgres host with no CA now throws unless `DB_SSL_INSECURE=true` (then the old unverified mode plus one warning). |
+| L8 | Removed email / invitation code / IP / user-agent / `session.email` / debug `console.error` from the cited handlers; the entity delete path no longer logs the whole entity row (which included a private key). |
+| L9 | Raw `error.message` no longer returned to clients from feed, taxonomy, taxonomy-analytics, products, media, audiences and admin handlers (status codes and response fields unchanged). |
+| L11 | SMTP: credentials are never sent over a plaintext socket (pure `decideSmtpAuth`); without credentials nothing changes. |
+| L13 (part) | Secret compares use `timingSafeEqual` over hashes; agent approval uses the session's ACTIVE tenant (membership verified) instead of the oldest membership. Dead flow left (see below). |
+| L14 | MFA `enroll/finalize` is bound to `enroll/begin` via a sealed, expiring enrolment token (`MFA_ENROLL_TTL_SECONDS`, default 600) — a client-chosen secret/backup codes are rejected; the MFA cookie now goes through `SessionManager.setSession` (same attributes as login). |
+| I2 (part) | `DEVICE_AUTH_KEK_BASE64` + `DEVICE_AUTH_KMS_KEY_ID` both set in production now refuses (warns in non-prod). The KV-cursor HMAC key part needs `env.ts` — not done. |
+| I3 | `docker-compose.yml` (Postgres, DynamoDB-local, LocalStack) and `docker-compose.hatchet.yml` (dashboard, gRPC) publish on `127.0.0.1` only. |
+| I4 | safe-fetch: unset `allowedPorts` means the scheme's default port only (delivery and key fetch share `ACTIVITYPUB_ALLOWED_FETCH_PORTS`); fetched keys must be RSA ≥ 2048 bits (`ACTIVITYPUB_MIN_RSA_BITS` can only raise); WebFinger not-found and suspended/deleted are byte-identical 404. |
+| I5 | `POST /api/media/upload` rejects a declared Content-Length above max(image cap, video cap)+slack (`MEDIA_UPLOAD_MULTIPART_OVERHEAD_BYTES`) with 413 before parsing the body. Limit: an image can still be buffered up to the video cap. |
+| Role-matrix guard | `test/unit/security/user-role-writers.test.ts` pins every code path that writes `User.role` (and every `createUser` caller that passes one). A new writer fails the build until reviewed. Also: `entity-handler` no longer seeds a new row's global role from the session (constant `END_USER`). |
 | L8 (part) | Invitation code/email removed from redemption log lines. |
 | L12 | `/oauth2/device_authorization` per-IP limit (`DEVICE_AUTHORIZATION_RATE_LIMIT` default 10 / `..._WINDOW_SECONDS` 60). |
 
@@ -84,6 +106,29 @@ Branch: `claude/youthful-goldberg-c18bkg` (base `30251d0`). Work paused at the
    `process.env`, deliberately NOT added to the `Env` type or its public API
    snapshot).
 
+10. **Second-pass env vars** (all read from `process.env`; none added to `Env`):
+    `ACTIVITYPUB_KEY_FETCH_RATE_LIMIT`, `ACTIVITYPUB_ALLOWED_FETCH_PORTS`,
+    `ACTIVITYPUB_INBOX_MAX_BODY_BYTES`, `ACTIVITYPUB_MAX_ADDRESSEES`,
+    `ACTIVITYPUB_MIN_RSA_BITS`, `ACTIVITYPUB_ALLOWED_HOSTS`, `DB_SSL_INSECURE`,
+    `MFA_ENROLL_TTL_SECONDS`, `MEDIA_UPLOAD_MULTIPART_OVERHEAD_BYTES`.
+11. **Operator-facing behaviour changes to check before deploying** (deployments
+    that rely on the old behaviour will break at boot or on first request):
+    - **L7** — remote Postgres without `DB_SSL_CA` / `DB_SSL_CA_PATH` now
+      refuses to start unless `DB_SSL_INSECURE=true`.
+    - **L3** — behind a proxy that rewrites `Host`, federation paths return 421
+      until `ACTIVITYPUB_ALLOWED_HOSTS` is set (only when `ACTIVITYPUB_ENABLED`
+      and a base URL are configured).
+    - **I4/M13** — federation to hosts on a non-443 port needs
+      `ACTIVITYPUB_ALLOWED_FETCH_PORTS`; peers with RSA keys under 2048 bits can
+      no longer sign.
+    - **L14** — MFA clients must send `enrollmentToken` (from `enroll/begin`) to
+      `enroll/finalize`; a bare `secret`/`backupCodes` body now gets 400.
+    - **L6** — non-owner post mutations return 404, not 403.
+    - **L4** — remote servers fetching a custom-audience collection see the
+      count only.
+    - **L11** — SMTP with credentials but no TLS/STARTTLS now refuses to send.
+    - **I2** — production with both a KEK and a KMS key id configured refuses.
+
 ## Not started
 
 - **M9 follow-ups (not blocking):** cost is now 1–2 KV reads per authenticated
@@ -96,34 +141,43 @@ Branch: `claude/youthful-goldberg-c18bkg` (base `30251d0`). Work paused at the
   (`tenant/member-handler.ts`) uses Cognito global sign-out, not the epoch.
 - **H3 (decided: don't wire `tenantId`)** — uploader check stays the sole gate;
   the optional `tenantId` seam on `getMediaDetails` stays unused.
-- **M13 / M14 follow-ups.** The review text was not available when these were
-  done — the scope was inferred from the one-line descriptions plus the code, so
-  check it against the original findings. Known leftovers:
-  - M14: the group **actor document** (`GET /groups/:id`) still serves `name`,
-    `summary` and `trellis:privacy` to anyone, for non-public groups too. It is
-    left open because peers dereference it for the public key; a redacted
-    variant for non-public groups is a separate decision.
+- **M13 / M14 follow-ups.** Known leftovers:
   - M14: a PUBLIC group's outbox still lists every outbox activity regardless
     of its `to`/`cc` audience; filtering to public-addressed activities is not
     done.
   - M14: a signed federated GET from a remote peer is not accepted as
-    authorization for a members-only collection (no authorized-fetch path), so
-    peers cannot read non-public groups at all. That is intended today.
+    authorization for a members-only collection or a private actor document (no
+    authorized-fetch path), so peers cannot read non-public groups at all.
   - M14: `GET .../followers` and `.../outbox` still do `parseInt(page)` with no
     lower bound (a negative or non-numeric `page` reaches Prisma `skip`).
-  - M13: the refresh-cooldown map and the nonce store are per process; with
-    several replicas each keeps its own, so the bound is per replica (the
-    pre-verification limit uses the shared token bucket, so it holds across
-    replicas only when a shared limiter backend is configured —
-    `KV_PROVIDER=postgres` or `RATE_LIMIT_TABLE`; otherwise it is in-memory too).
-- **L1–L7, L8 (rest), L9, L11, L13, L14, I2, I4, I5 — NOT DONE, source text
-  missing.** The 2026-11-05 *Trellis* review these IDs refer to is not on disk
-  (searched the repo, trellis-internal, security-notes, dot-notes; the only
-  2026-11-05 review found is a separate review of a downstream repo, whose scope excludes
-  trellis). The branch name looks like a Claude Code web session, whose
-  transcript is not in local session stats. Recover the review text from that
-  session, then work these. X1–X5 and I1 above came from the five trellis-side
-  asks in that downstream review plus the handoff's own hints, NOT from those IDs.
+  - M13: the refresh-cooldown map and the nonce store are per process; the
+    pre-verification and per-host limits use the shared token bucket, so they
+    hold across replicas only when a shared limiter backend is configured
+    (`KV_PROVIDER=postgres` or `RATE_LIMIT_TABLE`).
+- **Second-pass items NOT done or only partly done:**
+  - **L2 retention** — needs a scheduled prune of `activities` where
+    `inbox_actor_uri IS NOT NULL AND received_at < now() - <retention>` (batched,
+    env-configurable window) plus an index on `received_at`; that is a new
+    migration and a cron job.
+  - **I2 KV cursor key** — add a dedicated `KV_CURSOR_HMAC_SECRET` at `env.ts`
+    (~1614); refuse to boot in prod if unset or equal to `SESSION_SECRET`.
+  - **L13 dead flow** — `agent-authorize.ts` requires a `refreshToken` nothing
+    seals and posts CSRF as a form field while the middleware reads a header, so
+    it can never succeed. With the active-tenant fix it now additionally needs a
+    verified `session.activeTenantId` (cookie sessions have none). Delete the
+    HTML approval form, or rebuild it on the verified JWT.
+  - **L14** — re-enrolling still needs only a session; nothing checks the
+    existing factor was just verified before `finalize` replaces it.
+  - **L6** — collection owner checks still answer 403 (not 404) for non-owners
+    of a PRIVATE collection; same oracle class, outside the cited lines.
+  - **L9** — ~45 lower-risk handlers still log whole error objects.
+  - **Cross-tenant two-tenant fixture test** (every `:id` route driven with the
+    other tenant's ids, asserting a uniform 404) — not written. Behavioural
+    cross-tenant tests exist per fixed route; the generic driver does not.
+  - **Structural note** — `TENANT_SCOPE_MODE=off` plus an inert RLS backstop
+    means isolation rests on each handler's explicit `tenantId`; turning the
+    ambient scope on (or `warn`) in the consuming deployment converts most of
+    H2/M1/M2 to defence in depth. That is a deployment setting, not a code change.
 - **Found by the audits, deliberately not applied (each needs a decision):**
   - `GET /api/admin/orphaned-media/health` and `/backlog` have no auth at all
     (`middleware: []`). Adding a staff-session gate may break unauthenticated
@@ -145,7 +199,11 @@ Branch: `claude/youthful-goldberg-c18bkg` (base `30251d0`). Work paused at the
     push tokens (plausible leak, unconfirmed); ~45 lower-risk handlers log whole
     error objects.
   - Dashboard DELETE does not revoke sessions or invalidate claims.
-- **L10** (`.github/workflows/**`) and **I3** (compose binds) — workflows are
-  on the never-touch list; open an issue for a human.
-- Cross-tenant two-tenant fixture test and role-matrix test (review §"Test-coverage gap").
-- Full CI lanes needing Postgres/DynamoDB.
+- **L10 — needs a human (workflows are on the never-touch list).** Suggested
+  issue text: "`.github/workflows/dependabot-release.yml` (~117-120): one reusable
+  workflow is referenced `@main` with `secrets: inherit` and `contents: write`,
+  and is triggered when a commit message merely *contains* `dependabot[bot]`.
+  SHA-pin the reusable workflow and match on `head_commit.author.username`
+  instead of the message."
+- Full CI lanes needing Postgres/DynamoDB (standalone, testkit, graph, schema,
+  integration, smoke-pack) have not been run on this branch.

@@ -82,7 +82,9 @@ describe("PostActivityServiceFedify", () => {
       );
     });
 
-    it("should use requestUrl if provided", () => {
+    // L3: persisted canonical URIs come from the configured base URL; the
+    // request's Host / scheme must not be baked into stored activity/object ids.
+    it("ignores requestUrl when ACTIVITYPUB_BASE_URL is configured (L3)", () => {
       const uris = PostActivityServiceFedify.generatePostUris(
         "post-123",
         mockEnv,
@@ -90,10 +92,20 @@ describe("PostActivityServiceFedify", () => {
       );
 
       expect(uris.activityId.toString()).toBe(
-        "https://custom.example.com/posts/post-123/activity",
+        "https://example.com/posts/post-123/activity",
       );
-      expect(uris.objectId.toString()).toBe(
-        "https://custom.example.com/posts/post-123",
+      expect(uris.objectId.toString()).toBe("https://example.com/posts/post-123");
+    });
+
+    it("falls back to requestUrl only when no base URL is configured", () => {
+      const uris = PostActivityServiceFedify.generatePostUris(
+        "post-123",
+        { ...mockEnv, ACTIVITYPUB_BASE_URL: undefined } as Env,
+        "https://custom.example.com/posts/123",
+      );
+
+      expect(uris.activityId.toString()).toBe(
+        "https://custom.example.com/posts/post-123/activity",
       );
     });
   });

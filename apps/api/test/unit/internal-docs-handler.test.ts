@@ -210,7 +210,7 @@ describe("InternalDocsHandler", () => {
       expect(body.error).toContain("Unauthorized");
           });
 
-    it("should log unauthorized access attempts with IP and user agent", async () => {
+    it("L8: logs unauthorized access attempts by userId only (no IP / user agent)", async () => {
       const session: Session = {
         userId: "user-123",
         email: "user@example.com",
@@ -231,7 +231,15 @@ describe("InternalDocsHandler", () => {
         },
       });
 
+      const warnSpy = vi.spyOn((handler as any).logger, "warn").mockImplementation(() => {});
       await handler.handleGetDocsList(request, mockEnv);
+
+      expect(warnSpy).toHaveBeenCalled();
+      const dump = JSON.stringify(warnSpy.mock.calls);
+      expect(dump).toContain("user-123");
+      expect(dump).not.toContain("192.168.1.1");
+      expect(dump).not.toContain("TestAgent");
+      expect(dump).not.toContain("user@example.com");
 
           });
   });

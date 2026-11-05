@@ -7,15 +7,17 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "../../../src/env.js";
 import { __resetRateLimiterForTests } from "../../../src/lib/rate-limit.js";
-import { mfaAttemptLimits, mfaRoutes } from "../../../src/lib/routes/mfa.js";
+import { mfaAttemptLimits, mfaEnrollTtlSeconds, mfaRoutes } from "../../../src/lib/routes/mfa.js";
 
 // Mock SessionManager
 const mockGetSession = vi.fn();
 const mockEncryptSession = vi.fn();
+const mockSetSession = vi.fn();
 vi.mock("../../../src/lib/session-cookie", () => ({
   SessionManager: class {
     getSession = mockGetSession;
     encryptSession = mockEncryptSession;
+    setSession = mockSetSession;
   },
 }));
 
@@ -87,11 +89,51 @@ describe("MFA Routes", () => {
     };
 
     mockGetSession.mockResolvedValue(mockSession);
+    // Stand-in for SessionManager.setSession: appends the cookie like the real one.
+    mockSetSession.mockImplementation(async (res: Response) => {
+      const out = new Response(res.body, res);
+      out.headers.append("Set-Cookie", "trellis_session=sealed; Path=/; HttpOnly; Secure; SameSite=Lax");
+      return out;
+    });
     mockCreateSecureResponse.mockImplementation(
       (body, options) => new Response(body, options),
     );
     mockAddSecurityHeaders.mockImplementation((response) => response);
   });
+
+  const ENROLLMENT = {
+    otpauthUri: "otpauth://totp/test?secret=ABCDEFGHIJKLMNOP",
+    secret: "ABCDEFGHIJKLMNOP",
+    backupCodes: ["code1", "code2"],
+  };
+
+  /** Run enroll/begin through the real route and return its response body. */
+  async function begin(): Promise<any> {
+    mockBeginEnrollment.mockResolvedValue(ENROLLMENT);
+    const route = mfaRoutes.find(
+      (r) => r.path === "/api/mfa/enroll/begin" && r.method === "POST",
+    );
+    const res = await route!.handler(
+      new Request("https://example.com/api/mfa/enroll/begin", { method: "POST" }),
+      mockEnv,
+      { pathname: "/api/mfa/enroll/begin" },
+    );
+    return res.json();
+  }
+
+  const finalizeRoute = () =>
+    mfaRoutes.find((r) => r.path === "/api/mfa/enroll/finalize" && r.method === "POST")!;
+
+  const finalize = (body: Record<string, unknown>) =>
+    finalizeRoute().handler(
+      new Request("https://example.com/api/mfa/enroll/finalize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+      mockEnv,
+      { pathname: "/api/mfa/enroll/finalize" },
+    );
 
   describe("GET /api/mfa/status - Get MFA enrollment status", () => {
     const route = mfaRoutes.find(
@@ -182,6 +224,10 @@ describe("MFA Routes", () => {
       expect(body.otpauthUri).toBe("otpauth://totp/test?secret=ABC");
       expect(body.secret).toBe("ABC123");
       expect(body.backupCodes).toEqual(["code1", "code2"]);
+      // Binds finalize to this issuance; must not leak the secret in the clear.
+      expect(typeof body.enrollmentToken).toBe("string");
+      expect(body.enrollmentToken).not.toContain("ABC123");
+      expect(body.enrollmentTokenExpiresInSeconds).toBe(600);
     });
 
     it("should return 401 for unauthenticated request", async () => {
@@ -215,61 +261,149 @@ describe("MFA Routes", () => {
   });
 
   describe("POST /api/mfa/enroll/finalize - Finalize MFA enrollment", () => {
-    const route = mfaRoutes.find(
-      (r) => r.path === "/api/mfa/enroll/finalize" && r.method === "POST",
-    );
-
-    it("should finalize enrollment with valid data", async () => {
+    it("finalizes with the secret and backup codes taken from the ticket", async () => {
+      const { enrollmentToken } = await begin();
       mockFinalizeEnrollment.mockResolvedValue({ success: true });
+      const before = Date.now();
 
-      const request = new Request(
-        "https://example.com/api/mfa/enroll/finalize",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            secret: "ABCDEFGHIJKLMNOP",
-            backupCodes: ["code1"],
-            verificationCode: "123456",
-          }),
-        },
-      );
+      // No secret/backupCodes echoed: the ticket alone is enough.
+      const response = await finalize({ enrollmentToken, verificationCode: "123456" });
 
-      const response = await route!.handler(request, mockEnv, {
-        pathname: "/api/mfa/enroll/finalize",
-      });
-
+      expect(response.status).toBe(200);
+      expect((await response.json()).success).toBe(true);
       expect(mockFinalizeEnrollment).toHaveBeenCalledWith(
         mockPrisma,
         "user-123",
-        "ABCDEFGHIJKLMNOP",
-        ["code1"],
+        ENROLLMENT.secret,
+        ENROLLMENT.backupCodes,
         "123456",
         expect.objectContaining({ purpose: "mfa" }),
+        expect.any(Number),
       );
+      const issuedAt = mockFinalizeEnrollment.mock.calls[0][6] as number;
+      expect(issuedAt).toBeLessThanOrEqual(before);
+    });
+
+    it("accepts an echo of exactly what begin issued", async () => {
+      const { enrollmentToken } = await begin();
+      mockFinalizeEnrollment.mockResolvedValue({ success: true });
+
+      const response = await finalize({
+        enrollmentToken,
+        secret: ENROLLMENT.secret,
+        backupCodes: ENROLLMENT.backupCodes,
+        verificationCode: "123456",
+      });
       expect(response.status).toBe(200);
-      const body = await response.json();
-      expect(body.success).toBe(true);
+    });
+
+    it("rejects a client-chosen secret that differs from the ticket", async () => {
+      const { enrollmentToken } = await begin();
+
+      const response = await finalize({
+        enrollmentToken,
+        secret: "ZZZZZZZZZZZZZZZZ", // attacker-chosen seed
+        backupCodes: ENROLLMENT.backupCodes,
+        verificationCode: "123456",
+      });
+
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toMatch(/does not match/);
+      expect(mockFinalizeEnrollment).not.toHaveBeenCalled();
+    });
+
+    it("rejects client-chosen backup codes (substituted, extra, or fewer)", async () => {
+      const { enrollmentToken } = await begin();
+
+      for (const backupCodes of [
+        ["code1", "evil"],
+        ["code1", "code2", "code3"],
+        ["code1"],
+      ]) {
+        const response = await finalize({
+          enrollmentToken,
+          secret: ENROLLMENT.secret,
+          backupCodes,
+          verificationCode: "123456",
+        });
+        expect(response.status).toBe(400);
+      }
+      expect(mockFinalizeEnrollment).not.toHaveBeenCalled();
+    });
+
+    it("rejects finalize without a ticket (client-chosen secret, no binding)", async () => {
+      const response = await finalize({
+        secret: "ABCDEFGHIJKLMNOP",
+        backupCodes: ["code1"],
+        verificationCode: "123456",
+      });
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toBe("Invalid request");
+      expect(mockFinalizeEnrollment).not.toHaveBeenCalled();
+    });
+
+    it("rejects a tampered or garbage ticket", async () => {
+      const { enrollmentToken } = await begin();
+      const flipped =
+        enrollmentToken.slice(0, -4) +
+        (enrollmentToken.endsWith("AAAA") ? "BBBB" : "AAAA");
+
+      for (const token of [flipped, "garbage", "h1:AAAA"]) {
+        const response = await finalize({
+          enrollmentToken: token,
+          verificationCode: "123456",
+        });
+        expect(response.status).toBe(400);
+        expect((await response.json()).error).toBe("Invalid or expired enrollment session");
+      }
+      expect(mockFinalizeEnrollment).not.toHaveBeenCalled();
+    });
+
+    it("rejects a ticket issued to a different user", async () => {
+      const { enrollmentToken } = await begin(); // issued to user-123
+      mockGetSession.mockResolvedValue({ ...mockSession, userId: "user-456" });
+
+      const response = await finalize({ enrollmentToken, verificationCode: "123456" });
+
+      expect(response.status).toBe(400);
+      expect(mockFinalizeEnrollment).not.toHaveBeenCalled();
+    });
+
+    it("rejects an expired ticket and honours the configured TTL", async () => {
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+        mockEnv.MFA_ENROLL_TTL_SECONDS = "60" as any;
+        const begun = await begin();
+        expect(begun.enrollmentTokenExpiresInSeconds).toBe(60);
+        mockFinalizeEnrollment.mockResolvedValue({ success: true });
+
+        vi.setSystemTime(new Date("2026-01-01T00:00:59Z"));
+        expect((await finalize({ enrollmentToken: begun.enrollmentToken, verificationCode: "123456" })).status).toBe(200);
+
+        vi.setSystemTime(new Date("2026-01-01T00:01:00Z"));
+        const expired = await finalize({ enrollmentToken: begun.enrollmentToken, verificationCode: "123456" });
+        expect(expired.status).toBe(400);
+        expect((await expired.json()).error).toBe("Invalid or expired enrollment session");
+        expect(mockFinalizeEnrollment).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("mfaEnrollTtlSeconds defaults to 600 and ignores garbage", () => {
+      expect(mfaEnrollTtlSeconds({} as Env)).toBe(600);
+      expect(mfaEnrollTtlSeconds({ MFA_ENROLL_TTL_SECONDS: "90" } as any)).toBe(90);
+      expect(mfaEnrollTtlSeconds({ MFA_ENROLL_TTL_SECONDS: "0" } as any)).toBe(600);
+      expect(mfaEnrollTtlSeconds({ MFA_ENROLL_TTL_SECONDS: "soon" } as any)).toBe(600);
     });
 
     it("should return 401 for unauthenticated request", async () => {
       mockGetSession.mockResolvedValue(null);
 
-      const request = new Request(
-        "https://example.com/api/mfa/enroll/finalize",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            secret: "ABCDEFGHIJKLMNOP",
-            backupCodes: ["code1"],
-            verificationCode: "123456",
-          }),
-        },
-      );
-
-      const response = await route!.handler(request, mockEnv, {
-        pathname: "/api/mfa/enroll/finalize",
+      const response = await finalize({
+        enrollmentToken: "x",
+        verificationCode: "123456",
       });
 
       expect(response.status).toBe(401);
@@ -277,21 +411,11 @@ describe("MFA Routes", () => {
     });
 
     it("should return 400 for invalid request body", async () => {
-      const request = new Request(
-        "https://example.com/api/mfa/enroll/finalize",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            secret: "short", // Too short
-            backupCodes: [],  // Too few
-            verificationCode: "12",  // Too short
-          }),
-        },
-      );
-
-      const response = await route!.handler(request, mockEnv, {
-        pathname: "/api/mfa/enroll/finalize",
+      const response = await finalize({
+        enrollmentToken: "x",
+        secret: "short", // Too short
+        backupCodes: [], // Too few
+        verificationCode: "12", // Too short
       });
 
       expect(response.status).toBe(400);
@@ -301,56 +425,27 @@ describe("MFA Routes", () => {
       expect(mockFinalizeEnrollment).not.toHaveBeenCalled();
     });
 
-    it("should return 400 when finalization fails", async () => {
+    it("should return 400 when finalization fails (e.g. ticket already used)", async () => {
+      const { enrollmentToken } = await begin();
       mockFinalizeEnrollment.mockResolvedValue({
         success: false,
-        error: "Invalid verification code",
+        error: "Enrollment session already used",
       });
 
-      const request = new Request(
-        "https://example.com/api/mfa/enroll/finalize",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            secret: "ABCDEFGHIJKLMNOP",
-            backupCodes: ["code1"],
-            verificationCode: "123456",
-          }),
-        },
-      );
-
-      const response = await route!.handler(request, mockEnv, {
-        pathname: "/api/mfa/enroll/finalize",
-      });
+      const response = await finalize({ enrollmentToken, verificationCode: "123456" });
 
       expect(response.status).toBe(400);
-      const body = await response.json();
-      expect(body.error).toBe("Invalid verification code");
+      expect((await response.json()).error).toBe("Enrollment session already used");
     });
 
     it("should return 500 on handler error", async () => {
+      const { enrollmentToken } = await begin();
       mockFinalizeEnrollment.mockRejectedValue(new Error("DB error"));
 
-      const request = new Request(
-        "https://example.com/api/mfa/enroll/finalize",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            secret: "ABCDEFGHIJKLMNOP",
-            backupCodes: ["code1"],
-            verificationCode: "123456",
-          }),
-        },
-      );
-
-      const response = await route!.handler(request, mockEnv, {
-        pathname: "/api/mfa/enroll/finalize",
-      });
+      const response = await finalize({ enrollmentToken, verificationCode: "123456" });
 
       expect(response.status).toBe(500);
-          });
+    });
   });
 
   describe("POST /api/mfa/verify - Verify MFA code", () => {
@@ -381,8 +476,42 @@ describe("MFA Routes", () => {
       expect(response.status).toBe(200);
       const body = await response.json();
       expect(body.success).toBe(true);
-      // Should set session cookie
-      expect(response.headers.get("Set-Cookie")).toContain("trellis_session");
+      // The cookie is re-issued through SessionManager.setSession (same
+      // SameSite/Secure/Domain/Max-Age policy as login), with the flag set
+      // on a copy of the session — and no domain override of its own.
+      expect(mockSetSession).toHaveBeenCalledTimes(1);
+      const [, sealed, secret, domain, envArg] = mockSetSession.mock.calls[0];
+      expect(sealed).toEqual(
+        expect.objectContaining({
+          userId: "user-123",
+          mfaVerified: true,
+          mfaVerifiedAt: expect.any(Number),
+        }),
+      );
+      expect(secret).toBe(mockEnv.SESSION_SECRET);
+      expect(domain).toBeUndefined();
+      expect(envArg).toBe(mockEnv);
+      expect(mockSession.mfaVerified).toBeUndefined(); // original not mutated
+      const cookie = response.headers.get("Set-Cookie");
+      expect(cookie).toContain("trellis_session");
+      // No hand-built Max-Age=86400 header any more.
+      expect(cookie).not.toContain("Max-Age=86400");
+    });
+
+    it("does not re-issue the cookie when the code is wrong", async () => {
+      mockVerifyCode.mockResolvedValue(false);
+      const response = await route!.handler(
+        new Request("https://example.com/api/mfa/verify", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ code: "000000", type: "totp" }),
+        }),
+        mockEnv,
+        { pathname: "/api/mfa/verify" },
+      );
+      expect(response.status).toBe(401);
+      expect(mockSetSession).not.toHaveBeenCalled();
+      expect(response.headers.get("Set-Cookie")).toBeNull();
     });
 
     it("should verify backup code successfully", async () => {
@@ -544,6 +673,7 @@ describe("MFA Routes", () => {
     it("throttles finalize on the same budget", async () => {
       mockFinalizeEnrollment.mockResolvedValue({ success: false, error: "Invalid verification code" });
       mockEnv.MFA_VERIFY_MAX_ATTEMPTS = "1";
+      const { enrollmentToken } = await begin();
 
       const attempt = () =>
         finalizeRoute!.handler(
@@ -551,8 +681,7 @@ describe("MFA Routes", () => {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              secret: "ABCDEFGHIJKLMNOP",
-              backupCodes: ["code1"],
+              enrollmentToken,
               verificationCode: "000000",
             }),
           }),

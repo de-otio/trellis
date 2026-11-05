@@ -32,6 +32,10 @@ import { getMediaModerationProvider } from "./lib/media/request-moderation.js";
 import { validateExtensions } from "./lib/extension-validator.js";
 import { INTERNAL_REMOTE_ADDR_HEADER } from "./lib/net/trusted-client-ip.js";
 import {
+  applyFederationHostGuard,
+  buildFederationHostGuard,
+} from "./lib/activitypub/fedify/context.js";
+import {
   setExtensionModelRegistry,
   freezeExtensionModelRegistry,
   type ExtensionModelRegistryEntry,
@@ -275,6 +279,15 @@ export async function startServer(
   // try Hono first and fall back to the legacy router on a fallthrough 404.
   const honoApp = buildHonoApp();
 
+  // L3: federation canonical URIs come from ACTIVITYPUB_BASE_URL, never from
+  // the request. Built once; undefined (no-op) when federation is off or no
+  // base URL is configured, so local dev and tests behave as before.
+  const federationHostGuard = buildFederationHostGuard(
+    env.ACTIVITYPUB_BASE_URL,
+    process.env.ACTIVITYPUB_ALLOWED_HOSTS,
+    process.env.ACTIVITYPUB_ENABLED === "true",
+  );
+
   // Connection tracking for graceful shutdown
   let activeConnections = 0;
 
@@ -285,7 +298,22 @@ export async function startServer(
     const host = req.headers.host || `localhost:${PORT}`;
 
     try {
-      const url = new URL(rawUrl, `http://${host}`);
+      // L3: on a federation route a Host that is not the configured base URL's
+      // host is refused (421 Misdirected Request), and the request URL is
+      // rebuilt on the configured origin so neither the Host header nor the
+      // `http://` scheme assumed below can reach a persisted canonical URI.
+      const federationDecision = applyFederationHostGuard(
+        federationHostGuard,
+        rawUrl,
+        req.headers.host,
+      );
+      if (!federationDecision.ok) {
+        logger.warn(`${method} ${rawUrl.split("?")[0]} 421 — Host does not match ACTIVITYPUB_BASE_URL`);
+        res.writeHead(421, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Misdirected request" }));
+        return;
+      }
+      const url = federationDecision.url ?? new URL(rawUrl, `http://${host}`);
 
       // Build headers — filter out undefined values
       const headers: Record<string, string> = {};

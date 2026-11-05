@@ -39,6 +39,7 @@
 
 import * as crypto from "crypto";
 import { getLogger, Logger } from "../logger.js";
+import { consumeSharedBucket } from "../rate-limit.js";
 
 export interface HttpSignatureEnv {
   LOG_LEVEL?: string;
@@ -183,6 +184,56 @@ function claimKeyRefresh(keyId: string, now: number = Date.now()): boolean {
   }
   lastKeyRefreshAt.set(keyId, now);
   return true;
+}
+
+/**
+ * M13 — per-TARGET-HOST bound on outbound key fetches.
+ *
+ * The refresh cooldown and the per-client pre-verification bucket bound what one
+ * keyId / one source address can cause, but both are things an attacker varies
+ * freely (many keyIds, many addresses). What they cannot vary is the VICTIM: the
+ * host the keyId names. This bucket is keyed on that host, so however the
+ * requests are spread, we dereference any single third-party host at most this
+ * many times per minute — we cannot be used as a hammer, and the liveness-oracle
+ * rate is capped too. Runtime config: `ACTIVITYPUB_KEY_FETCH_RATE_LIMIT`
+ * (per host per minute; default 30). It is consulted only immediately before a
+ * LIVE fetch (cache hits are free), and it fails CLOSED.
+ */
+const DEFAULT_KEY_FETCH_LIMIT_PER_MINUTE = 30;
+
+function keyFetchLimitPerMinute(): number {
+  const raw = Number.parseInt(
+    process.env.ACTIVITYPUB_KEY_FETCH_RATE_LIMIT ?? "",
+    10,
+  );
+  return Number.isFinite(raw) && raw > 0
+    ? raw
+    : DEFAULT_KEY_FETCH_LIMIT_PER_MINUTE;
+}
+
+/** I4 — floor on the RSA modulus of a fetched signing key. Can be raised, never lowered. */
+const MIN_RSA_MODULUS_BITS = 2048;
+
+function minRsaModulusBits(): number {
+  const raw = Number.parseInt(process.env.ACTIVITYPUB_MIN_RSA_BITS ?? "", 10);
+  return Number.isFinite(raw) && raw > MIN_RSA_MODULUS_BITS
+    ? raw
+    : MIN_RSA_MODULUS_BITS;
+}
+
+/**
+ * Only `rsa-sha256` is accepted, so only RSA keys are usable; and a short
+ * modulus is factorable, which would let anyone forge that actor. A key that
+ * cannot be parsed is likewise unusable.
+ */
+function isAcceptableSigningKey(pem: string): boolean {
+  try {
+    const key = crypto.createPublicKey(pem);
+    if (key.asymmetricKeyType !== "rsa") return false;
+    return (key.asymmetricKeyDetails?.modulusLength ?? 0) >= minRsaModulusBits();
+  } catch {
+    return false;
+  }
 }
 
 /** Test seam: forget all refresh timestamps. */
@@ -650,6 +701,10 @@ async function invalidateActorCache(keyId: string): Promise<void> {
  *      for an actor on another host.
  *   5. `publicKey.owner`, when present, equals `actor.id`. It never CHOOSES
  *      the owner; the owner is `actor.id`, full stop.
+ *   6. The key is RSA with a modulus of at least 2048 bits (I4).
+ *
+ * The live fetch itself is bounded per TARGET host (M13); see
+ * `keyFetchLimitPerMinute`.
  */
 async function defaultFetchKey(
   keyId: string,
@@ -708,6 +763,33 @@ async function defaultFetchKey(
     actorUri,
     env as any,
     logger,
+    {
+      // M13: charged to the TARGET host, and only if a live request is about to
+      // be made. Fails closed: a limiter that cannot answer refuses the fetch.
+      beforeNetworkFetch: async (host) => {
+        try {
+          const result = await consumeSharedBucket(
+            env as any,
+            `ap:keyfetch:${host}`,
+            keyFetchLimitPerMinute(),
+            60,
+          );
+          if (!result.allowed) {
+            logger.warn(
+              "[HttpSignatureService] Key-fetch budget for target host exhausted",
+              { host, retryAfter: result.retryAfter },
+            );
+          }
+          return result.allowed;
+        } catch (error) {
+          logger.error(
+            "[HttpSignatureService] Key-fetch rate limit failed — failing CLOSED",
+            { error: (error as Error).message },
+          );
+          return false;
+        }
+      },
+    },
   )) as any;
   if (!actor) {
     logger.warn("[HttpSignatureService] Failed to fetch remote actor document", {
@@ -768,6 +850,15 @@ async function defaultFetchKey(
   if (typeof pem !== "string" || pem.length === 0) {
     logger.warn("[HttpSignatureService] Actor publicKey has no publicKeyPem", {
       actorUri,
+    });
+    return null;
+  }
+
+  // (6) I4: an RSA key of at least the minimum modulus, nothing else.
+  if (!isAcceptableSigningKey(pem)) {
+    logger.warn("[HttpSignatureService] Refusing weak or non-RSA signing key", {
+      keyId,
+      minBits: minRsaModulusBits(),
     });
     return null;
   }

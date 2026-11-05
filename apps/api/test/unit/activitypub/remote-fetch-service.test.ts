@@ -453,6 +453,204 @@ describe("RemoteFetchService", () => {
     });
   });
 
+  // M13 — the negative cache must not be defeatable by decorating the URL.
+  describe("cache keys are normalised (M13)", () => {
+    const docFor = (href: string) => ({
+      ok: true,
+      json: async () => ({
+        id: href.split("#")[0],
+        type: "Person",
+        inbox: `${href.split("#")[0]}/inbox`,
+      }),
+    });
+
+    it("a varying query string or fragment does not re-fetch a path that just failed", async () => {
+      (global.fetch as any).mockResolvedValue({ ok: false, status: 502 });
+      const base = "https://down.example/users/alice";
+
+      expect(await RemoteFetchService.fetchActor(`${base}?x=1`, mockEnv, getLogger())).toBeNull();
+      for (const variant of [`${base}?x=2`, `${base}?x=3&y=4`, `${base}#frag`, `${base}/`, `${base}?`]) {
+        expect(await RemoteFetchService.fetchActor(variant, mockEnv, getLogger())).toBeNull();
+      }
+      // Before the fix: one network request per variant.
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it("host case and a default port do not dodge the negative cache either", async () => {
+      (global.fetch as any).mockResolvedValue({ ok: false, status: 502 });
+      await RemoteFetchService.fetchActor("https://down.example/users/alice", mockEnv, getLogger());
+      await RemoteFetchService.fetchActor("https://DOWN.example:443/users/alice", mockEnv, getLogger());
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it("is not over-broad: a different PATH or HOST on a failing origin is still fetched", async () => {
+      (global.fetch as any).mockResolvedValue({ ok: false, status: 502 });
+      await RemoteFetchService.fetchActor("https://down.example/users/alice", mockEnv, getLogger());
+      await RemoteFetchService.fetchActor("https://down.example/users/bob", mockEnv, getLogger());
+      await RemoteFetchService.fetchActor("https://other.example/users/alice", mockEnv, getLogger());
+      expect(global.fetch).toHaveBeenCalledTimes(3);
+    });
+
+    it("invalidateCache clears the negative entry whatever query the caller names", async () => {
+      (global.fetch as any).mockResolvedValue({ ok: false, status: 502 });
+      await RemoteFetchService.fetchActor("https://down.example/users/alice?x=1", mockEnv, getLogger());
+      RemoteFetchService.invalidateCache("https://down.example/users/alice");
+      await RemoteFetchService.fetchActor("https://down.example/users/alice?x=2", mockEnv, getLogger());
+      expect(global.fetch).toHaveBeenCalledTimes(2);
+    });
+
+    it("the positive cache ignores the fragment (it is never sent) but NOT the query", async () => {
+      (global.fetch as any).mockImplementation(async (href: string) => docFor(href));
+      const base = "https://up.example/users/alice";
+
+      await RemoteFetchService.fetchActor(base, mockEnv, getLogger());
+      await RemoteFetchService.fetchActor(`${base}#main-key`, mockEnv, getLogger());
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+
+      const a = await RemoteFetchService.fetchActor(`${base}?a=1`, mockEnv, getLogger());
+      const b = await RemoteFetchService.fetchActor(`${base}?a=2`, mockEnv, getLogger());
+      expect((a as any).id).toBe(`${base}?a=1`);
+      expect((b as any).id).toBe(`${base}?a=2`);
+      expect(global.fetch).toHaveBeenCalledTimes(3);
+    });
+
+    it("the id-must-equal-the-fetched-URL rule is NOT weakened by key normalisation", async () => {
+      // Served from ?x=1 but claiming the query-less id: still refused.
+      (global.fetch as any).mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          id: "https://up.example/users/alice",
+          type: "Person",
+          inbox: "https://up.example/users/alice/inbox",
+        }),
+      });
+      const result = await RemoteFetchService.fetchActor(
+        "https://up.example/users/alice?x=1",
+        mockEnv,
+        getLogger(),
+      );
+      expect(result).toBeNull();
+      expect(RemoteFetchService.getCacheBytes()).toBe(0);
+    });
+  });
+
+  // M13 — caller-supplied budget, consulted only before a LIVE fetch.
+  describe("beforeNetworkFetch budget hook (M13)", () => {
+    const uri = "https://budget.example/users/alice";
+    const okDoc = () =>
+      (global.fetch as any).mockImplementation(async (href: string) => ({
+        ok: true,
+        json: async () => ({ id: href, type: "Person", inbox: `${href}/inbox` }),
+      }));
+
+    it("is called once, with the lower-cased host, before a live fetch", async () => {
+      okDoc();
+      const hook = vi.fn().mockResolvedValue(true);
+      const result = await RemoteFetchService.fetchActor(
+        "https://Budget.example/users/alice",
+        mockEnv,
+        getLogger(),
+        { beforeNetworkFetch: hook },
+      );
+      expect(result).not.toBeNull();
+      expect(hook).toHaveBeenCalledTimes(1);
+      expect(hook).toHaveBeenCalledWith("budget.example");
+    });
+
+    it("is NOT called for a cache hit, nor for a negative-cache hit", async () => {
+      okDoc();
+      const hook = vi.fn().mockResolvedValue(true);
+      await RemoteFetchService.fetchActor(uri, mockEnv, getLogger(), { beforeNetworkFetch: hook });
+      await RemoteFetchService.fetchActor(uri, mockEnv, getLogger(), { beforeNetworkFetch: hook });
+      expect(hook).toHaveBeenCalledTimes(1);
+
+      (global.fetch as any).mockResolvedValue({ ok: false, status: 502 });
+      const downUri = "https://down.example/users/alice";
+      await RemoteFetchService.fetchActor(downUri, mockEnv, getLogger(), { beforeNetworkFetch: hook });
+      await RemoteFetchService.fetchActor(downUri, mockEnv, getLogger(), { beforeNetworkFetch: hook });
+      expect(hook).toHaveBeenCalledTimes(2);
+    });
+
+    it("a refusal returns null WITHOUT touching the network, and is not negatively cached", async () => {
+      okDoc();
+      const deny = vi.fn().mockResolvedValue(false);
+      expect(
+        await RemoteFetchService.fetchActor(uri, mockEnv, getLogger(), { beforeNetworkFetch: deny }),
+      ).toBeNull();
+      expect(global.fetch).not.toHaveBeenCalled();
+
+      // Budget restored: the peer is fetched straight away (it was never "down").
+      const allow = vi.fn().mockResolvedValue(true);
+      expect(
+        await RemoteFetchService.fetchActor(uri, mockEnv, getLogger(), { beforeNetworkFetch: allow }),
+      ).not.toBeNull();
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it("fails CLOSED when the hook throws", async () => {
+      okDoc();
+      const boom = vi.fn().mockRejectedValue(new Error("limiter down"));
+      expect(
+        await RemoteFetchService.fetchActor(uri, mockEnv, getLogger(), { beforeNetworkFetch: boom }),
+      ).toBeNull();
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    it("a non-true return value is a refusal (only an explicit true admits)", async () => {
+      okDoc();
+      const sloppy = vi.fn().mockResolvedValue(undefined);
+      expect(
+        await RemoteFetchService.fetchActor(uri, mockEnv, getLogger(), { beforeNetworkFetch: sloppy }),
+      ).toBeNull();
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+  });
+
+  // M13 — actor documents are dereferenced on 443 only, unless configured.
+  describe("actor fetch ports (M13)", () => {
+    afterEach(() => {
+      delete process.env.ACTIVITYPUB_ALLOWED_FETCH_PORTS;
+    });
+    const okDoc = () =>
+      (global.fetch as any).mockImplementation(async (href: string) => ({
+        ok: true,
+        json: async () => ({ id: href, type: "Person", inbox: `${href}/inbox` }),
+      }));
+
+    it("refuses a non-443 port without making a request", async () => {
+      okDoc();
+      const result = await RemoteFetchService.fetchActor(
+        "https://remote.example:8443/users/alice",
+        mockEnv,
+        getLogger(),
+      );
+      expect(result).toBeNull();
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    it("allows the default port, explicit or implied", async () => {
+      okDoc();
+      expect(await RemoteFetchService.fetchActor("https://remote.example/users/a", mockEnv, getLogger())).not.toBeNull();
+      expect(await RemoteFetchService.fetchActor("https://remote.example:443/users/b", mockEnv, getLogger())).not.toBeNull();
+    });
+
+    it("ACTIVITYPUB_ALLOWED_FETCH_PORTS opens specific ports; `*` lifts the restriction", async () => {
+      okDoc();
+      process.env.ACTIVITYPUB_ALLOWED_FETCH_PORTS = "8443, 9443";
+      expect(await RemoteFetchService.fetchActor("https://remote.example:8443/users/a", mockEnv, getLogger())).not.toBeNull();
+      expect(await RemoteFetchService.fetchActor("https://remote.example:6379/users/a", mockEnv, getLogger())).toBeNull();
+
+      process.env.ACTIVITYPUB_ALLOWED_FETCH_PORTS = "*";
+      expect(await RemoteFetchService.fetchActor("https://remote.example:6379/users/b", mockEnv, getLogger())).not.toBeNull();
+    });
+
+    it("a garbage value falls back to 443-only rather than opening everything", async () => {
+      okDoc();
+      process.env.ACTIVITYPUB_ALLOWED_FETCH_PORTS = "abc";
+      expect(await RemoteFetchService.fetchActor("https://remote.example:8443/users/a", mockEnv, getLogger())).toBeNull();
+    });
+  });
+
   describe("fetchObject", () => {
     it("should fetch remote object successfully", async () => {
       const objectUri = "https://mastodon.social/posts/123";

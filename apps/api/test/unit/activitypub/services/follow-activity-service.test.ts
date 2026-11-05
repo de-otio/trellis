@@ -66,23 +66,31 @@ describe("FollowActivityService", () => {
       }
     });
 
-    it("should use requestUrl if provided", () => {
-      const targetActorId = "https://example.com/users/bob";
+    // L3: the persisted activity id comes from the configured base URL, never
+    // from the request's host.
+    it("ignores requestUrl when ACTIVITYPUB_BASE_URL is configured (L3)", () => {
       const activity = FollowActivityService.createFollowActivity(
         mockUser,
-        targetActorId,
+        "https://example.com/users/bob",
         mockEnv,
         "https://custom.example.com/path",
       );
 
-      // Activity ID should use the base URL from requestUrl
-      const activityAny = activity as any;
-      if (activityAny.id) {
-        expect(activityAny.id.toString()).toContain("custom.example.com");
-      } else {
-        // If ID isn't exposed, just verify activity was created
-        expect(activity).toBeInstanceOf(Follow);
-      }
+      const id = (activity as any).id;
+      expect(id).toBeInstanceOf(URL);
+      expect(id.toString()).toContain("https://example.com/");
+      expect(id.toString()).not.toContain("custom.example.com");
+    });
+
+    it("falls back to requestUrl only when no base URL is configured", () => {
+      const activity = FollowActivityService.createFollowActivity(
+        mockUser,
+        "https://example.com/users/bob",
+        { ...mockEnv, ACTIVITYPUB_BASE_URL: undefined } as Env,
+        "https://custom.example.com/path",
+      );
+
+      expect((activity as any).id.toString()).toContain("custom.example.com");
     });
 
     it("should handle different target actor IDs", () => {

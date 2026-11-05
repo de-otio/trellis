@@ -112,7 +112,11 @@ export interface SafeFetchOptions {
   maxBytes?: number;
   /** Default `["http:", "https:"]`. Federation passes `["https:"]`. */
   allowedProtocols?: readonly string[];
-  /** Default: 80, 443, and the URL's default. Empty array means "any". */
+  /**
+   * Default (unset): only the scheme's default port — 443 for https, 80 for
+   * http. A non-empty array is an allowlist of explicit ports (the default
+   * port is always permitted); an EMPTY array means "any port".
+   */
   allowedPorts?: readonly number[];
   /** Injectable for tests. Default: `dns.lookup` with `all: true`. */
   resolver?: DnsResolver;
@@ -197,18 +201,6 @@ export async function assertUrlSafe(
     );
   }
 
-  const allowedPorts = options.allowedPorts;
-  if (allowedPorts && allowedPorts.length > 0 && url.port) {
-    const port = Number.parseInt(url.port, 10);
-    if (!allowedPorts.includes(port)) {
-      throw new SsrfBlockedError(
-        "port-not-allowed",
-        `port ${port}`,
-        url.href,
-      );
-    }
-  }
-
   // Lexical screen first: catches localhost/.internal and every IP-literal
   // encoding without spending a DNS query.
   const lexical = classifyHostname(url.hostname);
@@ -218,6 +210,32 @@ export async function assertUrlSafe(
       `${url.hostname} → ${lexical.reason}${lexical.range ? ` (${lexical.range})` : ""}`,
       url.href,
     );
+  }
+
+  // Port policy. An explicit non-empty `allowedPorts` is an allowlist; an empty
+  // array opts out (any port); UNSET means the scheme's default port only
+  // (https 443, http 80 — and http only reaches here if the caller allowed it).
+  // `url.port` is "" for the default port, which URL parsing also produces for
+  // an explicit `:443` on https, so only a genuinely non-default port is tested.
+  // Runs after the lexical screen so a loopback target still reports
+  // `blocked-address`, and before the IP-literal early return so literals are
+  // port-checked too.
+  if (url.port) {
+    const port = Number.parseInt(url.port, 10);
+    const allowedPorts = options.allowedPorts;
+    const permitted =
+      allowedPorts === undefined
+        ? false // only the default port, which url.port === "" already covers
+        : allowedPorts.length === 0 || allowedPorts.includes(port);
+    if (!permitted) {
+      throw new SsrfBlockedError(
+        "port-not-allowed",
+        `port ${port} (allowed: ${
+          allowedPorts === undefined ? `default for ${url.protocol}` : allowedPorts.join(", ")
+        })`,
+        url.href,
+      );
+    }
   }
 
   // An IP literal needs no DNS — it IS the address, and it already passed.

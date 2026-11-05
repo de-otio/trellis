@@ -9,7 +9,7 @@
  *  - resolveKek paths: env-inline KEK, missing config error.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { randomBytes } from "node:crypto";
 import {
   CURRENT_KEK_VERSION,
@@ -17,6 +17,8 @@ import {
   _resetKekCacheForTest,
   deriveDek,
   open,
+  isProductionStage,
+  kekSourceConflict,
   resolveKek,
   resolveKekForVersion,
   safeEqual,
@@ -268,5 +270,60 @@ describe("envelope-crypto.resolveKek (KMS path)", () => {
   it("throws if no KMS fetcher is wired but the KMS path is selected", async () => {
     process.env.DEVICE_AUTH_KMS_KEY_ID = "alias/trellis-device-auth";
     await expect(resolveKek()).rejects.toThrow(/KMS KEK fetcher not configured/);
+  });
+});
+
+describe("envelope-crypto KEK source conflict (I2)", () => {
+  const INLINE = randomBytes(32).toString("base64");
+  const BOTH = { DEVICE_AUTH_KEK_BASE64: INLINE, DEVICE_AUTH_KMS_KEY_ID: "alias/k" };
+
+  it("isProductionStage: STAGE / DEPLOY_ENV / NODE_ENV = prod|production, case-insensitive", () => {
+    for (const name of ["STAGE", "DEPLOY_ENV", "NODE_ENV"]) {
+      expect(isProductionStage({ [name]: "prod" })).toBe(true);
+      expect(isProductionStage({ [name]: "Production" })).toBe(true);
+      expect(isProductionStage({ [name]: "staging" })).toBe(false);
+    }
+    expect(isProductionStage({})).toBe(false);
+    expect(isProductionStage({ NODE_ENV: "development", STAGE: "prod" })).toBe(true);
+  });
+
+  it("kekSourceConflict: only both-set conflicts; prod refuses, non-prod warns", () => {
+    expect(kekSourceConflict({ DEVICE_AUTH_KEK_BASE64: INLINE, STAGE: "prod" })).toBe("ok");
+    expect(kekSourceConflict({ DEVICE_AUTH_KMS_KEY_ID: "alias/k", STAGE: "prod" })).toBe("ok");
+    expect(kekSourceConflict({ ...BOTH, STAGE: "prod" })).toBe("refuse");
+    expect(kekSourceConflict({ ...BOTH, NODE_ENV: "production" })).toBe("refuse");
+    expect(kekSourceConflict({ ...BOTH, STAGE: "dev" })).toBe("warn");
+    expect(kekSourceConflict(BOTH)).toBe("warn");
+  });
+
+  describe("resolveKek wiring", () => {
+    beforeEach(() => {
+      _resetKekCacheForTest();
+      for (const k of ["STAGE", "DEPLOY_ENV"]) vi.stubEnv(k, "");
+      vi.stubEnv("NODE_ENV", "test");
+      vi.stubEnv("DEVICE_AUTH_KEK_BASE64", INLINE);
+      vi.stubEnv("DEVICE_AUTH_KMS_KEY_ID", "alias/k");
+    });
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      _resetKekCacheForTest();
+    });
+
+    it("refuses in production even though the inline key would have worked", async () => {
+      vi.stubEnv("STAGE", "prod");
+      await expect(resolveKek()).rejects.toThrow(/ambiguous.*DEVICE_AUTH_KEK_BASE64/s);
+    });
+
+    it("in non-prod the inline key still wins", async () => {
+      const k = await resolveKek();
+      expect(k.equals(Buffer.from(INLINE, "base64"))).toBe(true);
+    });
+
+    it("inline alone is still fine in production (dev fast path unchanged)", async () => {
+      vi.stubEnv("STAGE", "prod");
+      vi.stubEnv("DEVICE_AUTH_KMS_KEY_ID", "");
+      const k = await resolveKek();
+      expect(k.length).toBe(32);
+    });
   });
 });

@@ -11,7 +11,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPrisma } from "../../src/db.js";
-import { InvitationHandler } from "../../src/lib/invitation-handler.js";
+import { InvitationHandler, secretsEqual } from "../../src/lib/invitation-handler.js";
 import type { Session } from "../../src/lib/session-cookie.js";
 
 // Mock function for rate limiting - will be used with vi.spyOn
@@ -1942,6 +1942,82 @@ describe("InvitationHandler", () => {
 
       expect(data.valid).toBe(false);
       expect(data.error).toBe("Invalid or unavailable invitation code");
+    });
+  });
+
+  describe("L13: constant-time session-token comparison", () => {
+    it("secretsEqual accepts only an exact match and never throws on length/type differences", () => {
+      expect(secretsEqual("inv_abcdef", "inv_abcdef")).toBe(true);
+      expect(secretsEqual("inv_abcdef", "inv_abcdeg")).toBe(false); // same length
+      expect(secretsEqual("inv_abc", "inv_abcdef")).toBe(false); // different length
+      expect(secretsEqual("", "inv_abcdef")).toBe(false);
+      expect(secretsEqual(undefined, "inv_abcdef")).toBe(false);
+      expect(secretsEqual(12345, "12345")).toBe(false);
+      expect(secretsEqual(null, null)).toBe(false);
+    });
+
+    it("markInvitationAsUsed rejects a same-length wrong token and a stored non-string token", async () => {
+      mockEnv.INVITATIONS_KV.get.mockResolvedValue(
+        JSON.stringify({ token: "inv_right_token", expiresAt: null }),
+      );
+      const wrong = await handler.markInvitationAsUsed(
+        "ABC12345",
+        "user-123",
+        "inv_wrong_token", // same length as the stored token
+        "newuser@example.com",
+        mockEnv,
+      );
+      expect(wrong.success).toBe(false);
+      expect(wrong.error).toContain("Invalid or expired invitation session");
+
+      mockEnv.INVITATIONS_KV.get.mockResolvedValue(
+        JSON.stringify({ token: 12345 }),
+      );
+      const nonString = await handler.markInvitationAsUsed(
+        "ABC12345",
+        "user-123",
+        "12345",
+        "newuser@example.com",
+        mockEnv,
+      );
+      expect(nonString.success).toBe(false);
+    });
+  });
+
+  describe("L8: invitation validation logs carry no code or email", () => {
+    it("handleValidateInvitation never logs the code or the email, on any branch", async () => {
+      const logger = (handler as any).logger;
+      const calls: unknown[][] = [];
+      for (const level of ["info", "warn", "error", "debug"]) {
+        vi.spyOn(logger, level).mockImplementation((...args: unknown[]) => {
+          calls.push(args);
+        });
+      }
+      // Email-restricted + already used + expired + not found + happy path.
+      const future = new Date(Date.now() + 86_400_000);
+      const scenarios: Array<Record<string, unknown> | null> = [
+        null,
+        { id: "inv-1", used: true, expiresAt: future, email: null, scannedAt: null },
+        { id: "inv-2", used: false, expiresAt: new Date(Date.now() - 1000), email: null, scannedAt: null },
+        { id: "inv-3", used: false, expiresAt: future, email: null, scannedAt: null },
+      ];
+      for (const row of scenarios) {
+        mockDb.invitation.findUnique.mockResolvedValue(row);
+        mockDb.invitation.update.mockResolvedValue({ id: "x", scannedAt: new Date() });
+        const request = new Request(
+          "https://api.test.example.com/api/invitations/validate",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ code: "SECRETCODE99", email: "pii.person@example.com" }),
+          },
+        );
+        await handler.handleValidateInvitation(request, mockEnv);
+      }
+      expect(calls.length).toBeGreaterThan(0);
+      const dump = JSON.stringify(calls);
+      expect(dump).not.toContain("SECRETCODE99");
+      expect(dump.toLowerCase()).not.toContain("pii.person");
     });
   });
 

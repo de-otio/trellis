@@ -5,7 +5,9 @@ services:
     # format as postgres:16-alpine, so the existing volume is reused.
     image: postgis/postgis:16-3.4
     ports:
-      - "5432:5432"
+      # Loopback only: dev credentials are well known, so never publish the
+      # database on every host interface.
+      - "127.0.0.1:5432:5432"
     environment:
       POSTGRES_DB: trellis_dev
       POSTGRES_USER: trellis
@@ -21,7 +23,7 @@ services:
   dynamodb:
     image: amazon/dynamodb-local:latest
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000" # unauthenticated local emulator: loopback only
     # In-memory mode: ephemeral and fast, the recommended mode for tests. The
     # file-backed (-dbPath) engine can deadlock on the mounted volume, hanging
     # every DynamoDB operation while the HTTP port still answers.
@@ -30,7 +32,7 @@ services:
   localstack:
     image: localstack/localstack:latest
     ports:
-      - "4566:4566"
+      - "127.0.0.1:4566:4566" # unauthenticated local emulator: loopback only
     environment:
       SERVICES: s3,sqs,ses
       DEFAULT_REGION: us-east-1

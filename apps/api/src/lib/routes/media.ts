@@ -484,6 +484,61 @@ function checkSuspiciousContent(bytes: Uint8Array, mimeType: string): string[] {
   return suspicious;
 }
 
+/**
+ * Client-facing `message` for a failed media request (L9). `error.message` can
+ * be a Prisma/pg message naming tables and columns, so only the exact
+ * application-authored strings MediaHandler throws pass through; anything else
+ * becomes a generic message (the detail is logged by the caller).
+ */
+const CLIENT_SAFE_MEDIA_ERRORS: ReadonlySet<string> = new Set([
+  "Media not found",
+  "Cannot hide deleted media",
+  "Media is already hidden",
+  "Cannot unhide deleted media",
+  "Media is not hidden",
+  "Media is already deleted",
+  "Media is used by other users. It has been hidden instead of deleted.",
+]);
+
+function clientSafeMessage(error: unknown): string {
+  const raw = (error as { message?: unknown } | null)?.message;
+  return typeof raw === "string" && CLIENT_SAFE_MEDIA_ERRORS.has(raw)
+    ? raw
+    : "An unexpected error occurred";
+}
+
+/**
+ * Declared request-body length, or null when the header is absent or not a
+ * plain non-negative integer. A null result is NOT "fine" — it only means the
+ * pre-read check cannot run; the post-read per-type check always does.
+ */
+function declaredContentLength(request: Request): number | null {
+  const raw = request.headers.get("content-length");
+  if (raw === null || !/^\d{1,16}$/.test(raw.trim())) return null;
+  const n = Number(raw.trim());
+  return Number.isSafeInteger(n) ? n : null;
+}
+
+/**
+ * Largest multipart body the buffered upload route will read (I5).
+ *
+ * The per-type cap depends on the file's detected MIME type, which is only
+ * known after the body is parsed, so the pre-read bound is the largest
+ * per-type cap on this route (image/video) plus multipart framing slack. The
+ * slack is runtime config (MEDIA_UPLOAD_MULTIPART_OVERHEAD_BYTES), default
+ * 64 KiB. Content-Length can lie, so this never replaces the post-read check.
+ */
+function bufferedUploadBodyCap(env: {
+  media: { maxBytes: { image: number; video: number } };
+}): number {
+  const slackRaw = Number.parseInt(
+    process.env.MEDIA_UPLOAD_MULTIPART_OVERHEAD_BYTES ?? "",
+    10,
+  );
+  const slack = Number.isInteger(slackRaw) && slackRaw >= 0 ? slackRaw : 64 * 1024;
+  return Math.max(env.media.maxBytes.image, env.media.maxBytes.video) + slack;
+}
+
 export const mediaRoutes: Route[] = [
   {
     path: "/api/media/upload",
@@ -535,6 +590,28 @@ export const mediaRoutes: Route[] = [
       }
 
       try {
+        // I5: refuse an over-large declared body BEFORE buffering it. A
+        // missing/invalid Content-Length skips this and falls through to the
+        // authoritative post-read per-type check below.
+        const declaredLength = declaredContentLength(request);
+        if (
+          declaredLength !== null &&
+          declaredLength > bufferedUploadBodyCap(env)
+        ) {
+          logger.warn("Media upload rejected: declared Content-Length too large", {
+            userId: session.userId,
+            declaredLength,
+          });
+          const errorResponse = securityHeaders.createSecureResponse(
+            JSON.stringify({
+              error: "File too large",
+              message: "Upload exceeds the maximum allowed size",
+            }),
+            { status: 413, headers: { "content-type": "application/json" } },
+          );
+          return CorsHandler.addCorsHeaders(errorResponse, request, env);
+        }
+
         // Parse multipart form data
         let formData: FormData;
         try {
@@ -1526,7 +1603,7 @@ export const mediaRoutes: Route[] = [
         const errorResponse = securityHeaders.createSecureResponse(
           JSON.stringify({
             error: "Failed to upload media",
-            message: error.message || "An unexpected error occurred",
+            message: clientSafeMessage(error),
           }),
           { status: 500, headers: { "content-type": "application/json" } },
         );
@@ -1746,7 +1823,7 @@ export const mediaRoutes: Route[] = [
         const errorResponse = securityHeaders.createSecureResponse(
           JSON.stringify({
             error: "Failed to group media",
-            message: error.message || "An unexpected error occurred",
+            message: clientSafeMessage(error),
           }),
           {
             status: statusCode,
@@ -1863,7 +1940,7 @@ export const mediaRoutes: Route[] = [
         const errorResponse = securityHeaders.createSecureResponse(
           JSON.stringify({
             error: "Failed to get media stats",
-            message: error.message || "An unexpected error occurred",
+            message: clientSafeMessage(error),
           }),
           {
             status: statusCode,
@@ -2090,7 +2167,7 @@ export const mediaRoutes: Route[] = [
         const errorResponse = securityHeaders.createSecureResponse(
           JSON.stringify({
             error: message,
-            message: error.message || "An unexpected error occurred",
+            message: clientSafeMessage(error),
             source: "mediaId-route-catch",
           }),
           { status, headers: { "content-type": "application/json" } },
@@ -2155,7 +2232,7 @@ export const mediaRoutes: Route[] = [
         const errorResponse = securityHeaders.createSecureResponse(
           JSON.stringify({
             error: "Failed to serve media",
-            message: error.message || "An unexpected error occurred",
+            message: clientSafeMessage(error),
             source: "hash-route-catch",
           }),
           { status: 500, headers: { "content-type": "application/json" } },
@@ -2318,7 +2395,7 @@ export const mediaRoutes: Route[] = [
         const errorResponse = securityHeaders.createSecureResponse(
           JSON.stringify({
             error: "Failed to list media",
-            message: error.message || "An unexpected error occurred",
+            message: clientSafeMessage(error),
           }),
           {
             status: statusCode,
@@ -2463,7 +2540,7 @@ export const mediaRoutes: Route[] = [
           error.message.includes("deleted")
         ) {
           status = 400;
-          message = error.message;
+          message = clientSafeMessage(error);
           errorType = "ValidationError";
         }
 
@@ -2484,7 +2561,7 @@ export const mediaRoutes: Route[] = [
         const errorResponse = securityHeaders.createSecureResponse(
           JSON.stringify({
             error: message,
-            message: error.message || "An unexpected error occurred",
+            message: clientSafeMessage(error),
           }),
           { status, headers: { "content-type": "application/json" } },
         );
@@ -2626,7 +2703,7 @@ export const mediaRoutes: Route[] = [
           error.message.includes("deleted")
         ) {
           status = 400;
-          message = error.message;
+          message = clientSafeMessage(error);
           errorType = "ValidationError";
         }
 
@@ -2647,7 +2724,7 @@ export const mediaRoutes: Route[] = [
         const errorResponse = securityHeaders.createSecureResponse(
           JSON.stringify({
             error: message,
-            message: error.message || "An unexpected error occurred",
+            message: clientSafeMessage(error),
           }),
           { status, headers: { "content-type": "application/json" } },
         );
@@ -2789,7 +2866,7 @@ export const mediaRoutes: Route[] = [
               JSON.stringify({
                 success: false,
                 error: "Media is shared with other users",
-                message: deleteError.message,
+                message: clientSafeMessage(deleteError),
                 action: "hidden", // Media was hidden instead of deleted
               }),
               { status: 409, headers: { "content-type": "application/json" } },
@@ -2821,7 +2898,7 @@ export const mediaRoutes: Route[] = [
           errorType = "ForbiddenError";
         } else if (error.message.includes("already deleted")) {
           status = 400;
-          message = error.message;
+          message = clientSafeMessage(error);
           errorType = "ValidationError";
         }
 
@@ -2842,7 +2919,7 @@ export const mediaRoutes: Route[] = [
         const errorResponse = securityHeaders.createSecureResponse(
           JSON.stringify({
             error: message,
-            message: error.message || "An unexpected error occurred",
+            message: clientSafeMessage(error),
           }),
           { status, headers: { "content-type": "application/json" } },
         );

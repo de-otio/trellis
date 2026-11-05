@@ -53,8 +53,11 @@ services:
       hatchet-postgres:
         condition: service_healthy
     ports:
-      - "8888:8888" # dashboard + REST API
-      - "7077:7077" # gRPC — what the SDK worker connects to
+      # Loopback only: the dashboard and gRPC port must not be reachable from
+      # the network. (The 0.0.0.0 below is the in-container listen address that
+      # the port mapping forwards to — it is not host exposure.)
+      - "127.0.0.1:8888:8888" # dashboard + REST API
+      - "127.0.0.1:7077:7077" # gRPC — what the SDK worker connects to
     environment:
       DATABASE_URL: "postgresql://hatchet:hatchet_local_only@hatchet-postgres:5432/hatchet?sslmode=disable"
       DATABASE_POSTGRES_HOST: hatchet-postgres

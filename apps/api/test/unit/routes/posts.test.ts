@@ -381,8 +381,48 @@ describe("Posts Routes", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TEST_TENANT_ID, // verified Bearer tenant is passed through (L6)
       );
       expect(mockAddSecurityHeaders).toHaveBeenCalled();
+    });
+
+    // L6: the verified tenant is opportunistic. Cookie-only clients carry no
+    // trustworthy tenant, and must keep working exactly as before.
+    it("omits the tenant argument when there is no verified Bearer tenant", async () => {
+      mockAuthMiddleware.mockResolvedValue(null);
+      mockDeletePost.mockResolvedValue(new Response("{}", { status: 200 }));
+
+      const request = new Request("http://test.com/api/posts/post-123", {
+        method: "DELETE",
+      });
+      await route.handler(request, mockEnv, {
+        pathname: "/api/posts/post-123",
+        requestContext: mockRequestContext,
+      });
+
+      expect(mockDeletePost).toHaveBeenCalledWith(
+        "post-123",
+        request,
+        mockSession,
+        mockEnv,
+        mockRequestContext,
+      );
+    });
+
+    it("an authMiddleware failure never blocks the request and never invents a tenant", async () => {
+      mockAuthMiddleware.mockRejectedValue(new Error("jwks unreachable"));
+      mockDeletePost.mockResolvedValue(new Response("{}", { status: 200 }));
+
+      const request = new Request("http://test.com/api/posts/post-123", {
+        method: "DELETE",
+      });
+      const response = await route.handler(request, mockEnv, {
+        pathname: "/api/posts/post-123",
+        requestContext: mockRequestContext,
+      });
+
+      expect(response.status).toBe(200);
+      expect(mockDeletePost.mock.calls[0]).toHaveLength(5);
     });
 
     it("should handle errors gracefully", async () => {
@@ -442,6 +482,7 @@ describe("Posts Routes", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TEST_TENANT_ID, // verified Bearer tenant is passed through (L6)
       );
     });
 
@@ -502,6 +543,7 @@ describe("Posts Routes", () => {
         mockSession,
         mockEnv,
         mockRequestContext,
+        TEST_TENANT_ID, // verified Bearer tenant is passed through (L6)
       );
     });
 

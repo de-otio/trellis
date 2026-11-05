@@ -114,6 +114,9 @@ const ADMIN_SESSION: Session & { refreshToken: string } = {
   mfaVerified: true,
   mfaVerifiedAt: Date.now() - 60_000,
   refreshToken: "RT-admin",
+  // L13: approval binds to the session's ACTIVE tenant (membership verified),
+  // not to whichever membership happens to be oldest.
+  activeTenantId: "t_one",
 } as Session & { refreshToken: string };
 
 /** The refresh token Cognito hands back for the agent session. */

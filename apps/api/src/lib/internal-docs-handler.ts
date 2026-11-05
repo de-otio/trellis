@@ -123,10 +123,6 @@ export class InternalDocsHandler {
           {
             userId: session?.userId,
             userRole: access.userRole,
-            ipAddress:
-              request.headers.get("CF-Connecting-IP") ||
-              request.headers.get("X-Forwarded-For"),
-            userAgent: request.headers.get("User-Agent"),
           },
         );
 
@@ -308,10 +304,6 @@ export class InternalDocsHandler {
           {
             userId: session?.userId,
             userRole: access.userRole,
-            ipAddress:
-              request.headers.get("CF-Connecting-IP") ||
-              request.headers.get("X-Forwarded-For"),
-            userAgent: request.headers.get("User-Agent"),
           },
         );
 
@@ -373,10 +365,6 @@ export class InternalDocsHandler {
           {
             userId: session?.userId,
             userRole: access.userRole,
-            ipAddress:
-              request.headers.get("CF-Connecting-IP") ||
-              request.headers.get("X-Forwarded-For"),
-            userAgent: request.headers.get("User-Agent"),
           },
         );
 
@@ -459,11 +447,6 @@ export class InternalDocsHandler {
             filename,
             userId: session?.userId || "no-session",
             userRole: access.userRole || "unknown",
-            ipAddress:
-              request.headers.get("CF-Connecting-IP") ||
-              request.headers.get("X-Forwarded-For") ||
-              "unknown",
-            userAgent: request.headers.get("User-Agent") || "unknown",
           },
         );
 
@@ -494,8 +477,6 @@ export class InternalDocsHandler {
           "[InternalDocsHandler] Invalid filename format (potential path traversal):",
           {
             filename,
-            ipAddress: request.headers.get("CF-Connecting-IP"),
-            userAgent: request.headers.get("User-Agent"),
           },
         );
         return this.securityHeaders.createSecureResponse(
@@ -542,7 +523,6 @@ export class InternalDocsHandler {
           {
             filename,
             userId: session?.userId,
-            ipAddress: request.headers.get("CF-Connecting-IP"),
           },
         );
         return this.securityHeaders.createSecureResponse(

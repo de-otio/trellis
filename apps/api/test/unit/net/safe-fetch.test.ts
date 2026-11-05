@@ -88,6 +88,64 @@ describe("assertUrlSafe — scheme and shape", () => {
   });
 });
 
+describe("assertUrlSafe — port policy (I4)", () => {
+  const resolver = fixedResolver("93.184.216.34");
+  const reason = { reason: "port-not-allowed" };
+
+  it("unset allowedPorts: the scheme default port is allowed (implicit or explicit)", async () => {
+    await expect(assertUrlSafe("https://example.com/", { resolver })).resolves.toBeDefined();
+    await expect(assertUrlSafe("https://example.com:443/", { resolver })).resolves.toBeDefined();
+    await expect(assertUrlSafe("http://example.com/", { resolver })).resolves.toBeDefined();
+    await expect(assertUrlSafe("http://example.com:80/", { resolver })).resolves.toBeDefined();
+  });
+
+  it("unset allowedPorts: any non-default port is refused", async () => {
+    for (const url of [
+      "https://example.com:8443/",
+      "https://example.com:80/", // 80 is NOT https's default
+      "http://example.com:443/", // 443 is NOT http's default
+      "http://example.com:8080/",
+      "https://example.com:6379/",
+      "https://93.184.216.34:22/", // IP literal path is port-checked too
+    ]) {
+      await expect(assertUrlSafe(url, { resolver }), url).rejects.toMatchObject(reason);
+    }
+  });
+
+  it("http on 80 is only reachable when http is allowed at all", async () => {
+    await expect(
+      assertUrlSafe("http://example.com/", { resolver, allowedProtocols: ["https:"] }),
+    ).rejects.toMatchObject({ reason: "scheme-not-allowed" });
+  });
+
+  it("a non-empty allowlist permits exactly those ports plus the default", async () => {
+    const opts = { resolver, allowedPorts: [8443] };
+    await expect(assertUrlSafe("https://example.com:8443/", opts)).resolves.toBeDefined();
+    await expect(assertUrlSafe("https://example.com/", opts)).resolves.toBeDefined();
+    await expect(assertUrlSafe("https://example.com:9443/", opts)).rejects.toMatchObject(reason);
+  });
+
+  it("an empty allowlist means any port (explicit opt-out)", async () => {
+    await expect(
+      assertUrlSafe("https://example.com:9443/", { resolver, allowedPorts: [] }),
+    ).resolves.toBeDefined();
+  });
+
+  it("a loopback target on an odd port still reports blocked-address, not port-not-allowed", async () => {
+    await expect(assertUrlSafe("http://localhost:6379/", { resolver })).rejects.toMatchObject({
+      reason: "blocked-address",
+    });
+  });
+
+  it("every redirect hop is port-checked, so a redirect cannot reach a non-default port", async () => {
+    const { transport, calls } = scriptedTransport([redirect("https://example.com:6379/")]);
+    await expect(
+      safeFetch("https://example.com/", { resolver, transport, maxRedirects: 3 }),
+    ).rejects.toMatchObject(reason);
+    expect(calls).toHaveLength(1);
+  });
+});
+
 describe("assertUrlSafe — encoded IP literals never reach DNS", () => {
   const resolver = vi.fn<DnsResolver>(async () => ["93.184.216.34"]);
 

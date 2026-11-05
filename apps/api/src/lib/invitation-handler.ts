@@ -5,6 +5,7 @@
  * Users can create invitation codes that others can use to sign up.
  */
 
+import { createHash, timingSafeEqual } from "node:crypto";
 import { createPrisma } from "../db.js";
 import type { Env } from "../env.js";
 import { FeatureToggleService } from "./feature-toggle-service.js";
@@ -12,6 +13,19 @@ import { getLogger, Logger, type LoggerEnv } from "./logger.js";
 import { RateLimiter } from "./rate-limit.js";
 import { SecurityHeaders } from "./security-headers.js";
 import { Session, SessionManager } from "./session-cookie.js";
+
+/**
+ * Constant-time secret comparison. Both sides are hashed first so the buffers
+ * are always equal length (timingSafeEqual throws on a length mismatch) and a
+ * non-string stored value cannot throw or leak its length.
+ */
+export function secretsEqual(a: unknown, b: unknown): boolean {
+  if (typeof a !== "string" || typeof b !== "string") return false;
+  return timingSafeEqual(
+    createHash("sha256").update(a).digest(),
+    createHash("sha256").update(b).digest(),
+  );
+}
 
 /**
  * Invitation Handler class
@@ -146,7 +160,7 @@ export class InvitationHandler {
       const data = JSON.parse(stored);
 
       // Check if token matches
-      if (data.token !== token) {
+      if (!secretsEqual(data.token, token)) {
         return { valid: false };
       }
 
@@ -1324,9 +1338,10 @@ export class InvitationHandler {
 
       const db = createPrisma(env);
 
-      this.logger.info(
-        `[InvitationHandler] Validating invitation code: ${sanitizedCode}, email: ${email || "none"}`,
-      );
+      // L8: neither the invitation code (a bearer secret) nor the email is logged.
+      this.logger.info("[InvitationHandler] Validating invitation", {
+        hasEmail: !!email,
+      });
 
       // SECURITY: Check expiration BEFORE claiming to prevent wasted writes
       // First, do a quick check without locking
@@ -1355,10 +1370,7 @@ export class InvitationHandler {
       );
 
       if (!invitationCheck) {
-        this.logger.warn(
-          "[InvitationHandler] Invitation not found:",
-          sanitizedCode,
-        );
+        this.logger.warn("[InvitationHandler] Invitation not found");
         // SECURITY: Use generic error message to prevent code enumeration
         return this.securityHeaders.createSecureResponse(
           JSON.stringify({
@@ -1371,9 +1383,10 @@ export class InvitationHandler {
 
       // Check expiration first (before claiming)
       if (invitationCheck.expiresAt && new Date() > invitationCheck.expiresAt) {
-        this.logger.warn(
-          `[InvitationHandler] Invitation expired: ${sanitizedCode}, expires at ${invitationCheck.expiresAt}, now ${new Date()}`,
-        );
+        this.logger.warn("[InvitationHandler] Invitation expired", {
+          invitationId: invitationCheck.id,
+          expiresAt: invitationCheck.expiresAt,
+        });
         return this.securityHeaders.createSecureResponse(
           JSON.stringify({
             valid: false,
@@ -1385,10 +1398,9 @@ export class InvitationHandler {
 
       // Check if already used
       if (invitationCheck.used) {
-        this.logger.warn(
-          "[InvitationHandler] Invitation already used:",
-          sanitizedCode,
-        );
+        this.logger.warn("[InvitationHandler] Invitation already used", {
+          invitationId: invitationCheck.id,
+        });
         return this.securityHeaders.createSecureResponse(
           JSON.stringify({
             valid: false,
@@ -1466,8 +1478,10 @@ export class InvitationHandler {
         if (env.INVITATIONS_KV) {
           const key = `invitation-session:${sanitizedCode}`;
           const stored = await env.INVITATIONS_KV.get(key);
+          // The KV key embeds the invitation code — never log it.
           this.logger.info(
-            `[InvitationHandler] Checking KV for existing token, key: ${key}, found: ${!!stored}`,
+            "[InvitationHandler] Checking KV for existing token",
+            { invitationId: invitationCheck.id, found: !!stored },
           );
           if (stored) {
             try {
@@ -1545,32 +1559,32 @@ export class InvitationHandler {
 
         if (!inv) {
           this.logger.warn(
-            "[InvitationHandler] Invitation not found in transaction:",
-            sanitizedCode,
+            "[InvitationHandler] Invitation not found in transaction",
           );
           return { success: false, reason: "not_found" };
         }
 
         // Check all conditions
         if (inv.used) {
-          this.logger.warn(
-            "[InvitationHandler] Invitation already used:",
-            sanitizedCode,
-          );
+          this.logger.warn("[InvitationHandler] Invitation already used", {
+            invitationId: inv.id,
+          });
           return { success: false, reason: "already_used" };
         }
 
         if (inv.scannedAt) {
-          this.logger.warn(
-            `[InvitationHandler] Invitation already scanned: ${sanitizedCode}, at ${inv.scannedAt}`,
-          );
+          this.logger.warn("[InvitationHandler] Invitation already scanned", {
+            invitationId: inv.id,
+            scannedAt: inv.scannedAt,
+          });
           return { success: false, reason: "already_scanned" };
         }
 
         if (inv.expiresAt && new Date() > inv.expiresAt) {
-          this.logger.warn(
-            `[InvitationHandler] Invitation expired: ${sanitizedCode}, expires at ${inv.expiresAt}`,
-          );
+          this.logger.warn("[InvitationHandler] Invitation expired", {
+            invitationId: inv.id,
+            expiresAt: inv.expiresAt,
+          });
           return { success: false, reason: "expired" };
         }
 
@@ -1584,15 +1598,17 @@ export class InvitationHandler {
               scannedBy: sessionToken, // Store token as scannedBy for reference
             },
           });
-          this.logger.info(
-            `[InvitationHandler] Successfully claimed invitation: ${sanitizedCode}, scannedAt: ${updated.scannedAt}`,
-          );
+          this.logger.info("[InvitationHandler] Successfully claimed invitation", {
+            invitationId: inv.id,
+            scannedAt: updated.scannedAt,
+          });
           return { success: true };
         } catch (error: any) {
           // If update failed (e.g., record was deleted or already updated), return failure
           // This handles race conditions where another request claimed it first
           this.logger.error(
-            `[InvitationHandler] Failed to update invitation in transaction: ${sanitizedCode}, error: ${error.message}${error.code ? `, code: ${error.code}` : ""}`,
+            "[InvitationHandler] Failed to update invitation in transaction",
+            { invitationId: inv.id, error: error.message, errorCode: error.code },
           );
           return {
             success: false,
@@ -1603,9 +1619,11 @@ export class InvitationHandler {
       });
 
       if (!claimed.success) {
-        this.logger.error(
-          `[InvitationHandler] Failed to claim invitation: ${sanitizedCode}, reason: ${(claimed as any).reason || "unknown"}${(claimed as any).error ? `, error: ${(claimed as any).error}` : ""}`,
-        );
+        this.logger.error("[InvitationHandler] Failed to claim invitation", {
+          invitationId: invitationCheck.id,
+          reason: (claimed as any).reason || "unknown",
+          error: (claimed as any).error,
+        });
         return this.securityHeaders.createSecureResponse(
           JSON.stringify({
             valid: false,

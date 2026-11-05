@@ -60,11 +60,24 @@ describe("DmServiceFedify", () => {
       expect(uris.objectId.toString()).toContain("/messages/dm-123");
     });
 
-    it("should use requestUrl if provided", () => {
-      const dmId = "dm-123";
+    // L3: canonical URIs come from the configured base URL, not the request.
+    it("ignores requestUrl when ACTIVITYPUB_BASE_URL is configured (L3)", () => {
       const uris = DmServiceFedify.generateDmUris(
-        dmId,
+        "dm-123",
         mockEnv,
+        "https://custom.example.com/path",
+      );
+
+      expect(uris.activityId.toString()).toBe(
+        "https://example.com/messages/dm-123/activity",
+      );
+      expect(uris.activityId.toString()).not.toContain("custom.example.com");
+    });
+
+    it("falls back to requestUrl only when no base URL is configured", () => {
+      const uris = DmServiceFedify.generateDmUris(
+        "dm-123",
+        { ...mockEnv, ACTIVITYPUB_BASE_URL: undefined } as Env,
         "https://custom.example.com/path",
       );
 

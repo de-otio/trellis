@@ -199,6 +199,65 @@ describe("ActivityService", () => {
     });
   });
 
+  // L2 — inbox rows are kept indefinitely and store addressing verbatim.
+  describe("storeInboxActivity addressee cap (L2)", () => {
+    const base = { type: "Create", actor: "https://example.com/users/alice" };
+    const many = (n: number) =>
+      Array.from({ length: n }, (_, i) => `https://example.com/users/u${i}`);
+
+    afterEach(() => {
+      delete process.env.ACTIVITYPUB_MAX_ADDRESSEES;
+    });
+
+    it.each(["to", "cc", "bto", "bcc"] as const)(
+      "refuses %s over the default cap of 100 and stores nothing",
+      async (field) => {
+        await expect(
+          ActivityService.storeInboxActivity(
+            mockPrisma as PrismaClient,
+            "https://example.com/users/bob",
+            { ...base, [field]: many(101) },
+          ),
+        ).rejects.toMatchObject({ name: "TooManyAddresseesError", field });
+        expect(mockPrisma.activity.create).not.toHaveBeenCalled();
+      },
+    );
+
+    it("accepts exactly the cap (boundary) and stores the array untruncated", async () => {
+      (mockPrisma.activity.create as any).mockResolvedValue({});
+      await ActivityService.storeInboxActivity(
+        mockPrisma as PrismaClient,
+        "https://example.com/users/bob",
+        { ...base, to: many(100) },
+      );
+      const data = (mockPrisma.activity.create as any).mock.calls[0][0].data;
+      expect(data.to).toHaveLength(100);
+    });
+
+    it("the cap is runtime config (ACTIVITYPUB_MAX_ADDRESSEES)", async () => {
+      process.env.ACTIVITYPUB_MAX_ADDRESSEES = "2";
+      await expect(
+        ActivityService.storeInboxActivity(
+          mockPrisma as PrismaClient,
+          "https://example.com/users/bob",
+          { ...base, cc: many(3) },
+        ),
+      ).rejects.toMatchObject({ name: "TooManyAddresseesError" });
+    });
+
+    it("a scalar addressee counts as one and is wrapped as before", async () => {
+      process.env.ACTIVITYPUB_MAX_ADDRESSEES = "1";
+      (mockPrisma.activity.create as any).mockResolvedValue({});
+      await ActivityService.storeInboxActivity(
+        mockPrisma as PrismaClient,
+        "https://example.com/users/bob",
+        { ...base, to: "https://example.com/users/bob" },
+      );
+      const data = (mockPrisma.activity.create as any).mock.calls[0][0].data;
+      expect(data.to).toEqual(["https://example.com/users/bob"]);
+    });
+  });
+
   describe("storeOutboxActivity", () => {
     it("should store activity in outbox", async () => {
       const mockActivity: Activity = {

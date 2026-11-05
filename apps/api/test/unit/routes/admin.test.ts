@@ -467,12 +467,18 @@ describe("Admin Routes", () => {
 
     it("should handle errors", async () => {
       asSuperAdmin();
-      const error = new Error("Database error");
+      const error = new Error(
+        'Invalid `prisma.user.create()` invocation: Unique constraint failed on the fields: (`email`) in table "users"',
+      );
       mockCreateUser.mockRejectedValue(error);
 
       const response = await route!.handler(mockRequest, devEnv);
 
       expect(response.status).toBe(500);
+      // L9: no Prisma/pg detail (table/column names) reaches the client.
+      const text = await response.text();
+      expect(JSON.parse(text).error).toBe("Failed to create test user");
+      expect(text).not.toMatch(/prisma|constraint|users|email/i);
     });
   });
 
@@ -652,6 +658,35 @@ describe("Admin Routes", () => {
       expect(response.status).toBe(200);
       const body = await response.json();
       expect(body.message).toContain("already deleted");
+    });
+
+    it("L9: an unexpected delete failure returns a generic message, not the raw error", async () => {
+      const ciEnv = { ...mockEnv, CI: "true" };
+      asSuperAdmin();
+      mockDb.postComment.findMany.mockResolvedValue([]);
+      mockDb.post.findMany.mockResolvedValue([]);
+      mockDb.entity.findMany.mockResolvedValue([]);
+      mockDb.user.delete.mockRejectedValue(
+        new Error('relation "public.users" column "tenant_id" is locked'),
+      );
+      mockWithQueryTimeoutAndRetry.mockImplementation(
+        async (db, region, env, fn) => {
+          return await fn(mockDb);
+        },
+      );
+
+      const response = await route!.handler(
+        new Request("https://example.com/api/admin/test/users/user-123", {
+          method: "DELETE",
+        }),
+        ciEnv,
+        { pathname: "/api/admin/test/users/user-123" },
+      );
+
+      expect(response.status).toBe(500);
+      const text = await response.text();
+      expect(JSON.parse(text).error).toBe("Failed to delete test user");
+      expect(text).not.toMatch(/relation|tenant_id|public\.users/);
     });
   });
 
@@ -976,6 +1011,37 @@ describe("Admin Routes", () => {
       const body = await response.json();
       expect(body.enabled).toBe(true);
       expect(body.key).toBe("test_toggle");
+      // L5: the public read must not disclose the admin who changed it.
+      expect(body).not.toHaveProperty("changedBy");
+      expect(JSON.stringify(body)).not.toContain("admin-123");
+      expect(body.lastChanged).toBeDefined();
+    });
+
+    it("L5/L9: a storage failure returns a generic 500 without error.message", async () => {
+      mockGetToggle.mockRejectedValue(
+        new Error('Invalid `prisma.featureToggle.findUnique()`: column "changed_by" does not exist'),
+      );
+      mockRateLimitFeatureToggleAPI.mockResolvedValue({ allowed: true, headers: {} });
+
+      const route = adminRoutes.find(
+        (r) =>
+          r.path instanceof RegExp &&
+          r.path.test("/api/feature-toggles/test_toggle"),
+      );
+      const response = await route!.handler(
+        new Request("https://api.example.com/api/feature-toggles/test_toggle", {
+          method: "GET",
+        }),
+        mockEnv,
+        { pathname: "/api/feature-toggles/test_toggle" },
+      );
+
+      expect(response.status).toBe(500);
+      const text = await response.text();
+      const body = JSON.parse(text);
+      expect(body.error).toBe("Internal server error");
+      expect(body.message).toBe("An unexpected error occurred");
+      expect(text).not.toMatch(/prisma|changed_by|column/i);
     });
 
     it("should return false for non-existent toggle", async () => {
@@ -1894,6 +1960,13 @@ describe("Admin Routes", () => {
       expect(body.successful).toBe(1);
       expect(body.failed).toBe(1);
       expect(body.results).toHaveLength(2);
+      // L9: per-domain failure text is generic ("Block failed" was the raw message).
+      const failure = body.results.find((r: any) => r.domain === "fail.com");
+      expect(failure).toEqual({
+        domain: "fail.com",
+        success: false,
+        error: "Operation failed",
+      });
     });
 
     it("should return 401 for unauthenticated requests", async () => {

@@ -93,10 +93,6 @@ export class EntityHandler {
     session: Session,
     env: Env,
   ): Promise<Response> {
-    console.error("[ENTITY_HANDLER] createEntityProfile called", {
-      userId: session.userId,
-      email: session.email,
-    });
     try {
       const body = await request.json();
 
@@ -164,31 +160,10 @@ export class EntityHandler {
       // Ensure user exists in database before creating entity
       // This prevents foreign key constraint violations if user was created in Supabase Auth
       // but not yet synced to the database
-      console.error(
-        "[ENTITY_HANDLER] Ensuring user exists before creating entity",
-        {
-          userId: session.userId,
-          email: session.email,
-          region: finalRegion,
-        },
-      );
-      this.logger.error(
-        "[ENTITY_HANDLER] Ensuring user exists before creating entity",
-        {
-          userId: session.userId,
-          email: session.email,
-          region: finalRegion,
-        },
-      );
       // Resolved from the user row the upsert below returns; feeds the
       // tenant resolution that scopes the entity (see the create call).
       let personalTenantId: string | null = null;
       try {
-        console.error("[ENTITY_HANDLER] About to upsert user", {
-          userId: session.userId,
-          email: session.email,
-          region: finalRegion,
-        });
         const fallbackEmail =
           session.email || `user-${session.userId}@unknown.local`;
         // S-CP2: handle is non-null + unique — derive one for this fallback
@@ -204,7 +179,11 @@ export class EntityHandler {
             id: session.userId,
             email: fallbackEmail,
             handle,
-            role: session.role || "END_USER",
+            // Always the least-privileged role. A global role must never be
+            // seeded from a session/claim value: this is a fallback path for a
+            // user row that does not exist yet, and elevation is the job of the
+            // audited admin routes (provisioning decides B2B_PARTNER itself).
+            role: "END_USER",
             region: finalRegion,
             dataRegion: finalRegion, // dataRegion must match region for compliance
           },
@@ -217,19 +196,10 @@ export class EntityHandler {
         // The upsert returns the whole row, so the personal tenant needed to
         // scope the entity below costs no extra query.
         personalTenantId = user.personalTenantId ?? null;
-        console.error("[ENTITY_HANDLER] User ensured successfully", {
-          userId: user.id,
-          email: user.email,
-        });
-        this.logger.error("[ENTITY_HANDLER] User ensured successfully", {
-          userId: user.id,
-          email: user.email,
-        });
       } catch (userError: any) {
         this.logger.error("Error ensuring user exists:", {
           error: userError,
           userId: session.userId,
-          email: session.email,
           region: finalRegion,
           errorMessage: userError?.message,
           errorCode: userError?.code,
@@ -1179,36 +1149,21 @@ export class EntityHandler {
         session.userId,
       );
 
-      console.error("[ENTITY_HANDLER] About to delete entity", {
+      this.logger.info("[ENTITY_HANDLER] About to delete entity", {
         entityId,
-        entityName: entity.name,
-        userId: session.userId,
-        region: foundRegion,
-      });
-      this.logger.error("[ENTITY_HANDLER] About to delete entity", {
-        entityId,
-        entityName: entity.name,
         userId: session.userId,
         region: foundRegion,
       });
 
-      const deleteResult = await db.entity.delete({
+      await db.entity.delete({
         where: { id: entityId },
       });
 
-      console.error("[ENTITY_HANDLER] Entity deleted successfully", {
+      // deleteResult is the full row (incl. key material) — never log it.
+      this.logger.info("[ENTITY_HANDLER] Entity deleted successfully", {
         entityId,
-        entityName: entity.name,
         userId: session.userId,
         region: foundRegion,
-        deleteResult: JSON.stringify(deleteResult),
-      });
-      this.logger.error("[ENTITY_HANDLER] Entity deleted successfully", {
-        entityId,
-        entityName: entity.name,
-        userId: session.userId,
-        region: foundRegion,
-        deleteResult: JSON.stringify(deleteResult),
       });
 
       // Dual-write: remove entity from graph database

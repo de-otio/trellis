@@ -264,14 +264,15 @@ export class MediaMetrics {
   trackRateLimit(
     endpoint: string,
     userId?: string,
-    ipAddress?: string,
+    // L8: kept for call-site compatibility but deliberately NEVER logged — a raw
+    // client IP must not land in application logs outside the audit path.
+    _ipAddress?: string,
     limit?: number,
     windowSeconds?: number,
   ): void {
     this.logger.warn("[MediaMetrics] Rate limit exceeded", {
       endpoint,
       userId,
-      ipAddress,
       limit,
       windowSeconds,
       timestamp: new Date().toISOString(),

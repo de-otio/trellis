@@ -28,6 +28,7 @@ import {
   randomBytes,
   timingSafeEqual,
 } from "node:crypto";
+import { getLogger } from "../logger.js";
 
 /** HKDF info string. Versioned so future schema changes are detectable. */
 export const DEK_INFO = "trellis-device-auth-dek-v1";
@@ -241,8 +242,50 @@ export function setKmsKekFetcher(fn: KmsKekFetcher): void {
   kmsKekFetcher = fn;
 }
 
+/** Stage variables that, with any value of prod|production, mean "production". */
+const STAGE_VARS = ["STAGE", "DEPLOY_ENV", "NODE_ENV"] as const;
+
+/** True when any of STAGE / DEPLOY_ENV / NODE_ENV is `prod` or `production`. Pure. */
+export function isProductionStage(env: Readonly<Record<string, string | undefined>>): boolean {
+  return STAGE_VARS.some((name) => {
+    const v = env[name]?.trim().toLowerCase();
+    return v === "prod" || v === "production";
+  });
+}
+
+/**
+ * What to do when both KEK sources are configured. The inline key silently
+ * wins in `resolveKek`, so a production deployment that set a KMS key id could
+ * be running on a static env-var key without anyone noticing.
+ *   - "refuse": both set and the stage is production
+ *   - "warn":   both set, not production
+ *   - "ok":     at most one source set
+ * Pure; unit-tested without touching process.env.
+ */
+export function kekSourceConflict(
+  env: Readonly<Record<string, string | undefined>>,
+): "ok" | "warn" | "refuse" {
+  if (!env.DEVICE_AUTH_KEK_BASE64 || !env.DEVICE_AUTH_KMS_KEY_ID) return "ok";
+  return isProductionStage(env) ? "refuse" : "warn";
+}
+
+let warnedKekConflict = false;
+
 export async function resolveKek(): Promise<Buffer> {
   if (cachedKek) return cachedKek;
+
+  const conflict = kekSourceConflict(process.env);
+  if (conflict === "refuse") {
+    throw new Error(
+      "Device-auth KEK is ambiguous: both DEVICE_AUTH_KEK_BASE64 and DEVICE_AUTH_KMS_KEY_ID are set in a production stage, and the inline key would silently win over KMS. Unset DEVICE_AUTH_KEK_BASE64 (use KMS in production).",
+    );
+  }
+  if (conflict === "warn" && !warnedKekConflict) {
+    warnedKekConflict = true;
+    getLogger().warn(
+      "[envelope-crypto] Both DEVICE_AUTH_KEK_BASE64 and DEVICE_AUTH_KMS_KEY_ID are set; the inline key wins. This would be refused in a production stage.",
+    );
+  }
 
   const inline = process.env.DEVICE_AUTH_KEK_BASE64;
   if (inline) {
@@ -273,6 +316,7 @@ export async function resolveKek(): Promise<Buffer> {
 /** Reset the cached KEK. Test-only. */
 export function _resetKekCacheForTest(): void {
   cachedKek = undefined;
+  warnedKekConflict = false;
 }
 
 /** Reset the KMS fetcher to its default (test-only). */

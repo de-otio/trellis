@@ -4,7 +4,7 @@
  * Tests inbox activity processing with Fedify integration.
  */
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "../../../../src/env.js";
 import {
   parseActivity,
@@ -234,6 +234,93 @@ describe("Fedify Inbox Listener", () => {
 
       expect(response.status).toBe(status);
       expect((await response.json()).error).toBe("Try again later");
+    });
+
+    // L2 — what one delivery may cost us to store.
+    describe("size and addressee caps (L2)", () => {
+      const CAP = 64;
+      beforeEach(() => {
+        process.env.ACTIVITYPUB_INBOX_MAX_BODY_BYTES = String(CAP);
+        process.env.ACTIVITYPUB_MAX_ADDRESSEES = "3";
+      });
+      afterEach(() => {
+        delete process.env.ACTIVITYPUB_INBOX_MAX_BODY_BYTES;
+        delete process.env.ACTIVITYPUB_MAX_ADDRESSEES;
+      });
+
+      const verify = async (body: string) => {
+        const { verifyInboxRequest } = await import(
+          "../../../../src/lib/activitypub/listeners/http-signatures.js"
+        );
+        vi.mocked(verifyInboxRequest).mockResolvedValue({
+          valid: true,
+          keyId: "https://remote.example/users/alice#main-key",
+          owner: "https://remote.example/users/alice",
+          body: Buffer.from(body, "utf8"),
+        });
+        return vi.mocked(verifyInboxRequest);
+      };
+      const post = (body: string, headers: Record<string, string> = {}) =>
+        processInboxActivity(
+          new Request("https://example.com/users/bob/inbox", {
+            method: "POST",
+            headers: { "content-type": "application/json", ...headers },
+            body,
+          }),
+          mockEnv as Env,
+          "bob",
+        );
+
+      it("refuses a verified body one byte over the cap with 413, before parsing or storing", async () => {
+        const body = "x".repeat(CAP + 1); // not JSON: a parse attempt would be a 400
+        await verify(body);
+        const response = await post(body);
+        expect(response.status).toBe(413);
+        const { withQueryTimeoutAndRetry } = await import(
+          "../../../../src/lib/db-query-helper.js"
+        );
+        expect(withQueryTimeoutAndRetry).not.toHaveBeenCalled();
+      });
+
+      it("a body of exactly the cap is not refused as too large (boundary)", async () => {
+        const body = "x".repeat(CAP);
+        await verify(body);
+        expect((await post(body)).status).toBe(400); // fails the JSON parse instead
+      });
+
+      it("refuses a DECLARED oversize Content-Length before any signature work", async () => {
+        const verifyMock = await verify("{}");
+        const response = await post("{}", { "content-length": String(CAP + 1) });
+        expect(response.status).toBe(413);
+        expect(verifyMock).not.toHaveBeenCalled();
+      });
+
+      it("the cap is runtime config, not a compiled-in constant", async () => {
+        process.env.ACTIVITYPUB_INBOX_MAX_BODY_BYTES = "1000";
+        const body = "x".repeat(CAP + 1);
+        await verify(body);
+        expect((await post(body)).status).toBe(400);
+      });
+
+      it.each(["to", "cc", "bto", "bcc"])(
+        "refuses (400) more than the allowed addressees in %s, storing nothing",
+        async (field) => {
+          process.env.ACTIVITYPUB_INBOX_MAX_BODY_BYTES = "4096"; // isolate the addressee cap
+          const body = JSON.stringify({
+            type: "Create",
+            actor: "https://remote.example/users/alice",
+            [field]: ["a", "b", "c", "d"],
+          });
+          await verify(body);
+          const response = await post(body);
+          expect(response.status).toBe(400);
+          expect((await response.json()).error).toBe("Too many addressees");
+          const { withQueryTimeoutAndRetry } = await import(
+            "../../../../src/lib/db-query-helper.js"
+          );
+          expect(withQueryTimeoutAndRetry).not.toHaveBeenCalled();
+        },
+      );
     });
 
     it("should reject request with invalid activity", async () => {

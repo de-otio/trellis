@@ -383,6 +383,100 @@ describe("Media Routes", () => {
       expect(body.message).toContain("10MB");
     });
 
+    describe("I5: Content-Length is checked before the body is buffered", () => {
+      const MAX = 100 * 1024 * 1024; // largest per-type cap (video) in mockEnv
+      const SLACK = 64 * 1024; // default multipart slack
+
+      const uploadWith = async (contentLength: string | null) => {
+        const formData = new FormData();
+        formData.append(
+          "file",
+          new Blob([new Uint8Array([0xff, 0xd8, 0xff, 0xe0])], { type: "image/jpeg" }),
+          "tiny.jpg",
+        );
+        const req = new Request("https://api.example.com/api/media/upload", {
+          method: "POST",
+          body: formData,
+          ...(contentLength !== null ? { headers: { "content-length": contentLength } } : {}),
+        });
+        const formDataSpy = vi.spyOn(req, "formData");
+        const response = await uploadRoute!.handler(req, mockEnv, {
+          url: new URL("https://api.example.com/api/media/upload"),
+          pathname: "/api/media/upload",
+          params: {},
+        });
+        return { response, formDataSpy };
+      };
+
+      it("returns 413 with the existing error shape and never reads the body", async () => {
+        const { response, formDataSpy } = await uploadWith(String(MAX + SLACK + 1));
+
+        expect(response.status).toBe(413);
+        const body = await response.json();
+        expect(body).toHaveProperty("error", "File too large");
+        expect(typeof body.message).toBe("string");
+        expect(formDataSpy).not.toHaveBeenCalled();
+        expect(mockR2Put).not.toHaveBeenCalled();
+      });
+
+      it("rejects a huge declared length", async () => {
+        const { response, formDataSpy } = await uploadWith("9007199254740991");
+        expect(response.status).toBe(413);
+        expect(formDataSpy).not.toHaveBeenCalled();
+      });
+
+      it("boundary: a declared length exactly at the cap is not pre-rejected", async () => {
+        const { response, formDataSpy } = await uploadWith(String(MAX + SLACK));
+        expect(formDataSpy).toHaveBeenCalled();
+        expect(response.status).not.toBe(413);
+      });
+
+      it("honours MEDIA_UPLOAD_MULTIPART_OVERHEAD_BYTES", async () => {
+        process.env.MEDIA_UPLOAD_MULTIPART_OVERHEAD_BYTES = "0";
+        try {
+          const { response: over } = await uploadWith(String(MAX + 1));
+          expect(over.status).toBe(413);
+          const { response: at } = await uploadWith(String(MAX));
+          expect(at.status).not.toBe(413);
+        } finally {
+          delete process.env.MEDIA_UPLOAD_MULTIPART_OVERHEAD_BYTES;
+        }
+      });
+
+      it("invalid Content-Length values fall through to the post-read check", async () => {
+        for (const bad of ["abc", "-5", "1e12", "", "12 34"]) {
+          const { response, formDataSpy } = await uploadWith(bad);
+          expect(formDataSpy).toHaveBeenCalled();
+          expect(response.status).not.toBe(413);
+        }
+      });
+
+      it("a lying (small) Content-Length is still caught by the post-read per-type check", async () => {
+        const largeBlob = new Blob([new ArrayBuffer(11 * 1024 * 1024)], {
+          type: "image/jpeg",
+        });
+        const formData = new FormData();
+        formData.append("file", largeBlob, "large.jpg");
+        const response = await uploadRoute!.handler(
+          new Request("https://api.example.com/api/media/upload", {
+            method: "POST",
+            body: formData,
+            headers: { "content-length": "100" },
+          }),
+          mockEnv,
+          {
+            url: new URL("https://api.example.com/api/media/upload"),
+            pathname: "/api/media/upload",
+            params: {},
+          },
+        );
+        expect(response.status).toBe(400);
+        const body = await response.json();
+        expect(body).toHaveProperty("error", "File too large");
+        expect(body.message).toContain("10MB");
+      });
+    });
+
     it("should auto-detect PNG when declared as JPEG but file is actually PNG", async () => {
       // This is the real-world case: frontend compresses/converts image to PNG
       // but still declares it as JPEG. We should detect and use PNG.
@@ -3704,9 +3798,29 @@ describe("Media Routes", () => {
       expect(body.error).toBe("Forbidden");
     });
 
+    it("L9: an unexpected failure containing 'deleted' does not echo error.message", async () => {
+      mockMediaHandlerInstance.hideMedia.mockRejectedValue(
+        new Error('Invalid `prisma.mediaFile.update()`: column "deleted_at" violates constraint'),
+      );
+      const response = await hideRoute!.handler(
+        new Request("https://api.example.com/api/media/media-123/hide", {
+          method: "POST",
+        }),
+        mockEnv,
+        {
+          url: new URL("https://api.example.com/api/media/media-123/hide"),
+          pathname: "/api/media/media-123/hide",
+          params: { mediaId: "media-123" },
+        },
+      );
+      const text = await response.text();
+      expect(text).not.toMatch(/prisma|deleted_at|constraint|column/i);
+      expect(JSON.parse(text).message).toBe("An unexpected error occurred");
+    });
+
     it("POST /hide → 400 when the media was deleted", async () => {
       mockMediaHandlerInstance.hideMedia.mockRejectedValue(
-        new Error("Media is deleted"),
+        new Error("Cannot hide deleted media"),
       );
       const response = await hideRoute!.handler(
         new Request("https://api.example.com/api/media/media-123/hide", {

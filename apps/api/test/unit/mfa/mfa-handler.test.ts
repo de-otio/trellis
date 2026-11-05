@@ -201,6 +201,59 @@ describe("MfaHandler", () => {
         "hash-c",
       ]);
     });
+
+    describe("single-use enrollment ticket (L14)", () => {
+      const ISSUED_AT = 1_800_000_000_000;
+
+      beforeEach(() => {
+        mockVerifyTOTPStep.mockResolvedValue(1_700_000);
+        mockEncryptSecret.mockResolvedValue("encrypted");
+        mockHashBackupCode.mockReturnValue("h");
+        mockPrisma.mfaEnrollment.upsert.mockResolvedValue({});
+      });
+
+      const finalize = () =>
+        handler.finalizeEnrollment(
+          mockPrisma,
+          "user-1",
+          "SECRET",
+          ["A"],
+          "123456",
+          KEYRING,
+          ISSUED_AT,
+        );
+
+      it("refuses a ticket whose enrollment was already written at/after issue", async () => {
+        for (const enrolledAt of [ISSUED_AT, ISSUED_AT + 1]) {
+          mockPrisma.mfaEnrollment.upsert.mockClear();
+          mockPrisma.mfaEnrollment.findUnique.mockResolvedValue({
+            enrolledAt: new Date(enrolledAt),
+          });
+          const result = await finalize();
+          expect(result).toEqual({
+            success: false,
+            error: "Enrollment session already used",
+          });
+          expect(mockPrisma.mfaEnrollment.upsert).not.toHaveBeenCalled();
+        }
+      });
+
+      it("allows re-enrollment over an enrollment older than the ticket", async () => {
+        mockPrisma.mfaEnrollment.findUnique.mockResolvedValue({
+          enrolledAt: new Date(ISSUED_AT - 1),
+        });
+        expect(await finalize()).toEqual({ success: true });
+        expect(mockPrisma.mfaEnrollment.upsert).toHaveBeenCalled();
+      });
+
+      it("allows a first enrollment and stamps enrolledAt on create and update", async () => {
+        mockPrisma.mfaEnrollment.findUnique.mockResolvedValue(null);
+        expect(await finalize()).toEqual({ success: true });
+        const call = mockPrisma.mfaEnrollment.upsert.mock.calls[0][0];
+        expect(call.create.enrolledAt).toBeInstanceOf(Date);
+        expect(call.update.enrolledAt).toBeInstanceOf(Date);
+      });
+    });
   });
 
   describe("verifyCode", () => {

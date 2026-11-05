@@ -4,9 +4,15 @@
  * Endpoints for MFA enrollment, verification, and status.
  */
 
+import { createHash, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import { createPrisma } from "../../db.js";
-import { resolveKeyring } from "../at-rest-secret.js";
+import {
+  openSecret,
+  resolveKeyring,
+  sealSecret,
+  type Keyring,
+} from "../at-rest-secret.js";
 import { CorsHandler } from "../cors-handler.js";
 import { getLogger, Logger } from "../logger.js";
 import { MfaHandler } from "../mfa/mfa-handler.js";
@@ -101,9 +107,109 @@ async function consumeMfaAttempt(
 
 const BeginEnrollmentSchema = z.object({});
 
+/**
+ * Enrollment binding (L14).
+ *
+ * `enroll/begin` mints the secret and backup codes but stores nothing, so
+ * `enroll/finalize` used to accept whatever secret/backup codes the client
+ * sent — a client-chosen TOTP seed. The binding is a stateless, AEAD-sealed
+ * ticket (sealed under the "mfa" keyring, so it needs no new table or key)
+ * carrying {user, secret, backup codes, issue time, expiry}. `finalize`
+ * requires it and takes the secret/codes FROM the ticket; a client-supplied
+ * secret/backupCodes is optional and, if present, must equal the ticket's.
+ * Single use is enforced against the enrollment row (see
+ * `MfaHandler.finalizeEnrollment`). The TTL is runtime config.
+ */
+const ENROLL_TICKET_TAG = "mfa-enroll-v1";
+const DEFAULT_MFA_ENROLL_TTL_SECONDS = 600;
+
+/** Resolve the enrollment-ticket lifetime (env, then process.env, then default). */
+export function mfaEnrollTtlSeconds(env: Env): number {
+  return positiveInt(
+    (env as unknown as Record<string, string | undefined>).MFA_ENROLL_TTL_SECONDS ??
+      process.env.MFA_ENROLL_TTL_SECONDS,
+    DEFAULT_MFA_ENROLL_TTL_SECONDS,
+  );
+}
+
+interface EnrollmentTicket {
+  readonly secret: string;
+  readonly backupCodes: readonly string[];
+  readonly issuedAt: number;
+}
+
+async function sealEnrollmentTicket(
+  keyring: Keyring,
+  userId: string,
+  secret: string,
+  backupCodes: readonly string[],
+  now: number,
+  ttlSeconds: number,
+): Promise<string> {
+  return sealSecret(
+    JSON.stringify({
+      t: ENROLL_TICKET_TAG,
+      u: userId,
+      s: secret,
+      b: backupCodes,
+      i: now,
+      e: now + ttlSeconds * 1000,
+    }),
+    keyring,
+  );
+}
+
+/** Open a ticket for `userId`; null on any tamper, wrong user, wrong shape or expiry. */
+async function openEnrollmentTicket(
+  keyring: Keyring,
+  token: string,
+  userId: string,
+  now: number,
+): Promise<EnrollmentTicket | null> {
+  let payload: any;
+  try {
+    payload = JSON.parse(await openSecret(token, keyring));
+  } catch {
+    return null;
+  }
+  if (
+    !payload ||
+    payload.t !== ENROLL_TICKET_TAG ||
+    payload.u !== userId ||
+    typeof payload.s !== "string" ||
+    !Array.isArray(payload.b) ||
+    !payload.b.every((c: unknown) => typeof c === "string") ||
+    typeof payload.i !== "number" ||
+    typeof payload.e !== "number" ||
+    payload.e <= now
+  ) {
+    return null;
+  }
+  return { secret: payload.s, backupCodes: payload.b, issuedAt: payload.i };
+}
+
+/** Constant-time string equality (digests first, so length is not leaked). */
+function safeEqual(a: string, b: string): boolean {
+  return timingSafeEqual(
+    createHash("sha256").update(a, "utf8").digest(),
+    createHash("sha256").update(b, "utf8").digest(),
+  );
+}
+
+function safeEqualList(a: readonly string[], b: readonly string[]): boolean {
+  let ok = a.length === b.length;
+  const n = Math.max(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    ok = safeEqual(a[i] ?? "", b[i] ?? "") && ok;
+  }
+  return ok;
+}
+
 const FinalizeEnrollmentSchema = z.object({
-  secret: z.string().min(16).max(64),
-  backupCodes: z.array(z.string()).min(1).max(20),
+  enrollmentToken: z.string().min(1).max(8192),
+  // Optional echoes of what begin issued; verified against the ticket, never trusted.
+  secret: z.string().min(16).max(64).optional(),
+  backupCodes: z.array(z.string()).min(1).max(20).optional(),
   verificationCode: z.string().length(6).regex(/^\d{6}$/),
 });
 
@@ -190,11 +296,23 @@ export const mfaRoutes: Route[] = [
         const mfaHandler = new MfaHandler(env);
         const enrollment = await mfaHandler.beginEnrollment(session.email);
 
+        const ttlSeconds = mfaEnrollTtlSeconds(env);
+        const enrollmentToken = await sealEnrollmentTicket(
+          resolveKeyring(env, "mfa"),
+          session.userId,
+          enrollment.secret,
+          enrollment.backupCodes,
+          Date.now(),
+          ttlSeconds,
+        );
+
         const res = securityHeaders.createSecureResponse(
           JSON.stringify({
             otpauthUri: enrollment.otpauthUri,
             secret: enrollment.secret,
             backupCodes: enrollment.backupCodes,
+            enrollmentToken,
+            enrollmentTokenExpiresInSeconds: ttlSeconds,
           }),
           { status: 200, headers: { "content-type": "application/json" } },
         );
@@ -270,13 +388,42 @@ export const mfaRoutes: Route[] = [
         // the raw session secret (DP-3).
         const keyring = resolveKeyring(env, "mfa");
 
+        const ticket = await openEnrollmentTicket(
+          keyring,
+          parsed.data.enrollmentToken,
+          session.userId,
+          Date.now(),
+        );
+        if (!ticket) {
+          const res = securityHeaders.createSecureResponse(
+            JSON.stringify({ error: "Invalid or expired enrollment session" }),
+            { status: 400, headers: { "content-type": "application/json" } },
+          );
+          return CorsHandler.addCorsHeaders(res, request, env);
+        }
+        // A client-supplied secret/backup-code list is accepted only if it is
+        // exactly what begin issued for this user.
+        if (
+          (parsed.data.secret !== undefined &&
+            !safeEqual(parsed.data.secret, ticket.secret)) ||
+          (parsed.data.backupCodes !== undefined &&
+            !safeEqualList(parsed.data.backupCodes, ticket.backupCodes))
+        ) {
+          const res = securityHeaders.createSecureResponse(
+            JSON.stringify({ error: "Enrollment data does not match enrollment session" }),
+            { status: 400, headers: { "content-type": "application/json" } },
+          );
+          return CorsHandler.addCorsHeaders(res, request, env);
+        }
+
         const result = await mfaHandler.finalizeEnrollment(
           prisma,
           session.userId,
-          parsed.data.secret,
-          parsed.data.backupCodes,
+          ticket.secret,
+          [...ticket.backupCodes],
           parsed.data.verificationCode,
           keyring,
+          ticket.issuedAt,
         );
 
         if (!result.success) {
@@ -396,23 +543,23 @@ export const mfaRoutes: Route[] = [
           mfaVerified: true,
           mfaVerifiedAt: Date.now(),
         };
-        const updatedSessionData = JSON.stringify(updatedSession);
-        const sessionSalt = (env as any).SESSION_SALT as string | undefined;
-        const encryptedSession = await sessionManager.encryptSession(
-          updatedSessionData,
-          sessionSecret,
-          sessionSalt,
-        );
-
-        const res = securityHeaders.createSecureResponse(
+        const baseRes = securityHeaders.createSecureResponse(
           JSON.stringify({ success: true }),
           { status: 200, headers: { "content-type": "application/json" } },
         );
 
-        // Set updated session cookie
-        res.headers.set(
-          "Set-Cookie",
-          `trellis_session=${encryptedSession}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=86400`,
+        // Re-issue the session cookie through SessionManager.setSession (L14)
+        // — the same seal path and the same SameSite/Secure/HttpOnly/Domain/
+        // Max-Age policy as the cookie it replaces. A hand-built header with
+        // different attributes (Lax, no Domain, fixed 24h) could be rejected
+        // or shadowed by the original cookie, so the mfaVerified flag never
+        // stuck.
+        const res = await sessionManager.setSession(
+          baseRes,
+          updatedSession,
+          sessionSecret,
+          undefined,
+          env as any,
         );
 
         return CorsHandler.addCorsHeaders(res, request, env);

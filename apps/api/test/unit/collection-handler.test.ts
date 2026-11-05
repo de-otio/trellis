@@ -33,6 +33,7 @@ const mockPrisma = {
   },
   entity: {
     findUnique: vi.fn(),
+    findFirst: vi.fn(),
     findMany: vi.fn(),
   },
 };
@@ -274,6 +275,27 @@ describe("CollectionHandler", () => {
       expect(body.items[0].targetId).toBe("still_public_user");
     });
 
+    it("L6: read-time entity filter is scoped to the collection's tenant", async () => {
+      mockPrisma.collection.findUnique.mockResolvedValue(
+        makeCollection({ visibility: "PUBLIC", itemCount: 1, tenantId: "tenant_1" }),
+      );
+      mockPrisma.collectionItem.findMany.mockResolvedValue([
+        makeItem({ targetType: "entity", targetId: "entity_1" }),
+      ]);
+      mockPrisma.entity.findMany.mockResolvedValue([]);
+
+      const request = jsonRequest("https://api.example.com/api/collections/coll_1", "GET");
+      const response = await handler.handleGet("coll_1", request, null, mockEnv, ctx);
+
+      expect(response.status).toBe(200);
+      expect(mockPrisma.entity.findMany).toHaveBeenCalledWith({
+        where: { id: { in: ["entity_1"] }, tenantId: "tenant_1" },
+        select: { id: true },
+      });
+      const body = await response.json();
+      expect(body.items).toHaveLength(0);
+    });
+
     it("does not filter items for a PRIVATE collection viewed by its owner", async () => {
       mockPrisma.collection.findUnique.mockResolvedValue(
         makeCollection({ visibility: "PRIVATE", itemCount: 1 }),
@@ -449,6 +471,50 @@ describe("CollectionHandler", () => {
       expect(response.status).toBe(404);
       const body = await response.json();
       expect(body.error).toBe("REFERENT_NOT_FOUND");
+    });
+
+    it("L6: entity lookup is scoped to the collection's tenant; a cross-tenant entity is a plain 404", async () => {
+      mockPrisma.collection.findUnique.mockResolvedValue(
+        makeCollection({ visibility: "PRIVATE", itemCount: 0, tenantId: "tenant_1" }),
+      );
+      // The tenant-scoped query finds nothing for an entity owned by another tenant.
+      mockPrisma.entity.findFirst.mockResolvedValue(null);
+
+      const request = jsonRequest("https://api.example.com/api/collections/coll_1/items", "POST", {
+        targetType: "entity",
+        targetId: "entity_in_other_tenant",
+      });
+      const response = await handler.handleAddItem("coll_1", request, mockSession, mockEnv, ctx);
+
+      expect(response.status).toBe(404);
+      const body = await response.json();
+      expect(body.error).toBe("REFERENT_NOT_FOUND");
+      expect(mockPrisma.entity.findFirst).toHaveBeenCalledWith({
+        where: { id: "entity_in_other_tenant", tenantId: "tenant_1" },
+        select: { id: true },
+      });
+      // Never an unscoped lookup.
+      expect(mockPrisma.entity.findUnique).not.toHaveBeenCalled();
+      expect(mockPrisma.collectionItem.create).not.toHaveBeenCalled();
+    });
+
+    it("L6: a same-tenant entity can still be added", async () => {
+      mockPrisma.collection.findUnique.mockResolvedValue(
+        makeCollection({ visibility: "PRIVATE", itemCount: 0 }),
+      );
+      mockPrisma.entity.findFirst.mockResolvedValue({ id: "entity_1" });
+      mockPrisma.collectionItem.create.mockResolvedValue(
+        makeItem({ targetType: "entity", targetId: "entity_1" }),
+      );
+      mockPrisma.collection.update.mockResolvedValue(makeCollection({ itemCount: 1 }));
+
+      const request = jsonRequest("https://api.example.com/api/collections/coll_1/items", "POST", {
+        targetType: "entity",
+        targetId: "entity_1",
+      });
+      const response = await handler.handleAddItem("coll_1", request, mockSession, mockEnv, ctx);
+
+      expect(response.status).toBe(201);
     });
 
     it("rejects (add-time) a non-public referent for a PUBLIC collection", async () => {

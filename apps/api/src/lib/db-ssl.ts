@@ -24,10 +24,10 @@
  *      needs anyway, because it hands `tls.connect` a pre-opened socket and
  *      no `host`, so without it Node would compare the certificate against
  *      its "localhost" fallback.
- *   3. Neither set → the legacy unverified mode, with ONE warning per process
- *      naming the variable. This branch exists so consumers that have not yet
- *      provisioned a CA keep working; a follow-up flips it to fail-closed
- *      once every deployment sets one.
+ *   3. Neither set on a REMOTE host → FAIL CLOSED (throws, naming the fix).
+ *      The only way to the legacy unverified mode (encrypted, server never
+ *      authenticated, `rejectUnauthorized: false`) is the explicit, knowing
+ *      opt-in `DB_SSL_INSECURE=true`, which logs ONE warning per process.
  *
  * An unreadable `DB_SSL_CA_PATH` or an empty CA is an error, not a fallback:
  * the operator asked for verification, so silently downgrading would be the
@@ -41,6 +41,12 @@ import type { PeerCertificate } from "node:tls";
 export interface DbSslEnv {
   DB_SSL_CA?: string;
   DB_SSL_CA_PATH?: string;
+  /**
+   * `"true"` knowingly accepts an unverified remote Postgres TLS connection
+   * when no CA is configured. Falls back to `process.env.DB_SSL_INSECURE` when
+   * the caller's env object does not carry it (the typed `Env` does not).
+   */
+  DB_SSL_INSECURE?: string;
 }
 
 /** Same shape `tls.connect` accepts for `checkServerIdentity`. */
@@ -166,8 +172,8 @@ function loadCa(env: DbSslEnv, readFile: (path: string) => string): string | und
  * Build the `ssl` option for a `pg.Pool`.
  *
  * @param connectionString - the resolved Postgres URL (host is taken from it)
- * @param env - `DB_SSL_CA` / `DB_SSL_CA_PATH`
- * @param warn - where the one-per-process legacy warning goes
+ * @param env - `DB_SSL_CA` / `DB_SSL_CA_PATH` / `DB_SSL_INSECURE`
+ * @param warn - where the one-per-process DB_SSL_INSECURE warning goes
  * @param readFile - injectable for tests
  */
 export function buildDbSslOptions(
@@ -188,10 +194,19 @@ export function buildDbSslOptions(
     return { rejectUnauthorized: true, ca, servername: host };
   }
 
+  // No CA on a remote host: fail closed unless the operator knowingly opted
+  // in. Only the literal string "true" counts, so a typo cannot disable checks.
+  const insecure = (env.DB_SSL_INSECURE ?? process.env.DB_SSL_INSECURE)?.trim().toLowerCase();
+  if (insecure !== "true") {
+    throw new Error(
+      `db-ssl: refusing to connect to remote Postgres host "${hostOf(connectionString) ?? "<unknown>"}" without verifying its TLS certificate. Configure the database CA (DB_SSL_CA as PEM/base64, or DB_SSL_CA_PATH to a mounted PEM file), or, if you knowingly accept an unauthenticated connection, set DB_SSL_INSECURE=true.`,
+    );
+  }
+
   if (!warnedOnce) {
     warnedOnce = true;
     warn?.(
-      "[db-ssl] Postgres TLS is encrypted but NOT verified: neither DB_SSL_CA nor DB_SSL_CA_PATH is set, so the server certificate is not checked (rejectUnauthorized: false). Provision the database CA and set one of them.",
+      "[db-ssl] Postgres TLS is encrypted but NOT verified: DB_SSL_INSECURE=true and neither DB_SSL_CA nor DB_SSL_CA_PATH is set, so the server certificate is not checked (rejectUnauthorized: false). Provision the database CA and set one of them.",
       { host: hostOf(connectionString) },
     );
   }

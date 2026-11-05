@@ -2008,7 +2008,49 @@ describe("PostHandler", () => {
       expect(data.error).toBe("Post not found");
     });
 
-    it("should return 403 if user is not the owner", async () => {
+    it("L6: not-found and not-owner responses are byte-identical (all four mutations)", async () => {
+      const calls: Array<[string, (...a: any[]) => Promise<Response>]> = [
+        ["deletePost", (...a) => (handler as any).deletePost(...a)],
+        ["hidePost", (...a) => (handler as any).hidePost(...a)],
+        ["unhidePost", (...a) => (handler as any).unhidePost(...a)],
+      ];
+      for (const [, fn] of calls) {
+        const req = () => new Request("http://test.com/posts/post-123", { method: "PATCH" });
+        mockGetPost.mockResolvedValueOnce(null);
+        const missing = await fn("post-123", req(), mockSession, mockEnv, mockRequestContext);
+        mockGetPost.mockResolvedValueOnce({
+          id: "post-123",
+          authorId: "other-user",
+          dataRegion: "US",
+        });
+        const notMine = await fn("post-123", req(), mockSession, mockEnv, mockRequestContext);
+        expect(notMine.status).toBe(missing.status);
+        expect(await notMine.text()).toBe(await missing.text());
+      }
+    });
+
+    it("L6: a post in another tenant is a 404 even for its author when activeTenantId is supplied", async () => {
+      for (const method of ["deletePost", "hidePost", "unhidePost"] as const) {
+        mockGetPost.mockResolvedValueOnce({
+          id: "post-123",
+          authorId: mockSession.userId,
+          tenantId: "tenant-b",
+          dataRegion: "US",
+        });
+        const response = await (handler as any)[method](
+          "post-123",
+          new Request("http://test.com/posts/post-123", { method: "PATCH" }),
+          mockSession,
+          mockEnv,
+          mockRequestContext,
+          "tenant-a",
+        );
+        expect(response.status).toBe(404);
+        expect(await response.json()).toEqual({ error: "Post not found" });
+      }
+    });
+
+    it("should return 404 (not 403) if user is not the owner", async () => {
       mockGetPost.mockResolvedValueOnce({
         id: "post-123",
         authorId: "other-user",
@@ -2027,8 +2069,9 @@ describe("PostHandler", () => {
       );
       const data = await response.json();
 
-      expect(response.status).toBe(403);
-      expect(data.error).toBe("Forbidden");
+      // L6: indistinguishable from "post does not exist"
+      expect(response.status).toBe(404);
+      expect(data.error).toBe("Post not found");
     });
 
     it("should return 410 if post is already deleted", async () => {
@@ -2195,7 +2238,7 @@ describe("PostHandler", () => {
       expect(data.error).toBe("Post not found");
     });
 
-    it("should return 403 if user is not the owner", async () => {
+    it("should return 404 (not 403) if user is not the owner", async () => {
       mockGetPost.mockResolvedValueOnce({
         id: "post-123",
         authorId: "other-user",
@@ -2214,8 +2257,9 @@ describe("PostHandler", () => {
       );
       const data = await response.json();
 
-      expect(response.status).toBe(403);
-      expect(data.error).toBe("Forbidden");
+      // L6: indistinguishable from "post does not exist"
+      expect(response.status).toBe(404);
+      expect(data.error).toBe("Post not found");
     });
 
     it("should handle errors when hiding post", async () => {
@@ -2314,7 +2358,7 @@ describe("PostHandler", () => {
       expect(data.error).toBe("Post not found");
     });
 
-    it("should return 403 if user is not the owner", async () => {
+    it("should return 404 (not 403) if user is not the owner", async () => {
       mockGetPost.mockResolvedValueOnce({
         id: "post-123",
         authorId: "other-user",
@@ -2333,8 +2377,9 @@ describe("PostHandler", () => {
       );
       const data = await response.json();
 
-      expect(response.status).toBe(403);
-      expect(data.error).toBe("Forbidden");
+      // L6: indistinguishable from "post does not exist"
+      expect(response.status).toBe(404);
+      expect(data.error).toBe("Post not found");
     });
 
     it("should handle errors when unhiding post", async () => {
@@ -2618,9 +2663,9 @@ describe("PostHandler", () => {
       );
       const data = await response.json();
 
-      expect(response.status).toBe(403);
-      expect(data.error).toBe("Forbidden");
-      expect(data.message).toBe("You can only edit your own posts");
+      // L6: indistinguishable from "post does not exist"
+      expect(response.status).toBe(404);
+      expect(data).toEqual({ error: "Post not found" });
     });
   });
 });

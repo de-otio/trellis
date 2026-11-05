@@ -261,6 +261,55 @@ describe("Products Routes", () => {
         },
       );
     });
+
+    it("L9: never echoes a raw Prisma/pg message (500 and 404 paths)", async () => {
+      const prismaish =
+        'Invalid `prisma.productTaxonomyTag.createMany()`: relation "product_taxon_tags" violates foreign key constraint';
+      mockAddProductTaxonomyTags.mockRejectedValue(new Error(prismaish));
+
+      await route!.handler(mockRequest, mockEnv, {
+        pathname: "/products/product-123/taxonomy-tags",
+      });
+      let [body, init] = mockCreateSecureResponse.mock.calls.at(-1)!;
+      expect(init.status).toBe(500);
+      expect(JSON.parse(body).error).toBe("Internal server error");
+      expect(body).not.toMatch(/prisma|product_taxon_tags|constraint/i);
+
+      // A 404-class message that is NOT the app-authored one is also generic.
+      mockAddProductTaxonomyTags.mockRejectedValue(
+        new Error('Record "product_taxon_tags" not found in table'),
+      );
+      // The first call consumed the request body; use a fresh request.
+      const freshRequest = new Request(
+        "https://example.com/products/product-123/taxonomy-tags",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ taxonIds: ["taxon-1", "taxon-2"] }),
+        },
+      );
+      await route!.handler(freshRequest, mockEnv, {
+        pathname: "/products/product-123/taxonomy-tags",
+      });
+      [body, init] = mockCreateSecureResponse.mock.calls.at(-1)!;
+      expect(init.status).toBe(404);
+      expect(JSON.parse(body).error).toBe("Resource not found");
+      expect(body).not.toMatch(/product_taxon_tags/);
+    });
+
+    it("keeps the application-authored 'taxons not found' message", async () => {
+      mockAddProductTaxonomyTags.mockRejectedValue(
+        new Error("One or more taxons not found or inactive"),
+      );
+      await route!.handler(mockRequest, mockEnv, {
+        pathname: "/products/product-123/taxonomy-tags",
+      });
+      const [body, init] = mockCreateSecureResponse.mock.calls.at(-1)!;
+      expect(init.status).toBe(404);
+      expect(JSON.parse(body).error).toBe(
+        "One or more taxons not found or inactive",
+      );
+    });
   });
 
   describe("DELETE /products/:productId/taxonomy-tags - Remove taxonomy tags", () => {
@@ -398,7 +447,7 @@ describe("Products Routes", () => {
 
             expect(response.status).toBe(500);
       const body = await response.json();
-      expect(body.error).toBeDefined();
+      expect(body.error).toBe("Internal server error");
     });
 
     it("should handle tags with category and dimension", async () => {

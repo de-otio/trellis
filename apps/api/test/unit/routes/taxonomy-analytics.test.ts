@@ -150,14 +150,18 @@ describe("Taxonomy Analytics Routes", () => {
     });
 
     it("should handle errors", async () => {
-      const error = new Error("Database error");
+      const error = new Error(
+        'Invalid `prisma.taxon.findMany()` invocation: column "usage_count" does not exist',
+      );
       mockGetTaxonMetrics.mockRejectedValue(error);
 
       const response = await route!.handler(mockRequest, mockEnv);
 
             expect(response.status).toBe(500);
       const body = await response.json();
-      expect(body.error).toBe("Database error");
+      // L9: generic text; the raw Prisma/pg message must not reach the client.
+      expect(body.error).toBe("Internal server error");
+      expect(JSON.stringify(body)).not.toMatch(/prisma|usage_count|column/i);
     });
   });
 
@@ -219,7 +223,9 @@ describe("Taxonomy Analytics Routes", () => {
     });
 
     it("should handle errors", async () => {
-      const error = new Error("Database error");
+      const error = new Error(
+        'Invalid `prisma.taxon.findMany()` invocation: column "usage_count" does not exist',
+      );
       mockCheckPruningCandidates.mockRejectedValue(error);
 
       const request = new Request(
@@ -294,7 +300,9 @@ describe("Taxonomy Analytics Routes", () => {
     });
 
     it("should handle errors", async () => {
-      const error = new Error("Database error");
+      const error = new Error(
+        'Invalid `prisma.taxon.findMany()` invocation: column "usage_count" does not exist',
+      );
       mockGetPopularFreeFormTags.mockRejectedValue(error);
 
       const request = new Request(

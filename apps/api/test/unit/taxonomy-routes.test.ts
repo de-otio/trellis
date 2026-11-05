@@ -199,7 +199,7 @@ describe("Taxonomy Routes", () => {
 
     it("should handle errors gracefully", async () => {
       mockHandlerInstance.getDimensions.mockRejectedValue(
-        new Error("Database error"),
+        new Error('Invalid `prisma.taxonomyDimension.findMany()`: column "dim_code" missing'),
       );
 
       const route = taxonomyRoutes.find(
@@ -216,7 +216,9 @@ describe("Taxonomy Routes", () => {
 
       expect(response.status).toBe(500);
       const body = await response.json();
-      expect(body.error).toBeDefined();
+      // L9: generic text, no Prisma/pg detail.
+      expect(body.error).toBe("Internal server error");
+      expect(JSON.stringify(body)).not.toMatch(/prisma|dim_code|column/i);
     });
   });
 
@@ -494,7 +496,7 @@ describe("Taxonomy Routes", () => {
 
     it("should handle errors gracefully", async () => {
       mockHandlerInstance.getTaxonByTaxonId.mockRejectedValue(
-        new Error("Database error"),
+        new Error('Invalid `prisma.taxon.findUnique()`: table "taxons" locked'),
       );
 
       const route = taxonomyRoutes.find(
@@ -511,7 +513,8 @@ describe("Taxonomy Routes", () => {
 
       expect(response.status).toBe(500);
       const body = await response.json();
-      expect(body.error).toBeDefined();
+      expect(body.error).toBe("Internal server error");
+      expect(JSON.stringify(body)).not.toMatch(/prisma|taxons/i);
     });
   });
 

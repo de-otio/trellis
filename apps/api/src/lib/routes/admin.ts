@@ -410,7 +410,8 @@ export const adminRoutes: Route[] = [
         logger.error("[Admin Test] Error creating test user:", error);
         const errorResponse = securityHeaders.createSecureResponse(
           JSON.stringify({
-            error: error.message || "Failed to create test user",
+            // Detail is logged above (L9); never echo error.message.
+            error: "Failed to create test user",
           }),
           { status: 500, headers: { "content-type": "application/json" } },
         );
@@ -567,7 +568,8 @@ export const adminRoutes: Route[] = [
         logger.error("[Admin Test] Error deleting test user:", error);
         const errorResponse = securityHeaders.createSecureResponse(
           JSON.stringify({
-            error: error.message || "Failed to delete test user",
+            // Detail is logged above (L9); never echo error.message.
+          error: "Failed to delete test user",
           }),
           { status: 500, headers: { "content-type": "application/json" } },
         );
@@ -1519,8 +1521,9 @@ export const adminRoutes: Route[] = [
           JSON.stringify({
             enabled: toggle.enabled,
             key: toggle.key,
+            // No `changedBy`: it is an admin's email, and this read is public
+            // (L5). The super-admin routes above still return it.
             lastChanged: toggle.lastChanged?.toISOString(),
-            changedBy: toggle.changedBy,
           }),
           { status: 200, headers: responseHeaders },
         );
@@ -1550,7 +1553,8 @@ export const adminRoutes: Route[] = [
         const errorResponse = securityHeaders.createSecureResponse(
           JSON.stringify({
             error: "Internal server error",
-            message: error instanceof Error ? error.message : "Unknown error",
+            // Detail is logged above (L9); never echo error.message.
+            message: "An unexpected error occurred",
           }),
           { status: 500, headers: { "content-type": "application/json" } },
         );
@@ -2249,7 +2253,8 @@ export const adminRoutes: Route[] = [
             results.push({
               domain,
               success: false,
-              error: error.message || "Unknown error",
+              // Detail is logged above (L9); never echo error.message.
+              error: "Operation failed",
             });
           }
         }

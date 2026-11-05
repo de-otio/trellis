@@ -306,26 +306,22 @@ describe("SmtpEmailProvider", () => {
     expect(server.data).toContain(Buffer.from("<b>html body</b>", "utf8").toString("base64"));
   });
 
-  it("authenticates with AUTH PLAIN (RFC 4616 NUL-delimited token)", async () => {
-    server = new FakeSmtpServer({ requireAuth: true });
+  it("L11: STARTTLS requested but not supported by the server → no AUTH is ever sent", async () => {
+    // NOTE: binds a local socket (EPERM in some sandboxes).
+    server = new FakeSmtpServer(); // answers "250 ok" to STARTTLS, i.e. refuses the upgrade
     const port = await server.listen();
     const provider = new SmtpEmailProvider({
       host: "127.0.0.1",
       port,
+      startTls: true,
       username: "project-id",
       password: "secret-key",
     });
-
-    await provider.sendEmail({
-      from: "s@example.test",
-      to: "r@example.test",
-      subject: "s",
-      text: "t",
-    });
-
-    expect(server.authToken).toBe(
-      Buffer.from("\u0000project-id\u0000secret-key").toString("base64"),
-    );
+    await expect(
+      provider.sendEmail({ from: "s@example.test", to: "r@example.test", subject: "s", text: "t" }),
+    ).rejects.toThrow(/STARTTLS failed/);
+    expect(server.commands.some((c) => c.startsWith("AUTH"))).toBe(false);
+    expect(server.authToken).toBeNull();
   });
 
   it("fails loudly on a rejected recipient and never echoes AUTH secrets", async () => {
@@ -341,18 +337,6 @@ describe("SmtpEmailProvider", () => {
         text: "t",
       }),
     ).rejects.toThrow(/RCPT TO.*550/s);
-
-    // Separate check: an auth failure must redact the token.
-    await server.close();
-    server = new FakeSmtpServer();
-    const port2 = await server.listen();
-    // Fake server replies 235 only to AUTH PLAIN; force a failure by having
-    // the provider expect 235 but the server reject: simulate via requireAuth
-    // + wrong flow is not expressible here, so assert the redaction path
-    // directly instead.
-    const p2 = new SmtpEmailProvider({ host: "127.0.0.1", port: port2, username: "u", password: "p" });
-    await p2.sendEmail({ from: "s@example.test", to: "r@example.test", subject: "s", text: "t" });
-    expect(server.commands.some((c) => c.startsWith("AUTH PLAIN "))).toBe(true);
   });
 
   it("requires at least one recipient and a from address", async () => {

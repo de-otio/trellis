@@ -154,19 +154,18 @@ export async function handleWebFinger(
       },
     );
 
-    if (!user || !user.actorUri || !user.publicKey) {
+    // I4: not-found, no-actor, suspended and deleted accounts must be
+    // indistinguishable to the caller — same status, same headers, same body —
+    // or WebFinger becomes an oracle for account moderation state.
+    if (
+      !user ||
+      !user.actorUri ||
+      !user.publicKey ||
+      user.suspended ||
+      user.deletionConfirmedAt
+    ) {
       return securityHeaders.createSecureResponse(
         JSON.stringify({ error: "User not found" }),
-        {
-          status: 404,
-          headers: { "content-type": "application/json" },
-        },
-      );
-    }
-
-    if (user.suspended || user.deletionConfirmedAt) {
-      return securityHeaders.createSecureResponse(
-        JSON.stringify({ error: "User account is suspended or deleted" }),
         {
           status: 404,
           headers: { "content-type": "application/json" },

@@ -448,12 +448,12 @@ describe("Property 6: Non-owners cannot edit posts", () => {
    * **Property 6: Non-owners cannot edit posts**
    *
    * For any edit request where the requesting user's ID does not match
-   * the post's authorId, the system returns a 403 Forbidden error
-   * and the post remains unchanged.
+   * the post's authorId, the system returns the SAME 404 "Post not found"
+   * as for a missing post (L6: no existence oracle) and the post remains unchanged.
    *
    * **Validates: Requirements 4.7**
    */
-  it("should return 403 when user tries to edit another user's post", async () => {
+  it("should return 404 (not 403) when user tries to edit another user's post", async () => {
     await fc.assert(
       fc.asyncProperty(
         fc.uuid(), // Post owner ID
@@ -532,11 +532,11 @@ describe("Property 6: Non-owners cannot edit posts", () => {
             mockRequestContext as any,
           );
 
-          // Should return 403 Forbidden
-          expect(response.status).toBe(403);
+          // Same status + body as "post does not exist" — no existence oracle
+          expect(response.status).toBe(404);
 
           const data = await response.json();
-          expect(data.error).toBe("Forbidden");
+          expect(data.error).toBe("Post not found");
 
           return true;
         },

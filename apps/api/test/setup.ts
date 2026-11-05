@@ -60,6 +60,12 @@ if (isPostdeploymentTest) {
   // For unit tests, use test database URLs
   process.env.DATABASE_URL =
     "postgresql://test-hyperdrive-id.hyperdrive.workers.dev:5432/postgres";
+  // L7: building a pool for a REMOTE Postgres host without a CA now fails
+  // closed unless DB_SSL_INSECURE=true. These fixtures use fake remote
+  // hostnames and never open a real connection, so opt in here for the whole
+  // unit lane. The fail-closed behaviour itself is covered by
+  // test/unit/db-ssl.test.ts, which clears this variable in its own scope.
+  process.env.DB_SSL_INSECURE = "true";
 }
 process.env.ENVIRONMENT = "dev";
 process.env.APP_DOMAIN = "https://test.example.com";

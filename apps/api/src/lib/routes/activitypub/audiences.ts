@@ -22,6 +22,78 @@ import { SessionManager } from "../../session-cookie.js";
 import type { Route } from "../types.js";
 
 /**
+ * L4 — may this caller read the audience's MEMBER LIST?
+ *
+ * The collection URI is placed in the `to:` of every post addressed to the
+ * audience, so it is known to every recipient (and every server that received
+ * the post). Knowing the URI must not be enough to enumerate who is in the
+ * audience. Only the audience's creator and its members get `orderedItems`;
+ * everyone else (anonymous, a signed-in outsider, a remote server) gets the
+ * count only.
+ *
+ * Fails CLOSED: any error establishing the caller's identity or relationship
+ * downgrades to count-only.
+ */
+async function canReadAudienceMembers(args: {
+  request: Request;
+  env: Parameters<typeof withQueryTimeoutAndRetry>[2];
+  region: Parameters<typeof withQueryTimeoutAndRetry>[1];
+  audienceId: string;
+}): Promise<boolean> {
+  const { request, env, region, audienceId } = args;
+  try {
+    const session = await new SessionManager().getSession(
+      request,
+      (env as any).SESSION_SECRET,
+      env as any,
+    );
+    if (!session?.userId) return false;
+
+    const dbManager = sharedDatabaseConnectionManager;
+    const audience = await withQueryTimeoutAndRetry(
+      dbManager,
+      region,
+      env,
+      async (db) =>
+        db.customAudience.findUnique({
+          where: { id: audienceId },
+          select: { creatorId: true },
+        }),
+      {
+        ...QueryTimeoutPresets.STANDARD,
+        context: { operation: "audienceReadAuth_audience", audienceId },
+      },
+    );
+    if (!audience) return false;
+    if (audience.creatorId === session.userId) return true;
+
+    const membership = await withQueryTimeoutAndRetry(
+      dbManager,
+      region,
+      env,
+      async (db) =>
+        db.customAudienceMember.findUnique({
+          where: {
+            audienceId_memberId: { audienceId, memberId: session.userId },
+          },
+          select: { id: true },
+        }),
+      {
+        ...QueryTimeoutPresets.STANDARD,
+        context: { operation: "audienceReadAuth_member", audienceId },
+      },
+    );
+    return membership !== null && membership !== undefined;
+  } catch (error) {
+    getLogger().warn("[ActivityPub] Audience read authorization failed — count only", {
+      error: (error as Error).message,
+      audienceId,
+    });
+    return false;
+  }
+}
+
+/**
  * ActivityPub custom audience routes
  */
 export const audienceRoutes: Route[] = [
@@ -169,8 +241,9 @@ export const audienceRoutes: Route[] = [
           error.message?.includes("not found") ||
           error.message?.includes("not configured")
         ) {
+          // L9: the detail is in the log above; never echo error.message.
           const errorResponse = securityHeaders.createSecureResponse(
-            JSON.stringify({ error: error.message }),
+            JSON.stringify({ error: "Requested resource not found" }),
             { status: 404, headers: { "content-type": "application/json" } },
           );
           return addCorsHeaders(errorResponse, request, env);
@@ -178,7 +251,7 @@ export const audienceRoutes: Route[] = [
 
         const errorResponse = securityHeaders.createSecureResponse(
           JSON.stringify({
-            error: error.message || "Failed to create custom audience",
+            error: "Failed to create custom audience",
           }),
           { status: 400, headers: { "content-type": "application/json" } },
         );
@@ -224,6 +297,14 @@ export const audienceRoutes: Route[] = [
         const region = detectRegionSync(request, env);
         const dbManager = sharedDatabaseConnectionManager;
 
+        // L4: member list for the creator / members only; count-only otherwise.
+        const canSeeMembers = await canReadAudienceMembers({
+          request,
+          env,
+          region,
+          audienceId,
+        });
+
         // Create Fedify OrderedCollection
         const federation = getFedifyContext(env);
         const collection = await withQueryTimeoutAndRetry(
@@ -236,8 +317,10 @@ export const audienceRoutes: Route[] = [
               audienceId,
               env,
               url.toString(),
-              page,
-              limit,
+              // Count-only: ask for zero items so no member row is even read
+              // into the response.
+              canSeeMembers ? page : 1,
+              canSeeMembers ? limit : 0,
             );
           },
           {
@@ -248,6 +331,11 @@ export const audienceRoutes: Route[] = [
             },
           },
         );
+        if (!canSeeMembers && collection) {
+          // Belt and braces: no items and no `first` page link for outsiders.
+          delete (collection as any).orderedItems;
+          delete (collection as any).first;
+        }
 
         // Use Fedify's respondWithObject for proper JSON-LD serialization
         const response = await respondWithObject(
@@ -262,6 +350,9 @@ export const audienceRoutes: Route[] = [
           headers: {
             ...Object.fromEntries(response.headers.entries()),
             "content-type": "application/activity+json",
+            // The body depends on who is asking.
+            vary: "Cookie",
+            ...(canSeeMembers ? { "cache-control": "private, no-store" } : {}),
           },
         });
       } catch (error: any) {
@@ -393,7 +484,8 @@ export const audienceRoutes: Route[] = [
         logger.error("[ActivityPub] Error adding audience member:", error);
 
         const errorResponse = securityHeaders.createSecureResponse(
-          JSON.stringify({ error: error.message || "Failed to add member" }),
+          // L9: the detail is in the log above; never echo error.message.
+          JSON.stringify({ error: "Failed to add member" }),
           { status: 400, headers: { "content-type": "application/json" } },
         );
         return addCorsHeaders(errorResponse, request, env);

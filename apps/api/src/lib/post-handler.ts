@@ -202,6 +202,36 @@ export function mayFederatePost(
   return post.radius === "SHOUT";
 }
 
+/**
+ * The single refusal for an owner-only post mutation (delete / edit / hide /
+ * unhide). "No such post", "post in another tenant" and "post you do not own"
+ * MUST be indistinguishable — a 403 for the last would confirm that a post id
+ * exists (L6; tenant-isolation contract: "return not found rather than
+ * forbidden"). Identical status AND body, by construction.
+ */
+function postMutationNotFound(): Response {
+  return new Response(JSON.stringify({ error: "Post not found" }), {
+    status: 404,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+/**
+ * Can `session` mutate `post`? True only for the author, and — when the caller
+ * supplies the active tenant — only when the post belongs to that tenant
+ * (equivalent to a `findFirst({ id, tenantId })` lookup).
+ */
+function mayMutatePost(
+  post: { authorId: string; [key: string]: unknown },
+  session: Session,
+  activeTenantId: string | undefined,
+): boolean {
+  if (activeTenantId !== undefined && post.tenantId !== activeTenantId) {
+    return false;
+  }
+  return post.authorId === session.userId;
+}
+
 export class PostHandler {
   private logger: Logger;
 
@@ -1245,6 +1275,7 @@ export class PostHandler {
     session: Session,
     env: Env,
     requestContext: TrellisRequestContext,
+    activeTenantId?: string,
   ): Promise<Response> {
     try {
       const requestId = generateRequestId();
@@ -1267,11 +1298,8 @@ export class PostHandler {
         });
       }
 
-      if (post.authorId !== session.userId) {
-        return new Response(JSON.stringify({ error: "Forbidden" }), {
-          status: 403,
-          headers: { "content-type": "application/json" },
-        });
+      if (!mayMutatePost(post, session, activeTenantId)) {
+        return postMutationNotFound();
       }
 
       // Use DataRouter to get database for region, then update directly
@@ -1382,8 +1410,8 @@ export class PostHandler {
    * - 4.3: Set editedAt timestamp
    * - 4.4, 4.5: Validate input (text required, max 3000 chars)
    * - 4.6: Return 401 if not authenticated
-   * - 4.7: Return 403 if not post owner
-   * - 4.8: Return 404 if post not found
+   * - 4.7/4.8: Return 404 both when the post is not found AND when the caller
+   *   is not the owner (L6: no existence oracle; was 403 for non-owner)
    * - 5.1-5.4: Content moderation on edited content
    * - 6.1-6.4: ActivityPub sync for public posts
    * - 7.1-7.3: Cache invalidation
@@ -1394,6 +1422,7 @@ export class PostHandler {
     session: Session,
     env: Env,
     requestContext: TrellisRequestContext,
+    activeTenantId?: string,
   ): Promise<Response> {
     try {
       // Validate request body with Zod schema
@@ -1427,17 +1456,8 @@ export class PostHandler {
       }
 
       // Authorization check - only post owner can edit
-      if (post.authorId !== session.userId) {
-        return new Response(
-          JSON.stringify({
-            error: "Forbidden",
-            message: "You can only edit your own posts",
-          }),
-          {
-            status: 403,
-            headers: { "content-type": "application/json" },
-          },
-        );
+      if (!mayMutatePost(post, session, activeTenantId)) {
+        return postMutationNotFound();
       }
 
       // Art. 50 provenance MONOTONICITY (analysis/ai-act-transparency 03 §6).
@@ -1453,8 +1473,8 @@ export class PostHandler {
       //
       // Placed AFTER the ownership check on purpose: a 409 here is observable, so
       // running it first would let a non-owner distinguish "this post carries a
-      // declaration" (409) from "not yours" (403) — an information leak about
-      // someone else's post.
+      // declaration" (409) from "not yours" (404) — an information leak about
+      // someone else's post. (Non-owners now get the same 404 as a missing post.)
       //
       // Downward correction is deliberately NOT on this path. A genuine
       // mis-declaration is corrected by a staff-reviewed audited action —
@@ -2086,6 +2106,7 @@ export class PostHandler {
     session: Session,
     env: Env,
     requestContext: TrellisRequestContext,
+    activeTenantId?: string,
   ): Promise<Response> {
     try {
       const requestId = generateRequestId();
@@ -2108,11 +2129,8 @@ export class PostHandler {
         });
       }
 
-      if (post.authorId !== session.userId) {
-        return new Response(JSON.stringify({ error: "Forbidden" }), {
-          status: 403,
-          headers: { "content-type": "application/json" },
-        });
+      if (!mayMutatePost(post, session, activeTenantId)) {
+        return postMutationNotFound();
       }
 
       // Update post with timeout/retry
@@ -2169,6 +2187,7 @@ export class PostHandler {
     session: Session,
     env: Env,
     requestContext: TrellisRequestContext,
+    activeTenantId?: string,
   ): Promise<Response> {
     try {
       const requestId = generateRequestId();
@@ -2191,11 +2210,8 @@ export class PostHandler {
         });
       }
 
-      if (post.authorId !== session.userId) {
-        return new Response(JSON.stringify({ error: "Forbidden" }), {
-          status: 403,
-          headers: { "content-type": "application/json" },
-        });
+      if (!mayMutatePost(post, session, activeTenantId)) {
+        return postMutationNotFound();
       }
 
       // Update post with timeout/retry

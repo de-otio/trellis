@@ -1746,6 +1746,9 @@ describe("FeedHandler", () => {
       expect(response.status).toBe(500);
       const data = await response.json();
       expect(data.error).toBe("Failed to get feed");
+      // L9: the raw error message must not be echoed in `details`.
+      expect(JSON.stringify(data)).not.toContain("Database connection failed");
+      expect(data.details).toBe("An unexpected error occurred");
     });
 
     it("should handle friend-set resolution failures gracefully", async () => {

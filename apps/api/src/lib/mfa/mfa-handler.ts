@@ -84,7 +84,21 @@ export class MfaHandler {
     backupCodes: string[],
     verificationCode: string,
     keyring: Keyring,
+    ticketIssuedAt?: number,
   ): Promise<{ success: boolean; error?: string }> {
+    // Single-use enrollment ticket (L14): the ticket is stateless, so "used"
+    // is derived from the row — an enrollment (re)written at or after the
+    // ticket's issue time means this ticket already produced one.
+    if (ticketIssuedAt !== undefined) {
+      const existing = await prisma.mfaEnrollment.findUnique({
+        where: { userId },
+        select: { enrolledAt: true },
+      });
+      if (existing && existing.enrolledAt.getTime() >= ticketIssuedAt) {
+        return { success: false, error: "Enrollment session already used" };
+      }
+    }
+
     // Verify the user can generate a valid code. The matched step is
     // persisted so the enrollment code itself cannot be replayed as the
     // first verification.
@@ -101,18 +115,23 @@ export class MfaHandler {
       hashBackupCodeKeyed(code, keyring),
     );
 
-    // Upsert enrollment (in case of re-enrollment)
+    // Upsert enrollment (in case of re-enrollment). `enrolledAt` is stamped
+    // from the app clock on both branches so the ticket single-use check
+    // above compares like with like.
+    const enrolledAt = new Date();
     await prisma.mfaEnrollment.upsert({
       where: { userId },
       create: {
         userId,
         encryptedSecret: encrypted,
         backupCodes: hashedCodes,
+        enrolledAt,
         lastUsedStep: step,
       },
       update: {
         encryptedSecret: encrypted,
         backupCodes: hashedCodes,
+        enrolledAt,
         lastUsedAt: null,
         lastUsedStep: step,
       },

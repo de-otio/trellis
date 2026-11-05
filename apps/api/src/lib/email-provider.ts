@@ -578,6 +578,28 @@ export class ScalewayTemProvider implements EmailProvider {
  * - AUTH PLAIN only (RFC 4616) — Mailpit and the TEM relay both accept it.
  * - Fail-closed: missing host throws at construction (factory).
  */
+/**
+ * Decide whether SMTP AUTH may be sent. Pure, so the policy is unit-testable
+ * without a socket.
+ *
+ * - no credentials configured → "skip" (nothing to protect; Mailpit-style
+ *   plaintext dev sinks keep working)
+ * - credentials + TLS active (implicit TLS, or STARTTLS completed) → "send"
+ * - credentials + plaintext → "refuse": AUTH PLAIN is base64, not encryption,
+ *   so the password would cross the wire in the clear.
+ */
+export function decideSmtpAuth(state: {
+  readonly hasCredentials: boolean;
+  readonly tlsActive: boolean;
+}): "skip" | "send" | "refuse" {
+  if (!state.hasCredentials) return "skip";
+  return state.tlsActive ? "send" : "refuse";
+}
+
+/** Error text for a refused AUTH. Never includes the username or password. */
+const SMTP_AUTH_REFUSED_MESSAGE =
+  "SMTP AUTH refused: credentials are configured but the connection is not encrypted. Enable implicit TLS (SMTP_SECURE=true) or STARTTLS (SMTP_STARTTLS=true), or remove SMTP_USERNAME/SMTP_PASSWORD for a plaintext dev relay.";
+
 export class SmtpEmailProvider implements EmailProvider {
   private readonly host: string;
   private readonly port: number;
@@ -654,11 +676,21 @@ export class SmtpEmailProvider implements EmailProvider {
     recipients: string[],
     message: string,
   ): Promise<void> {
+    const hasCredentials = this.username !== undefined && this.password !== undefined;
+    // Refuse BEFORE opening a socket when TLS can never become active: no
+    // implicit TLS and no STARTTLS means the AUTH would go out in cleartext.
+    if (
+      decideSmtpAuth({ hasCredentials, tlsActive: this.secure || this.startTls }) === "refuse"
+    ) {
+      throw new Error(SMTP_AUTH_REFUSED_MESSAGE);
+    }
+
     const [{ connect: netConnect }, tls] = await Promise.all([
       import("node:net"),
       import("node:tls"),
     ]);
 
+    let tlsActive = this.secure;
     let socket: import("node:stream").Duplex = this.secure
       ? tls.connect({ host: this.host, port: this.port, servername: this.host })
       : netConnect({ host: this.host, port: this.port });
@@ -747,11 +779,18 @@ export class SmtpEmailProvider implements EmailProvider {
         buffer = "";
         attachReader(socket);
         await command("EHLO trellis.localdomain", [250]);
+        // A reply over the upgraded socket proves the TLS handshake completed.
+        tlsActive = true;
       }
 
-      if (this.username !== undefined && this.password !== undefined) {
+      // Re-checked against the REAL connection state, not just the config.
+      const authDecision = decideSmtpAuth({ hasCredentials, tlsActive });
+      if (authDecision === "refuse") {
+        throw new Error(SMTP_AUTH_REFUSED_MESSAGE);
+      }
+      if (authDecision === "send") {
         // AUTH PLAIN: base64("\0user\0pass") — RFC 4616.
-        const token = Buffer.from(`\u0000${this.username}\u0000${this.password}`).toString("base64");
+        const token = Buffer.from(`\u0000${this.username ?? ""}\u0000${this.password ?? ""}`).toString("base64");
         await command(`AUTH PLAIN ${token}`, [235]);
       }
 

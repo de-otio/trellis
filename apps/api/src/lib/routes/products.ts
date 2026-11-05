@@ -35,6 +35,30 @@ function unauthorizedResponse(): Response {
   );
 }
 
+/**
+ * Client-facing message for a failure (L9). Raw `error.message` can be a
+ * Prisma/pg message naming tables and columns, and `Validator.sanitizeError`
+ * is a denylist that does not catch those. The status is unchanged
+ * (404 when the message says "not found", else 500); only the one
+ * application-authored message from TaxonomyHandler is passed through.
+ * The detail is logged by the caller.
+ */
+const CLIENT_SAFE_ERRORS: ReadonlySet<string> = new Set([
+  "One or more taxons not found or inactive",
+]);
+
+function clientError(error: any): { status: number; message: string } {
+  const raw: unknown = error?.message;
+  const status = typeof raw === "string" && raw.includes("not found") ? 404 : 500;
+  if (typeof raw === "string" && CLIENT_SAFE_ERRORS.has(raw)) {
+    return { status, message: raw };
+  }
+  return {
+    status,
+    message: status === 404 ? "Resource not found" : "Internal server error",
+  };
+}
+
 export const productTaxonomyRoutes: Route[] = [
   // Add taxonomy tags to product
   {
@@ -128,15 +152,15 @@ export const productTaxonomyRoutes: Route[] = [
           },
         );
       } catch (error: any) {
-        const validator = new Validator();
         getLogger().error(
           "Error adding product taxonomy tags:",
           error,
         );
+        const failure = clientError(error);
         const errorResponse = securityHeaders.createSecureResponse(
-          JSON.stringify({ error: validator.sanitizeError(error) }),
+          JSON.stringify({ error: failure.message }),
           {
-            status: error.message?.includes("not found") ? 404 : 500,
+            status: failure.status,
             headers: { "content-type": "application/json" },
           },
         );
@@ -216,15 +240,15 @@ export const productTaxonomyRoutes: Route[] = [
           },
         );
       } catch (error: any) {
-        const validator = new Validator();
         getLogger().error(
           "Error removing product taxonomy tags:",
           error,
         );
+        const failure = clientError(error);
         const errorResponse = securityHeaders.createSecureResponse(
-          JSON.stringify({ error: validator.sanitizeError(error) }),
+          JSON.stringify({ error: failure.message }),
           {
-            status: error.message?.includes("not found") ? 404 : 500,
+            status: failure.status,
             headers: { "content-type": "application/json" },
           },
         );
@@ -294,7 +318,7 @@ export const productTaxonomyRoutes: Route[] = [
           error,
         );
         return new Response(
-          JSON.stringify({ error: error.message || "Internal server error" }),
+          JSON.stringify({ error: "Internal server error" }),
           {
             status: 500,
             headers: { "content-type": "application/json" },

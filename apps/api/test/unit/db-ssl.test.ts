@@ -9,7 +9,7 @@
  */
 
 import type { PeerCertificate } from "node:tls";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   _resetDbSslWarningForTests,
   buildDbSslOptions,
@@ -115,13 +115,51 @@ describe("buildDbSslOptions", () => {
     });
   });
 
-  it("neither set on a remote host → legacy unverified mode, warned exactly once per process", () => {
-    const warn = vi.fn();
-    expect(buildDbSslOptions(REMOTE, {}, warn)).toEqual({ rejectUnauthorized: false });
-    expect(buildDbSslOptions(REMOTE, {}, warn)).toEqual({ rejectUnauthorized: false });
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn.mock.calls[0][0]).toMatch(/DB_SSL_CA/);
-    expect(warn.mock.calls[0][0]).toMatch(/NOT verified/);
+  describe("neither CA set on a remote host → fail closed (L7)", () => {
+    beforeEach(() => vi.stubEnv("DB_SSL_INSECURE", ""));
+    afterEach(() => vi.unstubAllEnvs());
+
+    it("throws, and the message says how to fix it", () => {
+      const warn = vi.fn();
+      expect(() => buildDbSslOptions(REMOTE, {}, warn)).toThrow(/DB_SSL_CA/);
+      expect(() => buildDbSslOptions(REMOTE, {}, warn)).toThrow(/DB_SSL_CA_PATH/);
+      expect(() => buildDbSslOptions(REMOTE, {}, warn)).toThrow(/DB_SSL_INSECURE=true/);
+      expect(() => buildDbSslOptions(REMOTE, {}, warn)).toThrow(/db\.example\.net/);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it("only the literal 'true' opts in — typos and falsy values still fail closed", () => {
+      for (const v of ["1", "yes", "false", "tru", "on"]) {
+        expect(() => buildDbSslOptions(REMOTE, { DB_SSL_INSECURE: v })).toThrow(/refusing/);
+      }
+    });
+
+    it("DB_SSL_INSECURE=true → legacy unverified mode, warned exactly once per process", () => {
+      const warn = vi.fn();
+      expect(buildDbSslOptions(REMOTE, { DB_SSL_INSECURE: "true" }, warn)).toEqual({
+        rejectUnauthorized: false,
+      });
+      expect(buildDbSslOptions(REMOTE, { DB_SSL_INSECURE: "TRUE" }, warn)).toEqual({
+        rejectUnauthorized: false,
+      });
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toMatch(/NOT verified/);
+    });
+
+    it("falls back to process.env.DB_SSL_INSECURE when the env object lacks it", () => {
+      vi.stubEnv("DB_SSL_INSECURE", "true");
+      expect(buildDbSslOptions(REMOTE, {})).toEqual({ rejectUnauthorized: false });
+    });
+
+    it("a configured CA still wins over DB_SSL_INSECURE (verification stays ON)", () => {
+      expect(buildDbSslOptions(REMOTE, { DB_SSL_CA: PEM, DB_SSL_INSECURE: "true" })).toMatchObject({
+        rejectUnauthorized: true,
+      });
+    });
+
+    it("local hosts are unaffected", () => {
+      expect(buildDbSslOptions("postgresql://u:p@localhost:5432/db", {})).toBe(false);
+    });
   });
 
   it("an operator who asked for verification never silently gets the unverified mode", () => {

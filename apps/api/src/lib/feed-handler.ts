@@ -781,7 +781,12 @@ export class FeedHandler {
         `Error details: ${error.message}${error.stack ? `\n${error.stack}` : ""}`,
       );
       return new Response(
-        JSON.stringify({ error: "Failed to get feed", details: error.message }),
+        // Detail is logged above; the client gets a generic message only
+        // (Prisma/pg messages carry table and column names).
+        JSON.stringify({
+          error: "Failed to get feed",
+          details: "An unexpected error occurred",
+        }),
         { status: 500, headers: { "content-type": "application/json" } },
       );
     }

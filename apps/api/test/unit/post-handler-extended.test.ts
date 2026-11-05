@@ -349,7 +349,7 @@ describe("PostHandler - Extended", () => {
       expect(response.status).toBe(404);
     });
 
-    it("should return 403 if user is not post owner for edit", async () => {
+    it("should return 404 (not 403) if user is not post owner for edit", async () => {
       mockGetPost.mockResolvedValue({
         id: "post-123",
         authorId: "other-user",
@@ -367,9 +367,9 @@ describe("PostHandler - Extended", () => {
         mockRequestContext,
       );
 
-      expect(response.status).toBe(403);
+      expect(response.status).toBe(404);
       const data = await response.json();
-      expect(data.message).toContain("only edit your own");
+      expect(data).toEqual({ error: "Post not found" });
     });
 
     it("should return 410 if editing a deleted post", async () => {
@@ -658,7 +658,7 @@ describe("PostHandler - Extended", () => {
         mockRequestContext,
       );
 
-      expect(response.status).toBe(403);
+      expect(response.status).toBe(404);
     });
 
     it("should handle unhide when post not found", async () => {
@@ -688,7 +688,7 @@ describe("PostHandler - Extended", () => {
         mockRequestContext,
       );
 
-      expect(response.status).toBe(403);
+      expect(response.status).toBe(404);
     });
 
     it("should return 500 on hide database error", async () => {

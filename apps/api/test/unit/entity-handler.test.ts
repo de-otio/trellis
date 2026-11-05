@@ -627,6 +627,45 @@ describe("EntityHandler", () => {
       mockGetSession.mockResolvedValue(mockSession);
     });
 
+    it("L8: never logs session.email or writes console debug lines (success and user-upsert failure)", async () => {
+      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const logger = (handler as any).logger;
+      const calls: unknown[][] = [];
+      for (const level of ["info", "warn", "error", "debug"]) {
+        vi.spyOn(logger, level).mockImplementation((...args: unknown[]) => {
+          calls.push(args);
+        });
+      }
+      const makeRequest = () =>
+        new Request("http://test.com/entities", {
+          method: "POST",
+          body: JSON.stringify({ name: "Test" }),
+          headers: { "Content-Type": "application/json" },
+        });
+
+      // Success path.
+      mockDb.entity.create.mockResolvedValue({
+        id: "entity-1",
+        name: "Test",
+        entityType: "test",
+        metadata: {},
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      await handler.createEntityProfile(makeRequest(), mockSession, mockEnv);
+
+      // Failure path: the log that DOES fire must carry userId, not email.
+      mockDb.user.upsert.mockRejectedValueOnce(new Error("db down"));
+      const failed = await handler.createEntityProfile(makeRequest(), mockSession, mockEnv);
+      expect(failed.status).toBe(500);
+      expect(calls.length).toBeGreaterThan(0);
+      expect(JSON.stringify(calls)).toContain("user-123");
+
+      expect(JSON.stringify(calls)).not.toContain("test@example.com");
+      expect(consoleSpy).not.toHaveBeenCalled();
+      consoleSpy.mockRestore();
+    });
+
     it("should create entity profile successfully with all fields", async () => {
       // Arrange
       const createdAt = new Date("2024-01-01T10:00:00Z");
@@ -1015,6 +1054,51 @@ describe("EntityHandler", () => {
         update: expect.any(Object),
       });
     });
+
+    // A global role must never be seeded from a session value: this fallback
+    // creates a row for a user that does not exist yet, so a session claiming
+    // SUPER_ADMIN must still yield an END_USER row.
+    it.each(["SUPER_ADMIN", "INTERNAL", "B2B_PARTNER"])(
+      "creates the missing user as END_USER even when the session says %s",
+      async (sessionRole) => {
+        mockDb.user.findUnique.mockResolvedValueOnce(null);
+        mockDb.user.upsert.mockResolvedValue({
+          id: "user-123",
+          email: "test@example.com",
+          personalTenantId: "tenant-123",
+        });
+        mockDb.entity.create.mockResolvedValue({
+          id: "entity-123",
+          name: "Buddy",
+          entityType: "test",
+          metadata: {},
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
+        mockIsEnabled.mockResolvedValueOnce(true);
+        mockDetectRegion.mockResolvedValue("US");
+        const session = { ...mockSession, role: sessionRole } as typeof mockSession;
+        mockGetSession.mockResolvedValue(session);
+        const requestBody = { name: "Buddy", entityType: "test" };
+        mockValidateEntityProfile.mockReturnValue({ valid: true, data: requestBody });
+
+        const response = await handler.createEntityProfile(
+          new Request("http://test.com/entities", {
+            method: "POST",
+            body: JSON.stringify(requestBody),
+            headers: { "Content-Type": "application/json" },
+          }),
+          session,
+          mockEnv,
+        );
+
+        expect(response.status).toBe(201);
+        const upsertArg = mockDb.user.upsert.mock.calls[0][0];
+        expect(upsertArg.create.role).toBe("END_USER");
+        // The update branch must never write a role at all.
+        expect(upsertArg.update).not.toHaveProperty("role");
+      },
+    );
 
     it("should return 400 for invalid input (empty name)", async () => {
       // Arrange

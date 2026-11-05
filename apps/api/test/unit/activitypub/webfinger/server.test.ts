@@ -185,7 +185,52 @@ describe("WebFinger Server", () => {
       const body = await response.json();
 
       expect(response.status).toBe(404);
-      expect(body.error).toBe("User account is suspended or deleted");
+      expect(body.error).toBe("User not found");
+    });
+
+    it("I4: not-found, suspended, deleted and keyless accounts get byte-identical 404s", async () => {
+      const { withQueryTimeoutAndRetry } = await import(
+        "../../../../src/lib/db-query-helper.js"
+      );
+      const base = {
+        id: mockUser.id,
+        username: "alice",
+        actorUri: "https://example.com/users/alice",
+        publicKey: "pk",
+        suspended: false,
+        deletionConfirmedAt: null,
+      };
+      const variants: Array<Record<string, unknown> | null> = [
+        null,
+        { ...base, suspended: true },
+        { ...base, deletionConfirmedAt: new Date("2026-01-01T00:00:00Z") },
+        { ...base, publicKey: null },
+        { ...base, actorUri: null },
+      ];
+      const snapshots: Array<{ status: number; headers: string[][]; text: string }> = [];
+      for (const row of variants) {
+        vi.mocked(withQueryTimeoutAndRetry).mockImplementation(
+          async (_m, _r, _e, callback) =>
+            callback({ user: { findUnique: vi.fn().mockResolvedValue(row) } } as any),
+        );
+        const response = await handleWebFinger(
+          new Request(
+            `https://example.com/.well-known/webfinger?resource=${encodeURIComponent("acct:alice@example.com")}`,
+          ),
+          mockEnv,
+        );
+        snapshots.push({
+          status: response.status,
+          headers: [...response.headers.entries()].sort(([a], [b]) => a.localeCompare(b)),
+          text: await response.text(),
+        });
+      }
+      expect(snapshots[0].status).toBe(404);
+      for (const snap of snapshots.slice(1)) {
+        expect(snap).toEqual(snapshots[0]);
+      }
+      // Neither moderation state nor deletion may leak into the body.
+      expect(snapshots[0].text).not.toMatch(/suspend|delet/i);
     });
   });
 });

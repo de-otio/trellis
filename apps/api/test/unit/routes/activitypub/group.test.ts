@@ -4,7 +4,7 @@
  * Tests for ActivityPub group route handlers.
  */
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "../../../../src/env.js";
 import { groupRoutes } from "../../../../src/lib/routes/activitypub/group.js";
 
@@ -272,6 +272,72 @@ describe("ActivityPub Group Routes", () => {
       });
     });
 
+    describe("actor document (GET /groups/:groupId)", () => {
+      const actor = () => find("GET", "/groups/:groupId");
+      const callActor = () =>
+        actor().handler(new Request("https://example.com/groups/g1"), mockEnv, {
+          params: { groupId: "g1" },
+        } as any);
+      const ACTOR_DOC = { type: "Group", id: GROUP_URI, name: "Secret Club", summary: "members only" };
+
+      beforeEach(() => {
+        mockSerializeActor.mockResolvedValue(ACTOR_DOC);
+      });
+
+      it("PUBLIC group stays open to anonymous callers (no session lookup at all)", async () => {
+        withGroup("PUBLIC");
+        const res = await callActor();
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual(ACTOR_DOC);
+        expect(mockGetSession).not.toHaveBeenCalled();
+      });
+
+      it.each(["PRIVATE", "FRIENDS_ONLY", "SOME_FUTURE_VALUE"])(
+        "%s group: anonymous caller gets 404 and the document is never serialized",
+        async (privacy) => {
+          withGroup(privacy);
+          const res = await callActor();
+          expect(res.status).toBe(404);
+          expect(await res.text()).toBe(NOT_FOUND);
+          expect(mockSerializeActor).not.toHaveBeenCalled();
+        },
+      );
+
+      it("PRIVATE group: a signed-in NON-member gets 404", async () => {
+        withGroup("PRIVATE");
+        signedInAs(null);
+        const res = await callActor();
+        expect(res.status).toBe(404);
+        expect(mockSerializeActor).not.toHaveBeenCalled();
+      });
+
+      it("PRIVATE group: a plain MEMBER is served the document", async () => {
+        withGroup("PRIVATE");
+        signedInAs("MEMBER");
+        const res = await callActor();
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual(ACTOR_DOC);
+      });
+
+      it("PRIVATE group: a refusal is byte-identical to a nonexistent group", async () => {
+        withGroup("PRIVATE");
+        const denied = await callActor();
+        withGroup(null);
+        const missing = await callActor();
+        expect(denied.status).toBe(missing.status);
+        expect(await denied.text()).toBe(await missing.text());
+      });
+
+      it("PRIVATE group: fails CLOSED when the role lookup throws", async () => {
+        withGroup("PRIVATE");
+        signedInAs("ADMIN");
+        mockGetMemberRole.mockRejectedValue(new Error("db down"));
+        const res = await callActor();
+        expect(res.status).toBe(404);
+        expect(mockSerializeActor).not.toHaveBeenCalled();
+      });
+    });
+
     it("the role check is made against THIS group and the caller's own actorUri", async () => {
       withGroup("PRIVATE");
       signedInAs("MEMBER");
@@ -312,6 +378,89 @@ describe("ActivityPub Group Routes", () => {
     });
   });
 
+  describe("POST /groups/:groupId/inbox - size and addressee caps (L2)", () => {
+    const route = groupRoutes.find(
+      (r) => r.method === "POST" && r.path === "/groups/:groupId/inbox",
+    )!;
+    const CAP = 64;
+
+    beforeEach(() => {
+      process.env.ACTIVITYPUB_INBOX_MAX_BODY_BYTES = String(CAP);
+      process.env.ACTIVITYPUB_MAX_ADDRESSEES = "3";
+    });
+    afterEach(() => {
+      delete process.env.ACTIVITYPUB_INBOX_MAX_BODY_BYTES;
+      delete process.env.ACTIVITYPUB_MAX_ADDRESSEES;
+    });
+
+    const verified = (body: string) =>
+      mockVerifyInboxRequest.mockResolvedValue({
+        valid: true,
+        keyId: "https://remote.example/users/a#main-key",
+        owner: "https://remote.example/users/a",
+        body: Buffer.from(body, "utf8"),
+      });
+
+    const post = (body: string, headers: Record<string, string> = {}) =>
+      route.handler(
+        new Request("https://example.com/groups/group-123/inbox", {
+          method: "POST",
+          headers,
+          body,
+        }),
+        mockEnv,
+        { params: { groupId: "group-123" } } as any,
+      );
+
+    it("refuses a verified body one byte over the cap with 413, before parsing", async () => {
+      const body = "x".repeat(CAP + 1); // not JSON: a parse attempt would be a 400
+      verified(body);
+      const res = await post(body);
+      expect(res.status).toBe(413);
+      expect(mockDb.group.findUnique).not.toHaveBeenCalled();
+    });
+
+    it("a body of exactly the cap is NOT refused as too large (boundary)", async () => {
+      const body = "x".repeat(CAP);
+      verified(body);
+      const res = await post(body);
+      // Not JSON, so it fails later with 400 — the point is it is not a 413.
+      expect(res.status).toBe(400);
+    });
+
+    it("refuses a DECLARED oversize Content-Length before any signature work", async () => {
+      verified("{}");
+      const res = await post("{}", { "content-length": String(CAP + 1) });
+      expect(res.status).toBe(413);
+      expect(mockVerifyInboxRequest).not.toHaveBeenCalled();
+    });
+
+    it("the cap is runtime config (env), not a compiled-in constant", async () => {
+      process.env.ACTIVITYPUB_INBOX_MAX_BODY_BYTES = "1000";
+      const body = "x".repeat(CAP + 1);
+      verified(body);
+      const res = await post(body);
+      expect(res.status).toBe(400); // under the raised cap: reaches the JSON parse
+    });
+
+    it.each(["to", "cc", "bto", "bcc"])(
+      "refuses (400) an activity with more than the allowed addressees in %s, storing nothing",
+      async (field) => {
+        process.env.ACTIVITYPUB_INBOX_MAX_BODY_BYTES = "4096"; // isolate the addressee cap
+        const body = JSON.stringify({
+          type: "Follow",
+          actor: "https://remote.example/users/a",
+          [field]: ["a", "b", "c", "d"],
+        });
+        verified(body);
+        const res = await post(body);
+        expect(res.status).toBe(400);
+        expect((await res.json()).error).toBe("Too many addressees");
+        expect(mockDb.group.findUnique).not.toHaveBeenCalled();
+      },
+    );
+  });
+
   describe("GET /groups/:groupId - Get group actor", () => {
     const route = groupRoutes.find(
       (r) => r.method === "GET" && r.path === "/groups/:groupId",
@@ -322,6 +471,7 @@ describe("ActivityPub Group Routes", () => {
         id: "group-123",
         name: "Test Group",
         description: "A test group",
+        privacy: "PUBLIC",
       };
       mockDb.group.findUnique.mockResolvedValue(mockGroup);
       mockSerializeActor.mockResolvedValue({

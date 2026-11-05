@@ -342,11 +342,12 @@ describe("MediaMetrics", () => {
           msg: expect.stringContaining("Rate limit exceeded"),
           endpoint: "/api/media",
           userId: "user-123",
-          ipAddress: "1.2.3.4",
           limit: 100,
           windowSeconds: 3600,
         }),
       );
+      // L8: the raw client IP is never written to the log
+      expect(JSON.stringify(capture.entries())).not.toContain("1.2.3.4");
       expect(mockAnalytics.writeDataPoint).toHaveBeenCalledWith(
         expect.objectContaining({
           blobs: ["media-rate-limit", "/api/media"],

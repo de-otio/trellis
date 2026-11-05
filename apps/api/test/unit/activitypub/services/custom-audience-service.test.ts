@@ -72,13 +72,24 @@ describe("CustomAudienceService", () => {
       expect(uri).toBe("https://example.com/audiences/audience-123");
     });
 
-    it("should use request URL if provided", () => {
-      const audienceId = "audience-123";
-      const requestUrl = "https://custom-domain.com/api/audiences";
+    // L3: a persisted canonical URI must come from the CONFIGURED base URL. The
+    // request's Host / scheme is attacker-influenced when the origin is reached
+    // directly, so it must not be baked into stored URIs.
+    it("ignores the request URL when ACTIVITYPUB_BASE_URL is configured (L3)", () => {
       const uri = CustomAudienceService.generateCollectionUri(
-        audienceId,
+        "audience-123",
         mockEnv,
-        requestUrl,
+        "https://custom-domain.com/api/audiences",
+      );
+      expect(uri).toBe("https://example.com/audiences/audience-123");
+      expect(uri).not.toContain("custom-domain.com");
+    });
+
+    it("falls back to the request URL only when no base URL is configured", () => {
+      const uri = CustomAudienceService.generateCollectionUri(
+        "audience-123",
+        { ...mockEnv, ACTIVITYPUB_BASE_URL: undefined } as Env,
+        "https://custom-domain.com/api/audiences",
       );
       expect(uri).toBe("https://custom-domain.com/audiences/audience-123");
     });

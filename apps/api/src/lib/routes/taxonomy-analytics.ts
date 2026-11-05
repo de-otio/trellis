@@ -73,7 +73,7 @@ export const taxonomyAnalyticsRoutes: Route[] = [
       } catch (error: any) {
         getLogger().error("Error getting taxonomy metrics:", error);
         return new Response(
-          JSON.stringify({ error: error.message || "Internal server error" }),
+          JSON.stringify({ error: "Internal server error" }),
           {
             status: 500,
             headers: { "content-type": "application/json" },
@@ -133,7 +133,7 @@ export const taxonomyAnalyticsRoutes: Route[] = [
         );
         const securityHeaders = new SecurityHeaders(env);
         return securityHeaders.createSecureResponse(
-          JSON.stringify({ error: error.message || "Internal server error" }),
+          JSON.stringify({ error: "Internal server error" }),
           {
             status: 500,
             headers: { "content-type": "application/json" },
@@ -181,7 +181,7 @@ export const taxonomyAnalyticsRoutes: Route[] = [
       } catch (error: any) {
         getLogger().error("Error getting free-form tags:", error);
         return new Response(
-          JSON.stringify({ error: error.message || "Internal server error" }),
+          JSON.stringify({ error: "Internal server error" }),
           {
             status: 500,
             headers: { "content-type": "application/json" },

@@ -6,6 +6,15 @@
 
 import { Prisma } from "@prisma/client";
 import type { PrismaClient, Activity } from "@prisma/client";
+import { addresseeLimitViolation, maxAddressees } from "./inbox-limits.js";
+
+/** Thrown by `storeInboxActivity` when an addressing array exceeds the cap (L2). */
+export class TooManyAddresseesError extends Error {
+  constructor(readonly field: string) {
+    super(`activity ${field} exceeds ${maxAddressees()} addressees`);
+    this.name = "TooManyAddresseesError";
+  }
+}
 
 export interface ActivityStreamsActivity {
   "@context"?: string | string[];
@@ -118,6 +127,13 @@ export class ActivityService {
     inboxActorUri: string,
     activity: ActivityStreamsActivity,
   ): Promise<Activity> {
+    // L2: refuse (rather than silently truncate — a clipped `to` would change who
+    // an activity is addressed to) an addressing array over the runtime cap.
+    // Routes check this first and answer 400; this is the backstop for any other
+    // caller, so the cap cannot be bypassed by a new entry point.
+    const oversized = addresseeLimitViolation(activity);
+    if (oversized) throw new TooManyAddresseesError(oversized);
+
     const actorUri =
       typeof activity.actor === "string"
         ? activity.actor

@@ -173,7 +173,9 @@ export class CollectionHandler {
       });
 
       const visibleItems =
-        collection.visibility === "PRIVATE" ? items : await this.filterVisibleItems(items, db);
+        collection.visibility === "PRIVATE"
+          ? items
+          : await this.filterVisibleItems(items, collection.tenantId, db);
 
       return jsonResponse(
         {
@@ -400,7 +402,7 @@ export class CollectionHandler {
       const targetType = parsed.data.targetType as TargetType;
       const targetId = parsed.data.targetId;
 
-      const exists = await this.referentExists(targetType, targetId, db);
+      const exists = await this.referentExists(targetType, targetId, collection.tenantId, db);
       if (!exists) {
         return jsonResponse(
           { error: "REFERENT_NOT_FOUND", message: "Referent does not exist" },
@@ -409,7 +411,12 @@ export class CollectionHandler {
       }
 
       if (collection.visibility !== "PRIVATE") {
-        const isPublic = await this.isReferentPublic(targetType, targetId, db);
+        const isPublic = await this.isReferentPublic(
+          targetType,
+          targetId,
+          collection.tenantId,
+          db,
+        );
         if (!isPublic) {
           return jsonResponse(
             {
@@ -573,17 +580,27 @@ export class CollectionHandler {
     return user?.personalTenantId ?? null;
   }
 
-  /** Does the referent row currently exist at all? */
+  /**
+   * Does the referent row currently exist AND is it visible to the collection's
+   * tenant? Entities are tenant-scoped, so an entity in another tenant is
+   * indistinguishable from a missing one (L6: no cross-tenant existence
+   * oracle; tenant-isolation contract returns "not found", never "forbidden").
+   * Users are global identities (no tenant column) and stay tenant-agnostic.
+   */
   private async referentExists(
     targetType: TargetType,
     targetId: string,
+    tenantId: string,
     db: any,
   ): Promise<boolean> {
     if (targetType === "user") {
       const user = await db.user.findUnique({ where: { id: targetId }, select: { id: true } });
       return !!user;
     }
-    const entity = await db.entity.findUnique({ where: { id: targetId }, select: { id: true } });
+    const entity = await db.entity.findFirst({
+      where: { id: targetId, tenantId },
+      select: { id: true },
+    });
     return !!entity;
   }
 
@@ -596,6 +613,7 @@ export class CollectionHandler {
   private async isReferentPublic(
     targetType: TargetType,
     targetId: string,
+    tenantId: string,
     db: any,
   ): Promise<boolean> {
     if (targetType === "user") {
@@ -605,7 +623,10 @@ export class CollectionHandler {
       });
       return user?.profileVisibility === "PUBLIC";
     }
-    const entity = await db.entity.findUnique({ where: { id: targetId }, select: { id: true } });
+    const entity = await db.entity.findFirst({
+      where: { id: targetId, tenantId },
+      select: { id: true },
+    });
     return !!entity;
   }
 
@@ -616,6 +637,7 @@ export class CollectionHandler {
    */
   private async filterVisibleItems(
     items: CollectionItemLike[],
+    tenantId: string,
     db: any,
   ): Promise<CollectionItemLike[]> {
     if (items.length === 0) return items;
@@ -636,7 +658,7 @@ export class CollectionHandler {
         : Promise.resolve([]),
       entityIds.length > 0
         ? db.entity.findMany({
-            where: { id: { in: entityIds } },
+            where: { id: { in: entityIds }, tenantId },
             select: { id: true },
           })
         : Promise.resolve([]),

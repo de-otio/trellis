@@ -125,6 +125,8 @@ const ADMIN_SESSION: Session & { refreshToken: string } = {
   mfaVerified: true,
   mfaVerifiedAt: Date.now() - 60_000, // 1 minute ago
   refreshToken: "RT-admin",
+  // L13: the approval is scoped to the session's verified active tenant.
+  activeTenantId: "t_one",
 };
 
 beforeEach(() => {
@@ -207,6 +209,20 @@ describe("GET /agents/authorize", () => {
       params: {},
     });
     expect(response.status).toBe(403);
+  });
+
+  it("L13: returns 403 when the session has no active tenant", async () => {
+    const { activeTenantId: _omit, ...noTenant } = ADMIN_SESSION;
+    mockGetSession.mockResolvedValue(noTenant);
+    const route = findRoute("/agents/authorize", "GET")!;
+    const request = new Request("http://localhost/agents/authorize?user_code=BCDF-GHJK");
+    const response = await route.handler(request, ENV, {
+      url: new URL(request.url),
+      pathname: "/agents/authorize",
+      params: {},
+    });
+    expect(response.status).toBe(403);
+    expect(mockFindMember).not.toHaveBeenCalled();
   });
 
   it("renders the approval page for admin with fresh MFA", async () => {
@@ -351,6 +367,39 @@ describe("POST /agents/authorize/approve", () => {
     });
     // buildAuthContext returns null when subject is missing → 401.
     expect(response.status).toBe(401);
+  });
+
+  it("L13: scopes the membership lookup to the session's ACTIVE tenant (not the oldest membership)", async () => {
+    mockGetSession.mockResolvedValue({ ...ADMIN_SESSION, activeTenantId: "t_two" });
+    mockFindMember.mockResolvedValue(null); // not an ACTIVE member of t_two
+    const { route, request } = makeApprove();
+    const response = await route.handler(request, ENV, {
+      url: new URL(request.url),
+      pathname: "/agents/authorize/approve",
+      params: {},
+    });
+    // Fails closed with the existing UNAUTHORIZED shape, and never issues tokens.
+    expect(response.status).toBe(401);
+    expect(((await response.json()) as { error: string }).error).toBe("UNAUTHORIZED");
+    expect(mockIssueForAgent).not.toHaveBeenCalled();
+    expect(mockFindMember).toHaveBeenCalledTimes(1);
+    const where = (mockFindMember.mock.calls[0]![0] as { where: Record<string, unknown>; orderBy?: unknown });
+    expect(where.where).toEqual({ userId: "u_admin", tenantId: "t_two", status: "ACTIVE" });
+    expect((mockFindMember.mock.calls[0]![0] as { orderBy?: unknown }).orderBy).toBeUndefined();
+  });
+
+  it("L13: fails closed (401) when the session carries no active tenant, without querying memberships", async () => {
+    const { activeTenantId: _omit, ...noTenant } = ADMIN_SESSION;
+    mockGetSession.mockResolvedValue(noTenant);
+    const { route, request } = makeApprove();
+    const response = await route.handler(request, ENV, {
+      url: new URL(request.url),
+      pathname: "/agents/authorize/approve",
+      params: {},
+    });
+    expect(response.status).toBe(401);
+    expect(mockFindMember).not.toHaveBeenCalled();
+    expect(mockIssueForAgent).not.toHaveBeenCalled();
   });
 
   it("returns 401 mfa_required when MFA is stale", async () => {
@@ -512,6 +561,35 @@ describe("POST /agents/authorize/approve", () => {
       params: {},
     });
     expect(response.status).toBe(404);
+  });
+
+  it("L13: rejects a same-length but different user-code hash (constant-time compare path)", async () => {
+    mockGetSession.mockResolvedValue(ADMIN_SESSION);
+    mockLookupDeviceCodeByUserCode.mockResolvedValue("dc-same-len");
+    const original = await import("../../../../src/lib/oauth/device-authorization.js");
+    const good = original.hashUserCode(original.normaliseUserCode("BCDF-GHJK"));
+    // Flip the last hex char: identical length, different value.
+    const bad = good.slice(0, -1) + (good.endsWith("0") ? "1" : "0");
+    expect(bad).toHaveLength(good.length);
+    mockLoadByDeviceCode.mockResolvedValue({
+      deviceCode: "dc-same-len",
+      userCodeHash: bad,
+      status: "pending",
+      expiresAt: Math.floor(Date.now() / 1000) + 600,
+      createdAt: Math.floor(Date.now() / 1000),
+      interval: 5,
+      failedLookups: 0,
+    });
+    mockIncrementFailedLookup.mockResolvedValue(1);
+    const { route, request } = makeApprove();
+    const response = await route.handler(request, ENV, {
+      url: new URL(request.url),
+      pathname: "/agents/authorize/approve",
+      params: {},
+    });
+    expect(response.status).toBe(404);
+    expect(mockIncrementFailedLookup).toHaveBeenCalledWith("dc-same-len");
+    expect(mockIssueForAgent).not.toHaveBeenCalled();
   });
 
   it("increments failed lookups on user_code mismatch", async () => {

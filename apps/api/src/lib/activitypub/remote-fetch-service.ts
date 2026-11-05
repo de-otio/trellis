@@ -32,6 +32,34 @@ interface CachedDocument {
 export interface RemoteFetchOptions {
   resolver?: DnsResolver;
   transport?: Transport;
+  /**
+   * M13 — called immediately before a LIVE network dereference (never on a cache
+   * hit or a negative-cache hit). Return `false` to refuse the fetch: the call
+   * resolves to `null` and nothing is negatively cached, so a budget refusal is
+   * not mistaken for a dead peer. A throw is treated as a refusal (fail closed).
+   * Used by the signature verifier to bound how hard an unauthenticated sender
+   * can make us hit any one third-party host.
+   */
+  beforeNetworkFetch?: (host: string) => Promise<boolean>;
+}
+
+/**
+ * M13 — ports an actor document may be dereferenced on. Federation runs on 443;
+ * letting a remote-supplied URL pick an arbitrary port turns key fetching into
+ * a port scanner / liveness oracle for any public host. Runtime config:
+ * `ACTIVITYPUB_ALLOWED_FETCH_PORTS` (comma-separated; default `443`; the single
+ * value `*` lifts the restriction, e.g. for a dev federation on a high port).
+ * An absent port in the URL means 443 for https and is always allowed.
+ */
+export function allowedFetchPorts(): readonly number[] {
+  const raw = (process.env.ACTIVITYPUB_ALLOWED_FETCH_PORTS ?? "").trim();
+  // safe-fetch: an empty allowlist opts OUT of the port policy (any port).
+  if (raw === "*") return [];
+  const ports = raw
+    .split(",")
+    .map((p) => Number.parseInt(p.trim(), 10))
+    .filter((p) => Number.isInteger(p) && p > 0 && p < 65536);
+  return ports.length > 0 ? ports : [443];
 }
 
 /**
@@ -204,6 +232,18 @@ export class RemoteFetchService {
       return null;
     }
 
+    // M13: the caller's per-host budget, consulted only when a live request is
+    // actually about to be made. A refusal is not a failure of the peer, so it
+    // is not negatively cached.
+    if (!(await this.admitNetworkFetch(actorUri, options, logger))) {
+      if (logger) {
+        logger.warn(
+          `[RemoteFetchService] Actor fetch refused by pre-fetch budget: ${actorUri}`,
+        );
+      }
+      return null;
+    }
+
     try {
       // Fetch through the SSRF-safe helper: https-only, DNS resolved and every
       // A/AAAA record range-checked before connect, socket pinned to the
@@ -223,6 +263,7 @@ export class RemoteFetchService {
           "user-agent": "Trellis ActivityPub Client/1.0",
         },
         allowedProtocols: ["https:"],
+        allowedPorts: allowedFetchPorts(),
         timeoutMs: this.FETCH_TIMEOUT_MS,
         maxRedirects: this.MAX_REDIRECTS,
         maxBytes: this.MAX_DOCUMENT_BYTES,
@@ -605,9 +646,70 @@ export class RemoteFetchService {
   }
 
   /**
+   * Positive-cache key: the URL as the server sees it. The fragment is never
+   * sent, so `…/alice` and `…/alice#main-key` are one document; parsing also
+   * lower-cases the host and drops a default port. The QUERY stays — it
+   * selects a different resource, and a document is only ever cached after its
+   * `id` matched the exact URL it was served from.
+   */
+  private static positiveKey(uri: string): string {
+    try {
+      const u = new URL(uri);
+      u.hash = "";
+      return u.href;
+    } catch {
+      return uri;
+    }
+  }
+
+  /**
+   * Negative-cache key (M13): origin + path only. A failure is remembered for
+   * the whole path, so a sender cannot defeat the cache — and make us hit the
+   * same third-party endpoint on every request — by appending a varying query
+   * string or fragment. The cost is that one failing `?id=1` also suppresses
+   * `?id=2` on the same path for the (short) negative TTL, which is the right
+   * trade for an endpoint that is demonstrably failing. The "document id must
+   * equal the URL it was fetched from" rule is unaffected: it compares the
+   * exact URL, not this key.
+   */
+  private static negativeKey(uri: string): string {
+    try {
+      const u = new URL(uri);
+      return `${u.origin}${u.pathname.replace(/\/+$/, "")}`;
+    } catch {
+      return uri;
+    }
+  }
+
+  /**
+   * Run the caller's pre-network budget check. True = go ahead. Any throw
+   * refuses the fetch (fail closed).
+   */
+  private static async admitNetworkFetch(
+    uri: string,
+    options: RemoteFetchOptions,
+    logger?: Logger,
+  ): Promise<boolean> {
+    const hook =
+      options.beforeNetworkFetch ?? this.defaultFetchOptions.beforeNetworkFetch;
+    if (!hook) return true;
+    try {
+      return (await hook(new URL(uri).hostname.toLowerCase())) === true;
+    } catch (error) {
+      if (logger) {
+        logger.warn(
+          `[RemoteFetchService] Pre-fetch budget check failed — refusing ${uri}: ${(error as Error).message}`,
+        );
+      }
+      return false;
+    }
+  }
+
+  /**
    * Get cached document
    */
   private static getCached(uri: string): object | null {
+    uri = this.positiveKey(uri);
     const cached = this.cache.get(uri);
     if (!cached) {
       return null;
@@ -635,6 +737,7 @@ export class RemoteFetchService {
     document: object,
     ttl: number = this.DEFAULT_CACHE_TTL,
   ): void {
+    uri = this.positiveKey(uri);
     let bytes: number;
     try {
       bytes = Buffer.byteLength(JSON.stringify(document), "utf8");
@@ -657,6 +760,7 @@ export class RemoteFetchService {
 
   /** Remove one entry and keep the byte total in step. */
   private static evict(uri: string): void {
+    uri = this.positiveKey(uri);
     const existing = this.cache.get(uri);
     if (!existing) return;
     this.cacheBytes -= existing.bytes;
@@ -685,6 +789,7 @@ export class RemoteFetchService {
 
   /** True while `uri` sits in the negative cache. */
   private static isNegativelyCached(uri: string): boolean {
+    uri = this.negativeKey(uri);
     const until = this.negative.get(uri);
     if (until === undefined) return false;
     if (until <= Date.now()) {
@@ -696,6 +801,7 @@ export class RemoteFetchService {
 
   /** Record a failed dereference. Bounded: oldest entries go first. */
   private static setNegative(uri: string): void {
+    uri = this.negativeKey(uri);
     if (this.negative.size >= this.MAX_NEGATIVE_ENTRIES) {
       const now = Date.now();
       for (const [k, until] of this.negative) {
@@ -716,7 +822,7 @@ export class RemoteFetchService {
    */
   static invalidateCache(uri: string): void {
     this.evict(uri);
-    this.negative.delete(uri);
+    this.negative.delete(this.negativeKey(uri));
   }
 
   /**
