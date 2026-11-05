@@ -16,7 +16,8 @@ Branch: `claude/youthful-goldberg-c18bkg` (base `30251d0`). Work paused at the
 | ID | Change |
 |---|---|
 | H1 | `routes/dashboard.ts` PATCH: self-modification refused; role changes need SUPER_ADMIN; non-SUPER_ADMIN cannot touch a SUPER_ADMIN target; claims-cache invalidation after the write; best-effort audit event (`dashboard.user.update`, no IP/UA). Tests added. |
-| M9 (part) | `SessionManager.revokeAllSessionsIfBound` (no-op when no blocklist KV bound, throws if `SESSION_BLOCKLIST_REQUIRED=true` or the write fails). Wired into `UserDeprovisioning.suspendUser` (security event still written, then the call fails) and dashboard PATCH `status: "suspended"` (500 + "retry" on failure). **Scope: only routes authenticating through `SessionManager.getSession` honour the epoch — see "Not started" for the `authMiddleware` gap.** |
+| M9 (part) | `SessionManager.revokeAllSessionsIfBound` (no-op when no blocklist KV bound, throws if `SESSION_BLOCKLIST_REQUIRED=true` or the write fails). Wired into `UserDeprovisioning.suspendUser` (security event still written, then the call fails) and dashboard PATCH `status: "suspended"` (500 + "retry" on failure). `authMiddleware` (~32 route files) now honours the blocklist and epoch too — see the M9 (revocation) row. |
+| M9 (revocation) | Found: the blocklist/epoch were read ONLY by `SessionManager.getSession`; `authMiddleware` (~32 route files) checked neither, so a suspension epoch bump and any blocklist logout were invisible there. Fix: shared `auth/revocation.ts` (key formats, KV resolution, readers) used by BOTH paths; `authMiddleware` now denies a blocklisted token and a JWT whose `iat` is at or before the user's epoch. `iat` added to `TrellisClaims` (golden updated). Same posture as `getSession`: no KV bound ⇒ allow unless `SESSION_BLOCKLIST_REQUIRED=true`; KV read failure ⇒ deny. New `POST /auth/logout` (+ `/api/auth/logout`): requires a valid session, blocklists the presented token, clears the cookie, 204 only if the write persisted. |
 | H2 | `reaction-handler.ts` comment add/remove/get: `findFirst({id, tenantId})` + `canReadPost`, uniform 404; `routes/sentiments.ts` comment GET requires session + active tenant, `private, no-store`. |
 | H3 | `media-handler.ts`: entity-avatar ownership heuristic removed; ownership = `uploadedBy === userId`; hide/unhide/delete/metadata-visibility use `requireUploader`; EXIF only for uploader. Optional `tenantId` check added. |
 | H4 | `upload-session-handler.ts`: unowned ids rejected, canonical ids, cap `UPLOAD_SESSION_MAX_MEDIA_IDS` (default 50), `uploadedBy` filter on complete/abandon `updateMany`; `workers/hourly-cron.ts` soft-delete has `posts: { none: {} }`. |
@@ -73,17 +74,12 @@ Branch: `claude/youthful-goldberg-c18bkg` (base `30251d0`). Work paused at the
 
 ## Not started
 
-- **M9 (rest) — BLOCKED on a finding.** The session blocklist and epoch are
-  consulted ONLY by `SessionManager.getSession` (sealed cookie + JWT-via-
-  getSession). `authMiddleware` / `verifyJwt` — used by ~32 route files
-  (agent-sessions, deletion, tenants, posts, feeds, …) — check neither. So
-  today the M9 epoch bump on suspension does NOT stop a still-valid Cognito
-  JWT on those routes (it is bounded only by token expiry and the claims-cache
-  invalidation that blocks refresh), and a blocklist-based logout would be
-  equally ineffective there. Decision: logout was approved as a minimal
-  `POST /auth/logout` (revoke presented token + clear cookie), but it should
-  not ship until `authMiddleware` honours the blocklist/epoch (or the gap is
-  accepted in writing). Cost to weigh: 1–2 KV reads per authenticated request.
+- **M9 follow-ups (not blocking):** cost is now 1–2 KV reads per authenticated
+  request when a blocklist KV is bound (none when unbound) — watch KV latency
+  and consider a short in-process negative cache if it shows. `iat` is in
+  seconds, so a token minted in the same second as a revocation is rejected
+  (re-login retry succeeds). Logout revokes only the presented token; a client
+  holding both a cookie and a Bearer must send logout once per credential.
   `suspendUser` has no in-repo caller; member removal
   (`tenant/member-handler.ts`) uses Cognito global sign-out, not the epoch.
 - **H3 (decided: don't wire `tenantId`)** — uploader check stays the sole gate;

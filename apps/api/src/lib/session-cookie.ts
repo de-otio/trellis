@@ -28,6 +28,15 @@ import { getLogger } from "./logger.js";
 import { isKnownAgeTier } from "./age-gate.js";
 import { CUID_RE } from "./auth/cuid.js";
 import type { ScopeSet } from "./auth/scopes.js";
+// Blocklist/epoch keys + KV resolution are shared with `auth-middleware.ts`
+// (M9) so the writer here and the readers on BOTH auth paths cannot drift.
+import {
+  BLOCKLIST_TTL_SECONDS,
+  blocklistKeyForToken,
+  getBlocklistReader,
+  getBlocklistWriter,
+  sessionEpochKey,
+} from "./auth/revocation.js";
 import type { Env } from "../env.js";
 
 export type UserRole =
@@ -293,57 +302,6 @@ function getModuleCookie(
     moduleCookieCache.set(key, cookie);
   }
   return cookie;
-}
-
-/**
- * SEC L2 — the blocklist KV surface `SessionManager` needs.
- *
- * `revokeSession` has always written `blocked:{sha256(rawToken)}` here; the
- * reader added in this change uses the SAME key format (see
- * `blocklistKeyForToken`). `get` is added to the shape so the read is typed.
- */
-interface SessionBlocklistKv {
-  get(key: string): Promise<string | null>;
-  put(
-    key: string,
-    value: string,
-    opts: { expirationTtl: number },
-  ): Promise<unknown>;
-}
-
-/** Key format for a revoked raw token. MUST match `revokeSession`'s writer. */
-function blocklistKeyForToken(tokenHash: string): string {
-  return `blocked:${tokenHash}`;
-}
-
-/** Key format for a user's session epoch ("revoke all sessions"). */
-function sessionEpochKey(userId: string): string {
-  return `sessionepoch:${userId}`;
-}
-
-/** TTL for blocklist + epoch entries: the maximum cookie lifetime (90 days). */
-const BLOCKLIST_TTL_SECONDS = 90 * 24 * 60 * 60;
-
-/**
- * The blocklist binding, resolved separately for reads and writes.
- *
- * Reader and writer are resolved independently because the two capabilities are
- * independently optional in practice: a deployment (or a test double) may bind
- * a put-only store. A missing READER must not be mistaken for "not blocked" any
- * more than it must be mistaken for an outage — see `isTokenRevoked`.
- */
-function getBlocklistReader(
-  env: { [key: string]: any } | undefined,
-): Pick<SessionBlocklistKv, "get"> | undefined {
-  const kv = env?.SESSION_BLOCKLIST_KV as SessionBlocklistKv | undefined;
-  return kv && typeof kv.get === "function" ? kv : undefined;
-}
-
-function getBlocklistWriter(
-  env: { [key: string]: any } | undefined,
-): Pick<SessionBlocklistKv, "put"> | undefined {
-  const kv = env?.SESSION_BLOCKLIST_KV as SessionBlocklistKv | undefined;
-  return kv && typeof kv.put === "function" ? kv : undefined;
 }
 
 /**

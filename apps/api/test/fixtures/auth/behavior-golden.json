@@ -16,6 +16,7 @@
     { "name": "no_exp_SEC1_new_reject", "outcome": "reject" },
     { "name": "missing_sub_SEC8_new_reject", "outcome": "reject" }
   ],
+  "_validClaims_comment": "`iat` was added deliberately by the M9 revocation work: authMiddleware compares it to the user's session epoch so a suspension / sign-out-everywhere kills already-issued JWTs. It is mapped from the signature-verified token only and is never used for an authorization decision. 1893456000 is the fixture token's FIXED_EPOCH_S.",
   "validClaims": {
     "sub": "opaque-subject-abc",
     "username": "alice",
@@ -25,7 +26,8 @@
     "activeTenantId": "ctnt1234567890abcdefghijk",
     "tenantSlug": "acme",
     "tenantRole": "ADMIN",
-    "handle": "@alice"
+    "handle": "@alice",
+    "iat": 1893456000
   },
   "_validAuthContext_comment": "`scopes: \"*\"` was added deliberately by plan 034 lane A: the Bearer-JWT path now states the principal it always was — first-party, unscoped — instead of leaving it implicit in an absent field. `clientId` is intentionally absent here rather than null, because the middleware sets it to `undefined` and the comparison treats undefined and absent alike. If a future change makes this anything other than \"*\" on the first-party path, this gate is supposed to fail.",
   "validAuthContext": {

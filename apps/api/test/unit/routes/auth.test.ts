@@ -275,8 +275,16 @@ describe("Auth Routes", () => {
 
   describe("Route configuration", () => {
     it("should have all required routes", () => {
-      expect(authRoutes).toHaveLength(2);
-      expect(authRoutes.every((r) => r.method === "*")).toBe(true);
+      // Two catch-all wildcards (`/auth/*`, `/api/auth/*`) plus the two
+      // specific POST logout routes (M9) that must sit in front of them.
+      expect(authRoutes).toHaveLength(4);
+      const wildcards = authRoutes.filter((r) => r.method === "*");
+      expect(wildcards.map((r) => r.path)).toEqual(["/auth/*", "/api/auth/*"]);
+      const logout = authRoutes.filter((r) => r.method === "POST");
+      expect(logout.map((r) => r.path)).toEqual([
+        "/auth/logout",
+        "/api/auth/logout",
+      ]);
     });
 
     it("should have middleware configured for all routes", () => {

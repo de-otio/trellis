@@ -13,6 +13,10 @@ import { resolveJitClaims } from "../identity/jit-claims.js";
 import type { AuthContext } from "./auth-context.js";
 import { extractBearerToken, verifyJwt } from "./cognito-jwt.js";
 import { CUID_RE } from "./cuid.js";
+import { isBearerEpochStale, isRawTokenBlocked } from "./revocation.js";
+
+/** `Env` as the revocation helpers read it (KV binding + REQUIRED flag). */
+type KvEnv = { [key: string]: any };
 
 /**
  * Extract and verify the Bearer token from the request, then assemble an
@@ -36,6 +40,10 @@ export async function authMiddleware(
   } catch {
     return null;
   }
+
+  // M9: honour a logout / explicit revocation of THIS token. Done after the
+  // signature check so unauthenticated garbage never costs a KV read.
+  if (await isRawTokenBlocked(token, env as unknown as KvEnv)) return null;
 
   let userId = claims.userId;
   let activeTenantId = claims.activeTenantId;
@@ -70,6 +78,13 @@ export async function authMiddleware(
   // Reject malformed claim values: cuid v1 is c[a-z0-9]{24}. We accept up
   // to 40 chars to leave headroom for the slug-max widening done in T3.
   if (!CUID_RE.test(userId) || !CUID_RE.test(activeTenantId)) return null;
+
+  // M9: "revoke all sessions" (suspension, sign-out-everywhere) bumps a
+  // per-user epoch. A JWT minted at or before it is dead even though its
+  // signature and `exp` are still good. Needs the resolved userId, hence here.
+  if (await isBearerEpochStale(userId, claims.iat, env as unknown as KvEnv)) {
+    return null;
+  }
 
   // Memberships are loaded lazily — most requests don't need the full list.
   let membershipsCache: (TenantMember & { tenant: Tenant })[] | null = null;

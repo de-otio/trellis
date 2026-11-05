@@ -101,10 +101,20 @@ export interface TrellisClaims {
   handle?: string;
   /** was `custom:dataRegion`. */
   dataRegion?: string;
+  /**
+   * RFC 7519 `iat` (seconds since epoch) of a signature-verified token. Used
+   * ONLY to compare against the user's session epoch (M9 revoke-all); never
+   * for an authorization decision.
+   */
+  iat?: number;
 }
 
 function asString(v: unknown): string | undefined {
   return typeof v === "string" ? v : undefined;
+}
+
+function asFiniteNumber(v: unknown): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
 }
 
 /** OIDC boolean claims arrive as boolean (spec) or "true"/"false" strings. */
@@ -157,6 +167,7 @@ export function normalizeClaims(
       ...pick("tenantRole", asString(raw["custom:tenantRole"])),
       ...pick("handle", asString(raw["custom:handle"])),
       ...pick("dataRegion", asString(raw["custom:dataRegion"])),
+      ...pickNum("iat", asFiniteNumber(raw.iat)),
     };
   }
 
@@ -196,7 +207,15 @@ export function normalizeClaims(
     ...pick("tenantRole", asString(raw["custom:tenantRole"])),
     ...pick("handle", asString(raw["custom:handle"])),
     ...pick("dataRegion", asString(raw["custom:dataRegion"])),
+    ...pickNum("iat", asFiniteNumber(raw.iat)),
   };
+}
+
+function pickNum<K extends string>(
+  key: K,
+  value: number | undefined,
+): Partial<Record<K, number>> {
+  return value !== undefined ? ({ [key]: value } as Record<K, number>) : {};
 }
 
 function pick<K extends string>(key: K, value: string | undefined): Partial<Record<K, string>> {

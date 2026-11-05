@@ -42,7 +42,7 @@ const golden = JSON.parse(
   readFileSync(join(__dirname, "../../fixtures/auth/behavior-golden.json"), "utf8"),
 ) as {
   fixtures: { name: string; outcome: "accept" | "reject" }[];
-  validClaims: Record<string, string>;
+  validClaims: Record<string, string | number>;
   validAuthContext: Record<string, string>;
 };
 
