@@ -232,7 +232,8 @@ export class ConnectionCodeHandler {
       } catch (graphError: any) {
         const logger = getLogger();
         logger.error("[ConnectionCodeHandler] Graph sync failed during redemption (non-fatal):", {
-          code: connectionCode.code,
+          // The redeemed code itself is a credential; log the row id instead.
+          connectionCodeId: connectionCode.id,
           userId: session.userId,
           error: graphError.message,
         });

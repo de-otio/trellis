@@ -1129,6 +1129,72 @@ describe("Dashboard Routes", () => {
       expect(data.error).toBe("Cannot delete your own account");
     });
 
+    const del = (id = "other-user") =>
+      route.handler(
+        new Request(`http://test.com/api/dashboard/users/${id}`, { method: "DELETE" }),
+        mockEnv,
+        { pathname: `/api/dashboard/users/${id}` },
+      );
+
+    it("H1: INTERNAL cannot schedule deletion of a SUPER_ADMIN", async () => {
+      mockDb.user.findUnique
+        .mockResolvedValueOnce({ role: "INTERNAL" }) // caller
+        .mockResolvedValueOnce({ role: "SUPER_ADMIN" }); // target
+
+      const response = await del();
+
+      expect(response.status).toBe(403);
+      expect(mockDb.user.update).not.toHaveBeenCalled();
+      expect(mockAuditLog).not.toHaveBeenCalled();
+    });
+
+    it("H1: a SUPER_ADMIN may schedule deletion of a SUPER_ADMIN", async () => {
+      mockDb.user.findUnique
+        .mockResolvedValueOnce({ role: "SUPER_ADMIN" })
+        .mockResolvedValueOnce({ role: "SUPER_ADMIN" });
+      mockDb.user.update.mockResolvedValue({});
+
+      expect((await del()).status).toBe(200);
+      expect(mockDb.user.update).toHaveBeenCalledTimes(1);
+    });
+
+    it("returns 404 for a target that does not exist, without writing", async () => {
+      mockDb.user.findUnique
+        .mockResolvedValueOnce({ role: "INTERNAL" })
+        .mockResolvedValueOnce(null);
+
+      expect((await del("ghost")).status).toBe(404);
+      expect(mockDb.user.update).not.toHaveBeenCalled();
+    });
+
+    it("audits the scheduled deletion with actor, target and target role (no IP / UA)", async () => {
+      mockDb.user.findUnique
+        .mockResolvedValueOnce({ role: "INTERNAL" })
+        .mockResolvedValueOnce({ role: "END_USER" });
+      mockDb.user.update.mockResolvedValue({});
+
+      await del("victim");
+
+      expect(mockAuditLog).toHaveBeenCalledTimes(1);
+      const [event] = mockAuditLog.mock.calls[0];
+      expect(event).toMatchObject({
+        action: "dashboard.user.delete_scheduled",
+        userId: "user-123",
+        resourceId: "victim",
+        metadata: { targetRole: "END_USER" },
+      });
+      expect(event).not.toHaveProperty("ipAddress");
+      expect(event).not.toHaveProperty("userAgent");
+    });
+
+    it("an audit failure never blocks the deletion", async () => {
+      mockDb.user.findUnique.mockResolvedValue({ role: "INTERNAL" });
+      mockDb.user.update.mockResolvedValue({});
+      mockAuditLog.mockRejectedValue(new Error("audit sink down"));
+
+      expect((await del()).status).toBe(200);
+    });
+
     it("should delete user successfully", async () => {
       mockDb.user.findUnique.mockResolvedValue({ role: "INTERNAL" });
       mockDb.user.update.mockResolvedValue({});

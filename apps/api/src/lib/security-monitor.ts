@@ -353,7 +353,8 @@ export class SecurityMonitor {
       severity: event.severity,
       provider: event.provider,
       success: event.success,
-      ipAddress: event.ipAddress,
+      // No ipAddress: the SecurityEvent row already stores it with a bounded
+      // retention; the application log must not carry it unbounded.
     });
   }
 
@@ -363,9 +364,16 @@ export class SecurityMonitor {
   private async sendAlert(event: SecurityEvent, env: Env): Promise<void> {
     if (!env.SECURITY_WEBHOOK_URL) {
       // No webhook configured - just log
+      // Not the whole event: it carries ipAddress, userAgent, userId and
+      // free-form metadata.
       getLogger().warn(
         "[SecurityMonitor] Security alert (no webhook configured):",
-        event,
+        {
+          type: event.type,
+          severity: event.severity,
+          provider: event.provider,
+          success: event.success,
+        },
       );
       return;
     }

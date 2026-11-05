@@ -939,6 +939,40 @@ export const dashboardRoutes: Route[] = [
           return addCorsHeaders(errorResponse, request, env);
         }
 
+        // Same target rule as PATCH (H1): only a SUPER_ADMIN may touch a
+        // SUPER_ADMIN account. Without it an INTERNAL operator could schedule
+        // deletion of any account, including the admins above them.
+        const target = await withQueryTimeoutAndRetry(
+          dbManager,
+          region,
+          env,
+          async (db) =>
+            db.user.findUnique({ where: { id: userId }, select: { role: true } }),
+          QueryTimeoutPresets.STANDARD,
+        );
+        if (!target) {
+          return addCorsHeaders(
+            securityHeaders.createSecureResponse(
+              JSON.stringify({ error: "User not found" }),
+              { status: 404, headers: { "content-type": "application/json" } },
+            ),
+            request,
+            env,
+          );
+        }
+        if (target.role === "SUPER_ADMIN" && user.role !== "SUPER_ADMIN") {
+          return addCorsHeaders(
+            securityHeaders.createSecureResponse(
+              JSON.stringify({
+                error: "Forbidden: cannot modify a SUPER_ADMIN account",
+              }),
+              { status: 403, headers: { "content-type": "application/json" } },
+            ),
+            request,
+            env,
+          );
+        }
+
         // Delete user (soft delete by setting deletion flags)
         await withQueryTimeoutAndRetry(
           dbManager,
@@ -957,6 +991,31 @@ export const dashboardRoutes: Route[] = [
           },
           QueryTimeoutPresets.STANDARD,
         );
+
+        // Best-effort audit (never blocks the response); no IP / User-Agent.
+        try {
+          const { createAuditLogger } = await import("../audit-composer.js");
+          createAuditLogger(env)
+            .log(
+              {
+                type: "user_action",
+                action: "dashboard.user.delete_scheduled",
+                resource: "user",
+                resourceId: userId,
+                userId: session.userId,
+                region: region as any,
+                severity: "high",
+                success: true,
+                metadata: { targetRole: target.role },
+              },
+              env,
+            )
+            .catch((err) => {
+              logger.warn("[Dashboard] user delete audit logging failed:", err);
+            });
+        } catch (auditErr) {
+          logger.warn("[Dashboard] user delete audit logging failed:", auditErr);
+        }
 
         const response = securityHeaders.createSecureResponse(
           JSON.stringify({

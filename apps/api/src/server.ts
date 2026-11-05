@@ -369,7 +369,7 @@ export async function startServer(
       const duration = Date.now() - startMs;
 
       if (err?.message === "PAYLOAD_TOO_LARGE") {
-        logger.warn(`${method} ${rawUrl} 413 ${duration}ms — payload too large`);
+        logger.warn(`${method} ${rawUrl.split("?")[0]} 413 ${duration}ms — payload too large`);
         if (!res.headersSent) {
           res.writeHead(413, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Payload too large" }));
@@ -378,7 +378,7 @@ export async function startServer(
       }
 
       if (err?.message === "REQUEST_TIMEOUT") {
-        logger.warn(`${method} ${rawUrl} 504 ${duration}ms — request timeout`);
+        logger.warn(`${method} ${rawUrl.split("?")[0]} 504 ${duration}ms — request timeout`);
         if (!res.headersSent) {
           res.writeHead(504, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Gateway timeout" }));
@@ -386,7 +386,7 @@ export async function startServer(
         return;
       }
 
-      logger.error(`${method} ${rawUrl} 500 ${duration}ms`, err);
+      logger.error(`${method} ${rawUrl.split("?")[0]} 500 ${duration}ms`, err);
       if (!res.headersSent) {
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Internal server error" }));

@@ -27,9 +27,22 @@ import { RateLimiter } from "../rate-limit.js";
 import { structuredError } from "./errors.js";
 import type { Env } from "../../env.js";
 
-const RATE_LIMIT_PER_MIN = 30;
-const WINDOW_SECONDS = 60;
+/**
+ * I1: the ceiling is runtime config (never a compiled-in threshold — the npm
+ * tarball is public): `AUTH_DISCOVER_RATE_LIMIT` per `AUTH_DISCOVER_RATE_WINDOW_SECONDS`.
+ * Defaults 30 / 60. Read from `process.env` like the other late-added knobs, so
+ * the `Env` type and its public API snapshot are untouched.
+ */
+const DEFAULT_RATE_LIMIT_PER_MIN = 30;
+const DEFAULT_WINDOW_SECONDS = 60;
 const MIN_RESPONSE_MS = 80;
+/** RFC 5321 forward-path limit: no real address is longer. */
+const MAX_EMAIL_LENGTH = 254;
+
+function positiveIntEnv(raw: string | undefined, fallback: number): number {
+  const n = Number.parseInt(raw ?? "", 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
 
 function passwordResponse(): Response {
   return new Response(
@@ -61,17 +74,18 @@ async function discoverHandler(request: Request, env: Env): Promise<Response> {
   const startMs = Date.now();
 
   const rateLimiter = new RateLimiter();
-  const ip =
-    request.headers.get("CF-Connecting-IP") ||
-    request.headers.get("X-Forwarded-For")?.split(",")[0]?.trim() ||
-    "unknown";
 
+  // The bucket key is derived inside the limiter from `trustedClientIp`
+  // (M6) — a client-supplied CF-Connecting-IP / X-Forwarded-For cannot pick it.
   const rateLimitResult = await rateLimiter.checkRateLimitKV(
     env,
     request,
     "auth-discover",
-    RATE_LIMIT_PER_MIN,
-    WINDOW_SECONDS,
+    positiveIntEnv(process.env.AUTH_DISCOVER_RATE_LIMIT, DEFAULT_RATE_LIMIT_PER_MIN),
+    positiveIntEnv(
+      process.env.AUTH_DISCOVER_RATE_WINDOW_SECONDS,
+      DEFAULT_WINDOW_SECONDS,
+    ),
   );
 
   if (!rateLimitResult.allowed) {
@@ -93,7 +107,9 @@ async function discoverHandler(request: Request, env: Env): Promise<Response> {
   }
 
   const { z } = await import("zod");
-  const schema = z.object({ email: z.string() });
+  // Bounded BEFORE the regex in deriveEmailDomain and the DB lookup: otherwise
+  // a multi-MB "email" is parsed, regexed and used as a query filter.
+  const schema = z.object({ email: z.string().max(MAX_EMAIL_LENGTH) });
   const parsed = schema.safeParse(body);
 
   const emailDomain = parsed.success ? deriveEmailDomain(parsed.data.email) : null;

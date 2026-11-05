@@ -462,20 +462,19 @@ export class RateLimiter {
         result.retryAfter ??
         Math.max(1, Math.ceil((result.resetAt - Date.now()) / 1000));
 
-      // Log rate limit violation for telemetry/monitoring (fields preserved).
+      // Log the violation for telemetry. Deliberately NOT logged: the email,
+      // the session id, and the client address. Client metadata may be stored
+      // only through the audit composer / SecurityEvent (bounded retention),
+      // and a raw email in an application log is unbounded personal data. The
+      // endpoint + userId (when authenticated) are enough to investigate. The
+      // old address came from client-supplied CF-Connecting-IP / XFF as well.
       const logger = getLogger();
       logger.warn("[RateLimit] Rate limit exceeded", {
         endpoint,
         limit,
         windowSeconds,
         userId,
-        sessionId,
-        email,
         retryAfter,
-        ipAddress:
-          request.headers.get("CF-Connecting-IP") ||
-          request.headers.get("X-Forwarded-For")?.split(",")[0]?.trim() ||
-          "unknown",
       });
 
       return buildRateLimitResponse(limit, retryAfter, result.resetAt);

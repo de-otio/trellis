@@ -2739,4 +2739,36 @@ describe("testRoutesEnabled (SEC L1 environment gate)", () => {
     vi.stubEnv("STAGE", undefined as unknown as string);
     expect(testRoutesEnabled({})).toBe(false);
   });
+
+  // The prod marker must be found in ANY signal, not just the first of
+  // `STAGE || DEPLOY_ENV` (which let STAGE=staging hide DEPLOY_ENV=prod).
+  describe("a production marker in ANY signal denies, over every opt-in", () => {
+    const OPT_INS = { CI: "true", GITHUB_ACTIONS: "true", ENABLE_TEST_ROUTES: "true" };
+
+    it.each([
+      ["STAGE=staging + DEPLOY_ENV=prod", { STAGE: "staging", DEPLOY_ENV: "prod" }],
+      ["STAGE=dev (buildEnv default) + DEPLOY_ENV=production", { STAGE: "dev", DEPLOY_ENV: "production" }],
+      ["NODE_ENV=production alone", { STAGE: "dev", NODE_ENV: "production" }],
+      ["NODE_ENV=PROD with whitespace", { STAGE: "dev", NODE_ENV: " PROD " }],
+    ])("%s", (_label, env) => {
+      vi.stubEnv("STAGE", "dev");
+      expect(testRoutesEnabled({ ...env, ...OPT_INS })).toBe(false);
+    });
+
+    it.each(["STAGE", "DEPLOY_ENV", "NODE_ENV"])(
+      "raw process.env.%s=prod denies even when the env object says dev",
+      (name) => {
+        vi.stubEnv("STAGE", "dev");
+        vi.stubEnv(name, "prod");
+        expect(testRoutesEnabled({ STAGE: "dev", ...OPT_INS })).toBe(false);
+      },
+    );
+
+    it("a non-prod NODE_ENV does not interfere with the existing allow paths", () => {
+      vi.stubEnv("STAGE", "staging");
+      expect(
+        testRoutesEnabled({ STAGE: "staging", NODE_ENV: "test", ENABLE_TEST_ROUTES: "true" }),
+      ).toBe(true);
+    });
+  });
 });

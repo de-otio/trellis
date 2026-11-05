@@ -49,14 +49,34 @@ import type { Route } from "./types.js";
 export function testRoutesEnabled(env: {
   STAGE?: string;
   DEPLOY_ENV?: string;
+  NODE_ENV?: string;
   CI?: string;
   GITHUB_ACTIONS?: string;
   ENABLE_TEST_ROUTES?: string;
 }): boolean {
   const stage = (env.STAGE || env.DEPLOY_ENV || "").toLowerCase();
 
-  // Belt and braces: an explicit prod marker always wins, even over CI.
-  if (stage === "prod" || stage === "production") return false;
+  // Belt and braces: an explicit prod marker ANYWHERE always wins, even over CI
+  // and the explicit opt-in. Every signal is checked — not just the first of
+  // `STAGE || DEPLOY_ENV`: with `STAGE=staging` and `DEPLOY_ENV=prod` that
+  // short-circuit picked "staging" and never saw the prod marker, and
+  // `buildEnv` defaults `STAGE` to "dev", which hid `DEPLOY_ENV=prod` the same
+  // way. The raw process environment is consulted too, since the `env` object
+  // may have been built with defaults applied.
+  const isProd = (v: string | undefined): boolean => {
+    const s = (v ?? "").trim().toLowerCase();
+    return s === "prod" || s === "production";
+  };
+  if (
+    isProd(env.STAGE) ||
+    isProd(env.DEPLOY_ENV) ||
+    isProd(env.NODE_ENV) ||
+    isProd(process.env.STAGE) ||
+    isProd(process.env.DEPLOY_ENV) ||
+    isProd(process.env.NODE_ENV)
+  ) {
+    return false;
+  }
 
   // The explicit opt-in. This is the supported way to turn the seam on
   // (trellis's own standalone e2e lane uses it).

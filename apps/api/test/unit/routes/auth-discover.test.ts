@@ -417,6 +417,47 @@ describe("rate limiting", () => {
     expect(mockFindFirst).not.toHaveBeenCalled();
   });
 
+  // I1: the ceiling is runtime config, defaulting to the old 30 / 60.
+  it("uses 30 per 60s by default", async () => {
+    mockCheckRateLimitKV.mockResolvedValue({ allowed: true, remaining: 29, resetAt: Date.now() + 60_000 });
+    mockFindFirst.mockResolvedValue(null);
+
+    await invoke(postRequest({ email: "user@example.org" }));
+
+    const [, , endpoint, limit, window] = mockCheckRateLimitKV.mock.calls[0];
+    expect([endpoint, limit, window]).toEqual(["auth-discover", 30, 60]);
+  });
+
+  it("honours AUTH_DISCOVER_RATE_LIMIT / AUTH_DISCOVER_RATE_WINDOW_SECONDS", async () => {
+    vi.stubEnv("AUTH_DISCOVER_RATE_LIMIT", "7");
+    vi.stubEnv("AUTH_DISCOVER_RATE_WINDOW_SECONDS", "300");
+    try {
+      mockCheckRateLimitKV.mockResolvedValue({ allowed: true, remaining: 6, resetAt: Date.now() + 300_000 });
+      mockFindFirst.mockResolvedValue(null);
+
+      await invoke(postRequest({ email: "user@example.org" }));
+
+      const [, , , limit, window] = mockCheckRateLimitKV.mock.calls[0];
+      expect([limit, window]).toEqual([7, 300]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it.each(["0", "-5", "abc", ""])("ignores an invalid override %j and keeps the default", async (bad) => {
+    vi.stubEnv("AUTH_DISCOVER_RATE_LIMIT", bad);
+    try {
+      mockCheckRateLimitKV.mockResolvedValue({ allowed: true, remaining: 29, resetAt: Date.now() + 60_000 });
+      mockFindFirst.mockResolvedValue(null);
+
+      await invoke(postRequest({ email: "user@example.org" }));
+
+      expect(mockCheckRateLimitKV.mock.calls[0][3]).toBe(30);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("allowed request passes through to the DB", async () => {
     mockCheckRateLimitKV.mockResolvedValue({ allowed: true, remaining: 28, resetAt: Date.now() + 60_000 });
     mockFindFirst.mockResolvedValue(null);
@@ -489,6 +530,31 @@ describe("400 invalid email", () => {
     await invoke(postRequest({ email: "invalid" }));
 
     expect(mockFindFirst).not.toHaveBeenCalled();
+  });
+
+  // I1: bounded BEFORE the regex and the DB lookup, so a multi-MB "email"
+  // cannot be parsed, regexed and used as a query filter.
+  it("rejects an over-long email (> 254 chars) with 400 and never reaches the DB", async () => {
+    const local = "a".repeat(250);
+    const res = await invoke(postRequest({ email: `${local}@example.org` }));
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe("INVALID_EMAIL");
+    expect(mockFindFirst).not.toHaveBeenCalled();
+  });
+
+  it("accepts an email of exactly 254 chars (boundary)", async () => {
+    mockFindFirst.mockResolvedValue(null);
+    // 64 + 1 + 189 = 254, domain labels stay <= 63.
+    const email = `${"a".repeat(64)}@${"b".repeat(60)}.${"c".repeat(60)}.${"d".repeat(60)}.org`;
+    expect(email.length).toBeLessThanOrEqual(254);
+    const padded = email + "e".repeat(254 - email.length);
+    expect(padded.length).toBe(254);
+
+    const res = await invoke(postRequest({ email: padded }));
+
+    expect(res.status).toBe(200);
+    expect(mockFindFirst).toHaveBeenCalledOnce();
   });
 
   it("invalid email after rate-limit check — still 400 (rate limit did not fire)", async () => {

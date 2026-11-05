@@ -35,6 +35,12 @@ Branch: `claude/youthful-goldberg-c18bkg` (base `30251d0`). Work paused at the
 | M12 | Extension config denylist extended + pattern `/(SECRET|PASSWORD|PRIVATE_KEY|_KEY$|TOKEN|KEK|CREDENTIAL)/i` unless `EXT_`-prefixed; boot now refuses pattern matches too (not just the explicit list), with an actionable message. |
 | M13 | Inbound HTTP-signature verification let an UNAUTHENTICATED sender cause unbounded outbound work: every request dereferenced a sender-chosen `keyId` URL, and the only rate limit (`admitActivity`, per instance domain) ran AFTER verification succeeded. Also, any bad signature evicted the cached actor document and refetched it live, so garbage signatures naming a victim's `keyId` hammered that actor through us and kept its cache cold. Fixes: (a) `verifyInboxRequest` (shared by the user inbox, group inbox, DM route and remote-activity handler) first takes a per-trusted-client-address token from the shared bucket (`ACTIVITYPUB_INBOX_PREVERIFY_RATE_LIMIT`, per minute, default 120) — 429 over budget, 503 and fail CLOSED if the limiter is down; unknown address ⇒ one shared bucket with 10x headroom. (b) the evict-and-refetch is allowed at most once per `keyId` per `ACTIVITYPUB_KEY_REFRESH_COOLDOWN_SECONDS` (default 60, 0 disables; map capped at 2048 keyIds). |
 | M14 | Group collections ignored `Group.privacy`. `GET /groups/:id/inbox` served every delivered activity (actor, object, target, audience) to anyone; `followers` served the member list and count, and `outbox` its activities, to anyone, for PRIVATE groups too. Now: inbox is admin/moderator-only (an AP inbox is owner-only — public groups too); followers/outbox are open for PUBLIC and members-only otherwise; every refusal is the same 404 as a nonexistent group; any failure establishing the caller's role refuses. Also `processGroupFollow` only refused PRIVATE — a FRIENDS_ONLY group admitted any remote actor — it now admits only PUBLIC (`!== "PUBLIC"`, so a future value fails closed). |
+| X1 (discover floor) | `ctx.db.discover()` floored only `post` and `taxonomyTaxon`; `postTaxonomyTag` fell through to `{}` on the strength of a code comment saying the relation-where guard applied the post floor — it does not (it only checks that a traversed relation targets an allowed model). So findMany/count/groupBy returned and let an unauthenticated extension route probe the tags and `addedBy` user ids of private, hidden and soft-deleted posts. `postTaxonomyTag` now inherits the exact `post` floor through its `post` relation. `entityTaxonomyTag` / `productTaxonomyTag` still unfloored (see follow-ups). |
+| X2 (test-route gate) | `testRoutesEnabled` read the prod marker from only the first of `STAGE \|\| DEPLOY_ENV`, so `STAGE=staging` + `DEPLOY_ENV=prod`, or the `buildEnv` default `STAGE=dev` hiding `DEPLOY_ENV=prod`, bypassed it. Now `STAGE`, `DEPLOY_ENV`, `NODE_ENV` and their raw `process.env` counterparts are ALL checked; any prod marker denies over every opt-in. **`CI=true` still enables the routes in non-prod stages** (deliberate, tested; changing it needs workflow edits, which are on the never-touch list). |
+| X3 (dashboard DELETE) | `DELETE /api/dashboard/users/:id` let an INTERNAL operator schedule deletion of any account including a SUPER_ADMIN, with no audit. It now has the PATCH target rule (only SUPER_ADMIN may touch SUPER_ADMIN; 404 for a missing target) and a best-effort audit event. Does not yet revoke sessions / invalidate claims (see follow-ups). |
+| X4 (tenant audit) | `GET /api/tenants/:id/audit` was readable by any tenant member including GUEST (actor ids, source addresses, 10k-row CSV). Now requires `Capability.AuditView` (ADMIN and above), same as the compliance export. **Behaviour change:** MEMBER/GUEST callers now get 403. |
+| X5 (log redaction) | Removed from application logs: email, session id and client address from the rate-limit warning; client address from the SecurityMonitor info line and the whole event object from its no-webhook alert; Cognito `username` from the JWT-verified debug line; email from the e2e-sweeper messages; username and stringified error from the member sign-out warning; the redeemed connection code (now the row id); query strings from the three server error lines (magic-link tokens/emails can ride in them). |
+| I1 | `POST /api/auth/discover`: ceiling is now runtime config (`AUTH_DISCOVER_RATE_LIMIT`, `AUTH_DISCOVER_RATE_WINDOW_SECONDS`, defaults 30 / 60, invalid values fall back), the email is bounded to 254 chars before the regex and DB lookup, and the dead client-IP variable is gone. Failure policy deliberately unchanged (the limiter's in-memory fallback still enforces the limit per process). |
 | L8 (part) | Invitation code/email removed from redemption log lines. |
 | L12 | `/oauth2/device_authorization` per-IP limit (`DEVICE_AUTHORIZATION_RATE_LIMIT` default 10 / `..._WINDOW_SECONDS` 60). |
 
@@ -110,7 +116,35 @@ Branch: `claude/youthful-goldberg-c18bkg` (base `30251d0`). Work paused at the
     pre-verification limit uses the shared token bucket, so it holds across
     replicas only when a shared limiter backend is configured —
     `KV_PROVIDER=postgres` or `RATE_LIMIT_TABLE`; otherwise it is in-memory too).
-- **L1–L7, L8 (rest), L9, L11, L13, L14, I1 (auth-discover 30/min), I2, I4, I5.**
+- **L1–L7, L8 (rest), L9, L11, L13, L14, I2, I4, I5 — NOT DONE, source text
+  missing.** The 2026-11-05 *Trellis* review these IDs refer to is not on disk
+  (searched the repo, trellis-internal, security-notes, dot-notes; the only
+  2026-11-05 review found is a separate review of a downstream repo, whose scope excludes
+  trellis). The branch name looks like a Claude Code web session, whose
+  transcript is not in local session stats. Recover the review text from that
+  session, then work these. X1–X5 and I1 above came from the five trellis-side
+  asks in that downstream review plus the handoff's own hints, NOT from those IDs.
+- **Found by the audits, deliberately not applied (each needs a decision):**
+  - `GET /api/admin/orphaned-media/health` and `/backlog` have no auth at all
+    (`middleware: []`). Adding a staff-session gate may break unauthenticated
+    monitors that poll it — decide the monitor credential first.
+  - Presigned uploads: size is bounded and the post-upload HEAD re-checks it
+    (SAFE), but nothing caps concurrent `awaiting-upload` sessions per user and
+    quota is checked against the DECLARED size, not the real one. Fix needs a
+    `media.*` config field (`env.ts` + API snapshot).
+  - `GET /api/feature-toggles/:key` is public and returns `changedBy` /
+    `lastChanged`, and its 500 path echoes `error.message`.
+  - `authMiddleware` / `requireSuperAdmin` read `globalRole` / `tenantRole` from
+    the verified JWT, not the DB, so a demoted admin keeps the role until token
+    expiry (bounded by the M9 epoch only when a revocation was recorded).
+  - `discover()`: `entityTaxonomyTag` / `productTaxonomyTag` unfloored; the
+    `post` floor keys on the deprecated `radius` column and ignores
+    `audienceClass`, `discoverability` and `groupId` (unclear whether
+    `radius = SHOUT` can coexist with a non-public audience).
+  - `push-dispatcher.ts` logs whole `err` objects in a loop over plaintext
+    push tokens (plausible leak, unconfirmed); ~45 lower-risk handlers log whole
+    error objects.
+  - Dashboard DELETE does not revoke sessions or invalidate claims.
 - **L10** (`.github/workflows/**`) and **I3** (compose binds) — workflows are
   on the never-touch list; open an issue for a human.
 - Cross-tenant two-tenant fixture test and role-matrix test (review §"Test-coverage gap").

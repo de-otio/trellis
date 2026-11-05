@@ -81,8 +81,10 @@ async function bestEffortGlobalSignOut(
       JSON.stringify({
         level: "warn",
         msg: "AdminUserGlobalSignOut failed",
-        username,
-        error: String(err),
+        // Not the username (often the email) and not the stringified error
+        // (unbounded): a short prefix and the error class are enough to triage.
+        userRef: username.slice(0, 8),
+        errName: (err as { name?: string })?.name,
       }),
     );
   }

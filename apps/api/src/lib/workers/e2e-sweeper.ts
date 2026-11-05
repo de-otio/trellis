@@ -105,9 +105,12 @@ export async function runE2eSweeper(
               try {
                 await ctx.deleteAccountQueue.send({ userId: sub });
                 totalQueued++;
-                ctx.logger.info(`Queued deletion for ${email}`, { userId: sub });
+                ctx.logger.info("Queued deletion for E2E user", { userId: sub });
               } catch (err) {
-                ctx.logger.warn(`Failed to queue deletion for ${email}`, { error: err });
+                ctx.logger.warn("Failed to queue deletion for E2E user", {
+                  userId: sub,
+                  errName: (err as { name?: string })?.name,
+                });
               }
             }
 
@@ -116,9 +119,12 @@ export async function runE2eSweeper(
             // message after a delay)
             try {
               await ctx.directory.deleteUserByUsername(user.username);
-              ctx.logger.info(`Deleted Cognito user ${email}`);
+              ctx.logger.info("Deleted identity-provider E2E user", { userId: sub });
             } catch (err) {
-              ctx.logger.warn(`Cognito delete failed for ${email}`, { error: err });
+              ctx.logger.warn("Identity-provider delete failed for E2E user", {
+                userId: sub,
+                errName: (err as { name?: string })?.name,
+              });
             }
           }
 

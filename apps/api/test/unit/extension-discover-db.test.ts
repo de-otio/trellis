@@ -226,6 +226,63 @@ describe("extension discover() — Part B", () => {
     });
   });
 
+  // A tag row is exactly as visible as its post. Before this floor the model
+  // fell through to `{}`, so findMany/count/groupBy could read and probe the
+  // tags (and `addedBy` user ids) of private, hidden and soft-deleted posts.
+  describe("postTaxonomyTag inherits the post visibility floor", () => {
+    const POST_FLOOR = {
+      deletedAt: null,
+      hiddenByAuthor: false,
+      radius: "SHOUT",
+      dataRegion: "EU",
+    };
+    const OPS = ["findMany", "findFirst", "count", "aggregate", "groupBy"] as const;
+
+    it.each(OPS)("%s: the floor is applied through the `post` relation", (op) => {
+      const raw = op === "groupBy" ? { by: ["taxonId"] } : {};
+      const plan = planDiscoverOp("postTaxonomyTag", op, raw, ALLOWED, "EU");
+      expect(JSON.stringify(plan.args.where)).toContain(JSON.stringify({ post: POST_FLOOR }));
+    });
+
+    it("is the SAME predicate `post` itself gets (the two cannot drift)", () => {
+      const post = planDiscoverOp("post", "findMany", {}, ALLOWED, "EU");
+      const tag = planDiscoverOp("postTaxonomyTag", "findMany", {}, ALLOWED, "EU");
+      expect(JSON.stringify(tag.args.where)).toContain(JSON.stringify(post.args.where));
+    });
+
+    it("uses the caller's region, not a fixed one", () => {
+      const plan = planDiscoverOp("postTaxonomyTag", "findMany", {}, ALLOWED, "US");
+      expect(JSON.stringify(plan.args.where)).toContain('"dataRegion":"US"');
+    });
+
+    it("cannot be widened by the extension's own where (AND-merged, not overridden)", () => {
+      const plan = planDiscoverOp(
+        "postTaxonomyTag",
+        "findMany",
+        { where: { post: { is: { radius: "WHISPER", deletedAt: { not: null } } } } },
+        ALLOWED,
+        "EU",
+      );
+      const where = plan.args.where as { AND: unknown[] };
+      expect(Array.isArray(where.AND)).toBe(true);
+      // Both the caller's filter and the untouched floor are present.
+      expect(JSON.stringify(where.AND)).toContain('"radius":"WHISPER"');
+      expect(JSON.stringify(where.AND)).toContain(JSON.stringify({ post: POST_FLOOR }));
+    });
+
+    it("the floor reaches the database call (count included — no existence oracle)", async () => {
+      const raw = makeRawPrisma();
+      await db(raw).postTaxonomyTag.count({ where: { postId: "private-post" } } as any);
+      const sent = raw.postTaxonomyTag.count.mock.calls[0][0];
+      expect(JSON.stringify(sent.where)).toContain(JSON.stringify({ post: POST_FLOOR }));
+    });
+
+    it("catalog tables stay unfloored (they are intentionally public)", () => {
+      const plan = planDiscoverOp("taxonomyCategory", "findMany", {}, ALLOWED, "EU");
+      expect(JSON.stringify(plan.args.where ?? {})).not.toContain("SHOUT");
+    });
+  });
+
   describe("abuse caps", () => {
     it("defaults and clamps take on findMany", async () => {
       const raw = makeRawPrisma();

@@ -113,6 +113,44 @@ describe("GET /api/tenants/:id/audit", () => {
     expect(response.status).toBe(401);
   });
 
+  // ── Role gate: the log is for tenant admins, not every member ────────────────
+  // Being a member of the tenant used to be enough. The log carries actor ids
+  // and source addresses and exports as CSV.
+  it.each(["GUEST", "MEMBER"] as const)(
+    "a %s of the tenant is refused with 403 and the log is never read",
+    async (tenantRole) => {
+      mockAuthMiddleware.mockResolvedValue({ ...authA, tenantRole });
+      const response = await route.handler(
+        makeRequest(tenantA.id),
+        mockEnv,
+        routeContext(tenantA.id),
+      );
+      expect(response.status).toBe(403);
+      expect(mockDb.auditEvent.findMany).not.toHaveBeenCalled();
+    },
+  );
+
+  it("refuses a plain MEMBER the CSV export too", async () => {
+    mockAuthMiddleware.mockResolvedValue({ ...authA, tenantRole: "MEMBER" });
+    const response = await route.handler(
+      makeRequest(tenantA.id, { format: "csv" }),
+      mockEnv,
+      routeContext(tenantA.id, { format: "csv" }),
+    );
+    expect(response.status).toBe(403);
+    expect(mockDb.auditEvent.findMany).not.toHaveBeenCalled();
+  });
+
+  it("a tenant ADMIN is served", async () => {
+    mockAuthMiddleware.mockResolvedValue({ ...authA, tenantRole: "ADMIN" });
+    const response = await route.handler(
+      makeRequest(tenantA.id),
+      mockEnv,
+      routeContext(tenantA.id),
+    );
+    expect(response.status).toBe(200);
+  });
+
   // ── Happy path JSON ──────────────────────────────────────────────────────────
   it("returns 200 with events array for authenticated tenant owner", async () => {
     mockAuthMiddleware.mockResolvedValue(authA);

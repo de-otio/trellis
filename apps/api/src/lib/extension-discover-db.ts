@@ -105,10 +105,22 @@ function discoverBaselineWhere(
       };
     case "taxonomyTaxon":
       return { isActive: true }; // drafts are not public catalog
+    case "postTaxonomyTag":
+      // A tag row is exactly as visible as its post. This used to fall through
+      // to `{}` on the strength of a comment claiming the relation-where guard
+      // applied the post floor — it does not: `guardRelationWhere` only checks
+      // that a traversed relation targets an allowed model, it never injects a
+      // filter. So `findMany` / `count` / `groupBy` on this model returned (and
+      // let an unauthenticated extension route probe) the tags — and `addedBy`
+      // user ids — of private, group-scoped, hidden and soft-deleted posts.
+      // Floor it through the relation with the SAME predicate `post` gets, so
+      // the two cannot drift apart.
+      return { post: discoverBaselineWhere("post", callerRegion) };
     default:
-      // Join/catalog tables (postTaxonomyTag, entityTaxonomyTag,
-      // taxonomyCategory, taxonomyDimension, productTaxonomyTag): the post-side
-      // floor applies via the relation-where guard; rows are intentionally public.
+      // Catalog tables (entityTaxonomyTag, taxonomyCategory, taxonomyDimension,
+      // productTaxonomyTag): intentionally public. NOTE: entityTaxonomyTag and
+      // productTaxonomyTag are post-independent but hang off entities/products,
+      // whose own visibility is not floored here — see the handoff doc.
       return {};
   }
 }

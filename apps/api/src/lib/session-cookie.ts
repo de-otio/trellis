@@ -473,9 +473,9 @@ export class SessionManager {
         try {
           const { verifyLegacyCognitoClaims } = await import("./auth/cognito-jwt.js");
           const claims = await verifyLegacyCognitoClaims(token);
+          // `username` omitted: a Cognito username is frequently the email.
           logger.debug("[SessionManager] Cognito JWT verified", {
             sub: claims.sub,
-            username: claims.username,
           });
           // S1.7 — Use JWT exp claim for session expiration, capped at 1 hour
           let expiresAt = Date.now() + 3600_000;

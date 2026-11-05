@@ -19,6 +19,7 @@ import type { Prisma } from "@prisma/client";
 import { corsMiddleware } from "../middleware.js";
 import { SecurityHeaders } from "../security-headers.js";
 import { authMiddleware, requireActiveTenant } from "../auth/auth-middleware.js";
+import { Capability, requireCapability } from "../auth/require.js";
 import { renderCsv } from "../audit/csv-export.js";
 import { unauthorizedError } from "./errors.js";
 import type { Route } from "./types.js";
@@ -104,6 +105,13 @@ async function handleAuditRead(
 ): Promise<Response> {
   const denied = requireActiveTenant(auth, tenantId);
   if (denied) return denied;
+
+  // The route is documented as "tenant admins"; being a member of the tenant
+  // is not enough. The log carries actor ids and source addresses and can be
+  // exported as CSV, so a plain MEMBER or GUEST must not read it. Same gate
+  // as the compliance export (tenant-compliance.ts).
+  const capDenied = requireCapability(auth, Capability.AuditView);
+  if (capDenied) return capDenied;
 
   const isSuperAdmin = auth.globalRole === "SUPER_ADMIN";
   const params = parseQueryParams(url, isSuperAdmin);
