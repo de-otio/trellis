@@ -13,8 +13,11 @@
 # hijacked upstream release has `default-days` to be caught/pulled/yanked before
 # Dependabot even opens the PR that starts auto-merge → auto-release → publish. It only
 # applies to *version* updates, not *security* updates — Dependabot's own security PRs
-# (from GitHub Advisory Database matches) bypass cooldown, which is correct: those are
-# fixes for known-bad versions, not fresh releases that might themselves be the attack.
+# (from GitHub Advisory Database matches) bypass cooldown. They fix known-bad versions,
+# but the fixed release can itself be fresh, so cooldown not applying to them is a gap,
+# not a safeguard. The Dependabot merger (de-otio/dependabot-merger) closes it for its
+# own merges: it requires the new version to be at least 4 days old by registry publish
+# time before it merges a security update.
 # Paired with dependabot-release.yml's `version-strategy: prerelease` pin (never
 # auto-cuts straight to the `latest` dist-tag) — same shape adopted in skybber for the
 # analogous chain, kept coherent across the two repos deliberately.
