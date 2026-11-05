@@ -9,7 +9,7 @@
  */
 
 import * as crypto from "crypto";
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "../../../../src/env.js";
 import {
   signRequest,
@@ -17,8 +17,17 @@ import {
   verifyHttpSignature,
   verifyInboxRequest,
 } from "../../../../src/lib/activitypub/listeners/http-signatures.js";
+import { verificationFailureStatus } from "../../../../src/lib/activitypub/http-signatures.js";
 
 let mockGetKeyPair: any = null;
+
+// M13: the pre-verification limiter. Default is "allowed"; individual tests
+// make it deny or throw. Everything else in the module stays real.
+const mockConsume = vi.fn();
+vi.mock("../../../../src/lib/rate-limit", async (importOriginal) => ({
+  ...((await importOriginal()) as Record<string, unknown>),
+  consumeSharedBucket: (...args: unknown[]) => mockConsume(...args),
+}));
 
 vi.mock("../../../../src/lib/activitypub/dispatchers/user-actor", () => {
   const MockUserActorDispatcher = function (this: any, _env: any) {
@@ -71,7 +80,11 @@ beforeAll(() => {
 });
 
 /** Build a fully, honestly signed inbox request for `keyId`. */
-function signedRequest(keyId: string, body = '{"type":"Create"}'): Request {
+function signedRequest(
+  keyId: string,
+  body = '{"type":"Create"}',
+  extraHeaders: Record<string, string> = {},
+): Request {
   const url = "https://example.com/users/bob/inbox";
   const date = new Date().toUTCString();
   const digest = `SHA-256=${crypto.createHash("sha256").update(body).digest("base64")}`;
@@ -92,6 +105,7 @@ function signedRequest(keyId: string, body = '{"type":"Create"}'): Request {
       host: "example.com",
       date,
       digest,
+      ...extraHeaders,
       Signature: [
         `keyId="${keyId}"`,
         'algorithm="rsa-sha256"',
@@ -107,6 +121,12 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockGetKeyPair = null;
   fetchActor.mockReset();
+  mockConsume.mockReset();
+  mockConsume.mockResolvedValue({
+    allowed: true,
+    remaining: 100,
+    resetAt: Date.now() + 60_000,
+  });
 });
 
 describe("verifyHttpSignature (boolean shim)", () => {
@@ -232,6 +252,101 @@ describe("verifyInboxRequest", () => {
     if (!result.valid) throw new Error("unreachable");
     expect(result.owner).toBe(actorUri);
     expect(result.body.toString("utf8")).toBe(body);
+  });
+});
+
+describe("verifyInboxRequest — pre-verification budget (M13)", () => {
+  const actorUri = "https://remote.example/users/alice";
+  const keyId = `${actorUri}#main-key`;
+  // Public address: trustedClientIp rejects reserved/documentation ranges.
+  const CLIENT = { "x-trellis-remote-addr": "8.8.8.8" };
+  const honest = () =>
+    fetchActor.mockResolvedValue({
+      id: actorUri,
+      type: "Person",
+      inbox: `${actorUri}/inbox`,
+      publicKey: { id: keyId, owner: actorUri, publicKeyPem: keyPair.publicKey },
+    });
+  const verify = (headers: Record<string, string> = CLIENT) =>
+    verifyInboxRequest(signedRequest(keyId, '{"type":"Create"}', headers), mockEnv as Env, {
+      nonceStore: undefined,
+    });
+
+  afterEach(() => {
+    delete process.env.ACTIVITYPUB_INBOX_PREVERIFY_RATE_LIMIT;
+  });
+
+  it("over budget: refused as rate-limited WITHOUT any outbound key fetch", async () => {
+    honest();
+    mockConsume.mockResolvedValue({ allowed: false, remaining: 0, resetAt: 0, retryAfter: 30 });
+
+    const result = await verify();
+
+    expect(result).toMatchObject({ valid: false, reason: "rate-limited" });
+    expect(fetchActor).not.toHaveBeenCalled();
+  });
+
+  it("limiter unavailable: fails CLOSED (check-failed), still no outbound fetch", async () => {
+    honest();
+    mockConsume.mockRejectedValue(new Error("limiter down"));
+
+    const result = await verify();
+
+    expect(result).toMatchObject({ valid: false, reason: "check-failed" });
+    expect(fetchActor).not.toHaveBeenCalled();
+  });
+
+  it("within budget: proceeds to verification", async () => {
+    honest();
+    const result = await verify();
+    expect(result.valid).toBe(true);
+    expect(fetchActor).toHaveBeenCalled();
+  });
+
+  it("is keyed on the client ADDRESS (not the attacker-chosen keyId) at the default ceiling", async () => {
+    honest();
+    await verify();
+    expect(mockConsume).toHaveBeenCalledTimes(1);
+    const [, key, limit, windowSeconds] = mockConsume.mock.calls[0];
+    expect(key).toBe("ap:preverify:8.8.8.8");
+    expect(limit).toBe(120);
+    expect(windowSeconds).toBe(60);
+    expect(key).not.toContain("remote.example");
+  });
+
+  it("a client-supplied X-Forwarded-For cannot choose the bucket (TRUSTED_PROXY=none)", async () => {
+    honest();
+    await verify({ ...CLIENT, "x-forwarded-for": "1.2.3.4" });
+    expect(mockConsume.mock.calls[0][1]).toBe("ap:preverify:8.8.8.8");
+  });
+
+  it("unknown client address: one shared bucket with 10x headroom, not a federation-wide throttle", async () => {
+    honest();
+    await verify({});
+    const [, key, limit] = mockConsume.mock.calls[0];
+    expect(key).toBe("ap:preverify:unknown");
+    expect(limit).toBe(1200);
+  });
+
+  it("ceiling is runtime config (ACTIVITYPUB_INBOX_PREVERIFY_RATE_LIMIT)", async () => {
+    honest();
+    process.env.ACTIVITYPUB_INBOX_PREVERIFY_RATE_LIMIT = "7";
+    await verify();
+    expect(mockConsume.mock.calls[0][2]).toBe(7);
+  });
+
+  it.each(["0", "-3", "abc", ""])("ignores an invalid ceiling %j and uses the default", async (bad) => {
+    honest();
+    process.env.ACTIVITYPUB_INBOX_PREVERIFY_RATE_LIMIT = bad;
+    await verify();
+    expect(mockConsume.mock.calls[0][2]).toBe(120);
+  });
+
+  it("maps outcomes to HTTP: 429 back-off, 503 limiter down, 401 otherwise", () => {
+    expect(verificationFailureStatus("rate-limited")).toBe(429);
+    expect(verificationFailureStatus("check-failed")).toBe(503);
+    expect(verificationFailureStatus("bad-signature")).toBe(401);
+    expect(verificationFailureStatus("missing-signature")).toBe(401);
   });
 });
 

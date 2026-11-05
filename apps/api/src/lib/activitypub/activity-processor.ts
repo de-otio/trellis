@@ -520,16 +520,20 @@ export class ActivityProcessor {
       return;
     }
 
-    // A PRIVATE group's membership is a decision its admins make, not a side
-    // effect of a signed Follow. There is no pending-request model yet, so the
-    // request is refused (logged, no row) rather than silently granted — the
-    // previous behaviour let any remote actor join a private group as MEMBER.
-    if (group.privacy === "PRIVATE") {
+    // Only a PUBLIC group ("anyone can join") admits on a bare signed Follow.
+    // PRIVATE (invite-only) and FRIENDS_ONLY membership are decisions the
+    // group's admins make, and there is no pending-request or federated
+    // friendship check yet, so the request is refused (logged, no row) rather
+    // than silently granted — the previous behaviour let any remote actor join
+    // a private group as MEMBER, and `FRIENDS_ONLY` was never checked at all.
+    // Written as `!== "PUBLIC"` so a privacy value added later fails CLOSED.
+    if (group.privacy !== "PUBLIC") {
       logger.warn(
-        "[ActivityProcessor] Follow of a PRIVATE group refused — membership requires admin approval, which has no federated path yet",
+        "[ActivityProcessor] Follow of a non-PUBLIC group refused — membership requires admin approval, which has no federated path yet",
         {
           actorUri,
           groupId: group.id,
+          privacy: group.privacy,
         },
       );
       return;

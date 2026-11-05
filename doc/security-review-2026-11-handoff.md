@@ -33,6 +33,8 @@ Branch: `claude/youthful-goldberg-c18bkg` (base `30251d0`). Work paused at the
 | M10 | Issuer probe: `conf.issuer` must equal probed URL (`ISSUER_MISMATCH`); every discovered endpoint gets the issuer's egress checks. |
 | M11 | Invitation redemption: `updateMany({ id, used: false })` + count check. |
 | M12 | Extension config denylist extended + pattern `/(SECRET|PASSWORD|PRIVATE_KEY|_KEY$|TOKEN|KEK|CREDENTIAL)/i` unless `EXT_`-prefixed; boot now refuses pattern matches too (not just the explicit list), with an actionable message. |
+| M13 | Inbound HTTP-signature verification let an UNAUTHENTICATED sender cause unbounded outbound work: every request dereferenced a sender-chosen `keyId` URL, and the only rate limit (`admitActivity`, per instance domain) ran AFTER verification succeeded. Also, any bad signature evicted the cached actor document and refetched it live, so garbage signatures naming a victim's `keyId` hammered that actor through us and kept its cache cold. Fixes: (a) `verifyInboxRequest` (shared by the user inbox, group inbox, DM route and remote-activity handler) first takes a per-trusted-client-address token from the shared bucket (`ACTIVITYPUB_INBOX_PREVERIFY_RATE_LIMIT`, per minute, default 120) — 429 over budget, 503 and fail CLOSED if the limiter is down; unknown address ⇒ one shared bucket with 10x headroom. (b) the evict-and-refetch is allowed at most once per `keyId` per `ACTIVITYPUB_KEY_REFRESH_COOLDOWN_SECONDS` (default 60, 0 disables; map capped at 2048 keyIds). |
+| M14 | Group collections ignored `Group.privacy`. `GET /groups/:id/inbox` served every delivered activity (actor, object, target, audience) to anyone; `followers` served the member list and count, and `outbox` its activities, to anyone, for PRIVATE groups too. Now: inbox is admin/moderator-only (an AP inbox is owner-only — public groups too); followers/outbox are open for PUBLIC and members-only otherwise; every refusal is the same 404 as a nonexistent group; any failure establishing the caller's role refuses. Also `processGroupFollow` only refused PRIVATE — a FRIENDS_ONLY group admitted any remote actor — it now admits only PUBLIC (`!== "PUBLIC"`, so a future value fails closed). |
 | L8 (part) | Invitation code/email removed from redemption log lines. |
 | L12 | `/oauth2/device_authorization` per-IP limit (`DEVICE_AUTHORIZATION_RATE_LIMIT` default 10 / `..._WINDOW_SECONDS` 60). |
 
@@ -70,7 +72,11 @@ Branch: `claude/youthful-goldberg-c18bkg` (base `30251d0`). Work paused at the
 9. New env vars to document: `UPLOAD_SESSION_MAX_MEDIA_IDS`,
    `DELETION_CONFIRM_MAX_ATTEMPTS`, `DOMAIN_AUTOBLOCK_REPORT_THRESHOLD`,
    `LINK_REPORT_RATE_LIMIT_PER_HOUR`, `DEVICE_AUTHORIZATION_RATE_LIMIT`,
-   `DEVICE_AUTHORIZATION_RATE_WINDOW_SECONDS`.
+   `DEVICE_AUTHORIZATION_RATE_WINDOW_SECONDS`, `ACTIVITYPUB_INBOX_PREVERIFY_RATE_LIMIT`,
+   `ACTIVITYPUB_KEY_REFRESH_COOLDOWN_SECONDS` (the last two are documented in
+   `docs/concepts/activitypub.md`; like the others they are read from
+   `process.env`, deliberately NOT added to the `Env` type or its public API
+   snapshot).
 
 ## Not started
 
@@ -84,7 +90,26 @@ Branch: `claude/youthful-goldberg-c18bkg` (base `30251d0`). Work paused at the
   (`tenant/member-handler.ts`) uses Cognito global sign-out, not the epoch.
 - **H3 (decided: don't wire `tenantId`)** — uploader check stays the sole gate;
   the optional `tenantId` seam on `getMediaDetails` stays unused.
-- **M13** AP keyId fetch amplification; **M14** private-group followers/inbox.
+- **M13 / M14 follow-ups.** The review text was not available when these were
+  done — the scope was inferred from the one-line descriptions plus the code, so
+  check it against the original findings. Known leftovers:
+  - M14: the group **actor document** (`GET /groups/:id`) still serves `name`,
+    `summary` and `trellis:privacy` to anyone, for non-public groups too. It is
+    left open because peers dereference it for the public key; a redacted
+    variant for non-public groups is a separate decision.
+  - M14: a PUBLIC group's outbox still lists every outbox activity regardless
+    of its `to`/`cc` audience; filtering to public-addressed activities is not
+    done.
+  - M14: a signed federated GET from a remote peer is not accepted as
+    authorization for a members-only collection (no authorized-fetch path), so
+    peers cannot read non-public groups at all. That is intended today.
+  - M14: `GET .../followers` and `.../outbox` still do `parseInt(page)` with no
+    lower bound (a negative or non-numeric `page` reaches Prisma `skip`).
+  - M13: the refresh-cooldown map and the nonce store are per process; with
+    several replicas each keeps its own, so the bound is per replica (the
+    pre-verification limit uses the shared token bucket, so it holds across
+    replicas only when a shared limiter backend is configured —
+    `KV_PROVIDER=postgres` or `RATE_LIMIT_TABLE`; otherwise it is in-memory too).
 - **L1–L7, L8 (rest), L9, L11, L13, L14, I1 (auth-discover 30/min), I2, I4, I5.**
 - **L10** (`.github/workflows/**`) and **I3** (compose binds) — workflows are
   on the never-touch list; open an issue for a human.

@@ -22,6 +22,7 @@ import {
 } from "../../db-query-helper.js";
 import { detectRegionSync } from "../../region-detection.js";
 import { verifyInboxRequest } from "./http-signatures.js";
+import { verificationFailureStatus } from "../http-signatures.js";
 import { assertActorBinding } from "../http-signatures.js";
 import { processRemoteActivity } from "../services/remote-activity-handler.js";
 import { admitActivity } from "../services/abuse-prevention.js";
@@ -103,10 +104,13 @@ export async function processInboxActivity(
         reason: verification.reason,
         detail: verification.detail,
       });
-      return new Response(JSON.stringify({ error: "Unauthorized" }), {
-        status: 401,
-        headers: { "content-type": "application/json" },
-      });
+      // 429 / 503 for a peer over its pre-verification budget / an unavailable
+      // limiter (M13) so a legitimate sender backs off and retries; 401 else.
+      const status = verificationFailureStatus(verification.reason);
+      return new Response(
+        JSON.stringify({ error: status === 401 ? "Unauthorized" : "Try again later" }),
+        { status, headers: { "content-type": "application/json" } },
+      );
     }
 
     // Parse the exact bytes the digest covered.

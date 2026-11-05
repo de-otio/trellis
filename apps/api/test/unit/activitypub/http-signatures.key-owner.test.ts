@@ -15,7 +15,7 @@
  */
 
 import * as crypto from "crypto";
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const ATTACKER_ACTOR = "https://attacker.example/users/evil";
 const ATTACKER_KEY_ID = `${ATTACKER_ACTOR}#main-key`;
@@ -51,9 +51,20 @@ beforeAll(() => {
   rotatedKeys = gen();
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   fetchActor.mockReset();
   invalidateCache.mockReset();
+  // M13: the forced-refresh cooldown is module state; without this a test
+  // inherits the previous test's cooldown for the same keyId.
+  const { __resetKeyRefreshCooldownForTests } = await import(
+    "../../../src/lib/activitypub/http-signatures.js"
+  );
+  __resetKeyRefreshCooldownForTests();
+});
+
+afterEach(() => {
+  delete process.env.ACTIVITYPUB_KEY_REFRESH_COOLDOWN_SECONDS;
+  vi.useRealTimers();
 });
 
 /** An honest actor document for the attacker's own URI. */
@@ -250,5 +261,106 @@ describe("rotated remote key — evict and refetch exactly once", () => {
     if (result.valid) return;
     expect(result.reason).toBe("bad-signature");
     expect(fetchActor).toHaveBeenCalledTimes(2);
+  });
+});
+
+// M13 — an unauthenticated sender must not be able to make us evict and
+// re-dereference a third party's actor document on every request.
+describe("forced key refresh is bounded per keyId (M13)", () => {
+  it("garbage signatures naming one keyId trigger ONE eviction + live refetch, not one each", async () => {
+    fetchActor.mockResolvedValue(honestDocument());
+
+    // Five requests signed with a key that is not the actor's.
+    for (let i = 0; i < 5; i++) {
+      const result = await verify(
+        signed(activityAsSelf + " ".repeat(i), rotatedKeys.privateKey),
+      );
+      expect(result.valid).toBe(false);
+    }
+
+    // Before the fix: 5 evictions and 10 fetches (cached + live, every time).
+    expect(invalidateCache).toHaveBeenCalledTimes(1);
+    // 5 normal (cached-path) fetches + the single forced refresh.
+    expect(fetchActor).toHaveBeenCalledTimes(6);
+  });
+
+  it("a legitimately rotated peer still gets the refresh on its first request", async () => {
+    fetchActor
+      .mockResolvedValueOnce(honestDocument()) // stale cache
+      .mockResolvedValueOnce(
+        honestDocument({
+          publicKey: {
+            id: ATTACKER_KEY_ID,
+            owner: ATTACKER_ACTOR,
+            publicKeyPem: rotatedKeys.publicKey,
+          },
+        }),
+      );
+    const result = await verify(signed(activityAsSelf, rotatedKeys.privateKey));
+    expect(result.valid).toBe(true);
+    expect(invalidateCache).toHaveBeenCalledTimes(1);
+  });
+
+  it("the refresh is available again once the cooldown has elapsed", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-05T10:00:00Z"));
+    fetchActor.mockResolvedValue(honestDocument());
+
+    await verify(signed(activityAsSelf, rotatedKeys.privateKey));
+    expect(invalidateCache).toHaveBeenCalledTimes(1);
+
+    // Inside the default 60s cooldown: no second eviction.
+    vi.setSystemTime(new Date("2026-11-05T10:00:59Z"));
+    await verify(signed(activityAsSelf + " ", rotatedKeys.privateKey));
+    expect(invalidateCache).toHaveBeenCalledTimes(1);
+
+    // Past it: allowed again.
+    vi.setSystemTime(new Date("2026-11-05T10:01:01Z"));
+    await verify(signed(activityAsSelf + "  ", rotatedKeys.privateKey));
+    expect(invalidateCache).toHaveBeenCalledTimes(2);
+  });
+
+  it("the cooldown is runtime config (ACTIVITYPUB_KEY_REFRESH_COOLDOWN_SECONDS)", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-05T10:00:00Z"));
+    process.env.ACTIVITYPUB_KEY_REFRESH_COOLDOWN_SECONDS = "600";
+    fetchActor.mockResolvedValue(honestDocument());
+
+    await verify(signed(activityAsSelf, rotatedKeys.privateKey));
+    vi.setSystemTime(new Date("2026-11-05T10:05:00Z")); // 300s: past default, inside 600s
+    await verify(signed(activityAsSelf + " ", rotatedKeys.privateKey));
+
+    expect(invalidateCache).toHaveBeenCalledTimes(1);
+  });
+
+  it("a cooldown of 0 disables the bound (operator opt-out)", async () => {
+    process.env.ACTIVITYPUB_KEY_REFRESH_COOLDOWN_SECONDS = "0";
+    fetchActor.mockResolvedValue(honestDocument());
+
+    await verify(signed(activityAsSelf, rotatedKeys.privateKey));
+    await verify(signed(activityAsSelf + " ", rotatedKeys.privateKey));
+
+    expect(invalidateCache).toHaveBeenCalledTimes(2);
+  });
+
+  it("an invalid cooldown value falls back to the default rather than disabling the bound", async () => {
+    process.env.ACTIVITYPUB_KEY_REFRESH_COOLDOWN_SECONDS = "not-a-number";
+    fetchActor.mockResolvedValue(honestDocument());
+
+    await verify(signed(activityAsSelf, rotatedKeys.privateKey));
+    await verify(signed(activityAsSelf + " ", rotatedKeys.privateKey));
+
+    expect(invalidateCache).toHaveBeenCalledTimes(1);
+  });
+
+  it("a VALID signature never consumes the refresh slot", async () => {
+    fetchActor.mockResolvedValue(honestDocument());
+    const ok = await verify(signed(activityAsSelf, attackerKeys.privateKey));
+    expect(ok.valid).toBe(true);
+    expect(invalidateCache).not.toHaveBeenCalled();
+
+    // The first BAD signature afterwards still gets its refresh.
+    await verify(signed(activityAsSelf + " ", rotatedKeys.privateKey));
+    expect(invalidateCache).toHaveBeenCalledTimes(1);
   });
 });

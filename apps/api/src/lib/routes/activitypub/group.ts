@@ -11,6 +11,7 @@ import { ActivityService } from "../../activitypub/activity-service.js";
 import { GroupService } from "../../activitypub/group-service.js";
 import { assertActorBinding } from "../../activitypub/http-signatures.js";
 import { verifyInboxRequest } from "../../activitypub/listeners/http-signatures.js";
+import { verificationFailureStatus } from "../../activitypub/http-signatures.js";
 import { admitActivity } from "../../activitypub/services/abuse-prevention.js";
 import { sharedDatabaseConnectionManager } from "../../database-connection-manager.js";
 import {
@@ -21,7 +22,79 @@ import { getLogger, Logger } from "../../logger.js";
 import { corsMiddleware } from "../../middleware.js";
 import { detectRegionSync } from "../../region-detection.js";
 import { SecurityHeaders } from "../../security-headers.js";
+import { SessionManager } from "../../session-cookie.js";
 import type { Route } from "../types.js";
+
+/**
+ * M14 — who may READ a group's collections.
+ *
+ *  - `inbox`: an ActivityPub inbox is owner-only by spec, so it is readable
+ *    only by the group's ADMIN / MODERATOR members — for PUBLIC groups too. It
+ *    lists every activity delivered to the group (actor, object, target,
+ *    audience), which for a private group is a roster of who is asking to join
+ *    and what is being addressed to it.
+ *  - `collection` (followers, outbox): open for a PUBLIC group (unchanged);
+ *    for a PRIVATE / FRIENDS_ONLY group the member list, member count and
+ *    outbox are members-only.
+ *
+ * Written as `privacy === "PUBLIC"` ⇒ open, everything else ⇒ members-only, so a
+ * privacy value added later fails CLOSED.
+ *
+ * A refusal is the SAME 404 a nonexistent group gets, so the response does not
+ * tell an outsider that a private group exists. Any failure while establishing
+ * the caller's role is a refusal.
+ */
+type GroupReadLevel = "collection" | "inbox";
+
+async function authorizeGroupRead(args: {
+  request: Request;
+  env: Env;
+  region: Parameters<typeof withQueryTimeoutAndRetry>[1];
+  group: { id: string; privacy: string };
+  level: GroupReadLevel;
+}): Promise<boolean> {
+  const { request, env, region, group, level } = args;
+  if (level === "collection" && group.privacy === "PUBLIC") return true;
+
+  try {
+    const session = await new SessionManager().getSession(
+      request,
+      env.SESSION_SECRET,
+      env,
+    );
+    if (!session) return false;
+
+    const dbManager = sharedDatabaseConnectionManager;
+    const user = await withQueryTimeoutAndRetry(
+      dbManager,
+      region,
+      env,
+      async (db) =>
+        db.user.findUnique({
+          where: { id: session.userId },
+          select: { actorUri: true },
+        }),
+      { ...QueryTimeoutPresets.STANDARD, context: { operation: "groupReadAuthUser" } },
+    );
+    if (!user?.actorUri) return false;
+
+    const role = await withQueryTimeoutAndRetry(
+      dbManager,
+      region,
+      env,
+      async (db) => GroupService.getMemberRole(db, group.id, user.actorUri!),
+      { ...QueryTimeoutPresets.STANDARD, context: { operation: "groupReadAuthRole" } },
+    );
+    if (role === null) return false;
+    return level === "inbox" ? role === "ADMIN" || role === "MODERATOR" : true;
+  } catch (error) {
+    getLogger().warn("[Group] Read authorization failed — refusing", {
+      error: (error as Error).message,
+      groupId: group.id,
+    });
+    return false;
+  }
+}
 
 export const groupRoutes: Route[] = [
   {
@@ -128,6 +201,7 @@ export const groupRoutes: Route[] = [
                 id: true,
                 actorUri: true,
                 followersUrl: true,
+                privacy: true,
               },
             });
           },
@@ -140,7 +214,18 @@ export const groupRoutes: Route[] = [
           },
         );
 
-        if (!group || !group.actorUri) {
+        // M14: members-only for a non-PUBLIC group; same 404 as "not found".
+        if (
+          !group ||
+          !group.actorUri ||
+          !(await authorizeGroupRead({
+            request,
+            env,
+            region,
+            group,
+            level: "collection",
+          }))
+        ) {
           const errorResponse = securityHeaders.createSecureResponse(
             JSON.stringify({ error: "Group not found" }),
             { status: 404, headers: { "content-type": "application/json" } },
@@ -236,9 +321,13 @@ export const groupRoutes: Route[] = [
             reason: verification.reason,
             detail: verification.detail,
           });
+          // 429 / 503 for a pre-verification budget / limiter outcome (M13).
+          const status = verificationFailureStatus(verification.reason);
           const errorResponse = securityHeaders.createSecureResponse(
-            JSON.stringify({ error: "Unauthorized" }),
-            { status: 401, headers: { "content-type": "application/json" } },
+            JSON.stringify({
+              error: status === 401 ? "Unauthorized" : "Try again later",
+            }),
+            { status, headers: { "content-type": "application/json" } },
           );
           return addCorsHeaders(errorResponse, request, env);
         }
@@ -451,6 +540,7 @@ export const groupRoutes: Route[] = [
               select: {
                 id: true,
                 actorUri: true,
+                privacy: true,
               },
             });
           },
@@ -463,7 +553,19 @@ export const groupRoutes: Route[] = [
           },
         );
 
-        if (!group || !group.actorUri) {
+        // M14: an inbox is owner-only — group admins / moderators, for PUBLIC
+        // groups too. Same 404 as "not found" so nothing is revealed.
+        if (
+          !group ||
+          !group.actorUri ||
+          !(await authorizeGroupRead({
+            request,
+            env,
+            region,
+            group,
+            level: "inbox",
+          }))
+        ) {
           const errorResponse = securityHeaders.createSecureResponse(
             JSON.stringify({ error: "Group not found" }),
             { status: 404, headers: { "content-type": "application/json" } },
@@ -581,6 +683,7 @@ export const groupRoutes: Route[] = [
               select: {
                 id: true,
                 actorUri: true,
+                privacy: true,
               },
             });
           },
@@ -593,7 +696,18 @@ export const groupRoutes: Route[] = [
           },
         );
 
-        if (!group || !group.actorUri) {
+        // M14: members-only for a non-PUBLIC group; same 404 as "not found".
+        if (
+          !group ||
+          !group.actorUri ||
+          !(await authorizeGroupRead({
+            request,
+            env,
+            region,
+            group,
+            level: "collection",
+          }))
+        ) {
           const errorResponse = securityHeaders.createSecureResponse(
             JSON.stringify({ error: "Group not found" }),
             { status: 404, headers: { "content-type": "application/json" } },

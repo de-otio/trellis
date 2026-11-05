@@ -65,6 +65,24 @@ be present and active before federation may be enabled in any environment.
    `ACTIVITYPUB_INSTANCE_RATE_LIMIT` (default 60). Admission fails closed: if the
    limiter or the deny-list cannot be consulted, the activity is refused.
 
+   That limit runs *after* the signature has verified, and verifying means
+   dereferencing a key URL the sender chose. Two further bounds cover the work an
+   **unauthenticated** sender can cause before then:
+
+   - a per-client-address ceiling on inbox requests before any key is fetched,
+     `ACTIVITYPUB_INBOX_PREVERIFY_RATE_LIMIT` (per minute, default 120). It is
+     keyed on the trusted client address (see `TRUSTED_PROXY`), never on the
+     `keyId` or its host, which the sender controls. Over the ceiling the inbox
+     answers 429; if the limiter cannot be consulted it answers 503. If the client
+     address cannot be derived, all senders share one bucket with ten times the
+     ceiling, so a `TRUSTED_PROXY` misconfiguration degrades the bound instead of
+     blocking federation outright;
+   - at most one forced refetch of a peer's actor document per `keyId` per
+     `ACTIVITYPUB_KEY_REFRESH_COOLDOWN_SECONDS` (default 60; `0` disables). The
+     refetch exists so a peer that rotated its key is not refused until its cached
+     document expires; without a bound, bad signatures naming someone else's
+     `keyId` could force a live refetch of that actor on every request.
+
 Even with all four controls in place, a federated peer can retain whatever it is
 legitimately sent. These controls reduce bulk harvesting; they cannot revoke
 data already shared with a peer that was granted access. That residual reality
@@ -92,8 +110,16 @@ Beyond controls 1–3 above, these are not built yet:
   delivery is a single attempt; see below).
 - **A shared replay-protection store** across replicas (today's nonce cache is
   per process).
-- **A pending-membership model for private groups**, so a remote follow of a
-  private group is held for approval.
+- **A pending-membership model for non-public groups**, so a remote follow of a
+  `PRIVATE` or `FRIENDS_ONLY` group is held for approval. Until then only a
+  `PUBLIC` group admits a remote follow; the other two refuse it.
+
+Group collections follow the group's privacy. A group's **inbox** is readable
+only by its admins and moderators (an ActivityPub inbox is owner-only, so this
+holds for public groups too). Its **followers** collection and **outbox** are
+open for a `PUBLIC` group and members-only otherwise. Every refusal is the same
+404 a nonexistent group returns, so an outsider cannot tell a private group
+exists. A federated peer therefore cannot read a non-public group's member list.
 
 Treat this page as the gate that must close before federation is switched on,
 and verify each item against the code before enabling it in any environment.

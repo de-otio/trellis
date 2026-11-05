@@ -214,6 +214,28 @@ describe("Fedify Inbox Listener", () => {
       expect(body.error).toBe("Unauthorized");
     });
 
+    // M13: the pre-verification gate refuses BEFORE any key fetch; the inbox
+    // must tell a legitimate sender to back off (429) / retry (503), not 401.
+    it.each([
+      ["rate-limited", 429],
+      ["check-failed", 503],
+    ] as const)("answers a %s verification outcome with HTTP %i, not 401", async (reason, status) => {
+      const request = new Request("https://example.com/users/bob/inbox", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      const { verifyInboxRequest } = await import(
+        "../../../../src/lib/activitypub/listeners/http-signatures.js"
+      );
+      vi.mocked(verifyInboxRequest).mockResolvedValue({ valid: false, reason });
+
+      const response = await processInboxActivity(request, mockEnv as Env, "bob");
+
+      expect(response.status).toBe(status);
+      expect((await response.json()).error).toBe("Try again later");
+    });
+
     it("should reject request with invalid activity", async () => {
       const request = new Request("https://example.com/users/bob/inbox", {
         method: "POST",

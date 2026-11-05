@@ -61,6 +61,10 @@ export type SignatureFailureReason =
   | "key-unavailable"
   | "keyid-mismatch"
   | "bad-signature"
+  /** M13: refused BEFORE any key fetch — the caller is over its pre-verification budget. */
+  | "rate-limited"
+  /** M13: the pre-verification limiter could not be consulted (fail closed). */
+  | "check-failed"
   | "error";
 
 export interface SignatureVerificationSuccess {
@@ -91,6 +95,20 @@ export type SignatureVerificationResult =
   | SignatureVerificationSuccess
   | SignatureVerificationFailure;
 
+/**
+ * HTTP status for a failed verification. A peer over its pre-verification
+ * budget should back off and retry (429); an unavailable limiter is a transient
+ * server-side condition (503); everything else is an authentication failure
+ * (401). Lives beside the reason type so the mapping cannot drift from it.
+ */
+export function verificationFailureStatus(
+  reason: SignatureFailureReason,
+): 401 | 429 | 503 {
+  if (reason === "rate-limited") return 429;
+  if (reason === "check-failed") return 503;
+  return 401;
+}
+
 /** Store for replay suppression. Any TTL-capable KV shape will do. */
 export interface NonceStore {
   /** Returns true if `key` was newly recorded, false if already present. */
@@ -119,6 +137,58 @@ const REQUIRED_COVERED_HEADERS = ["(request-target)", "host", "date"] as const;
 
 const DEFAULT_MAX_SKEW_SECONDS = 300;
 const NONCE_TTL_SECONDS = 600;
+
+/**
+ * M13 — bound the "evict the cached actor document and refetch" step.
+ *
+ * That step exists so a peer that rotated its key is not refused until its
+ * cached document expires. But it is reachable by anyone: a request is signed
+ * with garbage and names a VICTIM's keyId, the signature fails, and we evict
+ * the victim's cached document and dereference it live — once per request, so
+ * an unauthenticated sender both hammers a third party through us and keeps
+ * that actor's cache permanently cold.
+ *
+ * Fix: at most one forced refresh per keyId per cooldown. A genuinely rotated
+ * peer is delayed by at most the cooldown (and an attacker's bad request that
+ * wins the slot refreshes the document for the real peer anyway). Runtime
+ * config, not a compiled-in constant: `ACTIVITYPUB_KEY_REFRESH_COOLDOWN_SECONDS`
+ * (default 60; `0` disables the bound).
+ */
+const DEFAULT_KEY_REFRESH_COOLDOWN_SECONDS = 60;
+/** Cap on tracked keyIds so minting keyIds cannot grow memory without bound. */
+const MAX_TRACKED_KEY_REFRESHES = 2048;
+const lastKeyRefreshAt = new Map<string, number>();
+
+function keyRefreshCooldownMs(): number {
+  const raw = Number.parseInt(
+    process.env.ACTIVITYPUB_KEY_REFRESH_COOLDOWN_SECONDS ?? "",
+    10,
+  );
+  const seconds =
+    Number.isFinite(raw) && raw >= 0 ? raw : DEFAULT_KEY_REFRESH_COOLDOWN_SECONDS;
+  return seconds * 1000;
+}
+
+/** True (and records it) when a forced refresh of `keyId` is allowed now. */
+function claimKeyRefresh(keyId: string, now: number = Date.now()): boolean {
+  const cooldown = keyRefreshCooldownMs();
+  if (cooldown === 0) return true;
+  const last = lastKeyRefreshAt.get(keyId);
+  if (last !== undefined && now - last < cooldown) return false;
+  // Re-insert so Map order tracks recency; evict the oldest at the cap.
+  lastKeyRefreshAt.delete(keyId);
+  if (lastKeyRefreshAt.size >= MAX_TRACKED_KEY_REFRESHES) {
+    const oldest = lastKeyRefreshAt.keys().next().value;
+    if (oldest !== undefined) lastKeyRefreshAt.delete(oldest);
+  }
+  lastKeyRefreshAt.set(keyId, now);
+  return true;
+}
+
+/** Test seam: forget all refresh timestamps. */
+export function __resetKeyRefreshCooldownForTests(): void {
+  lastKeyRefreshAt.clear();
+}
 
 /**
  * Default in-process nonce store. Adequate for a single replica; a deployment
@@ -339,8 +409,9 @@ export class HttpSignatureService {
       // A peer that rotated its key is refused for as long as its actor
       // document sits in our cache. When the DEFAULT fetcher is in play (a
       // test-injected one has no cache to bust), evict and try exactly once
-      // more with a freshly dereferenced key. One retry, never a loop.
-      if (!isValid && !options.fetchKey) {
+      // more with a freshly dereferenced key. One retry, never a loop — and
+      // (M13) at most one per keyId per cooldown, see `claimKeyRefresh`.
+      if (!isValid && !options.fetchKey && claimKeyRefresh(keyId)) {
         await invalidateActorCache(keyId);
         const fresh = await defaultFetchKey(keyId, env);
         if (fresh && fresh.pem !== key.pem) {

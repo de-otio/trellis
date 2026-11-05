@@ -953,6 +953,33 @@ describe("ActivityProcessor", () => {
         expect(mockPrisma.groupMember.create).not.toHaveBeenCalled();
       });
 
+      // M14: only PUBLIC auto-admits. FRIENDS_ONLY ("only friends can join")
+      // was never checked at all, so any remote actor could join as MEMBER; and
+      // an unrecognised privacy value must fail CLOSED, not fall through to join.
+      it.each(["FRIENDS_ONLY", "SOME_FUTURE_VALUE"])(
+        "REFUSES a Follow of a %s group — no membership row (M14)",
+        async (privacy) => {
+          const activity = {
+            type: "Follow",
+            actor: "https://remote.example/users/bob",
+            object: "https://example.com/groups/closed-group",
+          };
+
+          mockPrisma.group.findUnique.mockResolvedValue({
+            id: "group-1",
+            actorUri: "https://example.com/groups/closed-group",
+            privacy,
+            tenantId: "test-tenant-id",
+          });
+          mockPrisma.groupMember.findUnique.mockResolvedValue(null);
+          mockPrisma.groupMember.create.mockResolvedValue({});
+
+          await runActivity(activity);
+
+          expect(mockPrisma.groupMember.create).not.toHaveBeenCalled();
+        },
+      );
+
       it("REFUSES a Follow of group A delivered to group B's inbox (DP-5)", async () => {
         const activity = {
           type: "Follow",

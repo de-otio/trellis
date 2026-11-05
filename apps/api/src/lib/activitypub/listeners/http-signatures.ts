@@ -25,10 +25,13 @@
 
 import type { Env } from "../../../env.js";
 import { getLogger } from "../../logger.js";
+import { trustedClientIp } from "../../net/trusted-client-ip.js";
+import { consumeSharedBucket } from "../../rate-limit.js";
 import {
   HttpSignatureService,
   InMemoryNonceStore,
   type NonceStore,
+  type SignatureVerificationFailure,
   type SignatureVerificationResult,
   type VerifyOptions,
 } from "../http-signatures.js";
@@ -60,10 +63,81 @@ export async function verifyInboxRequest(
   env: Env,
   options: VerifyOptions = {},
 ): Promise<SignatureVerificationResult> {
+  // M13: bound the work an UNAUTHENTICATED sender can cause. Verification
+  // dereferences an attacker-chosen keyId URL, and the only existing rate limit
+  // (`admitActivity`, per remote instance domain) runs AFTER verification has
+  // already succeeded — so nothing limited the fetches themselves. Keyed on the
+  // client address, not on the keyId or its host, because those are exactly the
+  // things the attacker chooses freely.
+  const gate = await admitPreVerification(request, env);
+  if (gate) return gate;
+
   return HttpSignatureService.verifyRequest(request, env as any, {
     nonceStore: inboxNonceStore,
     ...options,
   });
+}
+
+/**
+ * Per-client-address ceiling on inbox requests BEFORE signature verification
+ * (and therefore before any outbound key fetch). Runtime config
+ * (`ACTIVITYPUB_INBOX_PREVERIFY_RATE_LIMIT`, per minute; default 120) — never a
+ * compiled-in threshold. The default sits above the per-instance post-
+ * verification default (60/min) so legitimate federation, which that limit
+ * already caps, is not throttled here.
+ */
+const DEFAULT_PREVERIFY_LIMIT_PER_MINUTE = 120;
+/**
+ * When the client address cannot be derived (a `TRUSTED_PROXY` mismatch), every
+ * sender shares one bucket. Applying the normal ceiling would throttle ALL
+ * federation to it, so that shared bucket is given this much more headroom —
+ * still a hard global bound on unauthenticated fetch work, but not a
+ * self-inflicted outage for a misconfigured deployment.
+ */
+const UNKNOWN_ADDRESS_HEADROOM = 10;
+
+async function admitPreVerification(
+  request: Request,
+  env: Env,
+): Promise<SignatureVerificationFailure | null> {
+  const logger = getLogger();
+  const configured = Number.parseInt(
+    process.env.ACTIVITYPUB_INBOX_PREVERIFY_RATE_LIMIT ?? "",
+    10,
+  );
+  const base =
+    Number.isFinite(configured) && configured > 0
+      ? configured
+      : DEFAULT_PREVERIFY_LIMIT_PER_MINUTE;
+
+  const ip = trustedClientIp(request, env as { TRUSTED_PROXY?: string });
+  const unknownAddress = !ip || ip === "unknown";
+  const limit = unknownAddress ? base * UNKNOWN_ADDRESS_HEADROOM : base;
+
+  try {
+    const result = await consumeSharedBucket(
+      env as any,
+      `ap:preverify:${unknownAddress ? "unknown" : ip}`,
+      limit,
+      60,
+    );
+    if (!result.allowed) {
+      logger.warn("[Fedify Inbox] Pre-verification rate limit exceeded", {
+        limit,
+        retryAfter: result.retryAfter,
+      });
+      return { valid: false, reason: "rate-limited" };
+    }
+    return null;
+  } catch (error) {
+    // Same policy as `admitActivity`: federation is retried by the sender, and
+    // admitting unevaluated traffic from arbitrary peers is the worse trade.
+    logger.error(
+      "[Fedify Inbox] Pre-verification rate limit failed — failing CLOSED",
+      { error: (error as Error).message },
+    );
+    return { valid: false, reason: "check-failed" };
+  }
 }
 
 /**
